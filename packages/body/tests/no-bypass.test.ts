@@ -39,6 +39,22 @@ describe("B1 no-bypass", () => {
     assert.ok(byUrl.some((h) => h.why === "dynamic-import"), `url-form hits=${JSON.stringify(byUrl)}`);
   });
 
+  it("P2-E: comment or newline between import and paren is a hit", () => {
+    const head = ["im", "port"].join("");
+    const commented = scanNoBypass(pkg, [{ file: "src/index.ts", text: `await ${head}/*x*/(name)\n` }]);
+    const broken = scanNoBypass(pkg, [{ file: "src/index.ts", text: `${head}\n(name)\n` }]);
+    assert.equal(
+      commented.filter((h) => h.why === "dynamic-import").length,
+      1,
+      `comment-form hits=${JSON.stringify(commented)}`,
+    );
+    assert.equal(
+      broken.filter((h) => h.why === "dynamic-import").length,
+      1,
+      `newline-form hits=${JSON.stringify(broken)}`,
+    );
+  });
+
   it("RED: a dynamic concatenated tools import is refused", () => {
     const head = "im" + "port(";
     const red = scanNoBypass(pkg, [
