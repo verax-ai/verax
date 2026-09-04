@@ -40,3 +40,20 @@ Known gaps:
   are not covered
 - payload encryption and retention policy not designed
 - `spend` / `pay` are denied as `spend-not-wired`
+
+## Phase 1 — body (this commit)
+
+The tree carries `@verax-ai/body`: Streamable HTTP on Node `http`, a
+resource-server Bearer check (`jose`, ES256/EdDSA), four tools, and
+`verax doctor`. A missing issuer/jwks/audience pair exits 78 without
+`listen`. Unauthenticated calls increment `metrics.json` and do not
+write a decision record.
+
+Known gaps:
+
+- field names not yet aligned with Tugra
+- no-bypass: CI scan + runtime registry; compiled-JS and foreign-binding
+  paths are not covered
+- the development issuer is not an authorization server; it has no
+  authorize endpoint
+- payload encryption and retention policy not designed

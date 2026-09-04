@@ -14,4 +14,8 @@ The accountable agent body. Design intent, not yet a claim:
 Status: skeleton. What the tree carries and what stays unproven is stated
 in `docs/STATUS.md`. Nothing in this repository is a claim beyond that file.
 
+`scripts/dev-issuer.mjs` is development only; not an authorization
+server; no authorize endpoint. It writes a token to `--out` and never
+prints one.
+
 License: Apache-2.0.

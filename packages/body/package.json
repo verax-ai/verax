@@ -11,8 +11,15 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "bin": {
+    "verax": "./src/cli.ts"
+  },
   "files": [
-    "src",
-    "README.md"
-  ]
+    "src"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@verax-ai/proxy": "^0.0.0",
+    "jose": "^6.2.11"
+  }
 }

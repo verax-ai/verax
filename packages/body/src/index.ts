@@ -1,2 +1,4 @@
-/** Workspace stub. The MCP body lives here in a later commit. */
-export {};
+export { loadConfig, EX_CONFIG } from "./config.ts";
+export { listen } from "./server.ts";
+export { runDoctor, doctorExit } from "./doctor.ts";
+export { createBodyServices, TOOL_NAMES } from "./wiring.ts";
