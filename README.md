@@ -16,7 +16,7 @@ in `docs/STATUS.md`. Nothing in this repository is a claim beyond that file.
 
 `scripts/dev-issuer.mjs` is development only; not an authorization
 server; no authorize endpoint. It writes a token to `--out` and never
-prints one.
+prints one. It listens on `VERAX_DEV_ISSUER_PORT` (default 8790).
 
 `apps/panel` is a 2D account-for rail beside a particle presence.
 In development the Vite proxy attaches `VERAX_DEV_TOKEN` from

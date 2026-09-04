@@ -46,6 +46,7 @@ if (existsSync(privPath) && existsSync(jwkPath)) {
 }
 
 const key = await importPKCS8(privatePem, "ES256");
+const port = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
 const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
 const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
 const sub = process.env.VERAX_DEV_SUB ?? "dev-brain";
@@ -77,7 +78,7 @@ const server = createServer((req, res) => {
 
 await new Promise((resolve, reject) => {
   server.once("error", reject);
-  server.listen(8790, "127.0.0.1", resolve);
+  server.listen(port, "127.0.0.1", resolve);
 });
 
-process.stderr.write("dev-issuer listening on http://127.0.0.1:8790/.well-known/jwks.json\n");
+process.stderr.write(`dev-issuer listening on http://127.0.0.1:${port}/.well-known/jwks.json\n`);

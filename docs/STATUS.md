@@ -65,7 +65,7 @@ Known gaps:
 - no-bypass: CI scan + runtime registry; compiled-JS and foreign-binding
   paths are not covered
 - the development issuer is not an authorization server; it has no
-  authorize endpoint
+  authorize endpoint. It listens on `VERAX_DEV_ISSUER_PORT` (default 8790)
 - payload encryption and retention policy not designed
 - memory items are not bound to the decision that read them (question 3
   is "not tracked yet")
