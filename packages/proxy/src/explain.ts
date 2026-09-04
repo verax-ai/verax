@@ -1,4 +1,5 @@
 import { audit, DECISION_PROFILE } from "@cedulon/audit";
+import { findDecisionRecordChainBreak } from "@cedulon/core";
 import type { ExplainResult, Ledger } from "./types.ts";
 
 const WINDOW_COVERAGE = "window-coverage";
@@ -36,19 +37,30 @@ export async function explain(ledger: Ledger, ref: string): Promise<ExplainResul
     refFindings[0] ??
     applicableWarnings.find((f) => f.id === ref) ??
     null;
+  const prefix = decisions.slice(0, decisions.indexOf(record) + 1);
+  const brk = findDecisionRecordChainBreak(prefix);
+  const breakAt = brk ? (prefix[brk.index]?.claims.ref ?? null) : null;
+  const chain = { intact: brk === null, breakAt };
   const witnessClass = effect?.witnessClass ?? null;
   const self = witnessClass === "self";
-  const balanced = refFindings.length === 0;
-  const summary = balanced ? "audit: balanced" : `audit: ${refFindings.length} finding(s) → FAIL`;
+  const chainBreak = !chain.intact;
+  const balanced = refFindings.length === 0 && !chainBreak;
+  const code = chainBreak ? "receipt-chain-break" : (hit?.code ?? null);
+  const detail = chainBreak
+    ? `receipt-chain-break at ${breakAt ?? "unknown"} (${brk?.reason ?? "broken"})`
+    : (hit?.detail ?? null);
+  const findingCount = chainBreak ? Math.max(refFindings.length, 1) : refFindings.length;
+  const summary = balanced ? "audit: balanced" : `audit: ${findingCount} finding(s) → FAIL`;
   return {
     record,
     effect,
     witnessClass,
     balanced,
+    chain,
     finding: {
-      code: hit?.code ?? null,
+      code,
       label: self ? "conditional" : null,
-      detail: hit?.detail ?? null,
+      detail,
       summary,
       ...(dropped.length > 0 ? { notApplicable: dropped } : {}),
     },

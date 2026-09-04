@@ -4,6 +4,7 @@ export { FileLedger, MemoryLedger } from "./ledger.ts";
 export { explain } from "./explain.ts";
 export type {
   EffectSigner,
+  ExplainChain,
   ExplainFinding,
   ExplainResult,
   ExtractWindow,

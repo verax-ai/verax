@@ -87,10 +87,16 @@ export type ExplainFinding = {
   notApplicable?: string[];
 };
 
+export type ExplainChain = {
+  intact: boolean;
+  breakAt: string | null;
+};
+
 export type ExplainResult = {
   record: SignedDecisionRecord;
   effect: LedgerEffect | null;
   finding: ExplainFinding;
   witnessClass: WitnessClass | null;
   balanced: boolean;
+  chain: ExplainChain;
 };
