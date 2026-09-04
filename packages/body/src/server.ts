@@ -104,6 +104,7 @@ function send(res: ServerResponse, status: number, body: unknown, headers?: Reco
   res.writeHead(status, {
     "content-type": "application/json",
     "content-length": Buffer.byteLength(text),
+    "x-content-type-options": "nosniff",
     ...headers,
   });
   res.end(text);
@@ -234,7 +235,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         const detail = err instanceof Error ? err.message : "fault";
         process.stderr.write(`verax-transport: ${detail}\n`);
         if (!res.headersSent) {
-          send(res, 500, { error: "transport", detail });
+            send(res, 500, { error: "transport" });
         }
       } finally {
         await transport.close();

@@ -79,6 +79,7 @@ Known gaps:
   connected`); there is no invented green
 - PKCE for the panel is not built
 - GET /api/ledger and POST /api/contest/{ref} are HTTP, not MCP
+- contest re-audits the whole ledger; no window bound (phase 4)
 - the rail screenshot is a schematic PNG, not a live capture
 - no React Three Fiber in the account-for rail commit
 

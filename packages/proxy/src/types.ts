@@ -96,4 +96,5 @@ export type ExplainResult = {
   effect: LedgerEffect | null;
   finding: ExplainFinding;
   witnessClass: WitnessClass | null;
+  balanced: boolean;
 };

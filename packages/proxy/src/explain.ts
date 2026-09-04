@@ -32,10 +32,12 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     null;
   const witnessClass = effect?.witnessClass ?? null;
   const self = witnessClass === "self";
+  const balanced = report.summary === "audit: balanced";
   return {
     record,
     effect,
     witnessClass,
+    balanced,
     finding: {
       code: hit?.code ?? null,
       label: self ? "conditional" : null,

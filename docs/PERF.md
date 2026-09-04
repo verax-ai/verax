@@ -10,4 +10,4 @@ below; a low-end row with P95 under 16.7 ms is not here yet.
 
 `apps/panel/perf/baseline.json` records the same swiftshader 15k row.
 The `panel-perf` job fails when a later `last.json` P95 exceeds
-baseline × 1.3.
+baseline x 1.3.

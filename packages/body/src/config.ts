@@ -29,7 +29,8 @@ function parseBind(raw: string | undefined): { host: string; port: number } {
 }
 
 export function isLoopbackHost(host: string): boolean {
-  return LOOPBACK.has(host);
+  const stripped = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+  return LOOPBACK.has(stripped);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {

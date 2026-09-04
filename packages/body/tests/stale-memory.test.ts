@@ -5,6 +5,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { generateKeyPairSync } from "node:crypto";
+
 import { createBodyServices } from "../src/wiring.ts";
 
 const policyFile = join(
@@ -16,21 +18,19 @@ const policyFile = join(
   "default.json",
 );
 
-const keys = {
-  privateKeyPem: `-----BEGIN PRIVATE KEY-----
-MC4CAQAwBQYDK2VwBCIEINzlJna6Owm08CZZR86n0YkAKTnSfONQQ46fSbBmoS7l
------END PRIVATE KEY-----
-`,
-  publicKeyPem: `-----BEGIN PUBLIC KEY-----
-MCowBQYDK2VwAyEA2R1wiqm2GNoE2kyz8xTaWOJCePoHgIwyMVty5zV6WIQ=
------END PUBLIC KEY-----
-`,
-};
+function testKeys() {
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  return {
+    privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+    publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+  };
+}
 
 describe("B6 stale memory", () => {
   it("does not return the body when validUntilMs is in the past", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-mem-"));
     let t = 1_000;
+    const keys = testKeys();
     const services = createBodyServices({
       stateDir: dir,
       policyFile,
