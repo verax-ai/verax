@@ -9,8 +9,12 @@ export type VerifiedBearer = {
 };
 
 export function resourceMetadataUrl(audience: string): string {
-  const base = audience.endsWith("/") ? audience.slice(0, -1) : audience;
-  return `${base}/.well-known/oauth-protected-resource`;
+  const u = new URL(audience);
+  const path = u.pathname.replace(/\/+$/, "").replace(/^\/+/, "");
+  if (path === "") {
+    return `${u.origin}/.well-known/oauth-protected-resource`;
+  }
+  return `${u.origin}/.well-known/oauth-protected-resource/${path}`;
 }
 
 export function wwwAuthenticate(audience: string): string {

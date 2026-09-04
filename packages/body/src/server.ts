@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { BodyConfig } from "./config.ts";
 import { explain } from "@verax-ai/proxy";
-import { createVerifier, readBearer, wwwAuthenticate } from "./auth.ts";
+import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpUnauthenticated } from "./metrics.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
@@ -94,6 +94,11 @@ async function readJsonBody(
   }
 }
 
+function isProtectedResourcePath(pathname: string, audience: string): boolean {
+  const want = new URL(resourceMetadataUrl(audience)).pathname;
+  return pathname === want || pathname === "/.well-known/oauth-protected-resource";
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -139,7 +144,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       send(res, 200, { ok: true });
       return;
     }
-    if (req.method === "GET" && url.pathname === "/.well-known/oauth-protected-resource") {
+    if (req.method === "GET" && isProtectedResourcePath(url.pathname, config.audience)) {
       send(res, 200, {
         resource: config.audience,
         authorization_servers: [config.issuer],
