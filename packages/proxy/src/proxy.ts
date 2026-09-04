@@ -48,12 +48,20 @@ export function createProxy(deps: ProxyDeps) {
         return denied(verdict.reasonCode, ref);
       }
 
+      const dispatchedName = call.name;
+      const dispatchedArgs = structuredClone(call.arguments);
+      const dispatchedHash = sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs));
+      const frozenCall: ToolCall = Object.freeze({
+        name: dispatchedName,
+        arguments: Object.freeze(dispatchedArgs),
+      });
+
       try {
-        const result = await deps.inner(call, principal);
+        const result = await deps.inner(frozenCall, principal);
         const row: EffectRow = {
           ref,
-          effectHash: sha256Canonical(effectDescriptor(call.name, call.arguments)),
-          effectClass: call.name,
+          effectHash: dispatchedHash,
+          effectClass: dispatchedName,
           timestampMs: deps.now(),
           actor: principal.brain,
         };
@@ -62,8 +70,8 @@ export function createProxy(deps: ProxyDeps) {
       } catch (err) {
         const row: EffectRow = {
           ref,
-          effectHash: sha256Canonical(effectDescriptor(call.name, call.arguments, true)),
-          effectClass: `${call.name}:threw`,
+          effectHash: sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs, true)),
+          effectClass: `${dispatchedName}:threw`,
           timestampMs: deps.now(),
           actor: principal.brain,
         };
