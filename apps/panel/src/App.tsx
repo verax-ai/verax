@@ -33,7 +33,14 @@ export function App() {
           actions={actions}
           onContest={async (ref) => {
             const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
-            return (await res.json()) as { reAuditedAt?: number; finding?: RailFinding };
+            const body = (await res.json().catch(() => ({}))) as {
+              reAuditedAt?: number;
+              finding?: RailFinding;
+            };
+            if (!res.ok || typeof body.reAuditedAt !== "number") {
+              return { error: `re-audit failed (${res.status})` };
+            }
+            return body;
           }}
         />
       </aside>

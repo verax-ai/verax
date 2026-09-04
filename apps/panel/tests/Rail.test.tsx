@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseLedger } from "../src/rail/parse.ts";
 import { Rail } from "../src/rail/Rail.tsx";
@@ -39,6 +39,16 @@ describe("account-for rail", () => {
     render(<Rail actions={actions} />);
     expect(screen.getByText("not tracked yet")).toBeTruthy();
     expect(screen.getByText("not connected")).toBeTruthy();
+  });
+
+  it("P2-11: a 401 contest shows re-audit failed, not re-audited at", async () => {
+    const onContest = vi.fn(async () => ({ error: "re-audit failed (401)" }));
+    render(<Rail actions={actions} onContest={onContest} />);
+    fireEvent.click(screen.getByRole("button", { name: "Contest" }));
+    await waitFor(() => {
+      expect(screen.getByText("re-audit failed (401)")).toBeTruthy();
+    });
+    expect(screen.queryByText(/re-audited at/)).toBeNull();
   });
 
   it("POSTs contest with the open ref", async () => {

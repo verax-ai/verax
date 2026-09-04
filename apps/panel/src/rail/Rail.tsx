@@ -3,7 +3,9 @@ import type { RailAction, RailFinding } from "./types.ts";
 
 export type RailProps = {
   actions: RailAction[];
-  onContest?: (ref: string) => Promise<{ reAuditedAt?: number; finding?: RailFinding } | void>;
+  onContest?: (
+    ref: string,
+  ) => Promise<{ reAuditedAt?: number; finding?: RailFinding; error?: string } | void>;
 };
 
 function kindOf(action: RailAction): "allow" | "deny" | "threw" {
@@ -84,10 +86,16 @@ export function Rail({ actions, onContest }: RailProps) {
                     onClick={async () => {
                       if (!action.record.claims.ref || !onContest) return;
                       const out = await onContest(action.record.claims.ref);
-                      const at =
-                        out && "reAuditedAt" in out && out.reAuditedAt ? out.reAuditedAt : Date.now();
-                      setStamp((s) => ({ ...s, [ref]: `re-audited at ${at}` }));
-                      if (out && "finding" in out && out.finding) {
+                      if (out && typeof out.error === "string") {
+                        setStamp((s) => ({ ...s, [ref]: out.error as string }));
+                        return;
+                      }
+                      if (!out || typeof out.reAuditedAt !== "number") {
+                        setStamp((s) => ({ ...s, [ref]: "re-audit failed (unknown)" }));
+                        return;
+                      }
+                      setStamp((s) => ({ ...s, [ref]: `re-audited at ${out.reAuditedAt}` }));
+                      if (out.finding) {
                         setFindings((s) => ({ ...s, [ref]: out.finding as RailFinding }));
                       }
                     }}
