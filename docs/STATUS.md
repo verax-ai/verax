@@ -29,8 +29,11 @@ Known gaps:
 - all witnesses are self in phase 1; reconciliation is conditional by
   construction
 - an allow whose inner throws still writes a row (`<tool>:threw`); the
-  audit must report that the effect hash does not match the intended
-  hash, not stay silent
+  effect hash is `sha256({ tool, arguments, threw: true })`, so
+  `effect-mismatch` is intentional, not silent
+- a successful allow hashes `{ tool, arguments }` on both the decision
+  and the effect row; the ToolResult hash lives as `resultHash` on the
+  Verax ledger line, not on Cedulon's EffectRow
 - ledger backends: file (phase 1); obsigna daemon planned, not wired
 - record and effect keys live in the same process; independence is a
   declaration, not a separate witness

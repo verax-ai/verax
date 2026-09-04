@@ -5,3 +5,8 @@ import { canonical } from "@cedulon/core";
 export function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
 }
+
+/** Decision and effect rows hash this same descriptor on a successful allow. */
+export function effectDescriptor(tool: string, args: Record<string, unknown>, threw = false): Record<string, unknown> {
+  return threw ? { tool, arguments: args, threw: true } : { tool, arguments: args };
+}

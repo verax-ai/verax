@@ -1,6 +1,6 @@
-import { explain, type Ledger, type ToolCall, type ToolResult } from "@verax-ai/proxy";
+import { explain, type Ledger, type RecordSigner, type ToolCall, type ToolResult } from "@verax-ai/proxy";
 
-export async function auditExplain(call: ToolCall, ledger: Ledger): Promise<ToolResult> {
+export async function auditExplain(call: ToolCall, ledger: Ledger, checkpointSigner?: RecordSigner): Promise<ToolResult> {
   const ref = call.arguments.ref;
   if (typeof ref !== "string" || ref === "") {
     return {
@@ -8,7 +8,7 @@ export async function auditExplain(call: ToolCall, ledger: Ledger): Promise<Tool
       isError: true,
     };
   }
-  const result = await explain(ledger, ref);
+  const result = await explain(ledger, ref, checkpointSigner ? { checkpointSigner } : undefined);
   return {
     content: [
       {

@@ -105,11 +105,15 @@ export class MemoryLedger implements Ledger {
     });
   }
 
-  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS): Promise<void> {
-    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass));
+  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
+    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass, resultHash));
   }
 
-  private async appendEffectUnlocked(row: EffectRow, witnessClass: WitnessClass): Promise<void> {
+  private async appendEffectUnlocked(
+    row: EffectRow,
+    witnessClass: WitnessClass,
+    resultHash?: string,
+  ): Promise<void> {
     const existing = this._effects.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
       this._effects.push({
@@ -121,10 +125,11 @@ export class MemoryLedger implements Ledger {
           actor: row.actor,
         },
         witnessClass: DEFAULT_WITNESS,
+        resultHash,
       });
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    this._effects.push({ row: asEffectRow(row), witnessClass });
+    this._effects.push({ row: asEffectRow(row), witnessClass, resultHash });
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
@@ -174,11 +179,15 @@ export class FileLedger implements Ledger {
     });
   }
 
-  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS): Promise<void> {
-    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass));
+  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
+    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass, resultHash));
   }
 
-  private async appendEffectUnlocked(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS): Promise<void> {
+  private async appendEffectUnlocked(
+    row: EffectRow,
+    witnessClass: WitnessClass = DEFAULT_WITNESS,
+    resultHash?: string,
+  ): Promise<void> {
     const current = await this.effects();
     const existing = current.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
@@ -191,11 +200,12 @@ export class FileLedger implements Ledger {
           actor: row.actor,
         },
         witnessClass: DEFAULT_WITNESS,
+        resultHash,
       };
       await appendFile(this.effectsPath, lineOf(marker), { encoding: "utf8" });
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    await appendFile(this.effectsPath, lineOf({ row: asEffectRow(row), witnessClass }), {
+    await appendFile(this.effectsPath, lineOf({ row: asEffectRow(row), witnessClass, resultHash }), {
       encoding: "utf8",
     });
   }

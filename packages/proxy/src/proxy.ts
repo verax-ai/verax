@@ -1,6 +1,6 @@
 import { signDecisionRecord } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
-import { sha256Canonical } from "./hash.ts";
+import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import type { Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
 function denied(reasonCode: string, ref: string): ToolResult {
@@ -35,7 +35,7 @@ export function createProxy(deps: ProxyDeps) {
             decision: verdict.decision,
             reasonCode: verdict.reasonCode,
             ref,
-            effectHash: allow ? sha256Canonical(call.arguments) : null,
+            effectHash: allow ? sha256Canonical(effectDescriptor(call.name, call.arguments)) : null,
             timestampMs,
             nonce: ref,
             prevRecordHash,
@@ -50,24 +50,25 @@ export function createProxy(deps: ProxyDeps) {
 
       try {
         const result = await deps.inner(call, principal);
+        const executed = result.executed ?? { tool: call.name, arguments: call.arguments };
         const row: EffectRow = {
           ref,
-          effectHash: sha256Canonical(result),
+          effectHash: sha256Canonical(effectDescriptor(executed.tool, executed.arguments)),
           effectClass: call.name,
           timestampMs: deps.now(),
           actor: principal.brain,
         };
-        await deps.ledger.appendEffect(row, "self");
+        await deps.ledger.appendEffect(row, "self", sha256Canonical(result));
         return result;
       } catch (err) {
         const row: EffectRow = {
           ref,
-          effectHash: sha256Canonical(thrownPayload(err)),
+          effectHash: sha256Canonical(effectDescriptor(call.name, call.arguments, true)),
           effectClass: `${call.name}:threw`,
           timestampMs: deps.now(),
           actor: principal.brain,
         };
-        await deps.ledger.appendEffect(row, "self");
+        await deps.ledger.appendEffect(row, "self", sha256Canonical(thrownPayload(err)));
         throw err;
       }
     },

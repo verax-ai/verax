@@ -142,7 +142,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           return;
         }
         const ref = decodeURIComponent(url.pathname.slice("/api/contest/".length));
-        const result = await explain(services.ledger, ref);
+        const result = await explain(services.ledger, ref, { checkpointSigner: signers.recordSigner });
         send(res, 200, { ...result, reAuditedAt: Date.now() });
         return;
       }

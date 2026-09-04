@@ -13,10 +13,11 @@ export type ToolCall = {
   arguments: Record<string, unknown>;
 };
 
-/** Same shape as `@cedulon/mcp-guard`. */
+/** Same shape as `@cedulon/mcp-guard`, plus the descriptor the inner actually ran. */
 export type ToolResult = {
   content: { type: "text"; text: string }[];
   isError: boolean;
+  executed?: { tool: string; arguments: Record<string, unknown> };
 };
 
 export type PolicyDecision = {
@@ -35,6 +36,8 @@ export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
 export type LedgerEffect = {
   row: EffectRow;
   witnessClass: WitnessClass;
+  /** Hash of the ToolResult (or thrown payload). Not an EffectRow field. */
+  resultHash?: string;
 };
 
 export type RecordSigner = {
@@ -59,7 +62,7 @@ export type ExtractWindow = {
 export type Ledger = {
   appendDecision(signed: SignedDecisionRecord): Promise<void>;
   appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void>;
-  appendEffect(row: EffectRow, witnessClass?: WitnessClass): Promise<void>;
+  appendEffect(row: EffectRow, witnessClass?: WitnessClass, resultHash?: string): Promise<void>;
   decisions(): Promise<SignedDecisionRecord[]>;
   effects(): Promise<LedgerEffect[]>;
   lastDecisionHash(): Promise<string | null>;
@@ -81,6 +84,11 @@ export type ExplainFinding = {
   label: "conditional" | null;
   detail: string | null;
   summary: string;
+  notApplicable?: string[];
+};
+
+export type ExplainOpts = {
+  checkpointSigner?: RecordSigner;
 };
 
 export type ExplainResult = {
