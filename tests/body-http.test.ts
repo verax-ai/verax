@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { createConnection } from "node:net";
+
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -123,6 +125,75 @@ describe("B5 identity and scope + e2e", () => {
       assert.equal((await rpc(mcp, await issuer.sign({ aud: "http://127.0.0.1:1" }), "tools/list", {})).status, 401);
       assert.equal((await rpc(mcp, await issuer.sign({ exp: "past" }), "tools/list", {})).status, 401);
     } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+});
+
+function rawGet(port: number, hostHeader: string): Promise<{ status: number; body: string }> {
+  return new Promise((resolve, reject) => {
+    const sock = createConnection({ host: "127.0.0.1", port }, () => {
+      sock.write(`GET /healthz HTTP/1.1\r\nHost: ${hostHeader}\r\nConnection: close\r\n\r\n`);
+    });
+    const chunks: Buffer[] = [];
+    const finish = (err?: Error) => {
+      sock.removeAllListeners();
+      sock.destroy();
+      if (err) {
+        reject(err);
+        return;
+      }
+      const text = Buffer.concat(chunks).toString("utf8");
+      const status = Number(/HTTP\/1\.\d (\d+)/.exec(text)?.[1] ?? 0);
+      resolve({ status, body: text });
+    };
+    sock.on("data", (c) => {
+      chunks.push(c as Buffer);
+      const text = Buffer.concat(chunks).toString("utf8");
+      if (text.includes("\r\n\r\n")) finish();
+    });
+    sock.on("end", () => finish());
+    sock.on("error", (err) => finish(err));
+    sock.setTimeout(3_000, () => finish(new Error("timeout waiting for response")));
+  });
+}
+
+describe("P1-3 broken Host", () => {
+  it("returns 400 for Host: [ and does not emit unhandledRejection", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-host-"));
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const port = (server.address() as { port: number }).port;
+    const onUnhandled = (reason: unknown) => {
+      throw reason instanceof Error ? reason : new Error(String(reason));
+    };
+    process.once("unhandledRejection", onUnhandled);
+    try {
+      const got = await Promise.race([
+        rawGet(port, "["),
+        new Promise<never>((_, reject) => {
+          process.once("unhandledRejection", (reason) => {
+            reject(reason instanceof Error ? reason : new Error(String(reason)));
+          });
+        }),
+      ]);
+      assert.equal(got.status, 400);
+      assert.match(got.body, /bad-request/);
+    } finally {
+      process.removeListener("unhandledRejection", onUnhandled);
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
       });

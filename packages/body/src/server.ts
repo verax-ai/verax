@@ -91,8 +91,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
   };
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
-    const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
-    if (req.method === "GET" && url.pathname === "/healthz") {
+    try {
+      const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+      if (req.method === "GET" && url.pathname === "/healthz") {
       send(res, 200, { ok: true });
       return;
     }
@@ -176,6 +177,17 @@ export async function listen(config: BodyConfig): Promise<Server> {
     } catch {
       await bumpUnauthenticated(config.stateDir);
       send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+    }
+    } catch (err) {
+      if (res.headersSent) return;
+      if (err instanceof TypeError) {
+        send(res, 400, { error: "bad-request" });
+        return;
+      }
+      process.stderr.write(`verax-handler: ${err instanceof Error ? err.message : "fault"}\n`);
+      send(res, 500, { error: "fault" });
+    } finally {
+      // Swallow so a bad Host cannot reject the request listener.
     }
   });
 
