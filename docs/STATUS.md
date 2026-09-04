@@ -38,7 +38,10 @@ Known gaps:
 - an allow whose inner throws still writes a row (`<tool>:threw`); the
   effect hash is `sha256({ tool, arguments, threw: true })`, so
   `effect-mismatch` is intentional, not silent
-- ledger backends: file (phase 1); obsigna daemon planned, not wired
+- ledger backends: file (phase 1); obsigna daemon planned, not wired.
+  One FileLedger per directory: a second instance throws
+  `ledger-locked:<pid>`; a stale lock from a dead pid is replaced.
+  `close()` drops the lock; the body calls it on SIGINT/SIGTERM
 - record and effect keys live in the same process; independence is a
   declaration, not a separate witness
 - duplicate-effect retry and late-event semantics are not designed
