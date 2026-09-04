@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Stage } from "./presence/Stage.tsx";
 import { parseLedger } from "./rail/parse.ts";
 import { Rail } from "./rail/Rail.tsx";
 import type { PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
@@ -24,15 +25,18 @@ export function App() {
   }, []);
 
   return (
-    <main>
-      <h1>Account for</h1>
-      <Rail
-        actions={actions}
-        onContest={async (ref) => {
-          const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
-          return (await res.json()) as { reAuditedAt?: number; finding?: RailFinding };
-        }}
-      />
+    <main className="shell">
+      <Stage />
+      <aside>
+        <h1>Account for</h1>
+        <Rail
+          actions={actions}
+          onContest={async (ref) => {
+            const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
+            return (await res.json()) as { reAuditedAt?: number; finding?: RailFinding };
+          }}
+        />
+      </aside>
     </main>
   );
 }

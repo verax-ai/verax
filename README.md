@@ -18,8 +18,10 @@ in `docs/STATUS.md`. Nothing in this repository is a claim beyond that file.
 server; no authorize endpoint. It writes a token to `--out` and never
 prints one.
 
-`apps/panel` is a 2D account-for rail. In development the Vite proxy
-attaches `VERAX_DEV_TOKEN` from `.env.local` to `/api`; the browser
-does not hold the token.
+`apps/panel` is a 2D account-for rail beside a particle presence.
+In development the Vite proxy attaches `VERAX_DEV_TOKEN` from
+`.env.local` to `/api`; the browser does not hold the token.
+Relative frame-time checks live in `apps/panel/perf`; they are not
+an absolute smoothness claim.
 
 License: Apache-2.0.

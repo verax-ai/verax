@@ -16,6 +16,7 @@
     "packages/**/*.ts",
     "apps/panel/src/**/*.ts",
     "apps/panel/src/**/*.tsx",
+    "apps/panel/src/**/*.d.ts",
     "scripts/**/*.ts",
     "tests/**/*.ts"
   ]

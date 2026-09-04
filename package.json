@@ -44,6 +44,8 @@
     "@cedulon/x402-adapter": "file:vendor/cedulon-x402-adapter-da7bf9b.tgz"
   },
   "devDependencies": {
+    "@gltf-transform/core": "^4.1.3",
+    "@gltf-transform/extensions": "^4.1.3",
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3"
   }

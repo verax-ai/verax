@@ -77,4 +77,18 @@ Known gaps:
 - PKCE for the panel is not built
 - GET /api/ledger and POST /api/contest/{ref} are HTTP, not MCP
 - the rail screenshot is a schematic PNG, not a live capture
-- no React Three Fiber in this commit
+- no React Three Fiber in the account-for rail commit
+
+## Phase 2 — presence (this commit)
+
+The tree carries a single `Points` field, an eight-state machine, and
+adaptive draw-range quality. The committed cloud is derived from a
+local GLB path (`VERAX_MODEL_GLB`); the GLB itself is not in git.
+
+Known gaps:
+
+- model provenance unverified
+- unmeasured on target hardware until a low-end row shows P95 under
+  16.7 ms
+- `uAudio` is 0; no AnalyserNode
+- all witnesses remain self; reconciliation stays conditional

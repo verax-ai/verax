@@ -6,5 +6,6 @@ dist/
 !**/.env.example
 *.glb
 *.log
+apps/panel/perf/last.json
 .verax/
 coverage/
