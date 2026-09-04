@@ -1,5 +1,5 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonical, decisionRecordHash } from "@cedulon/core";
 import {
@@ -150,18 +150,80 @@ export class MemoryLedger implements Ledger {
   }
 }
 
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function readLock(path: string): { pid: number; startedAt: number } | null {
+  try {
+    const raw = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; startedAt?: unknown };
+    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
+    return { pid: raw.pid, startedAt: raw.startedAt };
+  } catch {
+    return null;
+  }
+}
+
 export class FileLedger implements Ledger {
   readonly permissionCheck: PermissionCheck;
   readonly dir: string;
   private readonly decisionsPath: string;
   private readonly effectsPath: string;
+  private readonly lockPath: string;
   private readonly q = new SerialQueue();
+  private closed = false;
 
   constructor(dir: string) {
     this.dir = dir;
     this.permissionCheck = ensureLedgerDir(dir);
     this.decisionsPath = join(dir, "decisions.jsonl");
     this.effectsPath = join(dir, "effects.jsonl");
+    this.lockPath = join(dir, "ledger.lock");
+    this.acquireLock();
+  }
+
+  private acquireLock(): void {
+    const body = `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`;
+    try {
+      writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    }
+    const existing = readLock(this.lockPath);
+    if (existing && pidAlive(existing.pid)) {
+      throw new Error(`ledger-locked:${existing.pid}`);
+    }
+    try {
+      unlinkSync(this.lockPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+    try {
+      writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        const again = readLock(this.lockPath);
+        throw new Error(`ledger-locked:${again?.pid ?? "unknown"}`);
+      }
+      throw err;
+    }
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    try {
+      unlinkSync(this.lockPath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
   }
 
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {

@@ -9,7 +9,12 @@ export async function main(env: NodeJS.ProcessEnv = process.env): Promise<void> 
     process.exit(loaded.code);
   }
   try {
-    await listen(loaded.value);
+    const server = await listen(loaded.value);
+    const shutdown = () => {
+      server.close(() => process.exit(0));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
   } catch (err) {
     if (err instanceof KeysPartialError) {
       process.stderr.write("keys-partial\n");

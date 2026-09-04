@@ -50,10 +50,9 @@ export function createProxy(deps: ProxyDeps) {
 
       try {
         const result = await deps.inner(call, principal);
-        const executed = result.executed ?? { tool: call.name, arguments: call.arguments };
         const row: EffectRow = {
           ref,
-          effectHash: sha256Canonical(effectDescriptor(executed.tool, executed.arguments)),
+          effectHash: sha256Canonical(effectDescriptor(call.name, call.arguments)),
           effectClass: call.name,
           timestampMs: deps.now(),
           actor: principal.brain,
