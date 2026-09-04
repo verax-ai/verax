@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -160,11 +161,23 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function readLock(path: string): { pid: number; startedAt: number } | null {
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function readLock(path: string): { pid: number; startedAt: number; token?: string } | null {
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; startedAt?: unknown };
+    const raw = JSON.parse(readFileSync(path, "utf8")) as {
+      pid?: unknown;
+      startedAt?: unknown;
+      token?: unknown;
+    };
     if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
-    return { pid: raw.pid, startedAt: raw.startedAt };
+    return {
+      pid: raw.pid,
+      startedAt: raw.startedAt,
+      ...(typeof raw.token === "string" ? { token: raw.token } : {}),
+    };
   } catch {
     return null;
   }
@@ -177,7 +190,10 @@ export class FileLedger implements Ledger {
   private readonly effectsPath: string;
   private readonly lockPath: string;
   private readonly q = new SerialQueue();
+  private readonly takeoverPath: string;
+  private readonly token = randomBytes(16).toString("hex");
   private closed = false;
+  private lost = false;
   private heartbeat: ReturnType<typeof setInterval> | null = null;
 
   constructor(dir: string) {
@@ -186,11 +202,32 @@ export class FileLedger implements Ledger {
     this.decisionsPath = join(dir, "decisions.jsonl");
     this.effectsPath = join(dir, "effects.jsonl");
     this.lockPath = join(dir, "ledger.lock");
+    this.takeoverPath = join(dir, "ledger.takeover");
     this.acquireLock();
   }
 
   private lockBody(): string {
-    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`;
+    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.token })}\n`;
+  }
+
+  private ownsLock(): boolean {
+    const existing = readLock(this.lockPath);
+    return existing?.token === this.token;
+  }
+
+  private markLost(): void {
+    this.lost = true;
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
+  }
+
+  private assertOwned(): void {
+    if (this.lost || !this.ownsLock()) {
+      this.markLost();
+      throw new Error("ledger-lost-lock");
+    }
   }
 
   private lockIsStale(): boolean {
@@ -208,44 +245,88 @@ export class FileLedger implements Ledger {
   private startHeartbeat(): void {
     this.heartbeat = setInterval(() => {
       try {
+        if (!this.ownsLock()) {
+          this.markLost();
+          return;
+        }
         utimesSync(this.lockPath, new Date(), new Date());
       } catch {
-        /* lock gone */
+        this.markLost();
       }
     }, 5000);
     this.heartbeat.unref();
   }
 
-  private acquireLock(): void {
-    const body = this.lockBody();
+  private lockedError(): Error {
+    const existing = readLock(this.lockPath);
+    return new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
+  }
+
+  private tryCreateExclusive(path: string, body: string): boolean {
     try {
-      writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
-      this.startHeartbeat();
-      return;
+      writeFileSync(path, body, { encoding: "utf8", flag: "wx" });
+      return true;
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
+      throw err;
     }
-    if (!this.lockIsStale()) {
-      const existing = readLock(this.lockPath);
-      throw new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
+  }
+
+  private takeoverIsStale(): boolean {
+    try {
+      return Date.now() - statSync(this.takeoverPath).mtimeMs > 30_000;
+    } catch {
+      return true;
     }
-    const yieldMs = Number(process.env.VERAX_LOCK_YIELD_MS ?? "0");
-    if (Number.isFinite(yieldMs) && yieldMs > 0) {
-      const until = Date.now() + yieldMs;
-      while (Date.now() < until) {
-        /* test seam: let a faster takeover finish first */
+  }
+
+  private acquireTakeover(): void {
+    const body = this.lockBody();
+    if (this.tryCreateExclusive(this.takeoverPath, body)) return;
+    if (!this.takeoverIsStale()) throw this.lockedError();
+    const staleName = `${this.takeoverPath}.stale-${process.pid}-${Date.now()}`;
+    try {
+      renameSync(this.takeoverPath, staleName);
+    } catch {
+      throw this.lockedError();
+    }
+    try {
+      if (!this.tryCreateExclusive(this.takeoverPath, body)) throw this.lockedError();
+    } catch (err) {
+      try {
+        unlinkSync(staleName);
+      } catch {
+        /* already gone */
+      }
+      throw err;
+    }
+    try {
+      unlinkSync(staleName);
+    } catch {
+      /* left behind; not the live mutex */
+    }
+  }
+
+  private renameStaleLock(staleName: string): void {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        renameSync(this.lockPath, staleName);
+        return;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code !== "EPERM" && code !== "EBUSY") throw this.lockedError();
+        if (attempt === 4) throw this.lockedError();
+        sleepMs(20 * (attempt + 1));
       }
     }
-    if (!this.lockIsStale()) {
-      const existing = readLock(this.lockPath);
-      throw new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
-    }
+  }
+
+  private replaceStaleLock(body: string): void {
     const staleName = `${this.lockPath}.stale-${process.pid}-${Date.now()}`;
     try {
-      renameSync(this.lockPath, staleName);
+      this.renameStaleLock(staleName);
     } catch {
-      const existing = readLock(this.lockPath);
-      throw new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
+      throw this.lockedError();
     }
     try {
       writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
@@ -255,16 +336,33 @@ export class FileLedger implements Ledger {
       } catch {
         /* already gone */
       }
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
-        const again = readLock(this.lockPath);
-        throw new Error(`ledger-locked:${again?.pid ?? "unknown"}`);
-      }
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") throw this.lockedError();
       throw err;
     }
     try {
       unlinkSync(staleName);
     } catch {
       /* left behind; not the live lock */
+    }
+  }
+
+  private acquireLock(): void {
+    const body = this.lockBody();
+    if (this.tryCreateExclusive(this.lockPath, body)) {
+      this.startHeartbeat();
+      return;
+    }
+    if (!this.lockIsStale()) throw this.lockedError();
+    this.acquireTakeover();
+    try {
+      if (!this.lockIsStale()) throw this.lockedError();
+      this.replaceStaleLock(body);
+    } finally {
+      try {
+        unlinkSync(this.takeoverPath);
+      } catch {
+        /* already gone */
+      }
     }
     this.startHeartbeat();
   }
@@ -276,6 +374,10 @@ export class FileLedger implements Ledger {
       clearInterval(this.heartbeat);
       this.heartbeat = null;
     }
+    if (!this.ownsLock()) {
+      this.lost = true;
+      return;
+    }
     try {
       unlinkSync(this.lockPath);
     } catch (err) {
@@ -285,6 +387,7 @@ export class FileLedger implements Ledger {
 
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
+      this.assertOwned();
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
       await appendFile(this.decisionsPath, lineOf(signed), { encoding: "utf8" });
     });
@@ -292,6 +395,7 @@ export class FileLedger implements Ledger {
 
   async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
+      this.assertOwned();
       const prev = await this.lastDecisionHashUnlocked();
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
       await appendFile(this.decisionsPath, lineOf(build(prev)), { encoding: "utf8" });
@@ -299,7 +403,10 @@ export class FileLedger implements Ledger {
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
-    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass, resultHash));
+    return this.q.enqueue(async () => {
+      this.assertOwned();
+      return this.appendEffectUnlocked(row, witnessClass, resultHash);
+    });
   }
 
   private async appendEffectUnlocked(

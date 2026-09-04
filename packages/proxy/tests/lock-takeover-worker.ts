@@ -18,7 +18,7 @@ while (!existsSync(go)) {
 try {
   const ledger = new FileLedger(dir);
   process.stdout.write("OPENED\n");
-  await new Promise((resolve) => setTimeout(resolve, 2500));
+  await new Promise((resolve) => setTimeout(resolve, 200));
   ledger.close();
   process.exit(0);
 } catch (err) {
