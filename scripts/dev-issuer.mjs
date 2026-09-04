@@ -2,7 +2,7 @@
 // Development only; not an authorization server; no authorize endpoint.
 
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8 } from "jose";
 
@@ -36,7 +36,7 @@ if (existsSync(privPath) && existsSync(jwkPath)) {
   privatePem = readFileSync(privPath, "utf8");
   jwk = JSON.parse(readFileSync(jwkPath, "utf8"));
 } else {
-  const { privateKey, publicKey } = await generateKeyPair("ES256");
+  const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
   privatePem = await exportPKCS8(privateKey);
   const publicPem = await exportSPKI(publicKey);
   jwk = { ...(await exportJWK(publicKey)), alg: "ES256", use: "sig", kid: "verax-dev" };
@@ -61,6 +61,7 @@ const token = await new SignJWT({ scope })
   .sign(key);
 
 writeFileSync(outPath, token, { encoding: "utf8", mode: 0o600 });
+chmodSync(outPath, 0o600);
 
 const server = createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://127.0.0.1");
