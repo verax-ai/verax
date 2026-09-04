@@ -13,6 +13,11 @@
   },
   "files": [
     "src",
-    "README.md"
-  ]
+    "policy"
+  ],
+  "dependencies": {
+    "@cedulon/audit": "0.12.0",
+    "@cedulon/core": "0.12.0",
+    "@cedulon/effect-extract": "0.12.0"
+  }
 }

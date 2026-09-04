@@ -1,0 +1,4 @@
+{"row":{"actor":"brain-1","effectClass":"memory.get","effectHash":"78ba48245dbdfc7ecf6eadc81ce014b2153984355291b29cfba3d29704d7fa2b","ref":"n1","timestampMs":20},"witnessClass":"self"}
+{"row":{"actor":"brain-1","effectClass":"memory.put","effectHash":"2c47957aa7fbff0d42d43e3182e629e12a27fecec073095012a3a482e465a2cd","ref":"n2","timestampMs":40},"witnessClass":"self"}
+{"row":{"actor":"brain-1","effectClass":"message.read","effectHash":"bd2b277b71cd1b74d7b3bd913a5d5f1e049acd96cb58a89a2043f048ab6bf33b","ref":"n3","timestampMs":60},"witnessClass":"self"}
+{"row":{"actor":"brain-1","effectClass":"audit.explain:threw","effectHash":"85cd6a510a1dfc843bef825b7d8ba16e2a0f95d03747d9ee92e59294923880c6","ref":"n6","timestampMs":100},"witnessClass":"self"}

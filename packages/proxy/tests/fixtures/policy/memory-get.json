@@ -1,0 +1,6 @@
+{
+  "textHash": "21f6ead53604f927ce7d2bde9bdeb1491c856bfaf74bb1ba7b11c604db100dd7",
+  "call": { "name": "memory.get", "arguments": { "id": "note-1" } },
+  "principal": { "brain": "brain-1", "scopes": ["verax:read"] },
+  "expected": { "decision": "allow", "reasonCode": "allow", "rule": "memory-get" }
+}

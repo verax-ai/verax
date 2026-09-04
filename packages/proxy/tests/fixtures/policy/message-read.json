@@ -1,0 +1,6 @@
+{
+  "textHash": "96c74d09ef8de59bf3429fc7603f7b5038802860769fd40a7c0ba3e7ea8ea76c",
+  "call": { "name": "message.read", "arguments": {} },
+  "principal": { "brain": "brain-1", "scopes": ["verax:read"] },
+  "expected": { "decision": "allow", "reasonCode": "allow", "rule": "message-read" }
+}

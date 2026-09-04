@@ -1,0 +1,6 @@
+{
+  "textHash": "2a78bad1ab7d0b216c0f3855a97ebde694a3100ab2eddba13c31e0c1e438a0be",
+  "call": { "name": "audit.explain", "arguments": { "ref": "n1" } },
+  "principal": { "brain": "brain-1", "scopes": ["verax:read"] },
+  "expected": { "decision": "allow", "reasonCode": "allow", "rule": "audit-explain" }
+}

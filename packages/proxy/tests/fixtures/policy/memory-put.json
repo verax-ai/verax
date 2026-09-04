@@ -1,0 +1,6 @@
+{
+  "textHash": "380c9c3df7e3def1b083850f6faedbbd5b545b3124690cba5d5e2c3d9da1ea25",
+  "call": { "name": "memory.put", "arguments": { "id": "note-1", "body": "hello" } },
+  "principal": { "brain": "brain-1", "scopes": ["verax:memory"] },
+  "expected": { "decision": "allow", "reasonCode": "allow", "rule": "memory-put" }
+}

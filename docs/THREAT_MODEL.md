@@ -36,7 +36,7 @@ retention policy not designed.
 
 ## out of scope: OS compromise
 
-Hermes Agent, SECURITY.md §2.2 The Boundary: OS-Level Isolation:
+Hermes Agent, SECURITY.md section 2.2 The Boundary: OS-Level Isolation:
 
 > The only security boundary against an adversarial LLM is the operating
 > system. Nothing inside the agent process constitutes containment — not
