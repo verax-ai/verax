@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -65,6 +66,35 @@ describe("B1 no-bypass", () => {
       1,
       `string-form hits=${JSON.stringify(wrapped)}`,
     );
+  });
+
+  it("6: a string or comment containing the import sequence is still a hit", () => {
+    const dyn = ["im", "port("].join("");
+    const inString = scanNoBypass(pkg, [{ file: "src/index.ts", text: `const docs = "call ${dyn}name)";\n` }]);
+    const inComment = scanNoBypass(pkg, [{ file: "src/index.ts", text: `// docs: ${dyn}name)\n` }]);
+    assert.equal(
+      inString.filter((h) => h.why === "dynamic-import").length,
+      1,
+      `string-probe hits=${JSON.stringify(inString)}`,
+    );
+    assert.equal(
+      inComment.filter((h) => h.why === "dynamic-import").length,
+      1,
+      `comment-probe hits=${JSON.stringify(inComment)}`,
+    );
+  });
+
+  it("6: threat model states the conservative no-bypass rule", () => {
+    const threat = readFileSync(join(pkg, "..", "..", "docs", "THREAT_MODEL.md"), "utf8");
+    const a = ["im", "port("].join("");
+    const b = ["req", "uire("].join("");
+    const sentence =
+      "the no-bypass scan is deliberately conservative: the character sequences `" +
+      a +
+      "` and `" +
+      b +
+      "` may not appear anywhere in packages/body, including strings and comments.";
+    assert.equal(threat.includes(sentence), true);
   });
 
   it("RED: a dynamic concatenated tools import is refused", () => {
