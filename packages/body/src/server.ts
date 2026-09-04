@@ -57,6 +57,43 @@ const TOOL_META = [
   },
 ];
 
+const MAX_BODY_BYTES = 1024 * 1024;
+
+function contentLengthOverLimit(req: IncomingMessage): boolean {
+  const raw = req.headers["content-length"];
+  if (raw === undefined) return false;
+  const n = Number(Array.isArray(raw) ? raw[0] : raw);
+  return Number.isFinite(n) && n > MAX_BODY_BYTES;
+}
+
+async function readJsonBody(
+  req: IncomingMessage,
+  max: number,
+): Promise<{ ok: true; value: unknown } | { ok: false; tooLarge: true } | { ok: false; bad: true }> {
+  if (contentLengthOverLimit(req)) return { ok: false, tooLarge: true };
+  const chunks: Buffer[] = [];
+  let seen = 0;
+  try {
+    for await (const chunk of req) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      seen += buf.length;
+      if (seen > max) {
+        return { ok: false, tooLarge: true };
+      }
+      chunks.push(buf);
+    }
+  } catch {
+    return { ok: false, bad: true };
+  }
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (text === "") return { ok: true, value: undefined };
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false, bad: true };
+  }
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -93,6 +130,11 @@ export async function listen(config: BodyConfig): Promise<Server> {
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
+      if (req.method === "POST" && contentLengthOverLimit(req)) {
+        send(res, 413, { error: "payload-too-large" });
+        req.resume();
+        return;
+      }
       if (req.method === "GET" && url.pathname === "/healthz") {
       send(res, 200, { ok: true });
       return;
@@ -153,6 +195,16 @@ export async function listen(config: BodyConfig): Promise<Server> {
         enableJsonResponse: true,
       });
       await mcp.connect(transport);
+      const parsed = req.method === "POST" ? await readJsonBody(req, MAX_BODY_BYTES) : { ok: true as const, value: undefined };
+      if (parsed.ok === false && "tooLarge" in parsed) {
+        send(res, 413, { error: "payload-too-large" });
+        req.destroy();
+        return;
+      }
+      if (parsed.ok === false) {
+        send(res, 400, { error: "bad-request" });
+        return;
+      }
       try {
         await transport.handleRequest(
           Object.assign(req, {
@@ -164,6 +216,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             },
           }),
           res,
+          parsed.value,
         );
       } catch (err) {
         const detail = err instanceof Error ? err.message : "fault";
