@@ -9,7 +9,8 @@ export type DoctorCheck = {
   detail: string;
 };
 
-const SECRET_RE = /sk-|-----BEGIN|Bearer /;
+const SECRET_RE = /sk-|-----BEGIN|Bearer |eyJ[A-Za-z0-9_-]{10,}\./;
+const SECRET_NAME = /^(VERAX_DEV_TOKEN|.*_(TOKEN|SECRET|KEY))$/;
 
 export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
@@ -78,27 +79,27 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
     });
   }
 
-  const haystack = `${argv.join(" ")}\n${Object.entries(env)
-    .map(([k, v]) => `${k}=${v ?? ""}`)
-    .join("\n")}`;
+  const secretNames = Object.entries(env)
+    .filter(([k, v]) => Boolean(v) && (SECRET_NAME.test(k) || SECRET_RE.test(String(v))))
+    .map(([k]) => k);
   const secretInArgv = argv.some((a) => SECRET_RE.test(a));
   if (secretInArgv) {
     checks.push({
       id: "secrets-on-argv",
       level: "fail",
-      detail: "process.argv matches sk-, PEM begin, or Bearer ",
+      detail: "process.argv matches sk-, PEM begin, Bearer, or JWT",
     });
-  } else if (SECRET_RE.test(haystack)) {
+  } else if (secretNames.length > 0) {
     checks.push({
-      id: "secrets-on-argv",
-      level: "warn",
-      detail: "a secret-shaped string is in the environment; argv is clean",
+      id: "secrets-in-env",
+      level: "fail",
+      detail: `named env keys look secret: ${secretNames.join(", ")}`,
     });
   } else {
     checks.push({
       id: "secrets-on-argv",
       level: "ok",
-      detail: "no sk-, PEM, or Bearer pattern on argv or env",
+      detail: "no sk-, PEM, Bearer, or JWT pattern on argv or env",
     });
   }
 
