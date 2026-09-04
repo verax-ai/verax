@@ -1,8 +1,17 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
+import { EX_CONFIG } from "./config.ts";
 
 export type KeyPair = { privateKeyPem: string; publicKeyPem: string };
+
+export class KeysPartialError extends Error {
+  readonly code = EX_CONFIG;
+  constructor() {
+    super("keys-partial");
+    this.name = "KeysPartialError";
+  }
+}
 
 function pair(): KeyPair {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
@@ -12,8 +21,10 @@ function pair(): KeyPair {
   };
 }
 
-function writePem(path: string, pem: string): void {
-  writeFileSync(path, pem, { encoding: "utf8", mode: 0o600 });
+function writePemAtomic(path: string, pem: string): void {
+  const tmp = `${path}.tmp`;
+  writeFileSync(tmp, pem, { encoding: "utf8", mode: 0o600 });
+  renameSync(tmp, path);
 }
 
 export function loadOrCreateSigners(stateDir: string): {
@@ -26,13 +37,18 @@ export function loadOrCreateSigners(stateDir: string): {
   const recPub = join(dir, "record.public.pem");
   const effPriv = join(dir, "effect.private.pem");
   const effPub = join(dir, "effect.public.pem");
-  if (!existsSync(recPriv) || !existsSync(effPriv)) {
+  const paths = [recPriv, recPub, effPriv, effPub];
+  const present = paths.filter((p) => existsSync(p)).length;
+  if (present !== 0 && present !== 4) {
+    throw new KeysPartialError();
+  }
+  if (present === 0) {
     const record = pair();
     const effect = pair();
-    writePem(recPriv, record.privateKeyPem);
-    writePem(recPub, record.publicKeyPem);
-    writePem(effPriv, effect.privateKeyPem);
-    writePem(effPub, effect.publicKeyPem);
+    writePemAtomic(recPriv, record.privateKeyPem);
+    writePemAtomic(recPub, record.publicKeyPem);
+    writePemAtomic(effPriv, effect.privateKeyPem);
+    writePemAtomic(effPub, effect.publicKeyPem);
     return { recordSigner: record, effectSigner: effect };
   }
   return {
