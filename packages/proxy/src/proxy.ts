@@ -23,27 +23,27 @@ export function createProxy(deps: ProxyDeps) {
       const verdict = deps.policy.evaluate(call, principal);
       const ref = deps.nonce();
       const timestampMs = deps.now();
-      const prevRecordHash = await deps.ledger.lastDecisionHash();
       const allow = verdict.decision === "allow";
-      const signed = signDecisionRecord(
-        {
-          decider: "verax-proxy",
-          subject: call.name,
-          requestHash: sha256Canonical(call),
-          policyHash: deps.policy.hash,
-          inputsHash: null,
-          decision: verdict.decision,
-          reasonCode: verdict.reasonCode,
-          ref,
-          effectHash: allow ? sha256Canonical(call.arguments) : null,
-          timestampMs,
-          nonce: ref,
-          prevRecordHash,
-        },
-        deps.recordSigner.privateKeyPem,
-        deps.recordSigner.publicKeyPem,
+      await deps.ledger.appendDecisionChained((prevRecordHash) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: call.name,
+            requestHash: sha256Canonical(call),
+            policyHash: deps.policy.hash,
+            inputsHash: null,
+            decision: verdict.decision,
+            reasonCode: verdict.reasonCode,
+            ref,
+            effectHash: allow ? sha256Canonical(call.arguments) : null,
+            timestampMs,
+            nonce: ref,
+            prevRecordHash,
+          },
+          deps.recordSigner.privateKeyPem,
+          deps.recordSigner.publicKeyPem,
+        ),
       );
-      await deps.ledger.appendDecision(signed);
       if (!allow) {
         return denied(verdict.reasonCode, ref);
       }

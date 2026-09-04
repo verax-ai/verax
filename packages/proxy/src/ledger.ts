@@ -21,6 +21,20 @@ export type PermissionCheck = "owner-only" | "not checked on this platform";
 
 const DEFAULT_WITNESS: WitnessClass = "self";
 
+/** One async tail so read-then-append cannot fork the chain. */
+class SerialQueue {
+  private tail: Promise<void> = Promise.resolve();
+
+  enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.tail.then(fn, fn);
+    this.tail = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+}
+
 function lineOf(value: unknown): string {
   return `${canonical(value)}\n`;
 }
@@ -76,12 +90,26 @@ export class MemoryLedger implements Ledger {
   readonly permissionCheck: PermissionCheck = "owner-only";
   private readonly _decisions: SignedDecisionRecord[] = [];
   private readonly _effects: LedgerEffect[] = [];
+  private readonly q = new SerialQueue();
 
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {
-    this._decisions.push(signed);
+    return this.q.enqueue(async () => {
+      this._decisions.push(signed);
+    });
+  }
+
+  async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
+    return this.q.enqueue(async () => {
+      const last = this._decisions[this._decisions.length - 1];
+      this._decisions.push(build(last ? decisionRecordHash(last) : null));
+    });
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS): Promise<void> {
+    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass));
+  }
+
+  private async appendEffectUnlocked(row: EffectRow, witnessClass: WitnessClass): Promise<void> {
     const existing = this._effects.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
       this._effects.push({
@@ -122,6 +150,7 @@ export class FileLedger implements Ledger {
   readonly dir: string;
   private readonly decisionsPath: string;
   private readonly effectsPath: string;
+  private readonly q = new SerialQueue();
 
   constructor(dir: string) {
     this.dir = dir;
@@ -131,11 +160,25 @@ export class FileLedger implements Ledger {
   }
 
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {
-    await mkdir(this.dir, { recursive: true, mode: 0o700 });
-    await appendFile(this.decisionsPath, lineOf(signed), { encoding: "utf8" });
+    return this.q.enqueue(async () => {
+      await mkdir(this.dir, { recursive: true, mode: 0o700 });
+      await appendFile(this.decisionsPath, lineOf(signed), { encoding: "utf8" });
+    });
+  }
+
+  async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
+    return this.q.enqueue(async () => {
+      const prev = await this.lastDecisionHashUnlocked();
+      await mkdir(this.dir, { recursive: true, mode: 0o700 });
+      await appendFile(this.decisionsPath, lineOf(build(prev)), { encoding: "utf8" });
+    });
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS): Promise<void> {
+    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass));
+  }
+
+  private async appendEffectUnlocked(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS): Promise<void> {
     const current = await this.effects();
     const existing = current.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
@@ -166,6 +209,10 @@ export class FileLedger implements Ledger {
   }
 
   async lastDecisionHash(): Promise<string | null> {
+    return this.lastDecisionHashUnlocked();
+  }
+
+  private async lastDecisionHashUnlocked(): Promise<string | null> {
     const all = await this.decisions();
     const last = all[all.length - 1];
     return last ? decisionRecordHash(last) : null;

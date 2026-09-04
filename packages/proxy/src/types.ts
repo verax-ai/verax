@@ -58,6 +58,7 @@ export type ExtractWindow = {
  */
 export type Ledger = {
   appendDecision(signed: SignedDecisionRecord): Promise<void>;
+  appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void>;
   appendEffect(row: EffectRow, witnessClass?: WitnessClass): Promise<void>;
   decisions(): Promise<SignedDecisionRecord[]>;
   effects(): Promise<LedgerEffect[]>;
