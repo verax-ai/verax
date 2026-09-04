@@ -197,7 +197,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           return;
         }
         const ref = decodeURIComponent(url.pathname.slice("/api/contest/".length));
-        const result = await explain(services.ledger, ref, { checkpointSigner: signers.recordSigner });
+        const result = await explain(services.ledger, ref);
         send(res, 200, { ...result, reAuditedAt: Date.now() });
         return;
       }
@@ -280,6 +280,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
     server.listen(config.bindPort, config.bindHost, () => resolve());
+  });
+  server.on("close", () => {
+    services.ledger.close();
   });
   return server;
 }

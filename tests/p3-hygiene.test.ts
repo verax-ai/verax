@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 import { isLoopbackHost } from "../packages/body/src/config.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { explain } from "../packages/proxy/src/explain.ts";
-import { RECORD_SIGNER } from "../packages/proxy/tests/helpers.ts";
 import { runGoldenScenario } from "../packages/proxy/tests/golden-scenario.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -47,7 +46,7 @@ describe("P3 hygiene", () => {
   it("17: explain returns balanced: boolean", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-p3-"));
     const ledger = await runGoldenScenario(dir);
-    const n1 = await explain(ledger, "n1", { checkpointSigner: RECORD_SIGNER });
+    const n1 = await explain(ledger, "n1");
     assert.equal(typeof n1.balanced, "boolean");
     assert.equal(n1.balanced, true);
   });

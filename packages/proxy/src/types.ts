@@ -13,11 +13,11 @@ export type ToolCall = {
   arguments: Record<string, unknown>;
 };
 
-/** Same shape as `@cedulon/mcp-guard`, plus the descriptor the inner actually ran. */
+/** Same shape as `@cedulon/mcp-guard`. claimedHash is a side field; it does not enter the ledger or audit. */
 export type ToolResult = {
   content: { type: "text"; text: string }[];
   isError: boolean;
-  executed?: { tool: string; arguments: Record<string, unknown> };
+  claimedHash?: string;
 };
 
 export type PolicyDecision = {
@@ -85,10 +85,6 @@ export type ExplainFinding = {
   detail: string | null;
   summary: string;
   notApplicable?: string[];
-};
-
-export type ExplainOpts = {
-  checkpointSigner?: RecordSigner;
 };
 
 export type ExplainResult = {

@@ -38,7 +38,7 @@ export function createBodyServices(opts: {
   const registry = new Map<string, ToolFn>();
   registry.set("memory.get", (call) => memoryGet(call, opts.stateDir, now));
   registry.set("memory.put", (call) => memoryPut(call, opts.stateDir));
-  registry.set("audit.explain", (call) => auditExplain(call, ledger, opts.recordSigner));
+  registry.set("audit.explain", (call) => auditExplain(call, ledger));
   registry.set("message.read", (call) => messageRead(call, opts.stateDir));
 
   const inner: ToolFn = async (call) => {

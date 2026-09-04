@@ -28,12 +28,16 @@ Known gaps:
 
 - all witnesses are self in phase 1; reconciliation is conditional by
   construction
+- explain does not call signCheckpoint; durable checkpoint production
+  is the phase 4 night watch. Until then window-coverage is
+  notApplicable and balanced ignores that code
+- a successful allow hashes what the proxy dispatched
+  (`{ tool, arguments }`); whether the tool did that is the witness's
+  job (phase 4), not the tool's self-report. The ToolResult hash lives
+  as `resultHash` on the Verax ledger line, not on Cedulon's EffectRow
 - an allow whose inner throws still writes a row (`<tool>:threw`); the
   effect hash is `sha256({ tool, arguments, threw: true })`, so
   `effect-mismatch` is intentional, not silent
-- a successful allow hashes `{ tool, arguments }` on both the decision
-  and the effect row; the ToolResult hash lives as `resultHash` on the
-  Verax ledger line, not on Cedulon's EffectRow
 - ledger backends: file (phase 1); obsigna daemon planned, not wired
 - record and effect keys live in the same process; independence is a
   declaration, not a separate witness

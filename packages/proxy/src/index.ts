@@ -5,7 +5,6 @@ export { explain } from "./explain.ts";
 export type {
   EffectSigner,
   ExplainFinding,
-  ExplainOpts,
   ExplainResult,
   ExtractWindow,
   Ledger,
