@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Area-weighted surface samples. Reads VERAX_MODEL_GLB via gltf-transform
-// (no THREE.GLTFLoader — that wants a DOM). Math.random is not used.
+// (no THREE.GLTFLoader - that wants a DOM). Math.random is not used.
 
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";

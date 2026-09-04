@@ -18,7 +18,7 @@ export type BodyServices = {
 
 /**
  * Tool functions live in a Map that is not exported. The only way to
- * reach them at runtime is `proxy.call` → `inner`.
+ * reach them at runtime is `proxy.call` -> `inner`.
  */
 export function createBodyServices(opts: {
   stateDir: string;
