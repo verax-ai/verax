@@ -40,7 +40,12 @@ Known gaps:
   `effect-mismatch` is intentional, not silent
 - ledger backends: file (phase 1); obsigna daemon planned, not wired.
   One FileLedger per directory: a second instance throws
-  `ledger-locked:<pid>`; a stale lock from a dead pid is replaced.
+  `ledger-locked:<pid>` (dead holder: `ledger-locked-stale:<pid>`).
+  The directory lock is not a distributed lock: a lock is never taken
+  over automatically; an operator removes a dead lock with
+  `verax unlock`. A multi-process ledger belongs to the phase 4
+  witness process. Operator unlock is recorded in unlocks.jsonl, not signed.
+  Token checks on append/close are best effort; single writer by construction.
   `close()` drops the lock; the body calls it on SIGINT/SIGTERM
 - record and effect keys live in the same process; independence is a
   declaration, not a separate witness

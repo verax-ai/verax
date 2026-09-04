@@ -89,12 +89,19 @@ describe("B1 no-bypass", () => {
     const a = ["im", "port("].join("");
     const b = ["req", "uire("].join("");
     const sentence =
-      "the no-bypass scan is deliberately conservative: the character sequences `" +
+      "The no-bypass scan is deliberately conservative: the character sequences `" +
       a +
       "` and `" +
       b +
       "` may not appear anywhere in packages/body, including strings and comments.";
     assert.equal(threat.includes(sentence), true);
+    assert.equal(threat.includes("\n\n" + sentence + "\n\n"), true);
+    const lockSentence =
+      "The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.";
+    assert.equal(threat.includes(lockSentence), true);
+    const status = readFileSync(join(pkg, "..", "..", "docs", "STATUS.md"), "utf8");
+    assert.equal(status.includes("Operator unlock is recorded in unlocks.jsonl, not signed"), true);
+    assert.equal(status.includes("best effort; single writer by construction"), true);
   });
 
   it("RED: a dynamic concatenated tools import is refused", () => {

@@ -27,7 +27,10 @@ An operator can skip the publisher, stop the witness process, or delete
 the directory. Coverage proof and a heartbeat belong in a later phase.
 Until then this is a known gap: silence is indistinguishable from "nothing
 happened" if the only copy lives on the same host.
-the no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
+
+The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
+
+The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
 
 ## retention and erasure
 
