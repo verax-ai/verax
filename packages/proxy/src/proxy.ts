@@ -10,6 +10,19 @@ function denied(reasonCode: string, ref: string): ToolResult {
   };
 }
 
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  Object.freeze(value);
+  if (Array.isArray(value)) {
+    for (const item of value) deepFreeze(item);
+  } else {
+    for (const key of Object.keys(value as object)) {
+      deepFreeze((value as Record<string, unknown>)[key]);
+    }
+  }
+  return value;
+}
+
 function thrownPayload(err: unknown): unknown {
   if (err instanceof Error) {
     return { name: err.name, message: err.message };
@@ -49,11 +62,12 @@ export function createProxy(deps: ProxyDeps) {
       }
 
       const dispatchedName = call.name;
-      const dispatchedArgs = structuredClone(call.arguments);
+      const dispatchedArgs = deepFreeze(structuredClone(call.arguments));
       const dispatchedHash = sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs));
+      const thrownHash = sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs, true));
       const frozenCall: ToolCall = Object.freeze({
         name: dispatchedName,
-        arguments: Object.freeze(dispatchedArgs),
+        arguments: dispatchedArgs,
       });
 
       try {
@@ -70,7 +84,7 @@ export function createProxy(deps: ProxyDeps) {
       } catch (err) {
         const row: EffectRow = {
           ref,
-          effectHash: sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs, true)),
+          effectHash: thrownHash,
           effectClass: `${dispatchedName}:threw`,
           timestampMs: deps.now(),
           actor: principal.brain,

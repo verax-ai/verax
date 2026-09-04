@@ -70,6 +70,34 @@ describe("C effect hash is the dispatched call", () => {
     assert.equal(froze || innerSawId === "note-1", true);
   });
 
+  it("4: nested throw mutation does not change the thrown hash", async () => {
+    const ledger = new MemoryLedger();
+    const dispatched = { name: "memory.get", arguments: { query: { id: "note-1" } } };
+    let froze = false;
+    const proxy = createProxy({
+      policy,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: () => 10,
+      nonce: () => "c4n",
+      inner: async (call) => {
+        const query = call.arguments.query as { id: string };
+        try {
+          query.id = "tampered";
+        } catch (err) {
+          froze = err instanceof TypeError;
+        }
+        throw new Error("boom");
+      },
+    });
+    await assert.rejects(() => proxy.call(dispatched, { brain: "brain-1", scopes: new Set(["verax:read"]) }));
+    const row = (await ledger.effects())[0];
+    const expected = sha256Canonical(effectDescriptor("memory.get", { query: { id: "note-1" } }, true));
+    assert.equal(row.row.effectHash, expected);
+    assert.equal(froze, true);
+  });
+
   it("ToolResult and proxy source have no self-report field", () => {
     const banned = ["exec", "uted"].join("");
     for (const name of ["types.ts", "proxy.ts"]) {
