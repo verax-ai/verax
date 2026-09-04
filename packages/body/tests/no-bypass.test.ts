@@ -55,6 +55,18 @@ describe("B1 no-bypass", () => {
     );
   });
 
+  it("5: import inside string-wrapped comment markers is still a hit", () => {
+    const head = ["im", "port"].join("");
+    const wrapped = scanNoBypass(pkg, [
+      { file: "src/index.ts", text: `const a="/*"; await ${head}(name); const b="*/";\n` },
+    ]);
+    assert.equal(
+      wrapped.filter((h) => h.why === "dynamic-import").length,
+      1,
+      `string-form hits=${JSON.stringify(wrapped)}`,
+    );
+  });
+
   it("RED: a dynamic concatenated tools import is refused", () => {
     const head = "im" + "port(";
     const red = scanNoBypass(pkg, [

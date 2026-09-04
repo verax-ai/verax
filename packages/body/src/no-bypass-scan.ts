@@ -26,7 +26,7 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 const IMPORT_TOOLS = /(?:from|import)\s+["'][^"']*tools\/[^"']+["']/;
-const DYNAMIC_IMPORT = /\bimport\s*\(/g;
+const DYNAMIC_IMPORT = /\bimport\s*(?:\/\*[\s\S]*?\*\/\s*|\/\/[^\n]*\n\s*)*\(/g;
 const NEW_FUNCTION = /new Function\s*\(/;
 const EVAL_CALL = /\beval\s*\(/;
 const VM = /\bvm\b/;
@@ -36,12 +36,6 @@ const CREATE_REQUIRE = /\bcreateRequire\b/;
 const CONCAT_TOOLS = /["']\.\/to["']\s*\+\s*["']ols/;
 const CHILD = /\bchild_process\b/;
 const WORKER = /\bworker_threads\b/;
-
-function stripCommentsPreservingLines(text: string): string {
-  return text
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " "))
-    .replace(/\/\/.*$/gm, (m) => " ".repeat(m.length));
-}
 
 function lineAt(text: string, index: number): number {
   return text.slice(0, index).split(/\n/).length;
@@ -69,11 +63,10 @@ export function scanNoBypass(
     const rel = file.replace(/\\/g, "/");
     if (rel === "src/no-bypass-scan.ts") continue;
     const wiring = rel === "src/wiring.ts";
-    const stripped = stripCommentsPreservingLines(text);
     const originalLines = text.split(/\r?\n/);
-    for (const match of stripped.matchAll(DYNAMIC_IMPORT)) {
+    for (const match of text.matchAll(DYNAMIC_IMPORT)) {
       const index = match.index ?? 0;
-      const line = lineAt(stripped, index);
+      const line = lineAt(text, index);
       hits.push({
         file,
         line,
@@ -81,7 +74,7 @@ export function scanNoBypass(
         text: (originalLines[line - 1] ?? "").trim(),
       });
     }
-    const lines = stripped.split(/\r?\n/);
+    const lines = text.split(/\r?\n/);
     for (let i = 0; i < lines.length; i += 1) {
       const line = lines[i] ?? "";
       const push = (why: string) => {
