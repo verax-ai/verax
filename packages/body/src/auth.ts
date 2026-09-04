@@ -29,9 +29,12 @@ export function createVerifier(jwksUrl: string, issuer: string, audience: string
       audience,
       algorithms: [...ALGS],
       requiredClaims: ["exp", "iat", "sub"],
-      maxTokenAge: "1h",
       clockTolerance: 60,
     });
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (typeof payload.iat === "number" && payload.iat > nowSec + 60) {
+      throw new Error("iat-in-future");
+    }
     const sub = typeof payload.sub === "string" ? payload.sub : "";
     if (sub === "") {
       throw new Error("missing-sub");

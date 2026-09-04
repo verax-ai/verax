@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -56,5 +56,39 @@ describe("P1-1 jwtVerify requires exp, iat, sub", () => {
       });
       await issuer.close();
     }
+  });
+
+  it("F: a token with iat two hours ago and exp in ten minutes is accepted", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-iat-age-"));
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const port = (server.address() as { port: number }).port;
+    const mcp = `http://127.0.0.1:${port}/mcp`;
+    try {
+      const aged = await issuer.sign({ iatSkewSec: -7200 });
+      assert.equal(await toolsList(mcp, aged), 200, "valid exp must not be refused for iat age");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+
+  it("F: auth.ts keeps requiredClaims and clockTolerance, drops maxTokenAge", () => {
+    const src = readFileSync(join(root, "packages", "body", "src", "auth.ts"), "utf8");
+    assert.equal(src.includes("maxTokenAge"), false);
+    assert.equal(src.includes("clockTolerance: 60"), true);
+    assert.equal(src.includes('requiredClaims: ["exp", "iat", "sub"]'), true);
   });
 });
