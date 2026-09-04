@@ -11,8 +11,7 @@ The accountable agent body. Design intent, not yet a claim:
 - the body opens only when its authorization is configured, with no default
   token.
 
-Status: skeleton, no code, no release. What the tree carries and what stays
-unproven will be stated in `docs/STATUS.md`. Until that file exists, nothing
-in this repository is a claim.
+Status: skeleton. What the tree carries and what stays unproven is stated
+in `docs/STATUS.md`. Nothing in this repository is a claim beyond that file.
 
 License: Apache-2.0.

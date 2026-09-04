@@ -1,0 +1,32 @@
+# Full suite as a non-root user, on Linux.
+#
+# Do not add a Windows runner as the only full-suite job. The hosted
+# Windows job skips nothing at the time of writing, but a local Windows
+# run without symbolic-link privilege skips POSIX-mode cases, so a
+# green Windows job alone is a smaller claim than a green POSIX job. A
+# Windows job is only meaningful beside this one.
+name: posix-full
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: refuse root
+        run: |
+          test "$(id -u)" != "0"
+          echo "uid=$(id -u) user=$(id -un)"
+      - run: npm ci --ignore-scripts
+      - run: npm test
