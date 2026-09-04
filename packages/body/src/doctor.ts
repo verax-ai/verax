@@ -1,5 +1,7 @@
 import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { loadConfig, isLoopbackHost } from "./config.ts";
+import { pidAlive, readLockFile } from "./unlock.ts";
 
 export type DoctorLevel = "ok" | "warn" | "fail";
 
@@ -77,6 +79,26 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
           ? "VERAX_STATE_DIR is owner-only"
           : `VERAX_STATE_DIR mode ${mode.toString(8)} is not 0700`,
     });
+  }
+
+  if (stateDir !== "" && existsSync(stateDir)) {
+    const lockPath = join(stateDir, "ledger.lock");
+    if (existsSync(lockPath)) {
+      const existing = readLockFile(lockPath);
+      if (!existing) {
+        checks.push({ id: "ledger-lock", level: "fail", detail: "ledger.lock is unreadable" });
+      } else if (existing.pid === process.pid) {
+        checks.push({ id: "ledger-lock", level: "ok", detail: `ledger.lock is this process (${existing.pid})` });
+      } else if (pidAlive(existing.pid)) {
+        checks.push({ id: "ledger-lock", level: "warn", detail: `ledger.lock is held by live pid ${existing.pid}` });
+      } else {
+        checks.push({
+          id: "ledger-lock",
+          level: "fail",
+          detail: `ledger.lock is held by dead pid ${existing.pid}; run: verax unlock ${stateDir}`,
+        });
+      }
+    }
   }
 
   const secretNames = Object.entries(env)
