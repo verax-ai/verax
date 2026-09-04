@@ -165,8 +165,15 @@ export async function listen(config: BodyConfig): Promise<Server> {
       send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
       return;
     }
+    let verified: Awaited<ReturnType<typeof verify>>;
     try {
-      const verified = await verify(token);
+      verified = await verify(token);
+    } catch {
+      await bumpUnauthenticated(config.stateDir);
+      send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+      return;
+    }
+    try {
       if (apiLedger || contest) {
         if (!verified.principal.scopes.has("verax:read")) {
           send(res, 403, { error: "scope-missing" });
@@ -232,9 +239,19 @@ export async function listen(config: BodyConfig): Promise<Server> {
       } finally {
         await transport.close();
       }
-    } catch {
-      await bumpUnauthenticated(config.stateDir);
-      send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+    } catch (err) {
+      if (res.headersSent) return;
+      const msg = err instanceof Error ? err.message : "";
+      if (msg.startsWith("explain-unknown-ref:")) {
+        send(res, 404, { error: "unknown-ref" });
+        return;
+      }
+      if (err instanceof URIError) {
+        send(res, 400, { error: "bad-request" });
+        return;
+      }
+      process.stderr.write(`verax-handler: ${msg || "fault"}\n`);
+      send(res, 500, { error: "fault" });
     }
     } catch (err) {
       if (res.headersSent) return;
