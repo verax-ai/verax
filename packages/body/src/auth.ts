@@ -24,6 +24,9 @@ export function createVerifier(jwksUrl: string, issuer: string, audience: string
       issuer,
       audience,
       algorithms: [...ALGS],
+      requiredClaims: ["exp", "iat", "sub"],
+      maxTokenAge: "1h",
+      clockTolerance: 60,
     });
     const sub = typeof payload.sub === "string" ? payload.sub : "";
     if (sub === "") {

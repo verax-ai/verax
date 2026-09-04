@@ -6,7 +6,15 @@ export type DevIssuer = {
   jwksUrl: string;
   audience: string;
   port: number;
-  sign: (over?: { aud?: string; exp?: string; alg?: string; scope?: string }) => Promise<string>;
+  sign: (over?: {
+    aud?: string;
+    exp?: string;
+    alg?: string;
+    scope?: string;
+    omitExp?: boolean;
+    iatSkewSec?: number;
+    nbfSkewSec?: number;
+  }) => Promise<string>;
   close: () => Promise<void>;
 };
 
@@ -34,14 +42,20 @@ export async function startDevIssuer(bindPort: number, audience: string): Promis
     audience,
     port,
     async sign(over = {}) {
+      const nowSec = Math.floor(Date.now() / 1000);
       const jwt = new SignJWT({ scope: over.scope ?? "verax:read verax:memory" })
         .setProtectedHeader({ alg: "ES256", kid: "test" })
         .setSubject("brain-1")
         .setIssuer(issuerUrl)
         .setAudience(over.aud ?? audience)
-        .setIssuedAt();
-      if (over.exp === "past") {
-        jwt.setExpirationTime(Math.floor(Date.now() / 1000) - 60);
+        .setIssuedAt(nowSec + (over.iatSkewSec ?? 0));
+      if (typeof over.nbfSkewSec === "number") {
+        jwt.setNotBefore(nowSec + over.nbfSkewSec);
+      }
+      if (over.omitExp === true) {
+        // Intentionally unsigned exp: the verifier must reject this.
+      } else if (over.exp === "past") {
+        jwt.setExpirationTime(nowSec - 60);
       } else {
         jwt.setExpirationTime("10m");
       }
