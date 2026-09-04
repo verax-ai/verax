@@ -1,5 +1,5 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonical, decisionRecordHash } from "@cedulon/core";
 import {
@@ -178,6 +178,7 @@ export class FileLedger implements Ledger {
   private readonly lockPath: string;
   private readonly q = new SerialQueue();
   private closed = false;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
 
   constructor(dir: string) {
     this.dir = dir;
@@ -188,37 +189,93 @@ export class FileLedger implements Ledger {
     this.acquireLock();
   }
 
+  private lockBody(): string {
+    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`;
+  }
+
+  private lockIsStale(): boolean {
+    try {
+      const ageMs = Date.now() - statSync(this.lockPath).mtimeMs;
+      if (ageMs > 30_000) return true;
+    } catch {
+      return true;
+    }
+    const existing = readLock(this.lockPath);
+    if (!existing) return true;
+    return !pidAlive(existing.pid);
+  }
+
+  private startHeartbeat(): void {
+    this.heartbeat = setInterval(() => {
+      try {
+        utimesSync(this.lockPath, new Date(), new Date());
+      } catch {
+        /* lock gone */
+      }
+    }, 5000);
+    this.heartbeat.unref();
+  }
+
   private acquireLock(): void {
-    const body = `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`;
+    const body = this.lockBody();
     try {
       writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
+      this.startHeartbeat();
       return;
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    const existing = readLock(this.lockPath);
-    if (existing && pidAlive(existing.pid)) {
-      throw new Error(`ledger-locked:${existing.pid}`);
+    if (!this.lockIsStale()) {
+      const existing = readLock(this.lockPath);
+      throw new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
     }
+    const yieldMs = Number(process.env.VERAX_LOCK_YIELD_MS ?? "0");
+    if (Number.isFinite(yieldMs) && yieldMs > 0) {
+      const until = Date.now() + yieldMs;
+      while (Date.now() < until) {
+        /* test seam: let a faster takeover finish first */
+      }
+    }
+    if (!this.lockIsStale()) {
+      const existing = readLock(this.lockPath);
+      throw new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
+    }
+    const staleName = `${this.lockPath}.stale-${process.pid}-${Date.now()}`;
     try {
-      unlinkSync(this.lockPath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      renameSync(this.lockPath, staleName);
+    } catch {
+      const existing = readLock(this.lockPath);
+      throw new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
     }
     try {
       writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
     } catch (err) {
+      try {
+        unlinkSync(staleName);
+      } catch {
+        /* already gone */
+      }
       if ((err as NodeJS.ErrnoException).code === "EEXIST") {
         const again = readLock(this.lockPath);
         throw new Error(`ledger-locked:${again?.pid ?? "unknown"}`);
       }
       throw err;
     }
+    try {
+      unlinkSync(staleName);
+    } catch {
+      /* left behind; not the live lock */
+    }
+    this.startHeartbeat();
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.heartbeat) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
     try {
       unlinkSync(this.lockPath);
     } catch (err) {
