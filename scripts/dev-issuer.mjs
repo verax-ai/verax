@@ -81,4 +81,6 @@ await new Promise((resolve, reject) => {
   server.listen(port, "127.0.0.1", resolve);
 });
 
-process.stderr.write(`dev-issuer listening on http://127.0.0.1:${port}/.well-known/jwks.json\n`);
+const bound = server.address();
+const listenPort = bound && typeof bound === "object" ? bound.port : port;
+process.stderr.write(`dev-issuer listening on http://127.0.0.1:${listenPort}/.well-known/jwks.json\n`);
