@@ -65,6 +65,8 @@ Known gaps:
 - company effect is not connected (Talamus, question 4)
 - GET /api/ledger and POST /api/contest/{ref} are HTTP, not MCP (they
   land with the panel)
+- MCP is stateless (`sessionIdGenerator` unset). GET /mcp returns 405
+  so the SDK client does not wait on a standalone SSE stream
 
 ## Phase 1 — panel (this commit)
 

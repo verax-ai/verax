@@ -201,6 +201,16 @@ export async function listen(config: BodyConfig): Promise<Server> {
         send(res, 200, { ...result, reAuditedAt: Date.now() });
         return;
       }
+      if (req.method === "GET") {
+        // Stateless: no standalone SSE. The SDK client treats 405 as "no GET stream".
+        res.writeHead(405, {
+          allow: "POST, DELETE",
+          "content-type": "application/json",
+          "x-content-type-options": "nosniff",
+        });
+        res.end(JSON.stringify({ error: "method-not-allowed" }));
+        return;
+      }
       const mcp = new McpServer({ name: "verax-body", version: "0.0.0" }, { capabilities: { tools: {} } });
       attachHandlers(mcp);
       const transport = new StreamableHTTPServerTransport({
