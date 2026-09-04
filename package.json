@@ -15,7 +15,7 @@
     "guard:claims": "node --experimental-strip-types scripts/claim-guard.ts",
     "build": "tsc --noEmit",
     "test:unit": "node --experimental-strip-types scripts/run-unit-tests.ts",
-    "test": "npm run guard:crlf && npm run guard:claims && npm run build && npm run test:unit"
+    "test": "npm run guard:crlf && npm run guard:claims && npm run build && npm run test:unit && npm run test -w @verax-ai/panel"
   },
   "dependencies": {
     "@cedulon/audit": "file:vendor/cedulon-audit-da7bf9b.tgz",

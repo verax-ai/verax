@@ -57,3 +57,24 @@ Known gaps:
 - the development issuer is not an authorization server; it has no
   authorize endpoint
 - payload encryption and retention policy not designed
+- memory items are not bound to the decision that read them (question 3
+  is "not tracked yet")
+- company effect is not connected (Talamus, question 4)
+- GET /api/ledger and POST /api/contest/{ref} are HTTP, not MCP (they
+  land with the panel)
+
+## Phase 1 — panel (this commit)
+
+The tree carries a 2D account-for rail: six golden actions, five
+English questions, and a Contest button that re-runs `explain`. The
+Vite proxy injects `VERAX_DEV_TOKEN` onto `/api` so the token does not
+reach the browser.
+
+Known gaps:
+
+- questions 3 and 4 are explicit holes (`not tracked yet`, `not
+  connected`); there is no invented green
+- PKCE for the panel is not built
+- GET /api/ledger and POST /api/contest/{ref} are HTTP, not MCP
+- the rail screenshot is a schematic PNG, not a live capture
+- no React Three Fiber in this commit

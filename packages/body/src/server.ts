@@ -3,6 +3,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { BodyConfig } from "./config.ts";
+import { explain } from "@verax-ai/proxy";
 import { createVerifier, readBearer, wwwAuthenticate } from "./auth.ts";
 import { bumpUnauthenticated } from "./metrics.ts";
 import { loadOrCreateSigners } from "./keys.ts";
@@ -104,7 +105,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
       });
       return;
     }
-    if (url.pathname !== "/mcp") {
+    const apiLedger = req.method === "GET" && url.pathname === "/api/ledger";
+    const contest = req.method === "POST" && url.pathname.startsWith("/api/contest/");
+    if (url.pathname !== "/mcp" && !apiLedger && !contest) {
       send(res, 404, { error: "not-found" });
       return;
     }
@@ -116,6 +119,32 @@ export async function listen(config: BodyConfig): Promise<Server> {
     }
     try {
       const verified = await verify(token);
+      if (apiLedger || contest) {
+        if (!verified.principal.scopes.has("verax:read")) {
+          send(res, 403, { error: "scope-missing" });
+          return;
+        }
+        if (apiLedger) {
+          const from = Number(url.searchParams.get("from") ?? "0");
+          const to = Number(url.searchParams.get("to") ?? String(Number.MAX_SAFE_INTEGER));
+          const decisions = (await services.ledger.decisions()).filter(
+            (d) => d.claims.timestampMs >= from && d.claims.timestampMs < to,
+          );
+          const effects = (await services.ledger.effects()).filter(
+            (e) => e.row.timestampMs >= from && e.row.timestampMs < to,
+          );
+          send(res, 200, {
+            decisions,
+            effects,
+            policy: { hash: services.policyHash, document: services.policyDocument },
+          });
+          return;
+        }
+        const ref = decodeURIComponent(url.pathname.slice("/api/contest/".length));
+        const result = await explain(services.ledger, ref);
+        send(res, 200, { ...result, reAuditedAt: Date.now() });
+        return;
+      }
       const mcp = new McpServer({ name: "verax-body", version: "0.0.0" }, { capabilities: { tools: {} } });
       attachHandlers(mcp);
       const transport = new StreamableHTTPServerTransport({

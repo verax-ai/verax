@@ -11,6 +11,8 @@ export const TOOL_NAMES = ["memory.get", "memory.put", "audit.explain", "message
 export type BodyServices = {
   proxy: ReturnType<typeof createProxy>;
   ledger: FileLedger;
+  policyHash: string;
+  policyDocument: unknown;
   listTools: () => readonly string[];
 };
 
@@ -27,7 +29,9 @@ export function createBodyServices(opts: {
   nonce?: () => string;
 }): BodyServices {
   const ledger = new FileLedger(opts.stateDir);
-  const policy = loadPolicy(readFileSync(opts.policyFile, "utf8"));
+  const policyText = readFileSync(opts.policyFile, "utf8");
+  const policyDocument = JSON.parse(policyText) as unknown;
+  const policy = loadPolicy(policyText);
   const now = opts.now ?? (() => Date.now());
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
@@ -61,6 +65,8 @@ export function createBodyServices(opts: {
   return {
     proxy,
     ledger,
+    policyHash: policy.hash,
+    policyDocument,
     listTools: () => TOOL_NAMES,
   };
 }
