@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir, readFile } from "node:fs/promises";
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonical, decisionRecordHash } from "@cedulon/core";
 import {
@@ -161,10 +161,6 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function sleepMs(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 function readLock(path: string): { pid: number; startedAt: number; token?: string } | null {
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as {
@@ -190,11 +186,9 @@ export class FileLedger implements Ledger {
   private readonly effectsPath: string;
   private readonly lockPath: string;
   private readonly q = new SerialQueue();
-  private readonly takeoverPath: string;
   private readonly token = randomBytes(16).toString("hex");
   private closed = false;
   private lost = false;
-  private heartbeat: ReturnType<typeof setInterval> | null = null;
 
   constructor(dir: string) {
     this.dir = dir;
@@ -202,7 +196,6 @@ export class FileLedger implements Ledger {
     this.decisionsPath = join(dir, "decisions.jsonl");
     this.effectsPath = join(dir, "effects.jsonl");
     this.lockPath = join(dir, "ledger.lock");
-    this.takeoverPath = join(dir, "ledger.takeover");
     this.acquireLock();
   }
 
@@ -217,10 +210,6 @@ export class FileLedger implements Ledger {
 
   private markLost(): void {
     this.lost = true;
-    if (this.heartbeat) {
-      clearInterval(this.heartbeat);
-      this.heartbeat = null;
-    }
   }
 
   private assertOwned(): void {
@@ -230,150 +219,28 @@ export class FileLedger implements Ledger {
     }
   }
 
-  private lockIsStale(): boolean {
-    try {
-      const ageMs = Date.now() - statSync(this.lockPath).mtimeMs;
-      if (ageMs > 30_000) return true;
-    } catch {
-      return true;
-    }
-    const existing = readLock(this.lockPath);
-    if (!existing) return true;
-    return !pidAlive(existing.pid);
-  }
-
-  private startHeartbeat(): void {
-    this.heartbeat = setInterval(() => {
-      try {
-        if (!this.ownsLock()) {
-          this.markLost();
-          return;
-        }
-        utimesSync(this.lockPath, new Date(), new Date());
-      } catch {
-        this.markLost();
-      }
-    }, 5000);
-    this.heartbeat.unref();
-  }
-
   private lockedError(): Error {
     const existing = readLock(this.lockPath);
-    return new Error(`ledger-locked:${existing?.pid ?? "unknown"}`);
-  }
-
-  private tryCreateExclusive(path: string, body: string): boolean {
-    try {
-      writeFileSync(path, body, { encoding: "utf8", flag: "wx" });
-      return true;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") return false;
-      throw err;
+    const pid = existing?.pid ?? "unknown";
+    if (typeof existing?.pid === "number" && !pidAlive(existing.pid)) {
+      return new Error(`ledger-locked-stale:${pid}\nrun: verax unlock ${this.dir}`);
     }
-  }
-
-  private takeoverIsStale(): boolean {
-    try {
-      return Date.now() - statSync(this.takeoverPath).mtimeMs > 30_000;
-    } catch {
-      return true;
-    }
-  }
-
-  private acquireTakeover(): void {
-    const body = this.lockBody();
-    if (this.tryCreateExclusive(this.takeoverPath, body)) return;
-    if (!this.takeoverIsStale()) throw this.lockedError();
-    const staleName = `${this.takeoverPath}.stale-${process.pid}-${Date.now()}`;
-    try {
-      renameSync(this.takeoverPath, staleName);
-    } catch {
-      throw this.lockedError();
-    }
-    try {
-      if (!this.tryCreateExclusive(this.takeoverPath, body)) throw this.lockedError();
-    } catch (err) {
-      try {
-        unlinkSync(staleName);
-      } catch {
-        /* already gone */
-      }
-      throw err;
-    }
-    try {
-      unlinkSync(staleName);
-    } catch {
-      /* left behind; not the live mutex */
-    }
-  }
-
-  private renameStaleLock(staleName: string): void {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      try {
-        renameSync(this.lockPath, staleName);
-        return;
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code !== "EPERM" && code !== "EBUSY") throw this.lockedError();
-        if (attempt === 4) throw this.lockedError();
-        sleepMs(20 * (attempt + 1));
-      }
-    }
-  }
-
-  private replaceStaleLock(body: string): void {
-    const staleName = `${this.lockPath}.stale-${process.pid}-${Date.now()}`;
-    try {
-      this.renameStaleLock(staleName);
-    } catch {
-      throw this.lockedError();
-    }
-    try {
-      writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx" });
-    } catch (err) {
-      try {
-        unlinkSync(staleName);
-      } catch {
-        /* already gone */
-      }
-      if ((err as NodeJS.ErrnoException).code === "EEXIST") throw this.lockedError();
-      throw err;
-    }
-    try {
-      unlinkSync(staleName);
-    } catch {
-      /* left behind; not the live lock */
-    }
+    return new Error(`ledger-locked:${pid}`);
   }
 
   private acquireLock(): void {
     const body = this.lockBody();
-    if (this.tryCreateExclusive(this.lockPath, body)) {
-      this.startHeartbeat();
-      return;
-    }
-    if (!this.lockIsStale()) throw this.lockedError();
-    this.acquireTakeover();
     try {
-      if (!this.lockIsStale()) throw this.lockedError();
-      this.replaceStaleLock(body);
-    } finally {
-      try {
-        unlinkSync(this.takeoverPath);
-      } catch {
-        /* already gone */
-      }
+      writeFileSync(this.lockPath, body, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") throw this.lockedError();
+      throw err;
     }
-    this.startHeartbeat();
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    if (this.heartbeat) {
-      clearInterval(this.heartbeat);
-      this.heartbeat = null;
-    }
     if (!this.ownsLock()) {
       this.lost = true;
       return;

@@ -37,7 +37,7 @@ describe("policy fixtures", () => {
       const id = name.replace(/\.json$/, "");
       const rule = document.rules.find((r) => r.id === id);
       assert.ok(rule, `no rule ${id}`);
-      assert.equal(fx.textHash, ruleTextHash(rule.text), `textHash stale for ${id}`);
+      assert.equal(fx.textHash, ruleTextHash(rule.text), `textHash mismatch for ${id}`);
     }
   });
 
