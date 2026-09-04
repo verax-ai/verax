@@ -26,7 +26,11 @@ function walk(dir: string, out: string[] = []): string[] {
 }
 
 const IMPORT_TOOLS = /(?:from|import)\s+["'][^"']*tools\/[^"']+["']/;
-const DYNAMIC_IMPORT = /import\s*\(\s*["'`]/;
+const DYNAMIC_IMPORT = /\bimport\s*\(/;
+const NEW_FUNCTION = /new Function\s*\(/;
+const EVAL_CALL = /\beval\s*\(/;
+const VM = /\bvm\b/;
+const PROCESS_BINDING = /process\.binding/;
 const REQUIRE = /\brequire\s*\(/;
 const CREATE_REQUIRE = /\bcreateRequire\b/;
 const CONCAT_TOOLS = /["']\.\/to["']\s*\+\s*["']ols/;
@@ -65,6 +69,10 @@ export function scanNoBypass(
         push("static import of tools/");
       }
       if (DYNAMIC_IMPORT.test(line)) push("dynamic-import");
+      if (NEW_FUNCTION.test(line)) push("new-function");
+      if (EVAL_CALL.test(line)) push("eval");
+      if (VM.test(line)) push("vm");
+      if (PROCESS_BINDING.test(line)) push("process.binding");
       if (REQUIRE.test(line)) push("require(");
       if (CREATE_REQUIRE.test(line)) push("createRequire");
       if (CONCAT_TOOLS.test(line)) push("concatenated tools path");
