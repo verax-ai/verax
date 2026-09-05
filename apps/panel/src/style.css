@@ -107,3 +107,6 @@ aside {
   font-size: 0.85rem;
   margin: 0.8rem 0 0.2rem;
 }
+.rule-missing {
+  color: #c45c5c;
+}

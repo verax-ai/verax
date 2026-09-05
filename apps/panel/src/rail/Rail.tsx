@@ -33,7 +33,9 @@ export function Rail({ actions, onContest }: RailProps) {
           const expanded = open === ref;
           const finding = findings[ref] ?? action.finding;
           const brain = action.effect?.row.actor ?? "not on the decision record";
-          const ruleLine = action.rule ? JSON.stringify(action.rule) : "no matching rule";
+          const missing = action.rule && "missing" in action.rule ? action.rule.missing : null;
+          const matched = action.rule && !("missing" in action.rule) ? action.rule : null;
+          const ruleLine = matched ? JSON.stringify(matched) : missing ? "" : "no matching rule";
           return (
             <li key={ref}>
               <button
@@ -76,10 +78,14 @@ export function Rail({ actions, onContest }: RailProps) {
                   <h2>What did it do to the company</h2>
                   <p>not connected</p>
                   <h2>Was it within the rules</h2>
-                  <p>
-                    policy {action.record.claims.policyHash} rule {action.rule?.id ?? "none"} {ruleLine}{" "}
-                    {action.rule?.text ?? ""}
-                  </p>
+                  {missing ? (
+                    <p className="rule-missing">{missing}</p>
+                  ) : (
+                    <p>
+                      policy {action.record.claims.policyHash} rule {matched?.id ?? "none"} {ruleLine}{" "}
+                      {matched?.text ?? ""}
+                    </p>
+                  )}
                   <button
                     type="button"
                     className="contest focusable"

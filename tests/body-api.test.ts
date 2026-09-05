@@ -1,10 +1,11 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { parseLedger, type PolicyStore } from "../apps/panel/src/rail/parse.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -99,6 +100,101 @@ describe("ledger HTTP surfaces", () => {
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+});
+
+function policyDoc(putText: string): string {
+  return `${JSON.stringify({
+    version: 1,
+    default: "deny",
+    rules: [
+      {
+        id: "memory-put",
+        tool: "memory.put",
+        requires: ["verax:memory"],
+        text: putText,
+      },
+    ],
+  })}\n`;
+}
+
+describe("historical policy snapshots", () => {
+  it("keeps the A sentence on an old decision after restart with policy B", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-policy-hist-"));
+    const policyA = join(stateDir, "policy-a.json");
+    const policyB = join(stateDir, "policy-b.json");
+    writeFileSync(policyA, policyDoc("Policy A sentence for memory.put."));
+    writeFileSync(policyB, policyDoc("Policy B sentence for memory.put."));
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+
+    const start = async (policyFile: string) => {
+      const server = await listen({
+        issuer: issuer.issuer,
+        jwksUrl: issuer.jwksUrl,
+        audience,
+        stateDir,
+        bindHost: "127.0.0.1",
+        bindPort: 0,
+        policyFile,
+        tlsTerminated: false,
+      });
+      const port = (server.address() as { port: number }).port;
+      return { server, base: `http://127.0.0.1:${port}` };
+    };
+
+    const first = await start(policyA);
+    try {
+      const full = await issuer.sign({ scope: "verax:read verax:memory" });
+      await rpc(`${first.base}/mcp`, full, "tools/call", {
+        name: "memory.put",
+        arguments: {
+          id: "n1",
+          body: { t: 1 },
+          source: { uri: "file://t", retrievedAtMs: 1 },
+          validUntilMs: Date.now() + 60_000,
+        },
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        first.server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
+
+    const second = await start(policyB);
+    try {
+      const read = await issuer.sign({ scope: "verax:read" });
+      const res = await fetch(`${second.base}/api/ledger?from=0&to=9999999999999`, {
+        headers: { authorization: `Bearer ${read}` },
+      });
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as {
+        decisions: { claims: { subject: string; policyHash: string } }[];
+        effects: unknown[];
+        policies?: Record<string, { rules?: { tool: string; text: string }[] }>;
+        policy?: { document: { rules?: { text: string }[] } };
+      };
+      const old = body.decisions.find((d) => d.claims.subject === "memory.put");
+      assert.ok(old);
+      const snap = body.policies?.[old.claims.policyHash];
+      assert.ok(snap);
+      const aRule = snap.rules?.find((r) => r.tool === "memory.put");
+      assert.equal(aRule?.text, "Policy A sentence for memory.put.");
+      assert.notEqual(aRule?.text, "Policy B sentence for memory.put.");
+
+      const parsed = parseLedger(
+        body.decisions.map((x) => JSON.stringify(x)).join("\n"),
+        body.effects.map((x) => JSON.stringify(x)).join("\n"),
+        (body.policies as PolicyStore | null) ?? null,
+      );
+      const action = parsed.find((a) => a.record.claims.subject === "memory.put");
+      assert.equal(action?.rule && "text" in action.rule ? action.rule.text : null, "Policy A sentence for memory.put.");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        second.server.close((err) => (err ? reject(err) : resolve()));
       });
       await issuer.close();
     }

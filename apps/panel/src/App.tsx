@@ -38,6 +38,7 @@ export function App() {
       let body: {
         decisions?: unknown[];
         effects?: unknown[];
+        policies?: Record<string, PolicyBundle["document"]>;
         policy?: PolicyBundle;
       };
       try {
@@ -52,7 +53,7 @@ export function App() {
       const parsed = parseLedger(
         decisions.map((x) => JSON.stringify(x)).join("\n"),
         effects.map((x) => JSON.stringify(x)).join("\n"),
-        body.policy ?? null,
+        body.policies ?? null,
       );
       setLastReadMs(Date.now());
       setErrorText(null);

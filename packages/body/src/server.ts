@@ -7,6 +7,7 @@ import { explain } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpUnauthenticated } from "./metrics.ts";
 import { loadOrCreateSigners } from "./keys.ts";
+import { readPolicySnapshots } from "./policy-store.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
 const TOOL_META = [
@@ -198,10 +199,12 @@ export async function listen(config: BodyConfig): Promise<Server> {
           const effects = (await services.ledger.effects()).filter(
             (e) => e.row.timestampMs >= from && e.row.timestampMs < to,
           );
+          const hashes = [...new Set(decisions.map((d) => d.claims.policyHash))];
           send(res, 200, {
             decisions,
             effects,
             policy: { hash: services.policyHash, document: services.policyDocument },
+            policies: readPolicySnapshots(config.stateDir, hashes),
           });
           return;
         }

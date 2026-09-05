@@ -67,6 +67,40 @@ describe("account-for rail", () => {
   });
 });
 
+const histDecision = {
+  claims: {
+    subject: "memory.put",
+    decision: "allow" as const,
+    reasonCode: "allow",
+    timestampMs: 1,
+    decider: "verax-proxy",
+    ref: "hist-1",
+    policyHash: "aaa",
+    effectHash: null,
+  },
+};
+
+describe("historical policy sentence", () => {
+  it("uses the decision policyHash document, not a later live policy", () => {
+    const parsed = parseLedger(
+      JSON.stringify(histDecision),
+      "",
+      {
+        aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] },
+        bbb: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence B" }] },
+      },
+    );
+    expect(parsed[0]?.rule && "text" in parsed[0].rule ? parsed[0].rule.text : null).toBe("Sentence A");
+  });
+
+  it("shows historical policy unavailable in red when the snapshot is missing", () => {
+    const parsed = parseLedger(JSON.stringify(histDecision), "", {});
+    render(<Rail actions={parsed} />);
+    const line = screen.getByText("historical policy unavailable");
+    expect(line.className).toMatch(/rule-missing/);
+  });
+});
+
 describe("panel ledger fetch states", () => {
   afterEach(() => {
     vi.unstubAllGlobals();

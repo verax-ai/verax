@@ -1,5 +1,6 @@
 import { createProxy, FileLedger, loadPolicy, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
+import { persistPolicySnapshot } from "./policy-store.ts";
 import { memoryGet, memoryPut } from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead } from "./tools/message.ts";
@@ -32,6 +33,7 @@ export function createBodyServices(opts: {
   const policyText = readFileSync(opts.policyFile, "utf8");
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
+  persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
   const now = opts.now ?? (() => Date.now());
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 

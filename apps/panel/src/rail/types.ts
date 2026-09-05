@@ -27,9 +27,20 @@ export type PolicyRule = {
   text: string;
 };
 
+export type MissingRule = {
+  text: null;
+  missing: "historical policy unavailable";
+};
+
+export type RailRule = PolicyRule | MissingRule;
+
+export type PolicyDocument = {
+  rules?: PolicyRule[];
+};
+
 export type PolicyBundle = {
   hash: string;
-  document: { rules?: PolicyRule[] };
+  document: PolicyDocument;
 };
 
 export type RailFinding = {
@@ -41,6 +52,6 @@ export type RailFinding = {
 export type RailAction = {
   record: RailDecision;
   effect: RailEffect | null;
-  rule: PolicyRule | null;
+  rule: RailRule | null;
   finding: RailFinding | null;
 };
