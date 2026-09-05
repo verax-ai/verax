@@ -144,6 +144,20 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
+      const token = readBearer(req.headers.authorization);
+      let canRead = false;
+      if (token) {
+        try {
+          const verified = await verify(token);
+          canRead = verified.principal.scopes.has("verax:read");
+        } catch {
+          canRead = false;
+        }
+      }
+      if (!canRead) {
+        send(res, 200, { ok: true });
+        return;
+      }
       const decisions = await services.ledger.decisions();
       const effects = await services.ledger.effects();
       const last = decisions[decisions.length - 1];
