@@ -46,9 +46,11 @@ export function Rail({ actions, onContest }: RailProps) {
           const guarantee = audit?.guarantee ?? action.guarantee;
           const warnings = audit?.warnings ?? action.warnings ?? [];
           const witness = audit?.witnessClass ?? action.witnessClass ?? action.effect?.witnessClass ?? null;
-          const brain =
-            action.inputsBound && action.inputs
-              ? `${action.inputs.principal.brain} from the decision record (hash-bound)`
+          const identityMissing = !action.inputsBound && typeof action.record.claims.inputsHash === "string";
+          const brain = action.inputsBound && action.inputs
+            ? `${action.inputs.principal.brain} from the decision record (hash-bound)`
+            : identityMissing
+              ? "identity hash on the record; inputs document unavailable"
               : "not on the decision record";
           const missing = action.rule && "missing" in action.rule ? action.rule.missing : null;
           const matched = action.rule && !("missing" in action.rule) ? action.rule : null;
@@ -81,7 +83,8 @@ export function Rail({ actions, onContest }: RailProps) {
                   <p>
                     {action.record.claims.subject} {action.record.claims.decision}{" "}
                     {action.record.claims.reasonCode} at {action.record.claims.timestampMs} by{" "}
-                    {action.record.claims.decider} for brain {brain}
+                    {action.record.claims.decider} for brain{" "}
+                    {identityMissing ? <span className="rule-missing">{brain}</span> : brain}
                   </p>
                   {action.effect ? (
                     <p>

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, readdirSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -82,6 +82,29 @@ describe("inputs binding", () => {
     writeFileSync(path, `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`);
     const result = await explain(ledger, "tamp-1");
     assert.equal(result.finding.code, "inputs-hash-mismatch");
+    ledger.close();
+  });
+
+  it("f: a missing inputs document is reported, not read as balanced", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-inputs-miss-"));
+    const ledger = new FileLedger(dir);
+    const proxy = createProxy({
+      policy,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["miss-1"]),
+      inner: async () => ({ content: [{ type: "text", text: "no" }], isError: false }),
+    });
+    await proxy.call({ name: "memory.get", arguments: { id: "x" } }, { brain: "brain-1", scopes: new Set() });
+    unlinkSync(join(dir, "inputs.jsonl"));
+    const result = await explain(ledger, "miss-1");
+    assert.ok(
+      result.warnings.some((w) => w.code === "inputs-document-missing"),
+      JSON.stringify(result.warnings),
+    );
+    assert.equal(result.finding.label, "conditional");
     ledger.close();
   });
 

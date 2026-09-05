@@ -115,25 +115,42 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
       typeof record.claims.inputsHash === "string" &&
       sha256Canonical(inputsDoc) !== record.claims.inputsHash,
   );
-  const balanced = refFindings.length === 0 && !chainBreak && !issuerMismatch && !inputsMismatch;
+  const inputsMissing =
+    typeof record.claims.inputsHash === "string" && inputsDoc === null;
+  if (inputsMissing) conditions.push("inputs document missing");
+  const balanced = refFindings.length === 0 && !chainBreak && !issuerMismatch && !inputsMismatch && !inputsMissing;
   const code = chainBreak
     ? "receipt-chain-break"
     : inputsMismatch
       ? "inputs-hash-mismatch"
-      : (hit?.code ?? null);
+      : inputsMissing
+        ? "inputs-document-missing"
+        : (hit?.code ?? null);
   const detail = chainBreak
     ? `receipt-chain-break at ${breakAt ?? "unknown"} (${brk?.reason ?? "broken"})`
     : inputsMismatch
       ? "inputs document hash does not match claims.inputsHash"
-      : (hit?.detail ?? null);
+      : inputsMissing
+        ? "claims.inputsHash is on the record; the inputs document is not on disk"
+        : (hit?.detail ?? null);
   const findingCount = chainBreak
     ? Math.max(refFindings.length, 1)
-    : refFindings.length + (issuerMismatch && pinned ? 1 : 0) + (inputsMismatch ? 1 : 0);
+    : refFindings.length +
+      (issuerMismatch && pinned ? 1 : 0) +
+      (inputsMismatch ? 1 : 0) +
+      (inputsMissing ? 1 : 0);
   const guarantee = report.guarantee;
   const summary = balanced
     ? balancedSummary(guarantee, conditions, report.summary)
     : `audit: ${Math.max(findingCount, 1)} finding(s) → FAIL`;
   const warnings = applicableWarnings.filter((f) => f.id === "issuer" || f.id === "extract").map(asWarning);
+  if (inputsMissing) {
+    warnings.push({
+      id: "inputs",
+      code: "inputs-document-missing",
+      detail: "claims.inputsHash is on the record; the inputs document is not on disk",
+    });
+  }
   return {
     record,
     effect,

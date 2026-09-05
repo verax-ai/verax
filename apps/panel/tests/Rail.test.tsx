@@ -116,6 +116,20 @@ describe("historical policy sentence", () => {
     const line = screen.getByText("historical policy unavailable");
     expect(line.className).toMatch(/rule-missing/);
   });
+
+  it("shows a red identity line when the hash is on the record but the document is not", () => {
+    const parsed = parseLedger(
+      JSON.stringify({
+        claims: { ...histDecision.claims, inputsHash: "aa".repeat(32) },
+      }),
+      "",
+      { aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] } },
+    );
+    parsed[0] = { ...parsed[0]!, inputs: undefined, inputsBound: false };
+    render(<Rail actions={parsed} />);
+    const line = screen.getByText("identity hash on the record; inputs document unavailable");
+    expect(line.className).toMatch(/rule-missing/);
+  });
 });
 
 describe("panel ledger fetch states", () => {
