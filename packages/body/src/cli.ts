@@ -4,12 +4,13 @@ import { runUnlock } from "./unlock.ts";
 
 const argv = process.argv.slice(2);
 if (argv[0] === "unlock") {
-  const stateDir = argv[1];
+  const force = argv.includes("--force");
+  const stateDir = argv.slice(1).find((a) => a !== "--force");
   if (!stateDir) {
-    process.stderr.write("verax unlock <stateDir>\n");
+    process.stderr.write("verax unlock [--force] <stateDir>\n");
     process.exit(78);
   }
-  process.exit(runUnlock(stateDir));
+  process.exit(runUnlock(stateDir, (s) => process.stderr.write(s), { force }));
 }
 if (argv[0] === "doctor") {
   const json = argv.includes("--json");

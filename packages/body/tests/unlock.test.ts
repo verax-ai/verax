@@ -36,18 +36,23 @@ describe("2 verax unlock", () => {
       .trim()
       .split("\n")
       .filter((l) => l !== "");
-    assert.equal(lines.length, 1);
-    const row = JSON.parse(lines[0] ?? "{}") as {
+    assert.equal(lines.length, 2);
+    const first = JSON.parse(lines[0] ?? "{}") as {
       atMs?: number;
       removedPid?: number;
       startedAt?: number;
       operator?: string;
+      result?: string;
     };
-    assert.equal(row.removedPid, pid);
-    assert.equal(row.startedAt, 11);
-    assert.equal(typeof row.atMs, "number");
-    assert.equal(typeof row.operator, "string");
-    assert.equal((row.operator ?? "").length > 0, true);
+    const second = JSON.parse(lines[1] ?? "{}") as { result?: string; removedPid?: number };
+    assert.equal(first.result, "removing");
+    assert.equal(second.result, "removed");
+    assert.equal(first.removedPid, pid);
+    assert.equal(second.removedPid, pid);
+    assert.equal(first.startedAt, 11);
+    assert.equal(typeof first.atMs, "number");
+    assert.equal(typeof first.operator, "string");
+    assert.equal((first.operator ?? "").length > 0, true);
   });
 
   it("refuses a live-pid lock and leaves the file", () => {
