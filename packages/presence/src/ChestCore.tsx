@@ -1,4 +1,4 @@
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import { AdditiveBlending, CanvasTexture, Color, type PointLight, type Sprite, type SpriteMaterial } from "three";
 import { chestLocal, type Box3 } from "./fit.ts";
@@ -26,23 +26,27 @@ export function ChestCore({
   color,
   ringSpin,
   breathAmp,
+  flash = 0,
 }: {
   box: Box3;
   color: readonly [number, number, number];
   ringSpin: number;
   breathAmp: number;
+  flash?: number;
 }) {
   const tex = useMemo(() => radialTexture(), []);
+  useEffect(() => () => tex.dispose(), [tex]);
   const spriteRef = useRef<Sprite>(null);
   const lightRef = useRef<PointLight>(null);
   const current = useRef(new Color(color[0], color[1], color[2]));
   const target = useRef(new Color(color[0], color[1], color[2]));
   const pos = chestLocal(box);
+  const spin = ringSpin + (flash ? 1.5 : 0);
 
   useFrame(({ clock }) => {
     target.current.setRGB(color[0], color[1], color[2]);
     current.current.lerp(target.current, 0.04);
-    const pulse = 1 + Math.sin(clock.elapsedTime * (2 + ringSpin * 4)) * (0.12 + breathAmp * 2);
+    const pulse = 1 + Math.sin(clock.elapsedTime * (2 + spin * 4)) * (0.12 + breathAmp * 2);
     const s = 0.38 * pulse;
     const sprite = spriteRef.current;
     if (sprite) {

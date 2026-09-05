@@ -40,6 +40,7 @@ export function Figure({
 }) {
   const [root, setRoot] = useState<Group | null>(null);
   const reported = useRef(false);
+  const lastOpacity = useRef<number | null>(null);
 
   useEffect(() => {
     let dead = false;
@@ -74,13 +75,20 @@ export function Figure({
     };
   }, [onMissing, assetBase]);
 
+  useEffect(() => {
+    lastOpacity.current = null;
+  }, [root]);
+
   useFrame(() => {
     if (!root) return;
     const elapsed = (performance.now() - startedAtMs) / 1000;
     const progress = presence === "booting" ? Math.min(1, elapsed / 4) : 1;
     const boot = progress <= 0.75 ? 0 : Math.min(1, (progress - 0.75) / 0.25);
     const asleep = presence === "asleep" ? 0.25 : 1;
-    applyOpacity(root, boot * asleep);
+    const next = boot * asleep;
+    if (lastOpacity.current === next) return;
+    lastOpacity.current = next;
+    applyOpacity(root, next);
   });
 
   if (!root) return null;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { ACESFilmicToneMapping, Vector3 } from "three";
 import {
@@ -25,6 +25,8 @@ function assetBase(): string {
 const BASE = assetBase();
 
 type AnchorMap = Record<string, [number, number, number]>;
+type ScreenMap = Record<string, { x: number; y: number }>;
+type Laid = { top: number; midY: number; edgeX: number; elbowX: number };
 
 function asAnchorMap(raw: Record<string, number[]>): AnchorMap {
   const out: AnchorMap = {};
@@ -56,21 +58,75 @@ function hrefFor(link: string): string | null {
   return LINK_HREF[link] ?? (link === "—" ? null : `https://${link}/`);
 }
 
+function useNarrow(): boolean {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== "undefined" && window.matchMedia("(max-width: 800px)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 800px)");
+    const on = () => setNarrow(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return narrow;
+}
+
+function placeColumn(ids: readonly LabelId[], screen: ScreenMap, heights: Record<string, number>): Record<string, number> {
+  const items = ids
+    .map((id) => {
+      const p = screen[id];
+      const h = heights[id];
+      if (!p || h == null) return null;
+      return { id, h, desired: p.y - h / 2 };
+    })
+    .filter((x): x is { id: LabelId; h: number; desired: number } => x !== null)
+    .sort((a, b) => a.desired - b.desired);
+  const tops: Record<string, number> = {};
+  let prevBottom = Number.NEGATIVE_INFINITY;
+  for (const item of items) {
+    let top = item.desired;
+    if (top < prevBottom + 8) top = prevBottom + 8;
+    tops[item.id] = top;
+    prevBottom = top + item.h;
+  }
+  return tops;
+}
+
 function Projector({
   points,
   on,
 }: {
   points: AnchorMap;
-  on: (next: Record<string, { x: number; y: number }>) => void;
+  on: (next: ScreenMap) => void;
 }) {
-  useFrame(({ camera, size }) => {
-    const next: Record<string, { x: number; y: number }> = {};
+  const prev = useRef<ScreenMap>({});
+  useFrame(({ camera, size, gl }) => {
+    const next: ScreenMap = {};
     const v = new Vector3();
     for (const [id, p] of Object.entries(points)) {
       v.set(p[0], p[1], p[2]).project(camera);
       next[id] = { x: (v.x * 0.5 + 0.5) * size.width, y: (-v.y * 0.5 + 0.5) * size.height };
     }
+    let moved = Object.keys(next).length !== Object.keys(prev.current).length;
+    if (!moved) {
+      for (const [id, b] of Object.entries(next)) {
+        const a = prev.current[id];
+        if (!a || Math.abs(a.x - b.x) > 0.5 || Math.abs(a.y - b.y) > 0.5) {
+          moved = true;
+          break;
+        }
+      }
+    }
+    if (!moved) return;
+    prev.current = next;
     on(next);
+    const r = gl.domElement.getBoundingClientRect();
+    const view: ScreenMap = {};
+    for (const [id, p] of Object.entries(next)) {
+      view[id] = { x: p.x + r.left, y: p.y + r.top };
+    }
+    (window as Window & { __veraxAnchors?: ScreenMap }).__veraxAnchors = view;
   });
   return null;
 }
@@ -116,7 +172,11 @@ export function App() {
   const [missing, setMissing] = useState(false);
   const [selected, setSelected] = useState<LabelId | "whole">("whole");
   const [flash, setFlash] = useState(0);
-  const [screen, setScreen] = useState<Record<string, { x: number; y: number }>>({});
+  const [screen, setScreen] = useState<ScreenMap>({});
+  const [laid, setLaid] = useState<Record<string, Laid>>({});
+  const narrow = useNarrow();
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const labelRefs = useRef<Partial<Record<LabelId, HTMLButtonElement | null>>>({});
   const onMissing = useCallback(() => setMissing(true), []);
 
   useEffect(() => {
@@ -141,6 +201,39 @@ export function App() {
     return () => window.clearInterval(id);
   }, [presence, quality]);
 
+  useLayoutEffect(() => {
+    if (narrow) {
+      setLaid({});
+      return;
+    }
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const inset = 1.5 * rem;
+    const stageW = overlay.clientWidth;
+    const heights: Record<string, number> = {};
+    const widths: Record<string, number> = {};
+    for (const id of LABEL_IDS) {
+      const el = labelRefs.current[id];
+      if (!el) continue;
+      heights[id] = el.offsetHeight;
+      widths[id] = el.offsetWidth;
+    }
+    const tops = { ...placeColumn(LEFT_LABELS, screen, heights), ...placeColumn(RIGHT_LABELS, screen, heights) };
+    const next: Record<string, Laid> = {};
+    for (const id of LABEL_IDS) {
+      const p = screen[id];
+      const top = tops[id];
+      const h = heights[id];
+      const w = widths[id];
+      if (!p || top == null || h == null || w == null) continue;
+      const left = LEFT_LABELS.includes(id);
+      const edgeX = left ? inset + w : stageW - inset - w;
+      next[id] = { top, midY: top + h / 2, edgeX, elbowX: left ? edgeX + 22 : edgeX - 22 };
+    }
+    setLaid(next);
+  }, [screen, narrow]);
+
   const params = presence.params();
   const fit = meta ? fitFromBox(meta.bbox) : null;
   const worldAnchors = useMemo(() => {
@@ -153,8 +246,7 @@ export function App() {
   }, [fit]);
 
   const group = selected === "whole" ? "whole" : COPY_GROUP[selected];
-  const pullLocal =
-    selected === "whole" ? undefined : ANCHORS[selected];
+  const pullLocal = selected === "whole" ? undefined : ANCHORS[selected];
   const pullParams = pullLocal ? { ...params, pullToChest: 0.22 } : params;
 
   const pick = (id: LabelId | "whole") => {
@@ -166,83 +258,93 @@ export function App() {
     <div className="page">
       {missing ? <p className="model-missing">model missing, run pack-model</p> : null}
       <MatrixRain on={!quiet} />
-      <div className="figure-wrap">
-        <Canvas
-          camera={{ position: [0, 0.2, 5.4], fov: 44 }}
-          gl={{ antialias: false, toneMapping: ACESFilmicToneMapping, toneMappingExposure: 1.05 }}
-        >
-          <Lights color={params.coreColor} />
-          {cloud && meta && fit ? (
-            <group position={fit.position} scale={fit.scale}>
-              <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} assetBase={BASE} />
-              <ParticleField
-                cloud={cloud}
-                meta={meta}
-                count={Math.min(count, meta.count)}
-                params={pullParams}
-                presence={state}
-                startedAtMs={startedAtMs}
-                pullTarget={pullLocal}
-              />
-              <ChestCore
-                key={flash}
-                box={meta.bbox}
-                color={params.coreColor}
-                ringSpin={params.ringSpin + (flash ? 1.5 : 0)}
-                breathAmp={params.breathAmp}
-              />
-            </group>
-          ) : null}
-          <Projector points={worldAnchors} on={setScreen} />
-        </Canvas>
-      </div>
       <header className="intro">
         <h1>{copy.title}</h1>
         <p>{copy.lede}</p>
       </header>
-      <div className="overlay">
-        <div className="col">
-          {LEFT_LABELS.map((id) => (
-            <button
-              key={id}
-              type="button"
-              className={selected === id ? "label on" : "label"}
-              onMouseEnter={() => pick(id)}
-              onFocus={() => pick(id)}
-              onClick={() => pick(id)}
-            >
-              {copy[`${COPY_GROUP[id]}.part`]}
-            </button>
-          ))}
+      <div className="stage">
+        <div className="figure-wrap">
+          <Canvas
+            camera={{ position: [0, 0.15, 6.4], fov: 44 }}
+            gl={{ antialias: false, toneMapping: ACESFilmicToneMapping, toneMappingExposure: 1.05 }}
+          >
+            <Lights color={params.coreColor} />
+            {cloud && meta && fit ? (
+              <group position={fit.position} scale={fit.scale}>
+                <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} assetBase={BASE} />
+                <ParticleField
+                  cloud={cloud}
+                  meta={meta}
+                  count={Math.min(count, meta.count)}
+                  params={pullParams}
+                  presence={state}
+                  startedAtMs={startedAtMs}
+                  pullTarget={pullLocal}
+                />
+                <ChestCore
+                  box={meta.bbox}
+                  color={params.coreColor}
+                  ringSpin={params.ringSpin}
+                  breathAmp={params.breathAmp}
+                  flash={flash}
+                />
+              </group>
+            ) : null}
+            <Projector points={worldAnchors} on={setScreen} />
+          </Canvas>
         </div>
-        <div />
-        <div className="col right">
-          {RIGHT_LABELS.map((id) => (
-            <button
-              key={id}
-              type="button"
-              className={selected === id ? "label on" : "label"}
-              onMouseEnter={() => pick(id)}
-              onFocus={() => pick(id)}
-              onClick={() => pick(id)}
-            >
-              {copy[`${COPY_GROUP[id]}.part`]}
-            </button>
-          ))}
+        <div className="overlay" ref={overlayRef}>
+          {LABEL_IDS.map((id) => {
+            const side = LEFT_LABELS.includes(id) ? "left" : "right";
+            const pos = laid[id];
+            return (
+              <button
+                key={id}
+                ref={(el) => {
+                  labelRefs.current[id] = el;
+                }}
+                type="button"
+                data-anchor={id}
+                className={selected === id ? `label ${side} on` : `label ${side}`}
+                style={narrow || !pos ? undefined : { top: pos.top }}
+                onMouseEnter={() => pick(id)}
+                onFocus={() => pick(id)}
+                onClick={() => pick(id)}
+              >
+                {copy[`${COPY_GROUP[id]}.part`]}
+              </button>
+            );
+          })}
         </div>
+        {narrow ? null : (
+          <svg className="lines" aria-hidden="true">
+            {LABEL_IDS.map((id) => {
+              const p = screen[id];
+              const pos = laid[id];
+              if (!p || !pos) return null;
+              const r = selected === id ? 4 * 1.35 : 4;
+              return (
+                <g key={id}>
+                  <polyline
+                    points={`${pos.edgeX},${pos.midY} ${pos.elbowX},${pos.midY} ${p.x},${p.y}`}
+                    fill="none"
+                    stroke="#5CE1FF"
+                    strokeOpacity="0.45"
+                  />
+                  <circle cx={p.x} cy={p.y} r={r} fill="#5CE1FF" fillOpacity="0.9" />
+                </g>
+              );
+            })}
+          </svg>
+        )}
+        <Card copy={copy} group={group} />
       </div>
-      <svg className="lines" aria-hidden="true">
-        {LABEL_IDS.map((id) => {
-          const p = screen[id];
-          if (!p) return null;
-          const side = LEFT_LABELS.includes(id) ? 120 : window.innerWidth - 120;
-          return <line key={id} x1={side} y1={p.y} x2={p.x} y2={p.y} stroke="#5CE1FF" strokeOpacity="0.45" />;
-        })}
-      </svg>
-      <Card copy={copy} group={group} />
-      <a className="cta" href="https://verax-ai.com/" target="_blank" rel="noreferrer">
-        {copy.cta} → verax-ai.com
-      </a>
+      <footer className="bar">
+        <p className="origin">Figure: operator-generated model</p>
+        <a className="cta" href="https://verax-ai.com/" target="_blank" rel="noreferrer">
+          {copy.cta} → verax-ai.com
+        </a>
+      </footer>
     </div>
   );
 }

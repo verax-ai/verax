@@ -19,13 +19,14 @@ export function MatrixRain({ on }: { on: boolean }) {
     const ctx = canvas.getContext("2d", { alpha: true });
     if (!ctx) return;
     const fontSize = 13;
+    let drops: number[] = [];
     const resize = () => {
       canvas.width = canvas.clientWidth;
       canvas.height = canvas.clientHeight;
+      const cols = Math.max(1, Math.floor(canvas.width / fontSize));
+      drops = Array.from({ length: cols }, () => Math.random() * -40);
     };
     resize();
-    const cols = Math.max(1, Math.floor(canvas.width / fontSize));
-    const drops = Array.from({ length: cols }, () => Math.random() * -40);
     let raf = 0;
     const tick = () => {
       if (document.hidden) {

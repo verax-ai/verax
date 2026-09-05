@@ -3,49 +3,34 @@
   background: #070b14;
   font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
 }
-body {
+html,
+body,
+#root {
   margin: 0;
+  height: 100%;
 }
 .page {
   position: relative;
-  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 1fr;
+  grid-template-rows: auto 1fr auto;
+  height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
-.figure-wrap {
-  position: absolute;
+.matrix {
+  position: fixed;
   inset: 0;
-}
-.figure-wrap canvas {
-  display: block;
   width: 100%;
-  height: 100vh;
-}
-.model-missing {
-  position: absolute;
-  z-index: 3;
-  margin: 1rem;
-  font-family: "IBM Plex Mono", ui-monospace, monospace;
-}
-.overlay {
-  position: relative;
-  z-index: 2;
+  height: 100%;
   pointer-events: none;
-  min-height: 100vh;
-  display: grid;
-  grid-template-columns: 14rem 1fr 14rem;
-  padding: 1.5rem;
-  gap: 1rem;
-}
-.overlay * {
-  pointer-events: auto;
+  z-index: 0;
 }
 .intro {
-  position: absolute;
+  grid-row: 1;
+  position: relative;
   z-index: 2;
-  top: 1.5rem;
-  left: 50%;
-  transform: translateX(-50%);
-  width: min(36rem, 70vw);
+  padding: 1.25rem;
   text-align: center;
   pointer-events: none;
 }
@@ -59,16 +44,37 @@ body {
   margin: 0.4rem 0 0;
   color: #9db0c8;
 }
-.col {
-  display: flex;
-  flex-direction: column;
-  gap: 0.7rem;
-  padding-top: 7rem;
+.stage {
+  grid-row: 2;
+  position: relative;
+  min-height: 0;
+  z-index: 1;
 }
-.col.right {
-  align-items: flex-end;
+.figure-wrap {
+  position: absolute;
+  inset: 0;
+}
+.figure-wrap canvas {
+  display: block;
+  width: 100%;
+}
+.model-missing {
+  position: absolute;
+  z-index: 3;
+  margin: 1rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+.overlay * {
+  pointer-events: auto;
 }
 .label {
+  position: absolute;
   background: #10182a;
   color: inherit;
   border: 1px solid #2a3b55;
@@ -76,6 +82,12 @@ body {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+.label.left {
+  left: 1.5rem;
+}
+.label.right {
+  right: 1.5rem;
 }
 .label.on {
   border-color: #5ce1ff;
@@ -87,18 +99,21 @@ body {
 }
 .lines {
   position: absolute;
-  z-index: 2;
   inset: 0;
   width: 100%;
   height: 100%;
   pointer-events: none;
+  z-index: 2;
+  overflow: visible;
 }
 .card {
   position: absolute;
   z-index: 3;
+  top: 1rem;
   right: 1.5rem;
-  bottom: 5.5rem;
-  width: min(22rem, 90vw);
+  width: min(22rem, 34vw);
+  max-height: 60%;
+  overflow: auto;
   background: #10182a;
   border: 1px solid #2a3b55;
   padding: 1rem;
@@ -118,11 +133,23 @@ body {
   font-size: 0.85rem;
   color: #9db0c8;
 }
+.bar {
+  grid-row: 3;
+  position: relative;
+  z-index: 2;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.7rem 1.5rem;
+}
+.origin {
+  margin: 0;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.8rem;
+  color: #9db0c8;
+}
 .cta {
-  position: absolute;
-  z-index: 3;
-  right: 1.5rem;
-  bottom: 1.5rem;
   background: #5ce1ff;
   color: #070b14;
   text-decoration: none;
@@ -131,22 +158,42 @@ body {
   padding: 0.55rem 0.85rem;
 }
 @media (max-width: 800px) {
-  .overlay {
+  html,
+  body,
+  #root {
+    height: auto;
+  }
+  .page {
+    height: auto;
+    min-height: 100dvh;
+    overflow: visible;
+    grid-template-rows: auto auto auto;
+  }
+  .stage {
     display: flex;
     flex-direction: column;
-    padding-top: 55vh;
+    height: auto;
+    min-height: 0;
+  }
+  .figure-wrap {
+    position: relative;
+    inset: auto;
+    height: 52dvh;
+    flex: none;
+  }
+  .overlay {
+    position: static;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
     pointer-events: auto;
   }
-  .intro {
-    width: auto;
-    left: 1rem;
-    right: 1rem;
-    transform: none;
-  }
-  .col,
-  .col.right {
-    align-items: stretch;
-    padding-top: 0;
+  .label,
+  .label.left,
+  .label.right {
+    position: static;
+    width: 100%;
   }
   .lines {
     display: none;
@@ -154,10 +201,15 @@ body {
   .card {
     position: static;
     width: auto;
+    max-height: none;
+    margin: 0 1rem 0.75rem;
+  }
+  .bar {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0.75rem 1rem 1.1rem;
   }
   .cta {
-    position: static;
-    display: inline-block;
-    margin-top: 0.8rem;
+    text-align: center;
   }
 }

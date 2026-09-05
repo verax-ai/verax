@@ -33,7 +33,7 @@ roughly doubles P95 and still stays under the window.
 
 | Machine | GPU | Date | Tier | P95 (ms) | Frames |
 |---|---|---|---|---|---|
-| Windows 10 desktop (this tree) | Chromium `--use-gl=swiftshader` | 2026-09-05 | 20000 | 73.6 | 282 |
+| Windows laptop, Intel UHD | Chromium `--use-gl=swiftshader` | 2026-09-05 | 20000 | 73.6 | 282 |
 | GitHub Actions ubuntu-latest | Chromium `--use-gl=swiftshader` | 2026-09-05 | default | 1043.5 | 10 |
 
 `apps/panel/perf/baseline.json` is keyed by
