@@ -162,3 +162,17 @@ describe("panel-perf", () => {
     assert.equal(dead, true);
   });
 });
+
+describe("preview readiness", () => {
+  it("parses the Local: URL even when vite colours it", async () => {
+    // @ts-expect-error measure.mjs is an untyped script
+    const mod = await import("../apps/panel/perf/measure.mjs");
+    const parse = (mod as { parseLocalUrl?: (text: string) => string | null }).parseLocalUrl;
+    assert.equal(typeof parse, "function", "parseLocalUrl export missing");
+    const esc = String.fromCharCode(27);
+    const coloured = `  ${esc}[32m>${esc}[39m  ${esc}[1mLocal${esc}[22m:   ${esc}[36mhttp://127.0.0.1:${esc}[1m4199${esc}[22m/${esc}[39m\n`;
+    assert.equal(parse!(coloured), "http://127.0.0.1:4199/");
+    assert.equal(parse!("  Local:   http://127.0.0.1:4173/\n"), "http://127.0.0.1:4173/");
+    assert.equal(parse!("starting...\n"), null);
+  });
+});

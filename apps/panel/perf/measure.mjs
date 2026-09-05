@@ -95,8 +95,20 @@ export function startPreview(port) {
       shell: false,
       windowsHide: true,
       stdio: ["ignore", "pipe", "pipe"],
+      // vite colours its banner on win32 and under CI regardless of a tty;
+      // the readiness parser strips escapes too, this just keeps logs plain.
+      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
     },
   );
+}
+
+const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
+
+/** The Local: URL from vite's banner, with terminal colour codes removed. */
+export function parseLocalUrl(text) {
+  const plain = String(text).replace(ANSI, "");
+  const match = plain.match(/Local:\s+(http:\/\/127\.0\.0\.1:\d+\/)/);
+  return match ? match[1] : null;
 }
 
 export function waitReady(child) {
@@ -121,11 +133,11 @@ export function waitReady(child) {
         fail(new Error("preview-port-busy"));
         return;
       }
-      const match = buf.match(/Local:\s+(http:\/\/127\.0\.0\.1:\d+\/)/);
-      if (match) {
+      const url = parseLocalUrl(buf);
+      if (url) {
         settled = true;
         clearTimeout(timer);
-        resolve(match[1]);
+        resolve(url);
       }
     };
     child.stdout.on("data", onData);
