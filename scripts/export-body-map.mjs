@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Copy apps/body-map/dist to a required destination. No default path.
 
-import { cpSync, existsSync, mkdirSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,6 +20,14 @@ export function exportBodyMap(destArg) {
     throw new Error("export-body-map: refuse to write inside the source tree");
   }
   mkdirSync(dest, { recursive: true });
+  // Vite hashes bundle names, so a plain copy leaves the previous build behind.
+  // Remove only the files this export owns; never the destination itself.
+  const assets = join(dest, "assets");
+  if (existsSync(assets)) {
+    for (const name of readdirSync(assets)) {
+      if (/^index-[A-Za-z0-9_-]+\.(js|css)$/.test(name)) rmSync(join(assets, name), { force: true });
+    }
+  }
   cpSync(src, dest, { recursive: true });
   return dest;
 }
