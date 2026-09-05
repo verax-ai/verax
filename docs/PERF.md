@@ -9,7 +9,7 @@ regression guard; it is not an fps claim.
 
 | Machine | GPU | Date | Tier | P95 (ms) |
 |---|---|---|---|---|
-| Windows 10 desktop (this tree) | Chromium `--use-gl=swiftshader` | 2026-09-04 | 15000 | 52.5 |
+| Windows 10 desktop (this tree) | Chromium `--use-gl=swiftshader` | 2026-09-05 | 15000 | 57.5 |
 
 `apps/panel/perf/baseline.json` is keyed by
 `platform/gl/local` or `platform/gl/gha-<runner.os>`. The committed
