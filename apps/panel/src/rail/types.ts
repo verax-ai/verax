@@ -8,7 +8,13 @@ export type RailDecision = {
     ref: string | null;
     policyHash: string;
     effectHash: string | null;
+    inputsHash?: string | null;
   };
+};
+
+export type RailInputs = {
+  principal: { brain: string; scopes: string[] };
+  inputs: { id: string; versionHash: string; validFromMs: number; validUntilMs: number }[];
 };
 
 export type RailEffect = {
@@ -64,4 +70,6 @@ export type RailAction = {
   guarantee?: "unconditional" | "conditional";
   warnings?: RailWarning[];
   witnessClass?: string | null;
+  inputs?: RailInputs | null;
+  inputsBound?: boolean;
 };

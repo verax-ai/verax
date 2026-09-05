@@ -40,6 +40,7 @@ export function App() {
         effects?: unknown[];
         policies?: Record<string, PolicyBundle["document"]>;
         policy?: PolicyBundle;
+        inputs?: Record<string, import("./rail/types.ts").RailInputs>;
       };
       try {
         body = (await r.json()) as typeof body;
@@ -54,6 +55,7 @@ export function App() {
         decisions.map((x) => JSON.stringify(x)).join("\n"),
         effects.map((x) => JSON.stringify(x)).join("\n"),
         body.policies ?? null,
+        body.inputs ?? null,
       );
       setLastReadMs(Date.now());
       setErrorText(null);

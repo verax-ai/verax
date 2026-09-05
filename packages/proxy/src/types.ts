@@ -69,6 +69,29 @@ export type Ledger = {
   exportExtract(window: ExtractWindow, signer: EffectSigner): Promise<SignedEffectExtract>;
 };
 
+export type DecisionInputRow = {
+  id: string;
+  versionHash: string;
+  validFromMs: number;
+  validUntilMs: number;
+};
+
+export type DecisionInputs = {
+  principal: { brain: string; scopes: string[] };
+  inputs: DecisionInputRow[];
+};
+
+export type InputsLog = {
+  append(ref: string, inputs: DecisionInputs): Promise<void>;
+  get(ref: string): Promise<DecisionInputs | null>;
+};
+
+export type ResolvedInput = {
+  versionHash: string;
+  validFromMs: number;
+  validUntilMs: number;
+};
+
 export type ProxyDeps = {
   policy: Policy;
   recordSigner: RecordSigner;
@@ -77,6 +100,8 @@ export type ProxyDeps = {
   now: () => number;
   nonce: () => string;
   inner: (call: ToolCall, principal: Principal) => Promise<ToolResult>;
+  inputsLog?: InputsLog;
+  resolveInput?: (id: string) => Promise<ResolvedInput | null>;
 };
 
 export type ExplainFinding = {
@@ -101,6 +126,7 @@ export type ExplainWarning = {
 export type ExplainOpts = {
   issuerTrust?: { publicKeyPem: string | readonly string[] };
   extract?: import("@cedulon/effect-extract").SignedEffectExtract | import("@cedulon/x402-adapter").SignedRailExtract;
+  inputsLog?: InputsLog;
 };
 
 export type ExplainTrustRoot = {

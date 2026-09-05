@@ -7,6 +7,7 @@ import { explain } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpUnauthenticated } from "./metrics.ts";
 import { loadOrCreateSigners } from "./keys.ts";
+import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
@@ -205,6 +206,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             effects,
             policy: { hash: services.policyHash, document: services.policyDocument },
             policies: readPolicySnapshots(config.stateDir, hashes),
+            inputs: await matchingInputs(config.stateDir, decisions),
           });
           return;
         }

@@ -24,6 +24,14 @@ describe("policy fixtures", () => {
   const policy = loadPolicy(document);
   const files = readdirSync(fixtureDir).filter((n) => n.endsWith(".json"));
 
+  it("e: every fixture names a principal", () => {
+    for (const name of files) {
+      const fx = JSON.parse(readFileSync(join(fixtureDir, name), "utf8")) as Fixture;
+      assert.equal(typeof fx.principal.brain, "string", name);
+      assert.ok(Array.isArray(fx.principal.scopes), name);
+    }
+  });
+
   it("every rule has a fixture file named after its id", () => {
     const ids = new Set(files.map((n) => n.replace(/\.json$/, "")));
     for (const rule of document.rules) {

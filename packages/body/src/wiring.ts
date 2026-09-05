@@ -11,6 +11,7 @@ import {
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
 import { persistPolicySnapshot } from "./policy-store.ts";
+import { readMemoryMeta } from "./tools/memory.ts";
 import { memoryGet, memoryPut } from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead } from "./tools/message.ts";
@@ -88,6 +89,7 @@ export function createBodyServices(opts: {
     now,
     nonce,
     inner,
+    resolveInput: (id) => readMemoryMeta(opts.stateDir, id),
   });
 
   return {

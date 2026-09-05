@@ -1,5 +1,7 @@
 import { audit, DECISION_PROFILE, type Finding, type IssuerTrustPin, type PresentedExtract } from "@cedulon/audit";
 import { findDecisionRecordChainBreak } from "@cedulon/core";
+import { sha256Canonical } from "./hash.ts";
+import { inputsLogFor } from "./inputs.ts";
 import type { ExplainOpts, ExplainResult, ExplainWarning, Ledger } from "./types.ts";
 
 const WINDOW_COVERAGE = "window-coverage";
@@ -75,12 +77,27 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const issuerMismatch = applicable.concat(applicableWarnings).some(
     (f) => f.code === "issuer-key-mismatch" || (pinned && f.code === "unauthenticated-issuer"),
   );
-  const balanced = refFindings.length === 0 && !chainBreak && !issuerMismatch;
-  const code = chainBreak ? "receipt-chain-break" : (hit?.code ?? null);
+  const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
+  const inputsDoc = record.claims.ref ? await inputsLog.get(record.claims.ref) : null;
+  const inputsMismatch = Boolean(
+    inputsDoc &&
+      typeof record.claims.inputsHash === "string" &&
+      sha256Canonical(inputsDoc) !== record.claims.inputsHash,
+  );
+  const balanced = refFindings.length === 0 && !chainBreak && !issuerMismatch && !inputsMismatch;
+  const code = chainBreak
+    ? "receipt-chain-break"
+    : inputsMismatch
+      ? "inputs-hash-mismatch"
+      : (hit?.code ?? null);
   const detail = chainBreak
     ? `receipt-chain-break at ${breakAt ?? "unknown"} (${brk?.reason ?? "broken"})`
-    : (hit?.detail ?? null);
-  const findingCount = chainBreak ? Math.max(refFindings.length, 1) : refFindings.length + (issuerMismatch && pinned ? 1 : 0);
+    : inputsMismatch
+      ? "inputs document hash does not match claims.inputsHash"
+      : (hit?.detail ?? null);
+  const findingCount = chainBreak
+    ? Math.max(refFindings.length, 1)
+    : refFindings.length + (issuerMismatch && pinned ? 1 : 0) + (inputsMismatch ? 1 : 0);
   const guarantee = report.guarantee;
   const conditionText = conditions.join("; ");
   const summary = balanced

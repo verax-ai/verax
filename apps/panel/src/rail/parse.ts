@@ -5,6 +5,7 @@ import type {
   RailAction,
   RailDecision,
   RailEffect,
+  RailInputs,
   RailRule,
 } from "./types.ts";
 
@@ -36,6 +37,7 @@ export function parseLedger(
   decisionsText: string,
   effectsText: string,
   policies?: PolicyStore | PolicyBundle | null,
+  inputs?: Record<string, RailInputs> | null,
 ): RailAction[] {
   const decisions = decisionsText
     .split("\n")
@@ -47,10 +49,15 @@ export function parseLedger(
     .map((l) => JSON.parse(l) as RailEffect);
   const byRef = new Map(effects.map((e) => [e.row.ref, e]));
   const store = storeOf(policies);
-  return [...decisions].reverse().map((record) => ({
-    record,
-    effect: record.claims.ref ? (byRef.get(record.claims.ref) ?? null) : null,
-    rule: resolveRule(record, store),
-    finding: null,
-  }));
+  return [...decisions].reverse().map((record) => {
+    const doc = record.claims.ref ? (inputs?.[record.claims.ref] ?? null) : null;
+    return {
+      record,
+      effect: record.claims.ref ? (byRef.get(record.claims.ref) ?? null) : null,
+      rule: resolveRule(record, store),
+      finding: null,
+      inputs: doc,
+      inputsBound: doc !== null,
+    };
+  });
 }

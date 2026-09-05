@@ -46,7 +46,10 @@ export function Rail({ actions, onContest }: RailProps) {
           const guarantee = audit?.guarantee ?? action.guarantee;
           const warnings = audit?.warnings ?? action.warnings ?? [];
           const witness = audit?.witnessClass ?? action.witnessClass ?? action.effect?.witnessClass ?? null;
-          const brain = action.effect?.row.actor ?? "not on the decision record";
+          const brain =
+            action.inputsBound && action.inputs
+              ? `${action.inputs.principal.brain} from the decision record (hash-bound)`
+              : "not on the decision record";
           const missing = action.rule && "missing" in action.rule ? action.rule.missing : null;
           const matched = action.rule && !("missing" in action.rule) ? action.rule : null;
           const ruleLine = matched ? JSON.stringify(matched) : missing ? "" : "no matching rule";
