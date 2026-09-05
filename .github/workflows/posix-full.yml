@@ -29,4 +29,6 @@ jobs:
           test "$(id -u)" != "0"
           echo "uid=$(id -u) user=$(id -un)"
       - run: npm ci --ignore-scripts
+      # The body-map page tests drive a real Chromium; the suite must carry it too.
+      - run: npx playwright install --with-deps chromium
       - run: npm test
