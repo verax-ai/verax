@@ -24,7 +24,7 @@ type Shot = {
   width: number;
   height: number;
   canvas: { w: number; h: number } | null;
-  rain: { w: number; h: number } | null;
+  rain: boolean;
   anchors: Record<string, Anchor> | null;
   labels: Record<string, { cx: number; cy: number }> | null;
   card: Box | null;
@@ -118,7 +118,7 @@ describe("body-map layout", () => {
           };
           return {
             canvas: canvas ? { w: canvas.getBoundingClientRect().width, h: canvas.getBoundingClientRect().height } : null,
-            rain: rain ? { w: rain.width, h: rain.height } : null,
+            rain: Boolean(rain),
             anchors: w.__veraxAnchors ?? null,
             labels: Object.keys(labels).length ? labels : null,
             card: rect(".card"),
@@ -160,11 +160,7 @@ describe("body-map layout", () => {
           if (s.canvas.h > s.height) fails.push(`${s.name}:1 canvas height ${s.canvas.h} > window ${s.height}`);
           if (Math.abs(s.canvas.w - s.width) > 1) fails.push(`${s.name}:1 canvas width ${s.canvas.w} != window ${s.width}`);
         }
-        if (!s.rain) fails.push(`${s.name}:2 missing canvas.matrix`);
-        else {
-          if (Math.abs(s.rain.w - s.width) > 2) fails.push(`${s.name}:2 rain width ${s.rain.w} != window ${s.width}`);
-          if (Math.abs(s.rain.h - s.height) > 2) fails.push(`${s.name}:2 rain height ${s.rain.h} != window ${s.height}`);
-        }
+        if (s.rain) fails.push(`${s.name}:2 canvas.matrix present; the page has no rain`);
         if (!s.anchors) fails.push(`${s.name}:3 missing window.__veraxAnchors`);
         else {
           for (const id of IDS) {

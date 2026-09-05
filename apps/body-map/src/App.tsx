@@ -5,7 +5,6 @@ import {
   ChestCore,
   Figure,
   Lights,
-  MatrixRain,
   ParticleField,
   createPresence,
   createQuality,
@@ -257,7 +256,6 @@ export function App() {
   return (
     <div className="page">
       {missing ? <p className="model-missing">model missing, run pack-model</p> : null}
-      <MatrixRain on={!quiet} />
       <header className="intro">
         <h1>{copy.title}</h1>
         <p>{copy.lede}</p>
