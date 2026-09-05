@@ -3,9 +3,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { App } from "../src/App.tsx";
 import { parseLedger } from "../src/rail/parse.ts";
 import { Rail } from "../src/rail/Rail.tsx";
 import type { PolicyBundle } from "../src/rail/types.ts";
+
+vi.mock("@verax-ai/presence", () => ({
+  Stage: () => <div data-testid="stage" />,
+}));
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const golden = join(root, "packages", "proxy", "tests", "fixtures", "ledger-golden");
@@ -59,5 +64,48 @@ describe("account-for rail", () => {
     const ref = onContest.mock.calls[0]?.[0];
     expect(typeof ref).toBe("string");
     expect((ref as string).length).toBeGreaterThan(0);
+  });
+});
+
+describe("panel ledger fetch states", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it("shows error and the HTTP status when the ledger returns 500", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "fault" }), { status: 500 })),
+    );
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText(/500/)).toBeTruthy();
+    });
+    expect(screen.queryByText("empty")).toBeNull();
+    expect(document.querySelectorAll(".row").length).toBe(0);
+  });
+
+  it("shows empty when the ledger has no decisions or effects", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ decisions: [], effects: [] }), { status: 200 })),
+    );
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText("empty")).toBeTruthy();
+    });
+    expect(screen.queryByText("error")).toBeNull();
+  });
+
+  it("shows error when the ledger body is not JSON", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("not-json {", { status: 200 })));
+    render(<App />);
+    await waitFor(() => {
+      expect(screen.getByText("error")).toBeTruthy();
+    });
+    expect(screen.queryByText("empty")).toBeNull();
+    expect(document.querySelectorAll(".row").length).toBe(0);
   });
 });

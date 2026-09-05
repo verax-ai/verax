@@ -142,7 +142,16 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
-      send(res, 200, { ok: true });
+      const decisions = await services.ledger.decisions();
+      const effects = await services.ledger.effects();
+      const last = decisions[decisions.length - 1];
+      send(res, 200, {
+        ok: true,
+        decisions: decisions.length,
+        effects: effects.length,
+        lastDecisionMs: last ? last.claims.timestampMs : null,
+        lock: services.ledger.lockStatus(),
+      });
       return;
     }
     if (req.method === "GET" && isProtectedResourcePath(url.pathname, config.audience)) {

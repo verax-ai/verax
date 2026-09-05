@@ -36,6 +36,29 @@ body {
 aside {
   z-index: 1;
 }
+.rail-head {
+  width: 22rem;
+  margin-left: auto;
+  padding: 1rem 1rem 0;
+}
+.rail-status,
+.age {
+  margin: 0 0 0.4rem;
+  font-size: 0.85rem;
+}
+.rail-status.error,
+.age.stale,
+.rail-status.stale {
+  color: #c45c5c;
+}
+.refresh {
+  display: inline-flex;
+  background: #162033;
+  color: inherit;
+  border: 1px solid #2a3b55;
+  padding: 0.4rem 0.6rem;
+  cursor: pointer;
+}
 .rail {
   width: 22rem;
   margin-left: auto;

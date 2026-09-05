@@ -66,7 +66,18 @@ describe("B5 identity and scope + e2e", () => {
     try {
       const health = await fetch(`http://127.0.0.1:${bodyPort}/healthz`);
       assert.equal(health.status, 200);
-      assert.deepEqual(await health.json(), { ok: true });
+      const healthBody = (await health.json()) as {
+        ok?: boolean;
+        decisions?: number;
+        effects?: number;
+        lastDecisionMs?: number | null;
+        lock?: string;
+      };
+      assert.equal(healthBody.ok, true);
+      assert.equal(healthBody.decisions, 0);
+      assert.equal(healthBody.effects, 0);
+      assert.equal(healthBody.lastDecisionMs, null);
+      assert.equal(healthBody.lock, "held");
 
       const none = await rpc(mcp, null, "tools/call", { name: "memory.get", arguments: { id: "x" } });
       assert.equal(none.status, 401);
@@ -104,6 +115,29 @@ describe("B5 identity and scope + e2e", () => {
       assert.equal(putOk.status, 200);
       assert.equal((putOk.json?.result as { isError?: boolean })?.isError, false);
       assert.match(readFileSync(join(stateDir, "effects.jsonl"), "utf8"), /memory\.put/);
+
+      const healthAfter = await fetch(`http://127.0.0.1:${bodyPort}/healthz`);
+      const afterBody = (await healthAfter.json()) as {
+        decisions?: number;
+        effects?: number;
+        lastDecisionMs?: number | null;
+        lock?: string;
+      };
+      const decisionLines = readFileSync(join(stateDir, "decisions.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter((l) => l !== "");
+      const effectLines = readFileSync(join(stateDir, "effects.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter((l) => l !== "");
+      assert.equal(afterBody.decisions, decisionLines.length);
+      assert.equal(afterBody.effects, effectLines.length);
+      const lastDecision = JSON.parse(decisionLines[decisionLines.length - 1] ?? "{}") as {
+        claims: { timestampMs: number };
+      };
+      assert.equal(afterBody.lastDecisionMs, lastDecision.claims.timestampMs);
+      assert.equal(afterBody.lock, "held");
 
       const got = await rpc(mcp, full, "tools/call", { name: "memory.get", arguments: { id: "n1" } });
       const gotText = (got.json?.result as { content?: { text?: string }[] })?.content?.[0]?.text ?? "";

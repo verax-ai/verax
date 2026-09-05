@@ -208,6 +208,11 @@ export class FileLedger implements Ledger {
     return existing?.token === this.token;
   }
 
+  /** Lock file on disk, not a process counter. */
+  lockStatus(): "held" | "free" {
+    return this.ownsLock() ? "held" : "free";
+  }
+
   private markLost(): void {
     this.lost = true;
   }
