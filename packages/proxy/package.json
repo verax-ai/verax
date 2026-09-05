@@ -1,0 +1,23 @@
+{
+  "name": "@verax-ai/proxy",
+  "version": "0.0.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src",
+    "policy"
+  ],
+  "dependencies": {
+    "@cedulon/audit": "0.12.0",
+    "@cedulon/core": "0.12.0",
+    "@cedulon/effect-extract": "0.12.0"
+  }
+}

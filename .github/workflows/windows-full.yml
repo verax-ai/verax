@@ -1,0 +1,37 @@
+# The full suite on Windows, on a hosted runner neither party
+# keeps. At the current commit the hosted run skips nothing (measured on
+# the runner, none skipped); a local run without symbolic-link privilege
+# skips POSIX-mode cases with a stated reason. Either way a
+# green run is a smaller claim than posix-full, and it is
+# counted as exactly that.
+#
+# This job was withheld while a fresh Windows clone was believed to fail the
+# line-ending guard. That belief went stale: the guard reads the object
+# store, not the working tree, and a fresh core.autocrlf=true clone was
+# measured running the whole suite green before this job was added.
+name: windows-full
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: show the line-ending and temp configuration this runner actually has
+        shell: bash
+        run: |
+          echo "autocrlf=$(git config core.autocrlf || echo unset)"
+          node -e "const {tmpdir}=require('os'); console.log('tmpdir', tmpdir());"
+      - run: npm ci --ignore-scripts
+      - run: npm test

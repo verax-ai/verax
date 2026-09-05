@@ -1,0 +1,52 @@
+{
+  "name": "@verax-ai/workspace",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "guard:crlf": "node --experimental-strip-types scripts/crlf-guard.ts",
+    "guard:claims": "node --experimental-strip-types scripts/claim-guard.ts",
+    "build": "tsc --noEmit",
+    "test:unit": "node --experimental-strip-types scripts/run-unit-tests.ts",
+    "test": "npm run guard:crlf && npm run guard:claims && npm run build && npm run test:unit && npm run test -w @verax-ai/panel"
+  },
+  "dependencies": {
+    "@cedulon/audit": "file:vendor/cedulon-audit-da7bf9b.tgz",
+    "@cedulon/base-extract": "file:vendor/cedulon-base-extract-da7bf9b.tgz",
+    "@cedulon/checkpoint": "file:vendor/cedulon-checkpoint-da7bf9b.tgz",
+    "@cedulon/core": "file:vendor/cedulon-core-da7bf9b.tgz",
+    "@cedulon/cose": "file:vendor/cedulon-cose-da7bf9b.tgz",
+    "@cedulon/effect-extract": "file:vendor/cedulon-effect-extract-da7bf9b.tgz",
+    "@cedulon/manifest": "file:vendor/cedulon-manifest-da7bf9b.tgz",
+    "@cedulon/mcp-guard": "file:vendor/cedulon-mcp-guard-da7bf9b.tgz",
+    "@cedulon/mcp-server": "file:vendor/cedulon-mcp-server-da7bf9b.tgz",
+    "@cedulon/receipts": "file:vendor/cedulon-receipts-da7bf9b.tgz",
+    "@cedulon/x402-adapter": "file:vendor/cedulon-x402-adapter-da7bf9b.tgz"
+  },
+  "overrides": {
+    "@cedulon/audit": "file:vendor/cedulon-audit-da7bf9b.tgz",
+    "@cedulon/base-extract": "file:vendor/cedulon-base-extract-da7bf9b.tgz",
+    "@cedulon/checkpoint": "file:vendor/cedulon-checkpoint-da7bf9b.tgz",
+    "@cedulon/core": "file:vendor/cedulon-core-da7bf9b.tgz",
+    "@cedulon/cose": "file:vendor/cedulon-cose-da7bf9b.tgz",
+    "@cedulon/effect-extract": "file:vendor/cedulon-effect-extract-da7bf9b.tgz",
+    "@cedulon/manifest": "file:vendor/cedulon-manifest-da7bf9b.tgz",
+    "@cedulon/mcp-guard": "file:vendor/cedulon-mcp-guard-da7bf9b.tgz",
+    "@cedulon/mcp-server": "file:vendor/cedulon-mcp-server-da7bf9b.tgz",
+    "@cedulon/receipts": "file:vendor/cedulon-receipts-da7bf9b.tgz",
+    "@cedulon/x402-adapter": "file:vendor/cedulon-x402-adapter-da7bf9b.tgz"
+  },
+  "devDependencies": {
+    "@gltf-transform/core": "^4.1.3",
+    "@gltf-transform/extensions": "^4.1.3",
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}
