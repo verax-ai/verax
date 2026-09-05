@@ -1,4 +1,14 @@
-import { createProxy, FileLedger, loadPolicy, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
+import {
+  createProxy,
+  FileLedger,
+  loadPolicy,
+  type EffectSigner,
+  type ExplainOpts,
+  type Principal,
+  type RecordSigner,
+  type ToolCall,
+  type ToolResult,
+} from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { memoryGet, memoryPut } from "./tools/memory.ts";
@@ -15,6 +25,7 @@ export type BodyServices = {
   policyHash: string;
   policyDocument: unknown;
   listTools: () => readonly string[];
+  explainOpts: () => Promise<ExplainOpts>;
 };
 
 /**
@@ -24,8 +35,8 @@ export type BodyServices = {
 export function createBodyServices(opts: {
   stateDir: string;
   policyFile: string;
-  recordSigner: { privateKeyPem: string; publicKeyPem: string };
-  effectSigner: { privateKeyPem: string; publicKeyPem: string };
+  recordSigner: RecordSigner;
+  effectSigner: EffectSigner;
   now?: () => number;
   nonce?: () => string;
 }): BodyServices {
@@ -40,7 +51,22 @@ export function createBodyServices(opts: {
   const registry = new Map<string, ToolFn>();
   registry.set("memory.get", (call) => memoryGet(call, opts.stateDir, now));
   registry.set("memory.put", (call) => memoryPut(call, opts.stateDir));
-  registry.set("audit.explain", (call) => auditExplain(call, ledger));
+  const explainOpts = async (): Promise<ExplainOpts> => {
+    const env = process.env.VERAX_RECORD_PUBKEY_PIN;
+    const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
+    const effects = await ledger.effects();
+    let extract: ExplainOpts["extract"];
+    if (effects.length > 0) {
+      const start = Math.min(...effects.map((e) => e.row.timestampMs));
+      const end = Math.max(...effects.map((e) => e.row.timestampMs)) + 1;
+      extract = await ledger.exportExtract({ startMs: start, endMs: end }, opts.effectSigner);
+    }
+    return {
+      ...(pem ? { issuerTrust: { publicKeyPem: pem } } : {}),
+      ...(extract ? { extract } : {}),
+    };
+  };
+  registry.set("audit.explain", async (call) => auditExplain(call, ledger, await explainOpts()));
   registry.set("message.read", (call) => messageRead(call, opts.stateDir));
 
   const inner: ToolFn = async (call) => {
@@ -70,5 +96,6 @@ export function createBodyServices(opts: {
     policyHash: policy.hash,
     policyDocument,
     listTools: () => TOOL_NAMES,
+    explainOpts,
   };
 }

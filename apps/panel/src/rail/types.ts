@@ -19,6 +19,7 @@ export type RailEffect = {
     timestampMs: number;
     actor?: string;
   };
+  witnessClass?: string;
 };
 
 export type PolicyRule = {
@@ -49,9 +50,18 @@ export type RailFinding = {
   summary?: string;
 };
 
+export type RailWarning = {
+  id: string;
+  code: string;
+  detail?: string;
+};
+
 export type RailAction = {
   record: RailDecision;
   effect: RailEffect | null;
   rule: RailRule | null;
   finding: RailFinding | null;
+  guarantee?: "unconditional" | "conditional";
+  warnings?: RailWarning[];
+  witnessClass?: string | null;
 };

@@ -1,11 +1,18 @@
 import { useState } from "react";
-import type { RailAction, RailFinding } from "./types.ts";
+import type { RailAction, RailFinding, RailWarning } from "./types.ts";
 
 export type RailProps = {
   actions: RailAction[];
   onContest?: (
     ref: string,
-  ) => Promise<{ reAuditedAt?: number; finding?: RailFinding; error?: string } | void>;
+  ) => Promise<{
+    reAuditedAt?: number;
+    finding?: RailFinding;
+    guarantee?: "unconditional" | "conditional";
+    warnings?: RailWarning[];
+    witnessClass?: string | null;
+    error?: string;
+  } | void>;
 };
 
 function kindOf(action: RailAction): "allow" | "deny" | "threw" {
@@ -23,6 +30,9 @@ export function Rail({ actions, onContest }: RailProps) {
   const [open, setOpen] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
   const [stamp, setStamp] = useState<Record<string, string>>({});
   const [findings, setFindings] = useState<Record<string, RailFinding>>({});
+  const [audits, setAudits] = useState<
+    Record<string, { guarantee?: "unconditional" | "conditional"; warnings?: RailWarning[]; witnessClass?: string | null }>
+  >({});
 
   return (
     <nav className="rail" aria-label="Account-for rail">
@@ -32,6 +42,10 @@ export function Rail({ actions, onContest }: RailProps) {
           const kind = kindOf(action);
           const expanded = open === ref;
           const finding = findings[ref] ?? action.finding;
+          const audit = audits[ref];
+          const guarantee = audit?.guarantee ?? action.guarantee;
+          const warnings = audit?.warnings ?? action.warnings ?? [];
+          const witness = audit?.witnessClass ?? action.witnessClass ?? action.effect?.witnessClass ?? null;
           const brain = action.effect?.row.actor ?? "not on the decision record";
           const missing = action.rule && "missing" in action.rule ? action.rule.missing : null;
           const matched = action.rule && !("missing" in action.rule) ? action.rule : null;
@@ -53,6 +67,13 @@ export function Rail({ actions, onContest }: RailProps) {
               </button>
               {expanded ? (
                 <section className="questions">
+                  {guarantee ? (
+                    <p className={`guarantee ${guarantee}`}>
+                      guarantee {guarantee}
+                      {warnings.length > 0 ? ` ${warnings.map((w) => w.code).join(" ")}` : ""}
+                    </p>
+                  ) : null}
+                  <p className="witness">witness {witness ?? "none"}</p>
                   <h2>What did you do</h2>
                   <p>
                     {action.record.claims.subject} {action.record.claims.decision}{" "}
@@ -104,6 +125,14 @@ export function Rail({ actions, onContest }: RailProps) {
                       if (out.finding) {
                         setFindings((s) => ({ ...s, [ref]: out.finding as RailFinding }));
                       }
+                      setAudits((s) => ({
+                        ...s,
+                        [ref]: {
+                          guarantee: out.guarantee,
+                          warnings: out.warnings,
+                          witnessClass: out.witnessClass,
+                        },
+                      }));
                     }}
                   >
                     Contest

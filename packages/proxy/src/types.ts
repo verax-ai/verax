@@ -92,6 +92,22 @@ export type ExplainChain = {
   breakAt: string | null;
 };
 
+export type ExplainWarning = {
+  id: string;
+  code: string;
+  detail: string;
+};
+
+export type ExplainOpts = {
+  issuerTrust?: { publicKeyPem: string | readonly string[] };
+  extract?: import("@cedulon/effect-extract").SignedEffectExtract | import("@cedulon/x402-adapter").SignedRailExtract;
+};
+
+export type ExplainTrustRoot = {
+  pinned: boolean;
+  issuerMatches: boolean | null;
+};
+
 export type ExplainResult = {
   record: SignedDecisionRecord;
   effect: LedgerEffect | null;
@@ -99,4 +115,13 @@ export type ExplainResult = {
   witnessClass: WitnessClass | null;
   balanced: boolean;
   chain: ExplainChain;
+  guarantee: "unconditional" | "conditional";
+  warnings: ExplainWarning[];
+  trustRoot: ExplainTrustRoot;
+  scope?: {
+    accountId: string;
+    railId: string;
+    windowStartMs: number;
+    windowEndMs: number;
+  };
 };

@@ -11,11 +11,11 @@ import { runGoldenScenario } from "./golden-scenario.ts";
 const INTACT = { intact: true, breakAt: null } as const;
 
 export const GOLDEN_EXPLAIN_TABLE = [
-  { ref: "n1", code: null, summary: "audit: balanced", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
-  { ref: "n2", code: null, summary: "audit: balanced", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
-  { ref: "n3", code: null, summary: "audit: balanced", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
-  { ref: "n4", code: null, summary: "audit: balanced", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
-  { ref: "n5", code: null, summary: "audit: balanced", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
+  { ref: "n1", code: null, summary: "audit: balanced (conditional: self witness; issuer unpinned)", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
+  { ref: "n2", code: null, summary: "audit: balanced (conditional: self witness; issuer unpinned)", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
+  { ref: "n3", code: null, summary: "audit: balanced (conditional: self witness; issuer unpinned)", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
+  { ref: "n4", code: null, summary: "audit: balanced (conditional: issuer unpinned)", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
+  { ref: "n5", code: null, summary: "audit: balanced (conditional: issuer unpinned)", notApplicable: ["window-coverage"], balanced: true, chain: INTACT },
   {
     ref: "n6",
     code: "effect-mismatch",

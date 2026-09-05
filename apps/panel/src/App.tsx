@@ -114,6 +114,9 @@ export function App() {
               const body = (await res.json().catch(() => ({}))) as {
                 reAuditedAt?: number;
                 finding?: RailFinding;
+                guarantee?: "unconditional" | "conditional";
+                warnings?: { id: string; code: string; detail?: string }[];
+                witnessClass?: string | null;
               };
               if (!res.ok || typeof body.reAuditedAt !== "number") {
                 return { error: `re-audit failed (${res.status})` };

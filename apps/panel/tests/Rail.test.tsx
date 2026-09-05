@@ -80,6 +80,23 @@ const histDecision = {
   },
 };
 
+describe("guarantee strip", () => {
+  it("5: shows a general issuer warning on the rail", () => {
+    const parsed = parseLedger(JSON.stringify(histDecision), "", {
+      aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] },
+    });
+    parsed[0] = {
+      ...parsed[0]!,
+      guarantee: "conditional",
+      warnings: [{ id: "issuer", code: "unauthenticated-issuer", detail: "issuer unpinned" }],
+      witnessClass: null,
+    };
+    render(<Rail actions={parsed} />);
+    expect(screen.getByText(/unauthenticated-issuer/)).toBeTruthy();
+    expect(screen.getByText(/guarantee/i)).toBeTruthy();
+  });
+});
+
 describe("historical policy sentence", () => {
   it("uses the decision policyHash document, not a later live policy", () => {
     const parsed = parseLedger(

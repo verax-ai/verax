@@ -110,3 +110,12 @@ aside {
 .rule-missing {
   color: #c45c5c;
 }
+.guarantee.unconditional {
+  color: #5ca36a;
+}
+.guarantee.conditional {
+  color: #d4a017;
+}
+.witness {
+  font-size: 0.85rem;
+}
