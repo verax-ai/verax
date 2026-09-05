@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -23,22 +23,46 @@ function deadPid(): number {
   throw new Error("no-dead-pid");
 }
 
-function spawnOpener(dir: string): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--experimental-strip-types", worker], {
-      env: { ...process.env, VERAX_LOCK_DIR: dir },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let out = "";
-    child.stdout.on("data", (chunk) => {
-      out += String(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      out += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", () => resolve(out.trim()));
+type SpawnedOpener = {
+  child: ChildProcess;
+  firstLine: Promise<string>;
+  done: Promise<string>;
+};
+
+function spawnOpener(dir: string): SpawnedOpener {
+  const child = spawn(process.execPath, ["--experimental-strip-types", worker], {
+    env: { ...process.env, VERAX_LOCK_DIR: dir },
+    stdio: ["pipe", "pipe", "pipe"],
   });
+  let out = "";
+  let firstSettled = false;
+  let firstResolve: ((line: string) => void) | undefined;
+  const firstLine = new Promise<string>((resolve, reject) => {
+    firstResolve = resolve;
+    child.on("error", reject);
+  });
+  const feed = (chunk: Buffer | string) => {
+    out += String(chunk);
+    if (firstSettled) return;
+    const nl = out.search(/\r?\n/);
+    if (nl >= 0) {
+      firstSettled = true;
+      firstResolve?.(out.slice(0, nl));
+    }
+  };
+  child.stdout.on("data", feed);
+  child.stderr.on("data", feed);
+  const done = new Promise<string>((resolve, reject) => {
+    child.on("error", reject);
+    child.on("close", () => {
+      if (!firstSettled) {
+        firstSettled = true;
+        firstResolve?.(out.trim().split(/\r?\n/)[0] ?? "");
+      }
+      resolve(out.trim());
+    });
+  });
+  return { child, firstLine, done };
 }
 
 describe("D FileLedger directory lock", () => {
@@ -97,12 +121,13 @@ describe("D FileLedger directory lock", () => {
   it("1: two spawned bodies on the same dir leave one writer", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-two-"));
     const first = spawnOpener(dir);
-    const started = Date.now();
-    while (Date.now() - started < 5000 && !existsSync(join(dir, "ledger.lock"))) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
+    const openedLine = await first.firstLine;
+    assert.match(openedLine, /^OPENED:/);
     const second = spawnOpener(dir);
-    const lines = (await Promise.all([first, second])).map((s) => s.split("\n")[0] ?? "");
+    const secondLine = await second.firstLine;
+    assert.match(secondLine, /^ERR:ledger-locked:/);
+    first.child.stdin?.end();
+    const lines = (await Promise.all([first.done, second.done])).map((s) => s.split(/\r?\n/)[0] ?? "");
     const opened = lines.filter((l) => l.startsWith("OPENED:"));
     const locked = lines.filter((l) => l.startsWith("ERR:ledger-locked:"));
     assert.deepEqual({ opened: opened.length, locked: locked.length }, { opened: 1, locked: 1 });

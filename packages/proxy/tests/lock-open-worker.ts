@@ -6,10 +6,19 @@ if (!dir) {
   process.exit(2);
 }
 
+function holdUntilStdinCloses(): Promise<void> {
+  return new Promise((resolve) => {
+    const done = () => resolve();
+    process.stdin.on("end", done);
+    process.stdin.on("close", done);
+    process.stdin.resume();
+  });
+}
+
 try {
   const ledger = new FileLedger(dir);
   process.stdout.write(`OPENED:${process.pid}\n`);
-  await new Promise((resolve) => setTimeout(resolve, 400));
+  await holdUntilStdinCloses();
   ledger.close();
   process.exit(0);
 } catch (err) {
