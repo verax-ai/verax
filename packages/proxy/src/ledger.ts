@@ -1,6 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { mkdir, open, readFile } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+
+/** I/O seam so append-cost tests can count rereads without mocking node:fs. */
+export const ledgerFs = {
+  readFile,
+  readFileSync,
+  open,
+};
 import { join } from "node:path";
 import { canonical, decisionRecordHash } from "@cedulon/core";
 import { coseToHex, signCoseSign1 } from "@cedulon/cose";
@@ -52,10 +59,30 @@ function parseJsonl<T>(text: string): T[] {
 
 async function readJsonl<T>(path: string): Promise<T[]> {
   try {
-    return parseJsonl<T>(await readFile(path, "utf8"));
+    return parseJsonl<T>(await ledgerFs.readFile(path, "utf8"));
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;
+  }
+}
+
+function readJsonlSync<T>(path: string): T[] {
+  try {
+    return parseJsonl<T>(ledgerFs.readFileSync(path, "utf8"));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+/** Write then fsync so a crash cannot drop a committed line. */
+async function appendDurable(path: string, line: string): Promise<void> {
+  const fh = await ledgerFs.open(path, "a");
+  try {
+    await fh.write(line);
+    await fh.sync();
+  } finally {
+    await fh.close();
   }
 }
 
@@ -231,6 +258,8 @@ export class FileLedger implements Ledger {
   private readonly token = randomBytes(16).toString("hex");
   private closed = false;
   private lost = false;
+  private tailHash: string | null = null;
+  private readonly effectRefs = new Set<string>();
 
   constructor(dir: string) {
     this.dir = dir;
@@ -239,6 +268,18 @@ export class FileLedger implements Ledger {
     this.effectsPath = join(dir, "effects.jsonl");
     this.lockPath = join(dir, "ledger.lock");
     this.acquireLock();
+    this.loadCaches();
+  }
+
+  /** After lock handoff a new instance reloads; the lost owner cannot append. */
+  private loadCaches(): void {
+    this.effectRefs.clear();
+    const decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
+    const last = decisions[decisions.length - 1];
+    this.tailHash = last ? decisionRecordHash(last) : null;
+    for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
+      if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
+    }
   }
 
   private lockBody(): string {
@@ -303,7 +344,8 @@ export class FileLedger implements Ledger {
     return this.q.enqueue(async () => {
       this.assertOwned();
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
-      await appendFile(this.decisionsPath, lineOf(signed), { encoding: "utf8" });
+      await appendDurable(this.decisionsPath, lineOf(signed));
+      this.tailHash = decisionRecordHash(signed);
     });
   }
 
@@ -312,7 +354,9 @@ export class FileLedger implements Ledger {
       this.assertOwned();
       const prev = await this.lastDecisionHashUnlocked();
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
-      await appendFile(this.decisionsPath, lineOf(build(prev)), { encoding: "utf8" });
+      const signed = build(prev);
+      await appendDurable(this.decisionsPath, lineOf(signed));
+      this.tailHash = decisionRecordHash(signed);
     });
   }
 
@@ -328,9 +372,7 @@ export class FileLedger implements Ledger {
     witnessClass: WitnessClass = DEFAULT_WITNESS,
     resultHash?: string,
   ): Promise<void> {
-    const current = await this.effects();
-    const existing = current.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
-    if (existing && row.effectClass !== "duplicate-effect") {
+    if (row.effectClass !== "duplicate-effect" && this.effectRefs.has(row.ref)) {
       const marker: LedgerEffect = {
         row: {
           ref: row.ref,
@@ -342,10 +384,10 @@ export class FileLedger implements Ledger {
         witnessClass: DEFAULT_WITNESS,
         resultHash,
       };
-      await appendFile(this.effectsPath, lineOf(marker), { encoding: "utf8" });
+      await appendDurable(this.effectsPath, lineOf(marker));
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    await appendFile(
+    await appendDurable(
       this.effectsPath,
       lineOf({
         row: asEffectRow(row),
@@ -353,8 +395,8 @@ export class FileLedger implements Ledger {
         resultHash,
         ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
       }),
-      { encoding: "utf8" },
     );
+    if (row.effectClass !== "duplicate-effect") this.effectRefs.add(row.ref);
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
@@ -370,9 +412,7 @@ export class FileLedger implements Ledger {
   }
 
   private async lastDecisionHashUnlocked(): Promise<string | null> {
-    const all = await this.decisions();
-    const last = all[all.length - 1];
-    return last ? decisionRecordHash(last) : null;
+    return this.tailHash;
   }
 
   async exportExtract(window: ExtractWindow, signer: EffectSigner): Promise<SignedEffectExtract> {
