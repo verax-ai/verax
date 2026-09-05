@@ -108,7 +108,7 @@ export function App() {
             Refresh
           </button>
         </div>
-        {status === "ok" ? (
+        {status === "ok" || (status === "error" && actions.length > 0) ? (
           <Rail
             actions={actions}
             onContest={async (ref) => {

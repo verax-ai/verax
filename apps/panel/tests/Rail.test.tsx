@@ -177,6 +177,28 @@ describe("panel ledger fetch states", () => {
     expect(screen.queryByText("error")).toBeNull();
   });
 
+  it("keeps the last good rail when a later poll returns 500", async () => {
+    const ledgerBody = {
+      decisions: [histDecision],
+      effects: [],
+      policies: { aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] } },
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(ledgerBody), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() => {
+      expect(screen.getByText("error")).toBeTruthy();
+      expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
+    });
+  });
+
   it("shows error when the ledger body is not JSON", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("not-json {", { status: 200 })));
     render(<App />);
