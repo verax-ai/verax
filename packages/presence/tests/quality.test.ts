@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
-import { createQuality } from "../src/presence/quality.ts";
+import { createQuality } from "../src/quality.ts";
 
 function feed(q: { push(ms: number): void }, clock: { t: number }, frameMs: number, windowMs: number): void {
   const start = clock.t;

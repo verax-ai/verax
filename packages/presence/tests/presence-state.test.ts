@@ -6,7 +6,7 @@ import {
   TRANSITIONS,
   type Presence,
   type PresenceState,
-} from "../src/presence/state.ts";
+} from "../src/state.ts";
 
 const FROM_IDLE: Record<Exclude<PresenceState, "booting" | "idle">, PresenceState[]> = {
   listening: ["listening"],

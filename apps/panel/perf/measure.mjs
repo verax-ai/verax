@@ -16,6 +16,21 @@ const minFrames = 30;
 const gl = "swiftshader";
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
 
+/** `--url` probes an already-running page; default is the panel preview. */
+export function readUrlArg(argv = process.argv) {
+  const i = argv.indexOf("--url");
+  if (i === -1) return null;
+  const value = argv[i + 1];
+  if (!value || value.startsWith("-")) throw new Error("url-missing");
+  return value;
+}
+
+export function withTier(url, n) {
+  const u = new URL(url);
+  u.searchParams.set("tier", String(n));
+  return u.href;
+}
+
 function envKey() {
   const envTag = process.env.GITHUB_ACTIONS
     ? `gha-${process.env.RUNNER_OS ?? "unknown"}`
@@ -193,16 +208,22 @@ async function main() {
   let browser;
   let child;
   try {
-    const port = await resolvePort();
-    child = startPreview(port);
-    process.stderr.write(`preview-pid:${child.pid}\n`);
-    const url = await waitReady(child);
+    const given = readUrlArg(process.argv);
+    let url;
+    if (given) {
+      url = given;
+    } else {
+      const port = await resolvePort();
+      child = startPreview(port);
+      process.stderr.write(`preview-pid:${child.pid}\n`);
+      url = await waitReady(child);
+    }
     const { chromium } = await import("playwright");
     browser = await chromium.launch({
       args: ["--use-gl=swiftshader", "--use-angle=swiftshader"],
     });
     const page = await browser.newPage();
-    await page.goto(`${url}?tier=${tier}`, { waitUntil: "networkidle" });
+    await page.goto(withTier(url, tier), { waitUntil: "networkidle" });
     await page.waitForTimeout(4500);
     const samples = await page.evaluate(
       async ({ n, ms }) => {

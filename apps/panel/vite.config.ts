@@ -7,6 +7,12 @@ export default defineConfig(({ mode }) => {
   const target = env.VERAX_BODY_URL ?? "http://127.0.0.1:8787";
   return {
     plugins: [react()],
+    optimizeDeps: {
+      exclude: ["@verax-ai/presence"],
+    },
+    resolve: {
+      dedupe: ["react", "react-dom", "three"],
+    },
     server: {
       proxy: {
         "/api": {

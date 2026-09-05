@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Stage } from "./presence/Stage.tsx";
+import { Stage } from "@verax-ai/presence";
 import { parseLedger } from "./rail/parse.ts";
 import { Rail } from "./rail/Rail.tsx";
 import type { PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
