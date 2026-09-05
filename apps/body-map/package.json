@@ -1,0 +1,29 @@
+{
+  "name": "@verax-ai/body-map",
+  "version": "0.0.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "@react-three/fiber": "^9.1.2",
+    "@verax-ai/presence": "^0.0.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "three": "0.184.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.2",
+    "@types/react-dom": "^19.1.2",
+    "@vitejs/plugin-react": "^4.4.1",
+    "vite": "^6.3.4"
+  }
+}

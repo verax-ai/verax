@@ -1,5 +1,5 @@
 export { ChestCore } from "./ChestCore.tsx";
-export { Figure, MODEL_URL } from "./Figure.tsx";
+export { Figure, MODEL_FILE, modelUrl } from "./Figure.tsx";
 export { Lights } from "./Lights.tsx";
 export { MatrixRain, RAIN_GLYPHS, RAIN_PALETTE } from "./MatrixRain.tsx";
 export { ParticleField, type PointsMeta } from "./ParticleField.tsx";

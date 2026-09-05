@@ -5,7 +5,12 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MeshoptDecoder } from "three/examples/jsm/libs/meshopt_decoder.module.js";
 import type { PresenceState } from "./state.ts";
 
-export const MODEL_URL = "/verax-body.glb";
+export const MODEL_FILE = "verax-body.glb";
+
+export function modelUrl(assetBase = "/"): string {
+  const base = assetBase.endsWith("/") ? assetBase : `${assetBase}/`;
+  return `${base}${MODEL_FILE}`;
+}
 
 function applyOpacity(root: Group, opacity: number): void {
   root.traverse((obj) => {
@@ -26,10 +31,12 @@ export function Figure({
   presence,
   startedAtMs,
   onMissing,
+  assetBase = "/",
 }: {
   presence: PresenceState;
   startedAtMs: number;
   onMissing: () => void;
+  assetBase?: string;
 }) {
   const [root, setRoot] = useState<Group | null>(null);
   const reported = useRef(false);
@@ -42,7 +49,7 @@ export function Figure({
         onMissing();
       }
     };
-    void fetch(MODEL_URL)
+    void fetch(modelUrl(assetBase))
       .then((res) => {
         if (!res.ok) {
           miss();
@@ -65,7 +72,7 @@ export function Figure({
     return () => {
       dead = true;
     };
-  }, [onMissing]);
+  }, [onMissing, assetBase]);
 
   useFrame(() => {
     if (!root) return;

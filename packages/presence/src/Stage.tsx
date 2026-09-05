@@ -11,10 +11,16 @@ import { fitFromBox } from "./fit.ts";
 import { createQuality, TIER_COUNTS } from "./quality.ts";
 import { createPresence, PRESENCE_STATES, type PresenceState } from "./state.ts";
 
+function assetBase(): string {
+  const raw = (import.meta as { env?: { BASE_URL?: string } }).env?.BASE_URL ?? "/";
+  return raw.endsWith("/") ? raw : `${raw}/`;
+}
+
 async function loadCloud(): Promise<{ cloud: Uint16Array; meta: PointsMeta }> {
+  const base = assetBase();
   const [bin, meta] = await Promise.all([
-    fetch("/verax-points.bin").then((r) => r.arrayBuffer()),
-    fetch("/verax-points.json").then((r) => r.json() as Promise<PointsMeta>),
+    fetch(`${base}verax-points.bin`).then((r) => r.arrayBuffer()),
+    fetch(`${base}verax-points.json`).then((r) => r.json() as Promise<PointsMeta>),
   ]);
   const view = new DataView(bin);
   const version = view.getUint32(0, true);
@@ -100,7 +106,7 @@ export function Stage() {
         <Lights color={params.coreColor} />
         {cloud && meta && fit ? (
           <group position={fit.position} scale={fit.scale}>
-            <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} />
+            <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} assetBase={assetBase()} />
             <ParticleField
               cloud={cloud}
               meta={meta}

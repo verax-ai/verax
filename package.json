@@ -17,7 +17,9 @@
     "test:unit": "node --experimental-strip-types scripts/run-unit-tests.ts",
     "test": "npm run guard:crlf && npm run guard:claims && npm run build && npm run test:unit && npm run test -w @verax-ai/panel",
     "pack-model": "node scripts/pack-model.mjs",
-    "sample-points": "node scripts/sample-points.mjs"
+    "sample-points": "node scripts/sample-points.mjs",
+    "anchors": "node scripts/anchors.mjs",
+    "og": "node scripts/og.mjs"
   },
   "dependencies": {
     "@cedulon/audit": "file:vendor/cedulon-audit-da7bf9b.tgz",

@@ -2,7 +2,7 @@ export const FIT_EDGE = 4.2;
 
 export type Box3 = { min: [number, number, number]; max: [number, number, number] };
 
-/** Same fit as jarvis-web AIAvatarModel: centre, longest edge -> FIT_EDGE. */
+/** Centre the mesh; scale the longest edge to FIT_EDGE. */
 export function fitFromBox(box: Box3): { position: [number, number, number]; scale: number } {
   const cx = (box.min[0] + box.max[0]) / 2;
   const cy = (box.min[1] + box.max[1]) / 2;

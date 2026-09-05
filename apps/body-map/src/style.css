@@ -1,0 +1,163 @@
+:root {
+  color: #e8eef5;
+  background: #070b14;
+  font-family: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+}
+body {
+  margin: 0;
+}
+.page {
+  position: relative;
+  min-height: 100vh;
+  overflow: hidden;
+}
+.figure-wrap {
+  position: absolute;
+  inset: 0;
+}
+.figure-wrap canvas {
+  display: block;
+  width: 100%;
+  height: 100vh;
+}
+.model-missing {
+  position: absolute;
+  z-index: 3;
+  margin: 1rem;
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+}
+.overlay {
+  position: relative;
+  z-index: 2;
+  pointer-events: none;
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 14rem 1fr 14rem;
+  padding: 1.5rem;
+  gap: 1rem;
+}
+.overlay * {
+  pointer-events: auto;
+}
+.intro {
+  position: absolute;
+  z-index: 2;
+  top: 1.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(36rem, 70vw);
+  text-align: center;
+  pointer-events: none;
+}
+.intro h1 {
+  font-family: "Saira Condensed", "Arial Narrow", sans-serif;
+  font-size: 2rem;
+  margin: 0;
+  letter-spacing: 0.02em;
+}
+.intro p {
+  margin: 0.4rem 0 0;
+  color: #9db0c8;
+}
+.col {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  padding-top: 7rem;
+}
+.col.right {
+  align-items: flex-end;
+}
+.label {
+  background: #10182a;
+  color: inherit;
+  border: 1px solid #2a3b55;
+  padding: 0.45rem 0.7rem;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.label.on {
+  border-color: #5ce1ff;
+  color: #5ce1ff;
+}
+.label:focus {
+  outline: 2px solid #7eb6ff;
+  outline-offset: 2px;
+}
+.lines {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+.card {
+  position: absolute;
+  z-index: 3;
+  right: 1.5rem;
+  bottom: 5.5rem;
+  width: min(22rem, 90vw);
+  background: #10182a;
+  border: 1px solid #2a3b55;
+  padding: 1rem;
+}
+.card h2 {
+  font-family: "Saira Condensed", "Arial Narrow", sans-serif;
+  margin: 0 0 0.3rem;
+}
+.card p {
+  margin: 0.35rem 0;
+}
+.card .q {
+  color: #5ce1ff;
+}
+.card .status {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 0.85rem;
+  color: #9db0c8;
+}
+.cta {
+  position: absolute;
+  z-index: 3;
+  right: 1.5rem;
+  bottom: 1.5rem;
+  background: #5ce1ff;
+  color: #070b14;
+  text-decoration: none;
+  font-family: "Saira Condensed", "Arial Narrow", sans-serif;
+  font-weight: 700;
+  padding: 0.55rem 0.85rem;
+}
+@media (max-width: 800px) {
+  .overlay {
+    display: flex;
+    flex-direction: column;
+    padding-top: 55vh;
+    pointer-events: auto;
+  }
+  .intro {
+    width: auto;
+    left: 1rem;
+    right: 1rem;
+    transform: none;
+  }
+  .col,
+  .col.right {
+    align-items: stretch;
+    padding-top: 0;
+  }
+  .lines {
+    display: none;
+  }
+  .card {
+    position: static;
+    width: auto;
+  }
+  .cta {
+    position: static;
+    display: inline-block;
+    margin-top: 0.8rem;
+  }
+}

@@ -20,6 +20,7 @@ uniform float uTime;
 uniform float uAudio;
 uniform float uPointSize;
 uniform float uDpr;
+uniform vec3 uPull;
 varying float vAlpha;
 vec3 decodeTarget() {
   return mix(uBBoxMin, uBBoxMax, target / 65535.0);
@@ -38,8 +39,7 @@ vec3 spiralPos() {
 void main() {
   vec3 dest = decodeTarget();
   dest.y += sin(uTime * 2.0 + seed * 6.2831853) * uState.z;
-  vec3 chest = vec3(0.0, mix(uBBoxMin.y, uBBoxMax.y, 0.76), 0.0);
-  dest = mix(dest, chest, uState.w);
+  dest = mix(dest, uPull, uState.w);
   dest.y -= (1.0 - uState.x) * (uBBoxMax.y - uBBoxMin.y) * 0.35;
   vec3 p0 = cloudPos();
   vec3 p1 = spiralPos();
@@ -83,6 +83,7 @@ export function ParticleField({
   params,
   presence,
   startedAtMs,
+  pullTarget,
 }: {
   cloud: Uint16Array;
   meta: PointsMeta;
@@ -90,6 +91,7 @@ export function ParticleField({
   params: StateParams;
   presence: PresenceState;
   startedAtMs: number;
+  pullTarget?: readonly [number, number, number];
 }) {
   const geo = useMemo(() => {
     const geometry = new BufferGeometry();
@@ -120,6 +122,7 @@ export function ParticleField({
           uAudio: { value: 0 },
           uPointSize: { value: 2.0 },
           uDpr: { value: 1 },
+          uPull: { value: [0, meta.bbox.min[1] + (meta.bbox.max[1] - meta.bbox.min[1]) * 0.76, 0] },
           uColor: { value: params.coreColor.slice() },
         },
       }),
@@ -145,6 +148,12 @@ export function ParticleField({
     c[2] += (params.coreColor[2] - c[2]) * 0.04;
     uniforms.uAudio.value = 0;
     uniforms.uDpr.value = state.gl.getPixelRatio();
+    const chest: [number, number, number] = [
+      0,
+      meta.bbox.min[1] + (meta.bbox.max[1] - meta.bbox.min[1]) * 0.76,
+      0,
+    ];
+    uniforms.uPull.value = pullTarget ? pullTarget.slice() : chest;
     const w = window as Window & { __veraxPushFrame?: (ms: number) => void };
     w.__veraxPushFrame?.(dt * 1000);
   });
