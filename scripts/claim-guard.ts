@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // adapted from cedulon@da7bf9b
 // Cedulon's original scan rejects a handwritten suite size. Verax also
-// rejects a short list of certainty phrases on README.md and docs/.
+// rejects a short list of certainty phrases on README.md, docs/, and
+// the body-map public copy.
 //
 // This script does not run the suite. It only reads files.
 
@@ -36,6 +37,8 @@ const BANNED_PHRASES: ReadonlyArray<{ name: string; re: RegExp }> = [
   { name: "secure by default", re: /\bsecure by default\b/i },
   { name: "production-ready", re: /\bproduction-ready\b/i },
   { name: "60 fps", re: /\b60\s*fps\b/i },
+  { name: "every payment reconciles", re: /every payment reconciles/i },
+  { name: "independently verified", re: /independently verified/i },
 ];
 
 function stripTags(s: string): string {
@@ -64,7 +67,12 @@ function publishedFiles(base: string): string[] {
         .filter((n) => n.endsWith(".md"))
         .map((n) => join("docs", n).replace(/\\/g, "/"))
     : [];
-  return [...docs, "README.md"];
+  return [
+    ...docs,
+    "README.md",
+    "apps/body-map/src/copy/en.json",
+    "apps/body-map/src/copy/tr.json",
+  ];
 }
 
 function loadExceptions(base: string): Exception[] {

@@ -1,7 +1,8 @@
 import { signDecisionRecord } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
-import type { Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
+import { inputsLogFor } from "./inputs.ts";
+import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
 function denied(reasonCode: string, ref: string): ToolResult {
   return {
@@ -30,25 +31,84 @@ function thrownPayload(err: unknown): unknown {
   return { name: "thrown" };
 }
 
+function declaredInputs(args: Record<string, unknown>): { id: string; versionHash: string }[] | "invalid" | null {
+  if (!Object.prototype.hasOwnProperty.call(args, "_inputs")) return null;
+  const raw = args._inputs;
+  if (!Array.isArray(raw)) return "invalid";
+  const out: { id: string; versionHash: string }[] = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return "invalid";
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.id !== "string" || rec.id === "" || typeof rec.versionHash !== "string" || rec.versionHash === "") {
+      return "invalid";
+    }
+    out.push({ id: rec.id, versionHash: rec.versionHash });
+  }
+  return out;
+}
+
+function toolCallOf(call: ToolCall): ToolCall {
+  const args = { ...call.arguments };
+  delete args._inputs;
+  return { name: call.name, arguments: args };
+}
+
 export function createProxy(deps: ProxyDeps) {
+  const inputsLog = deps.inputsLog ?? inputsLogFor(deps.ledger);
+  (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   return {
     async call(call: ToolCall, principal: Principal): Promise<ToolResult> {
       const verdict = deps.policy.evaluate(call, principal);
       const ref = deps.nonce();
       const timestampMs = deps.now();
-      const allow = verdict.decision === "allow";
+      const declared = declaredInputs(call.arguments);
+      let reasonCode = verdict.reasonCode;
+      let decision = verdict.decision;
+      const rows: DecisionInputRow[] = [];
+      if (declared === "invalid") {
+        decision = "deny";
+        reasonCode = "input-invalid";
+      } else if (declared) {
+        for (const item of declared) {
+          const got = deps.resolveInput ? await deps.resolveInput(item.id) : null;
+          if (
+            !got ||
+            got.versionHash !== item.versionHash ||
+            got.validFromMs > timestampMs ||
+            got.validUntilMs < timestampMs
+          ) {
+            decision = "deny";
+            reasonCode = "input-invalid";
+            break;
+          }
+          rows.push({
+            id: item.id,
+            versionHash: item.versionHash,
+            validFromMs: got.validFromMs,
+            validUntilMs: got.validUntilMs,
+          });
+        }
+      }
+      const inputs: DecisionInputs = {
+        principal: { brain: principal.brain, scopes: [...principal.scopes].sort() },
+        inputs: reasonCode === "input-invalid" ? [] : rows,
+      };
+      const inputsHash = sha256Canonical(inputs);
+      await inputsLog.append(ref, inputs);
+      const allow = decision === "allow";
+      const dispatched = toolCallOf(call);
       await deps.ledger.appendDecisionChained((prevRecordHash) =>
         signDecisionRecord(
           {
             decider: "verax-proxy",
             subject: call.name,
-            requestHash: sha256Canonical(call),
+            requestHash: sha256Canonical(dispatched),
             policyHash: deps.policy.hash,
-            inputsHash: null,
-            decision: verdict.decision,
-            reasonCode: verdict.reasonCode,
+            inputsHash,
+            decision,
+            reasonCode,
             ref,
-            effectHash: allow ? sha256Canonical(effectDescriptor(call.name, call.arguments)) : null,
+            effectHash: allow ? sha256Canonical(effectDescriptor(dispatched.name, dispatched.arguments)) : null,
             timestampMs,
             nonce: ref,
             prevRecordHash,
@@ -58,11 +118,11 @@ export function createProxy(deps: ProxyDeps) {
         ),
       );
       if (!allow) {
-        return denied(verdict.reasonCode, ref);
+        return denied(reasonCode, ref);
       }
 
-      const dispatchedName = call.name;
-      const dispatchedArgs = deepFreeze(structuredClone(call.arguments));
+      const dispatchedName = dispatched.name;
+      const dispatchedArgs = deepFreeze(structuredClone(dispatched.arguments));
       const dispatchedHash = sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs));
       const thrownHash = sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs, true));
       const frozenCall: ToolCall = Object.freeze({

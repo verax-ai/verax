@@ -46,6 +46,37 @@ async function rpc(
   return { status: res.status, www: res.headers.get("www-authenticate") ?? undefined, json };
 }
 
+describe("healthz counts", () => {
+  it("unauthenticated healthz answers ok only; decisions is absent", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-healthz-"));
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const bodyPort = (server.address() as { port: number }).port;
+    try {
+      const health = await fetch(`http://127.0.0.1:${bodyPort}/healthz`);
+      assert.equal(health.status, 200);
+      const healthBody = (await health.json()) as Record<string, unknown>;
+      assert.equal(healthBody.ok, true);
+      assert.equal("decisions" in healthBody, false, JSON.stringify(healthBody));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+});
+
 describe("B5 identity and scope + e2e", () => {
   it("401 without a token leaves the ledger empty; scopes and algs are enforced", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-body-"));
@@ -64,9 +95,29 @@ describe("B5 identity and scope + e2e", () => {
     const bodyPort = (server.address() as { port: number }).port;
     const mcp = `http://127.0.0.1:${bodyPort}/mcp`;
     try {
-      const health = await fetch(`http://127.0.0.1:${bodyPort}/healthz`);
+      const anonHealth = await fetch(`http://127.0.0.1:${bodyPort}/healthz`);
+      assert.equal(anonHealth.status, 200);
+      const anonBody = (await anonHealth.json()) as Record<string, unknown>;
+      assert.equal(anonBody.ok, true);
+      assert.equal("decisions" in anonBody, false);
+
+      const readToken = await issuer.sign({ scope: "verax:read" });
+      const health = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${readToken}` },
+      });
       assert.equal(health.status, 200);
-      assert.deepEqual(await health.json(), { ok: true });
+      const healthBody = (await health.json()) as {
+        ok?: boolean;
+        decisions?: number;
+        effects?: number;
+        lastDecisionMs?: number | null;
+        lock?: string;
+      };
+      assert.equal(healthBody.ok, true);
+      assert.equal(healthBody.decisions, 0);
+      assert.equal(healthBody.effects, 0);
+      assert.equal(healthBody.lastDecisionMs, null);
+      assert.equal(healthBody.lock, "held");
 
       const none = await rpc(mcp, null, "tools/call", { name: "memory.get", arguments: { id: "x" } });
       assert.equal(none.status, 401);
@@ -104,6 +155,31 @@ describe("B5 identity and scope + e2e", () => {
       assert.equal(putOk.status, 200);
       assert.equal((putOk.json?.result as { isError?: boolean })?.isError, false);
       assert.match(readFileSync(join(stateDir, "effects.jsonl"), "utf8"), /memory\.put/);
+
+      const healthAfter = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${readOnly}` },
+      });
+      const afterBody = (await healthAfter.json()) as {
+        decisions?: number;
+        effects?: number;
+        lastDecisionMs?: number | null;
+        lock?: string;
+      };
+      const decisionLines = readFileSync(join(stateDir, "decisions.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter((l) => l !== "");
+      const effectLines = readFileSync(join(stateDir, "effects.jsonl"), "utf8")
+        .trim()
+        .split("\n")
+        .filter((l) => l !== "");
+      assert.equal(afterBody.decisions, decisionLines.length);
+      assert.equal(afterBody.effects, effectLines.length);
+      const lastDecision = JSON.parse(decisionLines[decisionLines.length - 1] ?? "{}") as {
+        claims: { timestampMs: number };
+      };
+      assert.equal(afterBody.lastDecisionMs, lastDecision.claims.timestampMs);
+      assert.equal(afterBody.lock, "held");
 
       const got = await rpc(mcp, full, "tools/call", { name: "memory.get", arguments: { id: "n1" } });
       const gotText = (got.json?.result as { content?: { text?: string }[] })?.content?.[0]?.text ?? "";

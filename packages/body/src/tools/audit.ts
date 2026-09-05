@@ -1,6 +1,10 @@
-import { explain, type Ledger, type ToolCall, type ToolResult } from "@verax-ai/proxy";
+import { explain, type ExplainOpts, type Ledger, type ToolCall, type ToolResult } from "@verax-ai/proxy";
 
-export async function auditExplain(call: ToolCall, ledger: Ledger): Promise<ToolResult> {
+export async function auditExplain(
+  call: ToolCall,
+  ledger: Ledger,
+  opts?: ExplainOpts,
+): Promise<ToolResult> {
   const ref = call.arguments.ref;
   if (typeof ref !== "string" || ref === "") {
     return {
@@ -8,7 +12,7 @@ export async function auditExplain(call: ToolCall, ledger: Ledger): Promise<Tool
       isError: true,
     };
   }
-  const result = await explain(ledger, ref);
+  const result = await explain(ledger, ref, opts);
   return {
     content: [
       {
@@ -18,6 +22,9 @@ export async function auditExplain(call: ToolCall, ledger: Ledger): Promise<Tool
           effect: result.effect,
           finding: result.finding,
           witnessClass: result.witnessClass,
+          guarantee: result.guarantee,
+          warnings: result.warnings,
+          trustRoot: result.trustRoot,
         }),
       },
     ],

@@ -1,11 +1,19 @@
 import { useState } from "react";
-import type { RailAction, RailFinding } from "./types.ts";
+import type { RailAction, RailFinding, RailWarning } from "./types.ts";
 
 export type RailProps = {
   actions: RailAction[];
   onContest?: (
     ref: string,
-  ) => Promise<{ reAuditedAt?: number; finding?: RailFinding; error?: string } | void>;
+  ) => Promise<{
+    reAuditedAt?: number;
+    finding?: RailFinding;
+    guarantee?: "unconditional" | "conditional";
+    warnings?: RailWarning[];
+    witnessClass?: string | null;
+    trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+    error?: string;
+  } | void>;
 };
 
 function kindOf(action: RailAction): "allow" | "deny" | "threw" {
@@ -23,6 +31,17 @@ export function Rail({ actions, onContest }: RailProps) {
   const [open, setOpen] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
   const [stamp, setStamp] = useState<Record<string, string>>({});
   const [findings, setFindings] = useState<Record<string, RailFinding>>({});
+  const [audits, setAudits] = useState<
+    Record<
+      string,
+      {
+        guarantee?: "unconditional" | "conditional";
+        warnings?: RailWarning[];
+        witnessClass?: string | null;
+        trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+      }
+    >
+  >({});
 
   return (
     <nav className="rail" aria-label="Account-for rail">
@@ -32,8 +51,22 @@ export function Rail({ actions, onContest }: RailProps) {
           const kind = kindOf(action);
           const expanded = open === ref;
           const finding = findings[ref] ?? action.finding;
-          const brain = action.effect?.row.actor ?? "not on the decision record";
-          const ruleLine = action.rule ? JSON.stringify(action.rule) : "no matching rule";
+          const audit = audits[ref];
+          const guarantee = audit?.guarantee ?? action.guarantee;
+          const warnings = audit?.warnings ?? action.warnings ?? [];
+          const witness = audit?.witnessClass ?? action.witnessClass ?? action.effect?.witnessClass ?? null;
+          const trust = audit?.trustRoot ?? action.trustRoot;
+          const pinLabel =
+            trust?.source === "env" ? "pin: env" : trust?.source === "own-key" ? "pin: own key" : "pin: none";
+          const identityMissing = !action.inputsBound && typeof action.record.claims.inputsHash === "string";
+          const brain = action.inputsBound && action.inputs
+            ? `${action.inputs.principal.brain} from the decision record (hash-bound)`
+            : identityMissing
+              ? "identity hash on the record; inputs document unavailable"
+              : "not on the decision record";
+          const missing = action.rule && "missing" in action.rule ? action.rule.missing : null;
+          const matched = action.rule && !("missing" in action.rule) ? action.rule : null;
+          const ruleLine = matched ? JSON.stringify(matched) : missing ? "" : "no matching rule";
           return (
             <li key={ref}>
               <button
@@ -51,11 +84,20 @@ export function Rail({ actions, onContest }: RailProps) {
               </button>
               {expanded ? (
                 <section className="questions">
+                  {guarantee ? (
+                    <p className={`guarantee ${guarantee}`}>
+                      guarantee {guarantee}
+                      {warnings.length > 0 ? ` ${warnings.map((w) => w.code).join(" ")}` : ""}
+                      {` ${pinLabel}`}
+                    </p>
+                  ) : null}
+                  <p className="witness">witness {witness ?? "none"}</p>
                   <h2>What did you do</h2>
                   <p>
                     {action.record.claims.subject} {action.record.claims.decision}{" "}
                     {action.record.claims.reasonCode} at {action.record.claims.timestampMs} by{" "}
-                    {action.record.claims.decider} for brain {brain}
+                    {action.record.claims.decider} for brain{" "}
+                    {identityMissing ? <span className="rule-missing">{brain}</span> : brain}
                   </p>
                   {action.effect ? (
                     <p>
@@ -76,10 +118,14 @@ export function Rail({ actions, onContest }: RailProps) {
                   <h2>What did it do to the company</h2>
                   <p>not connected</p>
                   <h2>Was it within the rules</h2>
-                  <p>
-                    policy {action.record.claims.policyHash} rule {action.rule?.id ?? "none"} {ruleLine}{" "}
-                    {action.rule?.text ?? ""}
-                  </p>
+                  {missing ? (
+                    <p className="rule-missing">{missing}</p>
+                  ) : (
+                    <p>
+                      policy {action.record.claims.policyHash} rule {matched?.id ?? "none"} {ruleLine}{" "}
+                      {matched?.text ?? ""}
+                    </p>
+                  )}
                   <button
                     type="button"
                     className="contest focusable"
@@ -98,6 +144,15 @@ export function Rail({ actions, onContest }: RailProps) {
                       if (out.finding) {
                         setFindings((s) => ({ ...s, [ref]: out.finding as RailFinding }));
                       }
+                      setAudits((s) => ({
+                        ...s,
+                        [ref]: {
+                          guarantee: out.guarantee,
+                          warnings: out.warnings,
+                          witnessClass: out.witnessClass,
+                          trustRoot: out.trustRoot,
+                        },
+                      }));
                     }}
                   >
                     Contest

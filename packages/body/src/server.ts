@@ -7,6 +7,8 @@ import { explain } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpUnauthenticated } from "./metrics.ts";
 import { loadOrCreateSigners } from "./keys.ts";
+import { matchingInputs } from "./inputs-read.ts";
+import { readPolicySnapshots } from "./policy-store.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
 const TOOL_META = [
@@ -142,7 +144,30 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
-      send(res, 200, { ok: true });
+      const token = readBearer(req.headers.authorization);
+      let canRead = false;
+      if (token) {
+        try {
+          const verified = await verify(token);
+          canRead = verified.principal.scopes.has("verax:read");
+        } catch {
+          canRead = false;
+        }
+      }
+      if (!canRead) {
+        send(res, 200, { ok: true });
+        return;
+      }
+      const decisions = await services.ledger.decisions();
+      const effects = await services.ledger.effects();
+      const last = decisions[decisions.length - 1];
+      send(res, 200, {
+        ok: true,
+        decisions: decisions.length,
+        effects: effects.length,
+        lastDecisionMs: last ? last.claims.timestampMs : null,
+        lock: services.ledger.lockStatus(),
+      });
       return;
     }
     if (req.method === "GET" && isProtectedResourcePath(url.pathname, config.audience)) {
@@ -189,15 +214,18 @@ export async function listen(config: BodyConfig): Promise<Server> {
           const effects = (await services.ledger.effects()).filter(
             (e) => e.row.timestampMs >= from && e.row.timestampMs < to,
           );
+          const hashes = [...new Set(decisions.map((d) => d.claims.policyHash))];
           send(res, 200, {
             decisions,
             effects,
             policy: { hash: services.policyHash, document: services.policyDocument },
+            policies: readPolicySnapshots(config.stateDir, hashes),
+            inputs: await matchingInputs(config.stateDir, decisions),
           });
           return;
         }
         const ref = decodeURIComponent(url.pathname.slice("/api/contest/".length));
-        const result = await explain(services.ledger, ref);
+        const result = await explain(services.ledger, ref, await services.explainOpts());
         send(res, 200, { ...result, reAuditedAt: Date.now() });
         return;
       }

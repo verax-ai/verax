@@ -6,7 +6,9 @@ A sketch of who is assumed hostile. Nothing here is measured.
 
 The MCP client is an untrusted program. It may send any tool name, any
 arguments, any replay, and any social prompt. A grant is a signed
-decision, not a mood. A refusal is recorded the same way.
+decision, not a mood. A refusal is recorded the same way. Prompt
+injection through tool results is not filtered by policy; policy sees
+tool name and scopes only.
 
 ## the tool server is hostile
 

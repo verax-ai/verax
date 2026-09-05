@@ -33,11 +33,19 @@ export type Policy = {
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
 
+export type EffectAttestation = {
+  coseHex: string;
+};
+
 export type LedgerEffect = {
   row: EffectRow;
   witnessClass: WitnessClass;
   /** Hash of the ToolResult (or thrown payload). Not an EffectRow field. */
   resultHash?: string;
+  /** One-row extract signed at call time. */
+  receipt?: SignedEffectExtract;
+  /** Signed { ref, effectHash, witnessClass, resultHash } via COSE Sign1. */
+  attestation?: EffectAttestation;
 };
 
 export type RecordSigner = {
@@ -69,6 +77,29 @@ export type Ledger = {
   exportExtract(window: ExtractWindow, signer: EffectSigner): Promise<SignedEffectExtract>;
 };
 
+export type DecisionInputRow = {
+  id: string;
+  versionHash: string;
+  validFromMs: number;
+  validUntilMs: number;
+};
+
+export type DecisionInputs = {
+  principal: { brain: string; scopes: string[] };
+  inputs: DecisionInputRow[];
+};
+
+export type InputsLog = {
+  append(ref: string, inputs: DecisionInputs): Promise<void>;
+  get(ref: string): Promise<DecisionInputs | null>;
+};
+
+export type ResolvedInput = {
+  versionHash: string;
+  validFromMs: number;
+  validUntilMs: number;
+};
+
 export type ProxyDeps = {
   policy: Policy;
   recordSigner: RecordSigner;
@@ -77,6 +108,8 @@ export type ProxyDeps = {
   now: () => number;
   nonce: () => string;
   inner: (call: ToolCall, principal: Principal) => Promise<ToolResult>;
+  inputsLog?: InputsLog;
+  resolveInput?: (id: string) => Promise<ResolvedInput | null>;
 };
 
 export type ExplainFinding = {
@@ -92,6 +125,24 @@ export type ExplainChain = {
   breakAt: string | null;
 };
 
+export type ExplainWarning = {
+  id: string;
+  code: string;
+  detail: string;
+};
+
+export type ExplainOpts = {
+  issuerTrust?: { publicKeyPem: string | readonly string[]; source?: "env" | "own-key" };
+  extract?: import("@cedulon/effect-extract").SignedEffectExtract | import("@cedulon/x402-adapter").SignedRailExtract;
+  inputsLog?: InputsLog;
+};
+
+export type ExplainTrustRoot = {
+  pinned: boolean;
+  issuerMatches: boolean | null;
+  source: "env" | "own-key" | null;
+};
+
 export type ExplainResult = {
   record: SignedDecisionRecord;
   effect: LedgerEffect | null;
@@ -99,4 +150,13 @@ export type ExplainResult = {
   witnessClass: WitnessClass | null;
   balanced: boolean;
   chain: ExplainChain;
+  guarantee: "unconditional" | "conditional";
+  warnings: ExplainWarning[];
+  trustRoot: ExplainTrustRoot;
+  scope?: {
+    accountId: string;
+    railId: string;
+    windowStartMs: number;
+    windowEndMs: number;
+  };
 };

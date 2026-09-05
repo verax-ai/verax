@@ -1,5 +1,17 @@
-import { createProxy, FileLedger, loadPolicy, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
+import {
+  createProxy,
+  FileLedger,
+  loadPolicy,
+  type EffectSigner,
+  type ExplainOpts,
+  type Principal,
+  type RecordSigner,
+  type ToolCall,
+  type ToolResult,
+} from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
+import { persistPolicySnapshot } from "./policy-store.ts";
+import { readMemoryMeta } from "./tools/memory.ts";
 import { memoryGet, memoryPut } from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead } from "./tools/message.ts";
@@ -14,6 +26,7 @@ export type BodyServices = {
   policyHash: string;
   policyDocument: unknown;
   listTools: () => readonly string[];
+  explainOpts: () => Promise<ExplainOpts>;
 };
 
 /**
@@ -23,8 +36,8 @@ export type BodyServices = {
 export function createBodyServices(opts: {
   stateDir: string;
   policyFile: string;
-  recordSigner: { privateKeyPem: string; publicKeyPem: string };
-  effectSigner: { privateKeyPem: string; publicKeyPem: string };
+  recordSigner: RecordSigner;
+  effectSigner: EffectSigner;
   now?: () => number;
   nonce?: () => string;
 }): BodyServices {
@@ -32,13 +45,28 @@ export function createBodyServices(opts: {
   const policyText = readFileSync(opts.policyFile, "utf8");
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
+  persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
   const now = opts.now ?? (() => Date.now());
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
   registry.set("memory.get", (call) => memoryGet(call, opts.stateDir, now));
   registry.set("memory.put", (call) => memoryPut(call, opts.stateDir));
-  registry.set("audit.explain", (call) => auditExplain(call, ledger));
+  const explainOpts = async (): Promise<ExplainOpts> => {
+    const env = process.env.VERAX_RECORD_PUBKEY_PIN;
+    const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
+    return {
+      ...(pem
+        ? {
+            issuerTrust: {
+              publicKeyPem: pem,
+              source: env && env.trim() !== "" ? "env" : "own-key",
+            },
+          }
+        : {}),
+    };
+  };
+  registry.set("audit.explain", async (call) => auditExplain(call, ledger, await explainOpts()));
   registry.set("message.read", (call) => messageRead(call, opts.stateDir));
 
   const inner: ToolFn = async (call) => {
@@ -60,6 +88,7 @@ export function createBodyServices(opts: {
     now,
     nonce,
     inner,
+    resolveInput: (id) => readMemoryMeta(opts.stateDir, id),
   });
 
   return {
@@ -68,5 +97,6 @@ export function createBodyServices(opts: {
     policyHash: policy.hash,
     policyDocument,
     listTools: () => TOOL_NAMES,
+    explainOpts,
   };
 }
