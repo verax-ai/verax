@@ -33,6 +33,8 @@ describe("claim-guard", () => {
     assert.equal(matchBanned("secure by default once configured"), "secure by default");
     assert.equal(matchBanned("production-ready after review"), "production-ready");
     assert.equal(matchBanned("holds 60 fps on a laptop"), "60 fps");
+    assert.equal(matchBanned("every payment reconciles on the rail"), "every payment reconciles");
+    assert.equal(matchBanned("the extract is independently verified"), "independently verified");
     assert.equal(matchBanned("Works out of the box."), "works (sentence-initial)");
     assert.equal(matchBanned("The network works when configured."), null);
     assert.equal(matchBanned("114 passing tests on CI"), "suite-size");
