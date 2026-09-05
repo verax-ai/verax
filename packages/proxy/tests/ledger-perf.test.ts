@@ -40,7 +40,7 @@ function cheapRecord(i: number, prev: string | null): SignedDecisionRecord {
 }
 
 describe("B8 FileLedger append cost and durability", () => {
-  it("last 100 of 2000 chained appends stay within 2x the first 100", () => {
+  it("2000 chained appends reread decisions.jsonl zero times (wall-clock ratio is printed, not asserted)", () => {
     const ran = spawnSync(process.execPath, ["--experimental-strip-types", worker], {
       encoding: "utf8",
       timeout: 60_000,
