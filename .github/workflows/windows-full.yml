@@ -34,4 +34,6 @@ jobs:
           echo "autocrlf=$(git config core.autocrlf || echo unset)"
           node -e "const {tmpdir}=require('os'); console.log('tmpdir', tmpdir());"
       - run: npm ci --ignore-scripts
+      # The body-map page tests drive a real Chromium; the suite must carry it too.
+      - run: npx playwright install chromium
       - run: npm test

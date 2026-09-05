@@ -40,6 +40,7 @@ describe("panel-perf", () => {
     const last = join(dir, "last.json");
     const result = await spawnScript(measure, {
       VERAX_PERF_FAKE_FRAMES: "10",
+      VERAX_PERF_MIN_FRAMES: "30",
       VERAX_PERF_LAST: last,
     });
     assert.equal(result.code, 1);

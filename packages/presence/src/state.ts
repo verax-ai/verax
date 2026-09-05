@@ -50,12 +50,12 @@ export type Presence = {
   transition(next: PresenceState): void;
 };
 
-export function createPresence(now: () => number): Presence {
-  let current: PresenceState = "booting";
+export function createPresence(now: () => number, start: PresenceState = "booting"): Presence {
+  let current: PresenceState = start;
   const bootStartedMs = now();
 
   const settle = (): PresenceState => {
-    if (current === "booting" && now() - bootStartedMs >= BOOT_MS) {
+    if (start === "booting" && current === "booting" && now() - bootStartedMs >= BOOT_MS) {
       current = "idle";
     }
     return current;

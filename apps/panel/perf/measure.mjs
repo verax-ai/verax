@@ -10,11 +10,28 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outPath = process.env.VERAX_PERF_LAST ?? join(root, "perf", "last.json");
 const tier = Number(process.env.VERAX_PERF_TIER ?? "15000");
+const gha = Boolean(process.env.GITHUB_ACTIONS);
+const headed = Boolean(process.env.VERAX_PERF_HEADED);
 const framesWanted = 300;
-const budgetMs = 20_000;
-const minFrames = 30;
-const gl = "swiftshader";
+const budgetMs = Number(process.env.VERAX_PERF_BUDGET_MS ?? (gha ? 40_000 : 20_000));
+const minFrames = Number(process.env.VERAX_PERF_MIN_FRAMES ?? (gha ? 10 : 30));
+const gl = headed ? "gpu" : "swiftshader";
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
+
+/** `--url` probes an already-running page; default is the panel preview. */
+export function readUrlArg(argv = process.argv) {
+  const i = argv.indexOf("--url");
+  if (i === -1) return null;
+  const value = argv[i + 1];
+  if (!value || value.startsWith("-")) throw new Error("url-missing");
+  return value;
+}
+
+export function withTier(url, n) {
+  const u = new URL(url);
+  u.searchParams.set("tier", String(n));
+  return u.href;
+}
 
 function envKey() {
   const envTag = process.env.GITHUB_ACTIONS
@@ -193,16 +210,23 @@ async function main() {
   let browser;
   let child;
   try {
-    const port = await resolvePort();
-    child = startPreview(port);
-    process.stderr.write(`preview-pid:${child.pid}\n`);
-    const url = await waitReady(child);
+    const given = readUrlArg(process.argv);
+    let url;
+    if (given) {
+      url = given;
+    } else {
+      const port = await resolvePort();
+      child = startPreview(port);
+      process.stderr.write(`preview-pid:${child.pid}\n`);
+      url = await waitReady(child);
+    }
     const { chromium } = await import("playwright");
     browser = await chromium.launch({
-      args: ["--use-gl=swiftshader", "--use-angle=swiftshader"],
+      headless: !headed,
+      args: headed ? [] : ["--use-gl=swiftshader", "--use-angle=swiftshader"],
     });
     const page = await browser.newPage();
-    await page.goto(`${url}?tier=${tier}`, { waitUntil: "networkidle" });
+    await page.goto(withTier(url, tier), { waitUntil: "networkidle" });
     await page.waitForTimeout(4500);
     const samples = await page.evaluate(
       async ({ n, ms }) => {

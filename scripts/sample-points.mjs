@@ -189,6 +189,7 @@ export async function samplePoints(glbPath, outDir) {
     count: COUNT,
     bbox: { min: [minx, miny, minz], max: [maxx, maxy, maxz] },
     sourceSha256,
+    source: "operator-generated (ChatGPT image, Meshy AI paid plan); see docs/STATUS.md",
   };
   writeFileSync(jsonPath, `${JSON.stringify(meta, null, 2)}\n`);
   return { binPath, jsonPath, sha256: createHash("sha256").update(body).digest("hex"), meta };
