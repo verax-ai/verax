@@ -1,5 +1,6 @@
-import { appendFile, readFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { appendDurable } from "./ledger.ts";
 import type { DecisionInputs, InputsLog } from "./types.ts";
 
 type Row = { ref: string; inputs: DecisionInputs };
@@ -24,9 +25,7 @@ export class FileInputsLog implements InputsLog {
   }
 
   async append(ref: string, inputs: DecisionInputs): Promise<void> {
-    await appendFile(join(this.dir, "inputs.jsonl"), `${JSON.stringify({ ref, inputs })}\n`, {
-      encoding: "utf8",
-    });
+    await appendDurable(join(this.dir, "inputs.jsonl"), `${JSON.stringify({ ref, inputs })}\n`);
   }
 
   async get(ref: string): Promise<DecisionInputs | null> {

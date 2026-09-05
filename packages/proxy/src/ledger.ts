@@ -76,7 +76,7 @@ function readJsonlSync<T>(path: string): T[] {
 }
 
 /** Write then fsync so a crash cannot drop a committed line. */
-async function appendDurable(path: string, line: string): Promise<void> {
+export async function appendDurable(path: string, line: string): Promise<void> {
   const fh = await ledgerFs.open(path, "a");
   try {
     await fh.write(line);

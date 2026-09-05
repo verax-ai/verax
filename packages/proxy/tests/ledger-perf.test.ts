@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import * as fsp from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -10,8 +10,13 @@ import { fileURLToPath } from "node:url";
 import type { SignedDecisionRecord } from "@cedulon/core";
 
 import { FileLedger, ledgerFs } from "../src/ledger.ts";
+import { createProxy } from "../src/proxy.ts";
+import { loadPolicy } from "../src/policy.ts";
+import { EFFECT_SIGNER, RECORD_SIGNER, queuedNonce, tickingNow } from "./helpers.ts";
 
-const worker = join(dirname(fileURLToPath(import.meta.url)), "ledger-perf-worker.ts");
+const here = dirname(fileURLToPath(import.meta.url));
+const worker = join(here, "ledger-perf-worker.ts");
+const policy = loadPolicy(readFileSync(join(here, "..", "policy", "default.json"), "utf8"));
 
 type HandleSync = {
   sync: (...args: unknown[]) => Promise<unknown>;
@@ -109,6 +114,39 @@ describe("B8 FileLedger append cost and durability", () => {
         "33".repeat(32),
       );
       assert.equal(syncs, 3, `fsync count ${syncs} (want 1 per append)`);
+    } finally {
+      proto.sync = origSync;
+      ledger.close();
+    }
+  });
+
+  it("a deny proxy call fsyncs the inputs document and the decision", async () => {
+    const probeDir = mkdtempSync(join(tmpdir(), "verax-inputs-sync-probe-"));
+    const probe = join(probeDir, "p");
+    writeFileSync(probe, "");
+    const probeFh = await fsp.open(probe, "r");
+    const proto = Object.getPrototypeOf(probeFh) as HandleSync;
+    await probeFh.close();
+    let syncs = 0;
+    const origSync = proto.sync;
+    proto.sync = async function syncWrapped(this: unknown, ...args: unknown[]) {
+      syncs += 1;
+      return origSync.apply(this, args);
+    };
+    const dir = mkdtempSync(join(tmpdir(), "verax-inputs-fsync-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy,
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["deny-fsync-1"]),
+        inner: async () => ({ content: [{ type: "text", text: "no" }], isError: false }),
+      });
+      await proxy.call({ name: "memory.get", arguments: { id: "x" } }, { brain: "brain-1", scopes: new Set() });
+      assert.equal(syncs, 2, `fsync count ${syncs} (want inputs + decision)`);
     } finally {
       proto.sync = origSync;
       ledger.close();
