@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+// @ts-expect-error measure.mjs is an untyped script
 import { stopPreview } from "../apps/panel/perf/measure.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -141,7 +142,9 @@ describe("panel-perf", () => {
       windowsHide: true,
     });
     const pid = child.pid;
-    assert.equal(typeof pid, "number");
+    if (typeof pid !== "number") {
+      assert.fail("no-pid");
+    }
     process.kill(pid, 0);
     stopPreview(child);
     const deadline = Date.now() + 2000;
