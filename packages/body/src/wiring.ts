@@ -55,13 +55,6 @@ export function createBodyServices(opts: {
   const explainOpts = async (): Promise<ExplainOpts> => {
     const env = process.env.VERAX_RECORD_PUBKEY_PIN;
     const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
-    const effects = await ledger.effects();
-    let extract: ExplainOpts["extract"];
-    if (effects.length > 0) {
-      const start = Math.min(...effects.map((e) => e.row.timestampMs));
-      const end = Math.max(...effects.map((e) => e.row.timestampMs)) + 1;
-      extract = await ledger.exportExtract({ startMs: start, endMs: end }, opts.effectSigner);
-    }
     return {
       ...(pem
         ? {
@@ -71,7 +64,6 @@ export function createBodyServices(opts: {
             },
           }
         : {}),
-      ...(extract ? { extract } : {}),
     };
   };
   registry.set("audit.explain", async (call) => auditExplain(call, ledger, await explainOpts()));
