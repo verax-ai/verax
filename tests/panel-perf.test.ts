@@ -1,10 +1,12 @@
 import { strict as assert } from "node:assert";
+import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { stopPreview } from "../apps/panel/perf/measure.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const measure = join(root, "apps", "panel", "perf", "measure.mjs");
@@ -99,5 +101,61 @@ describe("panel-perf", () => {
       GITHUB_ACTIONS: "",
     });
     assert.equal(result.code, 1);
+  });
+
+  it("occupied port exits preview-port-busy", async () => {
+    const server = createServer((_req, res) => {
+      res.statusCode = 500;
+      res.end("zombie");
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (typeof addr === "object" && addr) {
+          resolve(addr.port);
+          return;
+        }
+        reject(new Error("no-port"));
+      });
+    });
+    try {
+      const result = await spawnScript(measure, {
+        VERAX_PERF_PORT: String(port),
+      });
+      assert.equal(result.code, 1);
+      assert.match(result.stderr, /preview-port-busy/);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    }
+  });
+
+  it("stopPreview leaves the child pid dead", async () => {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const pid = child.pid;
+    assert.equal(typeof pid, "number");
+    process.kill(pid, 0);
+    stopPreview(child);
+    const deadline = Date.now() + 2000;
+    let dead = false;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        assert.equal((err as NodeJS.ErrnoException).code, "ESRCH");
+        dead = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(dead, true);
   });
 });

@@ -16,7 +16,9 @@ regression guard; it is not an fps claim.
 row is `win32/swiftshader/local`. There is no CI baseline yet.
 
 `measure.mjs` stops at 20 s or 300 frames, whichever comes first.
-Fewer than 30 frames is `render-failed`. When a key has a baseline,
+Fewer than 30 frames is `render-failed`. Each run starts its own
+preview on a strict port and tears it down; a busy port is an
+error, not a fallback. When a key has a baseline,
 the `panel-perf` job fails if `last.json` P95 exceeds that entry
 x 1.3. When the key is missing, check-baseline writes
 `no baseline for <key>; recorded` and passes; `last.json` is uploaded
