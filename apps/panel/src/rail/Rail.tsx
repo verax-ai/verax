@@ -11,6 +11,7 @@ export type RailProps = {
     guarantee?: "unconditional" | "conditional";
     warnings?: RailWarning[];
     witnessClass?: string | null;
+    trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
     error?: string;
   } | void>;
 };
@@ -31,7 +32,15 @@ export function Rail({ actions, onContest }: RailProps) {
   const [stamp, setStamp] = useState<Record<string, string>>({});
   const [findings, setFindings] = useState<Record<string, RailFinding>>({});
   const [audits, setAudits] = useState<
-    Record<string, { guarantee?: "unconditional" | "conditional"; warnings?: RailWarning[]; witnessClass?: string | null }>
+    Record<
+      string,
+      {
+        guarantee?: "unconditional" | "conditional";
+        warnings?: RailWarning[];
+        witnessClass?: string | null;
+        trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+      }
+    >
   >({});
 
   return (
@@ -46,6 +55,9 @@ export function Rail({ actions, onContest }: RailProps) {
           const guarantee = audit?.guarantee ?? action.guarantee;
           const warnings = audit?.warnings ?? action.warnings ?? [];
           const witness = audit?.witnessClass ?? action.witnessClass ?? action.effect?.witnessClass ?? null;
+          const trust = audit?.trustRoot ?? action.trustRoot;
+          const pinLabel =
+            trust?.source === "env" ? "pin: env" : trust?.source === "own-key" ? "pin: own key" : "pin: none";
           const identityMissing = !action.inputsBound && typeof action.record.claims.inputsHash === "string";
           const brain = action.inputsBound && action.inputs
             ? `${action.inputs.principal.brain} from the decision record (hash-bound)`
@@ -76,6 +88,7 @@ export function Rail({ actions, onContest }: RailProps) {
                     <p className={`guarantee ${guarantee}`}>
                       guarantee {guarantee}
                       {warnings.length > 0 ? ` ${warnings.map((w) => w.code).join(" ")}` : ""}
+                      {` ${pinLabel}`}
                     </p>
                   ) : null}
                   <p className="witness">witness {witness ?? "none"}</p>
@@ -137,6 +150,7 @@ export function Rail({ actions, onContest }: RailProps) {
                           guarantee: out.guarantee,
                           warnings: out.warnings,
                           witnessClass: out.witnessClass,
+                          trustRoot: out.trustRoot,
                         },
                       }));
                     }}

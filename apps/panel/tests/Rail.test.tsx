@@ -95,6 +95,19 @@ describe("guarantee strip", () => {
     expect(screen.getByText(/unauthenticated-issuer/)).toBeTruthy();
     expect(screen.getByText(/guarantee/i)).toBeTruthy();
   });
+
+  it("shows pin: own key on the guarantee strip", () => {
+    const parsed = parseLedger(JSON.stringify(histDecision), "", {
+      aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] },
+    });
+    parsed[0] = {
+      ...parsed[0]!,
+      guarantee: "conditional",
+      trustRoot: { pinned: true, issuerMatches: true, source: "own-key" },
+    };
+    render(<Rail actions={parsed} />);
+    expect(screen.getByText(/pin: own key/)).toBeTruthy();
+  });
 });
 
 describe("historical policy sentence", () => {

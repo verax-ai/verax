@@ -72,4 +72,5 @@ export type RailAction = {
   witnessClass?: string | null;
   inputs?: RailInputs | null;
   inputsBound?: boolean;
+  trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
 };

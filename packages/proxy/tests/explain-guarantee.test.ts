@@ -114,4 +114,26 @@ describe("explain guarantee and general warnings", () => {
     assert.match(result.finding.summary, /extract/);
     services.ledger.close();
   });
+
+  it("7: a body-path explain without pin env names the own-key source", async () => {
+    delete process.env.VERAX_RECORD_PUBKEY_PIN;
+    const dir = mkdtempSync(join(tmpdir(), "verax-g3-own-key-"));
+    const policyFile = join(dirname(fileURLToPath(import.meta.url)), "..", "policy", "default.json");
+    const services = createBodyServices({
+      stateDir: dir,
+      policyFile,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      now: tickingNow(),
+      nonce: queuedNonce(["body-own-1"]),
+    });
+    await services.proxy.call(
+      { name: "memory.get", arguments: { id: "x" } },
+      { brain: "brain-1", scopes: new Set() },
+    );
+    const result = await explain(services.ledger, "body-own-1", await services.explainOpts());
+    assert.equal(result.trustRoot.source, "own-key");
+    assert.match(result.finding.summary, /own key/);
+    services.ledger.close();
+  });
 });

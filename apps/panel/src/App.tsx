@@ -119,6 +119,7 @@ export function App() {
                 guarantee?: "unconditional" | "conditional";
                 warnings?: { id: string; code: string; detail?: string }[];
                 witnessClass?: string | null;
+                trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
               };
               if (!res.ok || typeof body.reAuditedAt !== "number") {
                 return { error: `re-audit failed (${res.status})` };

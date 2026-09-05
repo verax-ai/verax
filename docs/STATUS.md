@@ -120,7 +120,7 @@ Each line is what the tree carries, then what stays open.
 
 - G1 — Panel: carries loading, error, empty, and stale as four states, a refresh control, and `/healthz` counts read from ledger files; unproven until a hosted panel is watched against a live body.
 - G2 — Policy: carries a snapshot file per `policyHash` and the rail resolves the rule sentence from that hash; unproven until a second policy version is opened over an old decision in production.
-- G3 — Explain: carries Cedulon `guarantee`, general `warnings`, and trust-root pin state, and the summary never says `balanced` alone; unproven until a production pin (`VERAX_RECORD_PUBKEY_PIN`) is set and a foreign key is contested.
+- G3 — Explain: carries Cedulon `guarantee`, general `warnings`, and trust-root pin state (source `env` / `own-key` / none), and the summary never says `balanced` alone; pin defaults to the body's own record key; that proves the file, not an external root; unproven until a production pin (`VERAX_RECORD_PUBKEY_PIN`) is set and a foreign key is contested.
 - G4 — Inputs: carries a `DecisionInputs` document (principal + declared memory versions) bound by `inputsHash`, including deny; unproven until brains declare `_inputs` on every call (the field is optional).
 - G5 — Effects: carries a one-row Cedulon `SignedEffectExtract` receipt at call time and a COSE Sign1 attestation over `{ ref, effectHash, witnessClass, resultHash }`; unproven until a witness other than `self` signs the row.
 - G6 — Ledger I/O: carries a cached chain tail, an in-memory effect-ref index, and `fsync` after each append; unproven until a crash-restart drill on the production disk.

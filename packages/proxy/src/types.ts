@@ -132,7 +132,7 @@ export type ExplainWarning = {
 };
 
 export type ExplainOpts = {
-  issuerTrust?: { publicKeyPem: string | readonly string[] };
+  issuerTrust?: { publicKeyPem: string | readonly string[]; source?: "env" | "own-key" };
   extract?: import("@cedulon/effect-extract").SignedEffectExtract | import("@cedulon/x402-adapter").SignedRailExtract;
   inputsLog?: InputsLog;
 };
@@ -140,6 +140,7 @@ export type ExplainOpts = {
 export type ExplainTrustRoot = {
   pinned: boolean;
   issuerMatches: boolean | null;
+  source: "env" | "own-key" | null;
 };
 
 export type ExplainResult = {

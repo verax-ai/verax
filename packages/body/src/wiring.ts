@@ -63,7 +63,14 @@ export function createBodyServices(opts: {
       extract = await ledger.exportExtract({ startMs: start, endMs: end }, opts.effectSigner);
     }
     return {
-      ...(pem ? { issuerTrust: { publicKeyPem: pem } } : {}),
+      ...(pem
+        ? {
+            issuerTrust: {
+              publicKeyPem: pem,
+              source: env && env.trim() !== "" ? "env" : "own-key",
+            },
+          }
+        : {}),
       ...(extract ? { extract } : {}),
     };
   };

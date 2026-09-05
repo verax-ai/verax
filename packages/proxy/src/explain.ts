@@ -6,13 +6,21 @@ import type { ExplainOpts, ExplainResult, ExplainWarning, Ledger } from "./types
 
 const WINDOW_COVERAGE = "window-coverage";
 
-function resolveIssuerTrust(opts?: ExplainOpts): IssuerTrustPin | undefined {
-  if (opts?.issuerTrust) return opts.issuerTrust;
+function resolveIssuerTrust(opts?: ExplainOpts): {
+  pin: IssuerTrustPin | undefined;
+  source: "env" | "own-key" | null;
+} {
+  if (opts?.issuerTrust) {
+    return {
+      pin: { publicKeyPem: opts.issuerTrust.publicKeyPem },
+      source: opts.issuerTrust.source ?? null,
+    };
+  }
   const env = process.env.VERAX_RECORD_PUBKEY_PIN;
   if (typeof env === "string" && env.trim() !== "") {
-    return { publicKeyPem: env };
+    return { pin: { publicKeyPem: env }, source: "env" };
   }
-  return undefined;
+  return { pin: undefined, source: null };
 }
 
 function asWarning(f: Finding): ExplainWarning {
@@ -63,7 +71,9 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     throw new Error(`explain-unknown-ref:${ref}`);
   }
   const effect = effects.find((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect") ?? null;
-  const issuerTrust = resolveIssuerTrust(opts);
+  const resolvedTrust = resolveIssuerTrust(opts);
+  const issuerTrust = resolvedTrust.pin;
+  const pinSource = resolvedTrust.source;
   const pinned = issuerTrust !== undefined;
   const report = audit({
     receipts: decisions,
@@ -101,6 +111,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const chainBreak = !chain.intact;
   const conditions: string[] = [];
   if (self) conditions.push("self witness");
+  if (pinSource === "own-key") conditions.push("issuer pinned to own key");
   for (const w of applicableWarnings) {
     const name = conditionName(w);
     if (name && !conditions.includes(name)) conditions.push(name);
@@ -162,6 +173,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     trustRoot: {
       pinned,
       issuerMatches: pinned ? !issuerMismatch && !warnings.some((w) => w.id === "issuer") : null,
+      source: pinSource,
     },
     ...(report.scope ? { scope: report.scope } : {}),
     finding: {
