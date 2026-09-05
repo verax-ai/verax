@@ -18,6 +18,8 @@ uniform float uProgress;
 uniform vec4 uState;
 uniform float uTime;
 uniform float uAudio;
+uniform float uPointSize;
+uniform float uDpr;
 varying float vAlpha;
 vec3 decodeTarget() {
   return mix(uBBoxMin, uBBoxMax, target / 65535.0);
@@ -36,7 +38,7 @@ vec3 spiralPos() {
 void main() {
   vec3 dest = decodeTarget();
   dest.y += sin(uTime * 2.0 + seed * 6.2831853) * uState.z;
-  vec3 chest = vec3(0.0, mix(uBBoxMin.y, uBBoxMax.y, 0.55), 0.0);
+  vec3 chest = vec3(0.0, mix(uBBoxMin.y, uBBoxMax.y, 0.76), 0.0);
   dest = mix(dest, chest, uState.w);
   dest.y -= (1.0 - uState.x) * (uBBoxMax.y - uBBoxMin.y) * 0.35;
   vec3 p0 = cloudPos();
@@ -46,8 +48,8 @@ void main() {
     : mix(p1, dest, (uProgress - 0.5) * 2.0);
   vec4 mv = modelViewMatrix * vec4(p, 1.0);
   gl_Position = projectionMatrix * mv;
-  gl_PointSize = max(1.0, 180.0 / max(1.0, -mv.z));
-  vAlpha = 0.55 + uAudio * 0.2;
+  gl_PointSize = clamp(uPointSize * uDpr, 1.0, 4.0);
+  vAlpha = mix(0.18, 0.35, fract(seed * 7.0));
 }
 `;
 
@@ -116,6 +118,8 @@ export function ParticleField({
           uState: { value: [params.budgetScale, params.ringSpin, params.breathAmp, params.pullToChest] },
           uTime: { value: 0 },
           uAudio: { value: 0 },
+          uPointSize: { value: 2.0 },
+          uDpr: { value: 1 },
           uColor: { value: params.coreColor.slice() },
         },
       }),
@@ -129,14 +133,18 @@ export function ParticleField({
     geo.setDrawRange(0, count);
   }, [geo, count]);
 
-  useFrame((_, dt) => {
+  useFrame((state, dt) => {
     const elapsed = (performance.now() - startedAtMs) / 1000;
     const uniforms = matRef.current.uniforms;
     uniforms.uTime.value = elapsed;
     uniforms.uProgress.value = presence === "booting" ? Math.min(1, elapsed / 4) : 1;
     uniforms.uState.value = [params.budgetScale, params.ringSpin, params.breathAmp, params.pullToChest];
-    uniforms.uColor.value = params.coreColor.slice();
+    const c = uniforms.uColor.value as [number, number, number];
+    c[0] += (params.coreColor[0] - c[0]) * 0.04;
+    c[1] += (params.coreColor[1] - c[1]) * 0.04;
+    c[2] += (params.coreColor[2] - c[2]) * 0.04;
     uniforms.uAudio.value = 0;
+    uniforms.uDpr.value = state.gl.getPixelRatio();
     const w = window as Window & { __veraxPushFrame?: (ms: number) => void };
     w.__veraxPushFrame?.(dt * 1000);
   });

@@ -26,6 +26,13 @@ body {
   height: 100%;
   pointer-events: none;
 }
+.model-missing {
+  position: absolute;
+  z-index: 2;
+  margin: 1rem;
+  color: #e8eef5;
+  font-family: ui-monospace, monospace;
+}
 aside {
   z-index: 1;
 }

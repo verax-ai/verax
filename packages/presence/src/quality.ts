@@ -1,4 +1,4 @@
-export const TIER_COUNTS = [60_000, 30_000, 15_000] as const;
+export const TIER_COUNTS = [20_000, 10_000, 5_000] as const;
 
 export type Quality = {
   readonly count: number;

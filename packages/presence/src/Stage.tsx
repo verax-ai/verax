@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Canvas } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
+import { ACESFilmicToneMapping } from "three";
+import { ChestCore } from "./ChestCore.tsx";
+import { Figure } from "./Figure.tsx";
+import { Lights } from "./Lights.tsx";
 import { MatrixRain } from "./MatrixRain.tsx";
 import { ParticleField, type PointsMeta } from "./ParticleField.tsx";
-import { createPresence, type PresenceState } from "./state.ts";
-import { createQuality } from "./quality.ts";
+import { fitFromBox } from "./fit.ts";
+import { createQuality, TIER_COUNTS } from "./quality.ts";
+import { createPresence, PRESENCE_STATES, type PresenceState } from "./state.ts";
 
 async function loadCloud(): Promise<{ cloud: Uint16Array; meta: PointsMeta }> {
   const [bin, meta] = await Promise.all([
@@ -22,18 +27,35 @@ function readForcedTier(): number | null {
   const raw = new URLSearchParams(window.location.search).get("tier");
   if (!raw) return null;
   const n = Number(raw);
-  return n === 60_000 || n === 30_000 || n === 15_000 ? n : null;
+  return (TIER_COUNTS as readonly number[]).includes(n) ? n : null;
+}
+
+function readForcedState(): PresenceState | null {
+  const raw = new URLSearchParams(window.location.search).get("state");
+  if (!raw) return null;
+  return (PRESENCE_STATES as readonly string[]).includes(raw) ? (raw as PresenceState) : null;
+}
+
+function readBloom(): boolean {
+  return new URLSearchParams(window.location.search).get("bloom") === "1";
 }
 
 export function Stage() {
   const startedAtMs = useMemo(() => performance.now(), []);
-  const presence = useMemo(() => createPresence(() => performance.now() - startedAtMs + 0), [startedAtMs]);
+  const forcedState = useMemo(() => readForcedState(), []);
+  const presence = useMemo(
+    () => createPresence(() => performance.now() - startedAtMs + 0, forcedState ?? "booting"),
+    [startedAtMs, forcedState],
+  );
   const quality = useMemo(() => createQuality(() => performance.now()), []);
   const forced = useMemo(() => readForcedTier(), []);
+  const bloom = useMemo(() => readBloom(), []);
   const [state, setState] = useState<PresenceState>(presence.state);
   const [count, setCount] = useState(forced ?? quality.count);
   const [cloud, setCloud] = useState<Uint16Array | null>(null);
   const [meta, setMeta] = useState<PointsMeta | null>(null);
+  const [missing, setMissing] = useState(false);
+  const onMissing = useCallback(() => setMissing(true), []);
 
   useEffect(() => {
     void loadCloud().then((loaded) => {
@@ -63,27 +85,43 @@ export function Stage() {
   }, [quality, forced]);
 
   const params = presence.params();
-  const low = count <= 15_000;
+  const floor = TIER_COUNTS[TIER_COUNTS.length - 1] ?? 5_000;
+  const low = count <= floor;
+  const fit = meta ? fitFromBox(meta.bbox) : null;
 
   return (
     <div className="stage">
+      {missing ? <p className="model-missing">model missing, run pack-model</p> : null}
       <MatrixRain on={!low} />
-      <Canvas camera={{ position: [0, 0.4, 3.2], fov: 45 }} gl={{ antialias: false }}>
-        {cloud && meta ? (
-          <ParticleField
-            cloud={cloud}
-            meta={meta}
-            count={Math.min(count, meta.count)}
-            params={params}
-            presence={state}
-            startedAtMs={startedAtMs}
-          />
+      <Canvas
+        camera={{ position: [0, 0.2, 5.4], fov: 44 }}
+        gl={{ antialias: false, toneMapping: ACESFilmicToneMapping, toneMappingExposure: 1.05 }}
+      >
+        <Lights color={params.coreColor} />
+        {cloud && meta && fit ? (
+          <group position={fit.position} scale={fit.scale}>
+            <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} />
+            <ParticleField
+              cloud={cloud}
+              meta={meta}
+              count={Math.min(count, meta.count)}
+              params={params}
+              presence={state}
+              startedAtMs={startedAtMs}
+            />
+            <ChestCore
+              box={meta.bbox}
+              color={params.coreColor}
+              ringSpin={params.ringSpin}
+              breathAmp={params.breathAmp}
+            />
+          </group>
         ) : null}
-        {low ? null : (
+        {bloom ? (
           <EffectComposer>
             <Bloom intensity={0.35} luminanceThreshold={0.2} mipmapBlur />
           </EffectComposer>
-        )}
+        ) : null}
       </Canvas>
     </div>
   );

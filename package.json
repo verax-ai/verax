@@ -15,7 +15,9 @@
     "guard:claims": "node --experimental-strip-types scripts/claim-guard.ts",
     "build": "tsc --noEmit",
     "test:unit": "node --experimental-strip-types scripts/run-unit-tests.ts",
-    "test": "npm run guard:crlf && npm run guard:claims && npm run build && npm run test:unit && npm run test -w @verax-ai/panel"
+    "test": "npm run guard:crlf && npm run guard:claims && npm run build && npm run test:unit && npm run test -w @verax-ai/panel",
+    "pack-model": "node scripts/pack-model.mjs",
+    "sample-points": "node scripts/sample-points.mjs"
   },
   "dependencies": {
     "@cedulon/audit": "file:vendor/cedulon-audit-da7bf9b.tgz",
@@ -46,7 +48,10 @@
   "devDependencies": {
     "@gltf-transform/core": "^4.1.3",
     "@gltf-transform/extensions": "^4.1.3",
+    "@gltf-transform/functions": "^4.5.0",
     "@types/node": "^22.15.3",
+    "meshoptimizer": "^1.2.0",
+    "sharp": "^0.35.4",
     "typescript": "^5.8.3"
   }
 }
