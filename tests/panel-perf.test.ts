@@ -1,0 +1,103 @@
+import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
+
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const measure = join(root, "apps", "panel", "perf", "measure.mjs");
+const check = join(root, "apps", "panel", "perf", "check-baseline.mjs");
+
+function spawnScript(
+  script: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [script], {
+      env: { ...process.env, ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (buf: Buffer) => {
+      stdout += String(buf);
+    });
+    child.stderr.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
+    child.on("close", (exit) => resolve({ code: exit ?? 1, stdout, stderr }));
+  });
+}
+
+describe("panel-perf", () => {
+  it("fake frames under 30 fail render-failed", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-few-"));
+    const last = join(dir, "last.json");
+    const result = await spawnScript(measure, {
+      VERAX_PERF_FAKE_FRAMES: "10",
+      VERAX_PERF_LAST: last,
+    });
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /render-failed/);
+  });
+
+  it("fake frames at 40 write p95 and pass", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-ok-"));
+    const last = join(dir, "last.json");
+    const result = await spawnScript(measure, {
+      VERAX_PERF_FAKE_FRAMES: "40",
+      VERAX_PERF_LAST: last,
+    });
+    assert.equal(result.code, 0);
+    const record = JSON.parse(readFileSync(last, "utf8")) as {
+      frames?: number;
+      p95?: number;
+    };
+    assert.equal(record.frames, 40);
+    assert.equal(typeof record.p95, "number");
+  });
+
+  it("check-baseline records and passes when the key is missing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-none-"));
+    const last = join(dir, "last.json");
+    const baseline = join(dir, "baseline.json");
+    writeFileSync(
+      last,
+      `${JSON.stringify({ p95: 80, frames: 40, gl: "swiftshader" })}\n`,
+      { encoding: "utf8" },
+    );
+    writeFileSync(baseline, "{}\n", { encoding: "utf8" });
+    const result = await spawnScript(check, {
+      VERAX_PERF_LAST: last,
+      VERAX_PERF_BASELINE: baseline,
+      GITHUB_ACTIONS: "",
+    });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /no baseline for .*; recorded/);
+  });
+
+  it("check-baseline fails when p95 exceeds baseline x 1.3", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-over-"));
+    const last = join(dir, "last.json");
+    const baseline = join(dir, "baseline.json");
+    const key = `${process.platform}/swiftshader/local`;
+    writeFileSync(
+      last,
+      `${JSON.stringify({ p95: 20, frames: 40, gl: "swiftshader" })}\n`,
+      { encoding: "utf8" },
+    );
+    writeFileSync(
+      baseline,
+      `${JSON.stringify({ [key]: { p95: 10, frames: 40, at: "2026-09-05T00:00:00.000Z" } })}\n`,
+      { encoding: "utf8" },
+    );
+    const result = await spawnScript(check, {
+      VERAX_PERF_LAST: last,
+      VERAX_PERF_BASELINE: baseline,
+      GITHUB_ACTIONS: "",
+    });
+    assert.equal(result.code, 1);
+  });
+});
