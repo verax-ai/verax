@@ -84,7 +84,7 @@ describe("explain guarantee and general warnings", () => {
     delete process.env.VERAX_RECORD_PUBKEY_PIN;
     const dir = mkdtempSync(join(tmpdir(), "verax-g3-extract-"));
     const ledger = await runGoldenScenario(dir);
-    const result = await explain(ledger, "n1");
+    const result = await explain(ledger, "n4");
     assert.ok(warningIds(result).includes("extract"));
   });
 });

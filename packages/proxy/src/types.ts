@@ -33,11 +33,19 @@ export type Policy = {
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
 
+export type EffectAttestation = {
+  coseHex: string;
+};
+
 export type LedgerEffect = {
   row: EffectRow;
   witnessClass: WitnessClass;
   /** Hash of the ToolResult (or thrown payload). Not an EffectRow field. */
   resultHash?: string;
+  /** One-row extract signed at call time. */
+  receipt?: SignedEffectExtract;
+  /** Signed { ref, effectHash, witnessClass, resultHash } via COSE Sign1. */
+  attestation?: EffectAttestation;
 };
 
 export type RecordSigner = {

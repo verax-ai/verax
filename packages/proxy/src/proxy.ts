@@ -55,6 +55,7 @@ function toolCallOf(call: ToolCall): ToolCall {
 
 export function createProxy(deps: ProxyDeps) {
   const inputsLog = deps.inputsLog ?? inputsLogFor(deps.ledger);
+  (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   return {
     async call(call: ToolCall, principal: Principal): Promise<ToolResult> {
       const verdict = deps.policy.evaluate(call, principal);

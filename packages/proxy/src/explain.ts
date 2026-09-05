@@ -43,7 +43,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     settlements: effects.map((e) => e.row),
     profile: DECISION_PROFILE,
     ...(issuerTrust ? { issuerTrust } : {}),
-    ...(opts?.extract ? { extract: opts.extract } : {}),
+    ...(opts?.extract ?? effect?.receipt ? { extract: opts?.extract ?? effect?.receipt } : {}),
   });
   const dropped = [
     ...new Set(

@@ -3,6 +3,7 @@ import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { canonical, decisionRecordHash } from "@cedulon/core";
+import { coseToHex, signCoseSign1 } from "@cedulon/cose";
 import {
   signEffectExtract,
   type EffectRow,
@@ -77,6 +78,40 @@ function ensureLedgerDir(dir: string): PermissionCheck {
   return assertDirPrivate(dir);
 }
 
+function signedEffectFields(
+  row: EffectRow,
+  witnessClass: WitnessClass,
+  resultHash: string | undefined,
+  signer: EffectSigner | undefined,
+): Pick<LedgerEffect, "receipt" | "attestation"> {
+  if (!signer) return {};
+  const clean = asEffectRow(row);
+  const receipt = signEffectExtract(
+    {
+      deciderId: "verax-proxy",
+      channelId: "verax-body",
+      windowStartMs: clean.timestampMs,
+      windowEndMs: clean.timestampMs + 1,
+      effects: [clean],
+    },
+    signer.privateKeyPem,
+    signer.publicKeyPem,
+  );
+  const payload = Buffer.from(
+    canonical({
+      ref: clean.ref,
+      effectHash: clean.effectHash,
+      witnessClass,
+      resultHash: resultHash ?? null,
+    }),
+    "utf8",
+  );
+  const attestation = {
+    coseHex: coseToHex(signCoseSign1(payload, signer.privateKeyPem, "application/json")),
+  };
+  return { receipt, attestation };
+}
+
 function asEffectRow(row: EffectRow): EffectRow {
   return {
     ref: row.ref,
@@ -89,6 +124,7 @@ function asEffectRow(row: EffectRow): EffectRow {
 
 export class MemoryLedger implements Ledger {
   readonly permissionCheck: PermissionCheck = "owner-only";
+  effectSigner?: EffectSigner;
   private readonly _decisions: SignedDecisionRecord[] = [];
   private readonly _effects: LedgerEffect[] = [];
   private readonly q = new SerialQueue();
@@ -130,7 +166,12 @@ export class MemoryLedger implements Ledger {
       });
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    this._effects.push({ row: asEffectRow(row), witnessClass, resultHash });
+    this._effects.push({
+      row: asEffectRow(row),
+      witnessClass,
+      resultHash,
+      ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
+    });
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
@@ -182,6 +223,7 @@ function readLock(path: string): { pid: number; startedAt: number; token?: strin
 export class FileLedger implements Ledger {
   readonly permissionCheck: PermissionCheck;
   readonly dir: string;
+  effectSigner?: EffectSigner;
   private readonly decisionsPath: string;
   private readonly effectsPath: string;
   private readonly lockPath: string;
@@ -303,9 +345,16 @@ export class FileLedger implements Ledger {
       await appendFile(this.effectsPath, lineOf(marker), { encoding: "utf8" });
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    await appendFile(this.effectsPath, lineOf({ row: asEffectRow(row), witnessClass, resultHash }), {
-      encoding: "utf8",
-    });
+    await appendFile(
+      this.effectsPath,
+      lineOf({
+        row: asEffectRow(row),
+        witnessClass,
+        resultHash,
+        ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
+      }),
+      { encoding: "utf8" },
+    );
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
