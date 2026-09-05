@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { createBodyServices } from "../../body/src/wiring.ts";
 import { explain } from "../src/explain.ts";
 import { loadPolicy } from "../src/policy.ts";
 import { createProxy } from "../src/proxy.ts";
@@ -86,5 +87,31 @@ describe("explain guarantee and general warnings", () => {
     const ledger = await runGoldenScenario(dir);
     const result = await explain(ledger, "n4");
     assert.ok(warningIds(result).includes("extract"));
+  });
+
+  it("6: a body-path deny lists a concrete extract condition, not conditional: conditional", async () => {
+    delete process.env.VERAX_RECORD_PUBKEY_PIN;
+    const dir = mkdtempSync(join(tmpdir(), "verax-g3-body-deny-"));
+    const policyFile = join(dirname(fileURLToPath(import.meta.url)), "..", "policy", "default.json");
+    const services = createBodyServices({
+      stateDir: dir,
+      policyFile,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      now: tickingNow(),
+      nonce: queuedNonce(["body-deny-1"]),
+    });
+    await services.proxy.call(
+      { name: "memory.get", arguments: { id: "x" } },
+      { brain: "brain-1", scopes: new Set() },
+    );
+    const result = await explain(services.ledger, "body-deny-1", await services.explainOpts());
+    assert.equal(
+      result.finding.summary.includes("conditional: conditional"),
+      false,
+      result.finding.summary,
+    );
+    assert.match(result.finding.summary, /extract/);
+    services.ledger.close();
   });
 });

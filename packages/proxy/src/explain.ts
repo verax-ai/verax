@@ -19,13 +19,41 @@ function asWarning(f: Finding): ExplainWarning {
   return { id: f.id, code: f.code, detail: f.detail };
 }
 
+function conditionName(f: Finding): string | null {
+  if (f.code === "unauthenticated-issuer") return "issuer unpinned";
+  if (f.code === "unauthenticated-extract") {
+    return f.detail.includes("unsigned") ? "extract unsigned" : "extract unpinned";
+  }
+  return null;
+}
+
+function balancedSummary(
+  guarantee: "unconditional" | "conditional",
+  conditions: readonly string[],
+  cedulonSummary: string,
+): string {
+  if (conditions.length > 0) {
+    return `audit: balanced (${guarantee}: ${conditions.join("; ")})`;
+  }
+  if (guarantee === "unconditional") {
+    return "audit: balanced (unconditional)";
+  }
+  const why = cedulonSummary.replace(/^audit:\s*/i, "").trim();
+  if (why !== "" && why !== "balanced" && why !== "conditional") {
+    return `audit: balanced (${guarantee}: ${why})`;
+  }
+  return `audit: balanced (${guarantee})`;
+}
+
 /**
  * Re-runs the Cedulon decision profile on the whole ledger. Finding codes
  * are Cedulon's; this wrapper does not invent names. Phase 1 has no
  * durable checkpoint, so window-coverage is listed as notApplicable and
  * dropped from the finding set before balanced is computed. General
  * issuer/extract warnings and the audit guarantee are kept. A self
- * witness is named in the condition list; "balanced" is never written alone.
+ * witness and each general Cedulon warning are named in the condition
+ * list; "balanced" is never written alone, and "conditional" is never
+ * written twice.
  */
 export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): Promise<ExplainResult> {
   const decisions = await ledger.decisions();
@@ -73,7 +101,10 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const chainBreak = !chain.intact;
   const conditions: string[] = [];
   if (self) conditions.push("self witness");
-  if (!pinned) conditions.push("issuer unpinned");
+  for (const w of applicableWarnings) {
+    const name = conditionName(w);
+    if (name && !conditions.includes(name)) conditions.push(name);
+  }
   const issuerMismatch = applicable.concat(applicableWarnings).some(
     (f) => f.code === "issuer-key-mismatch" || (pinned && f.code === "unauthenticated-issuer"),
   );
@@ -99,9 +130,8 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     ? Math.max(refFindings.length, 1)
     : refFindings.length + (issuerMismatch && pinned ? 1 : 0) + (inputsMismatch ? 1 : 0);
   const guarantee = report.guarantee;
-  const conditionText = conditions.join("; ");
   const summary = balanced
-    ? `audit: balanced (${guarantee}: ${conditionText || guarantee})`
+    ? balancedSummary(guarantee, conditions, report.summary)
     : `audit: ${Math.max(findingCount, 1)} finding(s) → FAIL`;
   const warnings = applicableWarnings.filter((f) => f.id === "issuer" || f.id === "extract").map(asWarning);
   return {
