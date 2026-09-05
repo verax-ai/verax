@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { explain } from "../src/explain.ts";
+import { inputsLogFor } from "../src/inputs.ts";
 import { MemoryLedger } from "../src/ledger.ts";
 import { runGoldenScenario } from "./golden-scenario.ts";
 
@@ -24,8 +25,14 @@ describe("3 ancestor chain break is visible on later refs", () => {
     assert.ok(n2);
     n2.coseHex = flipCoseHex(n2.coseHex);
     const ledger = new MemoryLedger();
+    const srcInputs = inputsLogFor(golden);
+    const dstInputs = inputsLogFor(ledger);
     for (const d of decisions) {
       await ledger.appendDecision(d);
+      const ref = d.claims.ref;
+      if (!ref) continue;
+      const doc = await srcInputs.get(ref);
+      if (doc) await dstInputs.append(ref, doc);
     }
     for (const e of effects) {
       await ledger.appendEffect(e.row, e.witnessClass, e.resultHash);
