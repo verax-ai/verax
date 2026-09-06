@@ -63,6 +63,8 @@ export function scanNoBypass(
     const rel = file.replace(/\\/g, "/");
     if (rel === "src/no-bypass-scan.ts") continue;
     const wiring = rel === "src/wiring.ts";
+    // Desktop supervises issuer/body/panel. It is not a tool-call path.
+    const desktop = rel === "src/desktop.ts";
     const originalLines = text.split(/\r?\n/);
     for (const match of text.matchAll(DYNAMIC_IMPORT)) {
       const index = match.index ?? 0;
@@ -90,7 +92,7 @@ export function scanNoBypass(
       if (REQUIRE.test(line)) push("require(");
       if (CREATE_REQUIRE.test(line)) push("createRequire");
       if (CONCAT_TOOLS.test(line)) push("concatenated tools path");
-      if (CHILD.test(line)) push("child_process");
+      if (CHILD.test(line) && !desktop) push("child_process");
       if (WORKER.test(line)) push("worker_threads");
     }
   }

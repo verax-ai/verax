@@ -96,6 +96,16 @@ describe("B1 no-bypass", () => {
       "` may not appear anywhere in packages/body, including strings and comments.";
     assert.equal(threat.includes(sentence), true);
     assert.equal(threat.includes("\n\n" + sentence + "\n\n"), true);
+    const c = ["child", "_process"].join("");
+    const desktopException =
+      "Exception: `src/desktop.ts` may import `node:" +
+      c +
+      "` to supervise the issuer, body, and panel. That file is still scanned for `" +
+      a +
+      "`, `" +
+      b +
+      "`, `eval`, and `tools/` imports.";
+    assert.equal(threat.includes(desktopException), true);
     const lockSentence =
       "The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.";
     assert.equal(threat.includes(lockSentence), true);

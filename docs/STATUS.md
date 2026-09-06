@@ -137,6 +137,7 @@ Each line is what the tree carries, then what stays open.
 - F8 — Healthz: carries `ok` only for an unauthenticated probe; ledger counts require `verax:read`; unproven until an unauthenticated probe is watched on a hosted body.
 - P4 — Reconcile: carries a channel-export matcher (`reconcile`) that names ghost / unsent / outOfScope without calling Cedulon `audit()`, a `verax reconcile` CLI, and a panel card that reads `/reconcile-report.json`; unproven until a live Sent export is compared to a production ledger.
 - P1 — Observatory: carries four tabs (status, map, history, anatomy), a detail pane with evidence scope, a timeline, demo-badge golden fallback, and F0 anatomy (particles off, procedural breath, no rain); unproven until a hosted panel is watched against a live body.
+- P2 — Desktop: carries `verax desktop` (dev issuer → body → `vite preview` with token on env only → Edge/Chrome `--app=` or `--browser`); window close kills the process tree (`taskkill /T` / POSIX group). `src/desktop.ts` is the only body file allowed to name `child_process`; it is still scanned for `import(`, `require(`, `eval`, and `tools/` imports. Unproven until an operator starts it on a machine with Edge or Chrome and closes the window.
 
 Remaining gaps, still open:
 

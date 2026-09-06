@@ -1,3 +1,4 @@
+import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
 import { main } from "./main.ts";
 import { runReconcile } from "./reconcile-cli.ts";
@@ -27,6 +28,9 @@ if (argv[0] === "doctor") {
 }
 if (argv[0] === "reconcile") {
   process.exit(runReconcile(argv));
+}
+if (argv[0] === "desktop") {
+  process.exit(await desktopMain(argv));
 }
 
 await main();
