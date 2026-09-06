@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, "perf", "check-baseline.mjs");
-const lastZero = join(root, "perf", "last.json");
+const lastZero = join(root, "perf", "last-zero.json");
 
 describe("panel-perf check-baseline", () => {
   it("fails last.json with frames 0 as panel-perf: no frames", () => {
