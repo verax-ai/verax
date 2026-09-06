@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email <info@verax-ai.com>. Please do not open a public issue for something
+Email <security@verax-ai.com>. Please do not open a public issue for something
 that is exploitable; everything else is welcome in the tracker.
 
 Useful in a report: the commit you tested, the platform and Node version,
