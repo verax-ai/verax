@@ -75,21 +75,31 @@ unproven until an operator approves a live hostile-brain call.
 The tool server is hostile; reconciliation notices mismatch, it does
 not pay.
 
-**Decision.** Tool `spend { amount, currency, payee, reference }`.
-Policy: amount cap, payee allow-list, daily total; **always**
-`defer` when those pass. Over cap / unknown payee / daily breach →
-`deny` (`spend-cap` / `spend-payee` / `spend-daily`). `pay` stays
-`spend-not-wired`. After approve, the effect row is "payment
+**Decision.** Tool `spend { amountMinor, currency, payee, reference }`.
+Amounts are integer minor units (kuruş); a decimal float must not
+enter the request hash. Policy: amount cap, payee allow-list, daily
+total, currency match; **always** `defer` when those pass. Argument
+schema failure → `deny spend-args-invalid`. Wrong ISO-4217 currency →
+`deny spend-currency`. Over cap / unknown payee / daily breach →
+`deny` (`spend-cap` / `spend-payee` / `spend-daily`). `pay` and a
+`spend` call with no spend rule stay `spend-not-wired`. Daily total
+is read from the approvals snapshot (`subject === "spend"`, `status`
+pending or approved, same currency, `createdAtMs` on the UTC day;
+expired does not count; missing `createdAtMs` is `expiresAtMs −
+approvalTtlMs`). After approve, the effect row is "payment
 authorized" (`effectClass: "spend"`, `effectHash` =
 `effectDescriptor("spend", args)`). **The body does not move
-money.** A human pays in the payee's own console. The statement
+money.** A human pays in the payee's own console and writes
+`spend.reference` = `verax:<defer ref>` on the statement. A `_ref`
+retry with an allow and no effect writes `deny spend-reauth-required`
+under a new ref (authorize-once; inner does not run). The statement
 arrives later as operator CSV.
 
 **Adapter.** Do not mint a Cedulon `SignedRailExtract` over that CSV:
 the extract type is a signed rail window (`accountId`, `railId`,
 settlements). A typed file is not a rail. P4 `reconcile` already
 names `ghost` / `unsent` / `outOfScope` without calling `audit()`.
-S2 extends Verax `ChannelRow` with optional `amount` and `currency`
+S2 extends Verax `ChannelRow` with optional `amountMinor` and `currency`
 (not a Cedulon field). `verax reconcile --channel card` parses CSV →
 `ChannelRow`. Match: amount + currency (minor-unit tolerance) + time
 window; `ref` if present. Report buckets: `matched` · `ghost`
@@ -228,12 +238,19 @@ the decision, before `appendEffect`), the same `_ref` re-runs
 `inner`. Side-effecting tools must be idempotent at the tool.
 **S2 `spend` must not re-run `inner` without a new operator
 approval** — authorize-once, even when the effect row is missing.
+That is the exception to "same `_ref` + same hash → no new record":
+the retry writes `deny spend-reauth-required` under a new
+`ref`/`nonce`.
 
 A `_ref` retry uses **that** defer's resolution only (`allowRef` /
 `resolves ===` the given `_ref`). Another defer with the same
 `requestHash` is not a grant. Lookup is O(1) via an in-memory
 `ref → record` index on FileLedger / MemoryLedger (the `Ledger`
-interface stays closed).
+interface stays closed). `resolvedBy` (defer ref → allow or expired
+ref) is built from a single pass over `inputs.jsonl` at FileLedger
+open and updated after each inputs append; `hasResolves`,
+`explain.pairFor`, and the retry fallback use it. FileInputsLog
+itself stays cache-less.
 
 **Accept.** Replay same `_ref` + args: one decision. Second
 `appendEffect`: `duplicate-effect` marker, existing tests stay

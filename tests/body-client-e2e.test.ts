@@ -41,7 +41,7 @@ describe("E real SDK client", () => {
           await client.connect(transport);
           const listed = await client.listTools();
           const names = listed.tools.map((t) => t.name).sort();
-          assert.deepEqual(names, ["audit.explain", "memory.get", "memory.put", "message.read"]);
+          assert.deepEqual(names, ["audit.explain", "memory.get", "memory.put", "message.read", "spend"]);
           const put = await client.callTool({
             name: "memory.put",
             arguments: {

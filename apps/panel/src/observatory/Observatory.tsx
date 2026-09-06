@@ -334,8 +334,9 @@ function StatusView({
             {open.map((p) => (
               <li key={p.ref}>
                 {p.ref} · {p.subject} · {p.ruleText ?? ""} · {p.brain}
-                {p.payee !== undefined ? ` · ${String(p.payee)}` : ""}
-                {p.amount !== undefined ? ` · ${String(p.amount)}` : ""}
+                {p.subject === "spend" && p.amount !== undefined && p.payee !== undefined
+                  ? ` · ${String(p.amount)} ${p.currency !== undefined ? String(p.currency) : ""} → ${String(p.payee)}`.replace("  ", " ")
+                  : `${p.payee !== undefined ? ` · ${String(p.payee)}` : ""}${p.amount !== undefined ? ` · ${String(p.amount)}` : ""}`}
               </li>
             ))}
           </ul>

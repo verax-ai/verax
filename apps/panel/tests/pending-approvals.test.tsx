@@ -43,4 +43,29 @@ describe("pending approvals", () => {
     expect(document.querySelector("[data-approve-all]")).toBeNull();
     expect(document.querySelector("button[data-approve]")).toBeNull();
   });
+
+  it("formats a spend pending row as amount currency to payee", () => {
+    render(
+      <Observatory
+        actions={[]}
+        status="empty"
+        demo={false}
+        pending={[
+          {
+            ...row,
+            ref: "s1",
+            subject: "spend",
+            ruleText: "Spends need operator approval.",
+            amount: 125050,
+            currency: "TRY",
+            payee: "true-ads",
+          },
+        ]}
+      />,
+    );
+    const list = screen.getByTestId("pending-approvals");
+    expect(list.textContent).toMatch(/125050 TRY → true-ads/);
+    expect(list.textContent).toMatch(/Spends need operator approval/);
+    expect(document.querySelector("button[data-approve]")).toBeNull();
+  });
 });

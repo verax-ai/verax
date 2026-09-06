@@ -16,6 +16,8 @@ export type ApprovalRow = {
   inputsSummary: { count: number; ids: string[] };
   amount?: unknown;
   payee?: unknown;
+  currency?: unknown;
+  createdAtMs?: number;
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;
@@ -26,6 +28,7 @@ export type ApprovalsLog = {
   append(row: ApprovalRow): Promise<void>;
   get(ref: string): Promise<ApprovalRow | null>;
   listPending(): Promise<ApprovalRow[]>;
+  listAll(): Promise<ApprovalRow[]>;
   updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void>;
 };
 
@@ -61,6 +64,10 @@ export class MemoryApprovalsLog implements ApprovalsLog {
     return [...this.byRef.values()].filter((r) => r.status === "pending");
   }
 
+  async listAll(): Promise<ApprovalRow[]> {
+    return [...this.byRef.values()];
+  }
+
   async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
     const cur = this.byRef.get(ref);
     if (!cur) return;
@@ -88,6 +95,10 @@ export class FileApprovalsLog implements ApprovalsLog {
 
   async listPending(): Promise<ApprovalRow[]> {
     return [...this.byRef.values()].filter((r) => r.status === "pending");
+  }
+
+  async listAll(): Promise<ApprovalRow[]> {
+    return [...this.byRef.values()];
   }
 
   async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
@@ -239,6 +250,15 @@ export async function approvePending(opts: {
     ),
   );
   noteResolution(opts.ledger, opts.ref, { ref: allowRef, kind: "allow" });
+  if (snap.subject === "spend") {
+    await opts.ledger.appendEffect({
+      ref: allowRef,
+      effectHash,
+      effectClass: "spend",
+      timestampMs: opts.now(),
+      actor: snap.brain,
+    });
+  }
   await opts.approvals.updateStatus(opts.ref, "approved", { allowRef });
   return { ok: true, allowRef };
 }

@@ -72,6 +72,7 @@ export type PendingApproval = {
   inputsSummary: { count: number; ids: string[] };
   amount?: unknown;
   payee?: unknown;
+  currency?: unknown;
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;

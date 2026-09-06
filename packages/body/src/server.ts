@@ -57,6 +57,21 @@ const TOOL_META = [
       properties: {},
     },
   },
+  {
+    name: "spend",
+    description: "Authorizes a payment; does not move money.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        amountMinor: { type: "integer" },
+        currency: { type: "string" },
+        payee: { type: "string" },
+        reference: { type: "string" },
+      },
+      required: ["amountMinor", "currency", "payee", "reference"],
+    },
+  },
 ];
 
 const MAX_BODY_BYTES = 1024 * 1024;

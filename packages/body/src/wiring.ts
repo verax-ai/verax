@@ -15,10 +15,11 @@ import { readMemoryMeta } from "./tools/memory.ts";
 import { memoryGet, memoryPut } from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead } from "./tools/message.ts";
+import { spendAuthorize } from "./tools/spend.ts";
 
-export type ToolFn = (call: ToolCall, principal: Principal) => Promise<ToolResult>;
+export type ToolFn = (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
 
-export const TOOL_NAMES = ["memory.get", "memory.put", "audit.explain", "message.read"] as const;
+export const TOOL_NAMES = ["memory.get", "memory.put", "audit.explain", "message.read", "spend"] as const;
 
 export type BodyServices = {
   proxy: ReturnType<typeof createProxy>;
@@ -68,8 +69,9 @@ export function createBodyServices(opts: {
   };
   registry.set("audit.explain", async (call) => auditExplain(call, ledger, await explainOpts()));
   registry.set("message.read", (call) => messageRead(call, opts.stateDir));
+  registry.set("spend", (call, _principal, ref) => spendAuthorize(call, ref ?? ""));
 
-  const inner: ToolFn = async (call) => {
+  const inner: ToolFn = async (call, principal, ref) => {
     const fn = registry.get(call.name);
     if (!fn) {
       return {
@@ -77,7 +79,7 @@ export function createBodyServices(opts: {
         isError: true,
       };
     }
-    return fn(call, { brain: "", scopes: new Set() });
+    return fn(call, principal, ref);
   };
 
   const proxy = createProxy({

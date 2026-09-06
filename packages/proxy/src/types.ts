@@ -26,10 +26,14 @@ export type PolicyDecision = {
   rule: string | null;
 };
 
+export type PolicyEvalCtx = {
+  spentTodayMinor?: (currency: string) => number;
+};
+
 export type Policy = {
   hash: string;
   approvalTtlMs: number;
-  evaluate(call: ToolCall, principal: Principal): PolicyDecision;
+  evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
   rule(id: string | null): { id: string; text: string } | null;
 };
 
@@ -110,7 +114,7 @@ export type ProxyDeps = {
   ledger: Ledger;
   now: () => number;
   nonce: () => string;
-  inner: (call: ToolCall, principal: Principal) => Promise<ToolResult>;
+  inner: (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
   inputsLog?: InputsLog;
   resolveInput?: (id: string) => Promise<ResolvedInput | null>;
 };

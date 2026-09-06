@@ -20,6 +20,7 @@ const ALLOWED = new Set([
   "loadApprovalsFromDir",
   "loadEffectsFromDir",
   "parseChannelJsonl",
+  "parseCardCsv",
   "reconcile",
 ]);
 

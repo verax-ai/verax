@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
-import { loadEffectsFromDir, parseChannelJsonl, reconcile } from "@verax-ai/proxy";
+import { loadApprovalsFromDir, loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "@verax-ai/proxy";
+
+const CARD_TOLERANCE_MS = 3 * 86_400_000;
 
 export function parseReconcileArgs(argv: string[]): {
   stateDir: string;
@@ -8,12 +10,22 @@ export function parseReconcileArgs(argv: string[]): {
   outPath: string;
   toleranceMs: number;
   window?: { startMs: number; endMs: number };
+  channel?: "card";
+  currency?: string;
+  columns?: { date: string; amount: string; description: string; id?: string };
+  delimiter?: ";" | ",";
+  decimal?: "," | ".";
 } | { error: string } {
   const rest = argv.slice(1);
-  let toleranceMs = 60_000;
+  let toleranceMs: number | undefined;
   let outPath: string | undefined;
   let windowStart: number | undefined;
   let windowEnd: number | undefined;
+  let channel: "card" | undefined;
+  let currency: string | undefined;
+  let columns: { date: string; amount: string; description: string; id?: string } | undefined;
+  let delimiter: ";" | "," | undefined;
+  let decimal: "," | "." | undefined;
   const positionals: string[] = [];
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i]!;
@@ -46,6 +58,43 @@ export function parseReconcileArgs(argv: string[]): {
       i += 1;
       continue;
     }
+    if (a === "--channel") {
+      const p = rest[i + 1];
+      if (p !== "card") return { error: "channel-invalid" };
+      channel = "card";
+      i += 1;
+      continue;
+    }
+    if (a === "--currency") {
+      const p = rest[i + 1];
+      if (!p || p.startsWith("-")) return { error: "currency-missing" };
+      currency = p;
+      i += 1;
+      continue;
+    }
+    if (a === "--columns") {
+      const p = rest[i + 1];
+      if (!p || p.startsWith("-")) return { error: "columns-invalid" };
+      const parsed = parseColumns(p);
+      if (!parsed) return { error: "columns-invalid" };
+      columns = parsed;
+      i += 1;
+      continue;
+    }
+    if (a === "--delimiter") {
+      const p = rest[i + 1];
+      if (p !== ";" && p !== ",") return { error: "delimiter-invalid" };
+      delimiter = p;
+      i += 1;
+      continue;
+    }
+    if (a === "--decimal") {
+      const p = rest[i + 1];
+      if (p !== "," && p !== ".") return { error: "decimal-invalid" };
+      decimal = p;
+      i += 1;
+      continue;
+    }
     if (a.startsWith("-")) return { error: `flag-unknown:${a}` };
     positionals.push(a);
   }
@@ -54,6 +103,7 @@ export function parseReconcileArgs(argv: string[]): {
   if (!stateDir || !channelPath || !outPath) {
     return { error: "usage" };
   }
+  if (channel === "card" && !currency) return { error: "currency-missing" };
   if ((windowStart === undefined) !== (windowEnd === undefined)) {
     return { error: "window-invalid" };
   }
@@ -61,7 +111,34 @@ export function parseReconcileArgs(argv: string[]): {
     windowStart !== undefined && windowEnd !== undefined
       ? { startMs: windowStart, endMs: windowEnd }
       : undefined;
-  return { stateDir, channelPath, outPath, toleranceMs, window };
+  return {
+    stateDir,
+    channelPath,
+    outPath,
+    toleranceMs: toleranceMs ?? (channel === "card" ? CARD_TOLERANCE_MS : 60_000),
+    window,
+    channel,
+    currency,
+    columns,
+    delimiter,
+    decimal,
+  };
+}
+
+function parseColumns(raw: string): { date: string; amount: string; description: string; id?: string } | null {
+  const map: Record<string, string> = {};
+  for (const part of raw.split(",")) {
+    const eq = part.indexOf("=");
+    if (eq <= 0) return null;
+    map[part.slice(0, eq).trim()] = part.slice(eq + 1).trim();
+  }
+  if (!map.date || !map.amount || !map.desc) return null;
+  return {
+    date: map.date,
+    amount: map.amount,
+    description: map.desc,
+    ...(map.id ? { id: map.id } : {}),
+  };
 }
 
 export function runReconcile(
@@ -80,13 +157,28 @@ export function runReconcile(
     return 78;
   }
   try {
-    const channel = parseChannelJsonl(readFileSync(parsed.channelPath, "utf8"));
+    const raw = readFileSync(parsed.channelPath, "utf8");
+    const channel =
+      parsed.channel === "card" && parsed.currency
+        ? parseCardCsv(raw, {
+            currency: parsed.currency,
+            columns: parsed.columns,
+            delimiter: parsed.delimiter,
+            decimal: parsed.decimal,
+          })
+        : parseChannelJsonl(raw);
     const effects = loadEffectsFromDir(parsed.stateDir);
     const report = reconcile(channel, effects, {
       toleranceMs: parsed.toleranceMs,
       window: parsed.window,
+      approvals: parsed.channel === "card" ? loadApprovalsFromDir(parsed.stateDir) : undefined,
     });
     writeFileSync(parsed.outPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8" });
+    if (parsed.channel === "card") {
+      writeErr(
+        `matched ${report.matched.length} · ghost ${report.ghost.length} · authorizedUnpaid ${report.authorizedUnpaid.length}\n`,
+      );
+    }
     return 0;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code ?? (err instanceof Error ? err.message : "unknown");

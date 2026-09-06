@@ -4,7 +4,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseChannelJsonl, reconcile } from "../src/reconcile.ts";
+import type { ApprovalRow } from "../src/approvals.ts";
+import { parseCardCsv, parseChannelJsonl, reconcile } from "../src/reconcile.ts";
 import type { LedgerEffect } from "../src/types.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -77,5 +78,79 @@ describe("reconcile channel export against the ledger", () => {
       report.ghost.some((r) => r.externalId === "msg-far"),
       false,
     );
+  });
+});
+
+describe("card:", () => {
+  const noon = Date.UTC(2026, 8, 6, 12);
+  const csvPath = join(here, "fixtures", "card-statement.csv");
+
+  it("parseCardCsv reads a Turkish bank row and treats refunds as credits", () => {
+    const rows = parseCardCsv(readFileSync(csvPath, "utf8"), { currency: "TRY" });
+    assert.equal(rows.length, 4);
+    assert.equal(rows[0]!.channel, "card");
+    assert.equal(rows[0]!.subject, "spend");
+    assert.equal(rows[0]!.ref, "d1");
+    assert.equal(rows[0]!.amountMinor, 125_050);
+    assert.equal(rows[0]!.currency, "TRY");
+    assert.equal(rows[0]!.occurredAtMs, noon);
+    const dotted = parseCardCsv("Date,Desc,Amt\n2026-09-06,TRUE verax:x,-1250.50\n", {
+      currency: "TRY",
+      columns: { date: "Date", amount: "Amt", description: "Desc" },
+      delimiter: ",",
+      decimal: ".",
+      dateFormat: "YYYY-MM-DD",
+    });
+    assert.equal(dotted[0]!.amountMinor, 125_050);
+    const refund = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;IADE;100,00\n", { currency: "TRY" });
+    assert.equal(refund[0]!.credit, true);
+    assert.equal(refund[0]!.amountMinor, 10_000);
+  });
+
+  it("fixture statement: 3 matched, 1 ghost, 1 authorizedUnpaid", () => {
+    const channel = parseCardCsv(readFileSync(csvPath, "utf8"), { currency: "TRY" });
+    const spend = (ref: string, allowRef: string, amountMinor: number): { effect: LedgerEffect; approval: ApprovalRow } => ({
+      effect: {
+        row: {
+          ref: allowRef,
+          effectHash: "11".repeat(32),
+          effectClass: "spend",
+          timestampMs: noon,
+        },
+        witnessClass: "self",
+      },
+      approval: {
+        ref,
+        requestHash: "00".repeat(32),
+        subject: "spend",
+        args: { amountMinor, currency: "TRY", payee: "true-ads", reference: `verax:${ref}` },
+        ruleId: "spend-true",
+        ruleText: "Spends need operator approval.",
+        inputsSummary: { count: 0, ids: [] },
+        amount: amountMinor,
+        payee: "true-ads",
+        currency: "TRY",
+        createdAtMs: noon,
+        expiresAtMs: noon + 86_400_000,
+        status: "approved",
+        brain: "brain-1",
+        allowRef,
+      },
+    });
+    const d1 = spend("d1", "a1", 125_050);
+    const d2 = spend("d2", "a2", 10_000);
+    const d3 = spend("d3", "a3", 5_000);
+    const unpaid = spend("d4", "a4", 9_000);
+    const report = reconcile(channel, [d1.effect, d2.effect, d3.effect, unpaid.effect], {
+      toleranceMs: 3 * 86_400_000,
+      approvals: [d1.approval, d2.approval, d3.approval, unpaid.approval],
+    });
+    assert.equal(report.matched.length, 3);
+    assert.equal(report.ghost.length, 1);
+    assert.equal(report.authorizedUnpaid.length, 1);
+    assert.equal(report.authorizedUnpaid[0]?.ref, "a4");
+    const refundRows = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;IADE;100,00\n", { currency: "TRY" });
+    const refunded = reconcile(refundRows, [], { toleranceMs: 3 * 86_400_000 });
+    assert.equal(refunded.outOfScope.length, 1);
   });
 });

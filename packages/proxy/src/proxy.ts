@@ -127,6 +127,52 @@ export function createProxy(deps: ProxyDeps) {
     }
   }
 
+  function utcDayStart(ms: number): number {
+    const d = new Date(ms);
+    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  }
+
+  function spentTodayMinorOf(rows: { subject: string; status: string; createdAtMs?: number; expiresAtMs: number; args: Record<string, unknown> }[], nowMs: number, currency: string): number {
+    const start = utcDayStart(nowMs);
+    const end = start + 86_400_000;
+    let sum = 0;
+    for (const row of rows) {
+      if (row.subject !== "spend") continue;
+      if (row.status !== "pending" && row.status !== "approved") continue;
+      const created = row.createdAtMs ?? row.expiresAtMs - deps.policy.approvalTtlMs;
+      if (created < start || created >= end) continue;
+      if (row.args.currency !== currency) continue;
+      const amt = row.args.amountMinor;
+      if (typeof amt === "number") sum += amt;
+    }
+    return sum;
+  }
+
+  async function spendReauth(
+    requestHash: string,
+    inputs: DecisionInputs,
+    timestampMs: number,
+    subject: string,
+  ): Promise<ToolResult> {
+    for (const d of await deps.ledger.decisions()) {
+      if (d.claims.reasonCode === "spend-reauth-required" && d.claims.requestHash === requestHash && d.claims.ref) {
+        return denied("spend-reauth-required", d.claims.ref);
+      }
+    }
+    const ref = deps.nonce();
+    await writeRecord({
+      decision: "deny",
+      reasonCode: "spend-reauth-required",
+      ref,
+      requestHash,
+      inputs,
+      effectHash: null,
+      subject,
+      timestampMs,
+    });
+    return denied("spend-reauth-required", ref);
+  }
+
   async function runInner(call: ToolCall, principal: Principal, ref: string): Promise<ToolResult> {
     const dispatchedName = call.name;
     const dispatchedArgs = deepFreeze(structuredClone(call.arguments));
@@ -137,7 +183,7 @@ export function createProxy(deps: ProxyDeps) {
       arguments: dispatchedArgs,
     });
     try {
-      const result = await deps.inner(frozenCall, principal);
+      const result = await deps.inner(frozenCall, principal, ref);
       const row: EffectRow = {
         ref,
         effectHash: dispatchedHash,
@@ -296,6 +342,9 @@ export function createProxy(deps: ProxyDeps) {
                 await approvals.updateStatus(given, "approved", { allowRef: allow.ref });
               }
               if (await hasPrimaryEffect(deps.ledger, allow.ref)) return allowedReplay(allow.ref);
+              if (allow.subject === "spend") {
+                return spendReauth(requestHash, resolved.inputs, timestampMs, call.name);
+              }
               return runInner(dispatched, principal, allow.ref);
             }
             return deferred(given);
@@ -307,12 +356,18 @@ export function createProxy(deps: ProxyDeps) {
             if (await hasPrimaryEffect(deps.ledger, existing.ref)) {
               return allowedReplay(existing.ref);
             }
+            if (existing.subject === "spend") {
+              return spendReauth(requestHash, resolved.inputs, timestampMs, call.name);
+            }
             return runInner(dispatched, principal, existing.ref);
           }
         }
       }
 
-      const verdict = deps.policy.evaluate(call, principal);
+      const approvalRows = await approvals.listAll();
+      const verdict = deps.policy.evaluate(dispatched, principal, {
+        spentTodayMinor: (currency) => spentTodayMinorOf(approvalRows, timestampMs, currency),
+      });
       let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
       let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
       const ref = given ?? deps.nonce();
@@ -329,8 +384,9 @@ export function createProxy(deps: ProxyDeps) {
       });
       if (decision === "defer") {
         const rule = deps.policy.rule(verdict.rule);
-        const amount = dispatched.arguments.amount;
+        const amount = dispatched.name === "spend" ? dispatched.arguments.amountMinor : dispatched.arguments.amount;
         const payee = dispatched.arguments.payee;
+        const currency = dispatched.arguments.currency;
         await approvals.append({
           ref,
           requestHash,
@@ -344,6 +400,8 @@ export function createProxy(deps: ProxyDeps) {
           },
           ...(amount !== undefined ? { amount } : {}),
           ...(payee !== undefined ? { payee } : {}),
+          ...(currency !== undefined ? { currency } : {}),
+          createdAtMs: timestampMs,
           expiresAtMs: timestampMs + deps.policy.approvalTtlMs,
           status: "pending",
           brain: principal.brain,

@@ -141,7 +141,7 @@ describe("B5 identity and scope + e2e", () => {
       const full = await issuer.sign({ scope: "verax:read verax:memory" });
       const listed = await rpc(mcp, full, "tools/list", {});
       const tools = ((listed.json?.result as { tools?: { name: string }[] })?.tools ?? []).map((t) => t.name);
-      assert.deepEqual(tools.sort(), ["audit.explain", "memory.get", "memory.put", "message.read"]);
+      assert.deepEqual(tools.sort(), ["audit.explain", "memory.get", "memory.put", "message.read", "spend"]);
 
       const putOk = await rpc(mcp, full, "tools/call", {
         name: "memory.put",
