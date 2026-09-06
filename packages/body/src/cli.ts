@@ -1,5 +1,7 @@
+import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
 import { main } from "./main.ts";
+import { runReconcile } from "./reconcile-cli.ts";
 import { runUnlock } from "./unlock.ts";
 
 const argv = process.argv.slice(2);
@@ -23,6 +25,12 @@ if (argv[0] === "doctor") {
     }
   }
   process.exit(doctorExit(checks));
+}
+if (argv[0] === "reconcile") {
+  process.exit(runReconcile(argv));
+}
+if (argv[0] === "desktop") {
+  process.exit(await desktopMain(argv));
 }
 
 await main();

@@ -21,6 +21,10 @@ jobs:
       - run: npx playwright install --with-deps chromium
       - run: npm run build -w @verax-ai/panel
       - run: node apps/panel/perf/measure.mjs
+        env:
+          # Software-GL smoke: 40 s budget, 10-frame floor. Key is gha-*.
+          VERAX_PERF_BUDGET_MS: "40000"
+          VERAX_PERF_MIN_FRAMES: "10"
       - run: node apps/panel/perf/check-baseline.mjs
       - uses: actions/upload-artifact@v4
         if: always()

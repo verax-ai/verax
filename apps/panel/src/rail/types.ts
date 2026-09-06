@@ -26,6 +26,8 @@ export type RailEffect = {
     actor?: string;
   };
   witnessClass?: string;
+  receipt?: unknown;
+  attestation?: unknown;
 };
 
 export type PolicyRule = {

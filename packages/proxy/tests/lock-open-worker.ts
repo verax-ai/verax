@@ -6,6 +6,13 @@ if (!dir) {
   process.exit(2);
 }
 
+/** A forgotten stdin hold must not hang the suite. */
+const WORKER_LIMIT_MS = 30_000;
+setTimeout(() => {
+  process.stderr.write("worker-limit\n");
+  process.exit(3);
+}, WORKER_LIMIT_MS);
+
 function holdUntilStdinCloses(): Promise<void> {
   return new Promise((resolve) => {
     const done = () => resolve();

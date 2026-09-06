@@ -1,0 +1,5 @@
+{"channel":"sent","externalId":"msg-n1","occurredAtMs":20,"subject":"memory.get","actor":"brain-1","ref":"n1"}
+{"channel":"sent","externalId":"msg-n2","occurredAtMs":40,"subject":"memory.put","actor":"brain-1","ref":"n2"}
+{"channel":"sent","externalId":"msg-n3","occurredAtMs":60,"subject":"message.read","actor":"brain-1","ref":"n3"}
+{"channel":"sent","externalId":"msg-ghost","occurredAtMs":55,"subject":"mail.send","actor":"brain-1"}
+{"channel":"sent","externalId":"msg-far","occurredAtMs":180100,"subject":"audit.explain:threw","actor":"brain-1"}

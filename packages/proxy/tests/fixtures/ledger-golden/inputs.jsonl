@@ -1,0 +1,6 @@
+{"ref":"n1","inputs":{"principal":{"brain":"brain-1","scopes":["verax:memory","verax:read"]},"inputs":[]}}
+{"ref":"n2","inputs":{"principal":{"brain":"brain-1","scopes":["verax:memory","verax:read"]},"inputs":[]}}
+{"ref":"n3","inputs":{"principal":{"brain":"brain-1","scopes":["verax:memory","verax:read"]},"inputs":[]}}
+{"ref":"n4","inputs":{"principal":{"brain":"brain-1","scopes":[]},"inputs":[]}}
+{"ref":"n5","inputs":{"principal":{"brain":"brain-1","scopes":["verax:memory","verax:read"]},"inputs":[]}}
+{"ref":"n6","inputs":{"principal":{"brain":"brain-1","scopes":["verax:memory","verax:read"]},"inputs":[]}}

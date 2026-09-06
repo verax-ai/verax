@@ -1,0 +1,9 @@
+{
+  "key": "win32/swiftshader/local",
+  "platform": "win32",
+  "tier": 15000,
+  "frames": 0,
+  "p95": 0,
+  "gl": "swiftshader",
+  "at": "2026-09-06T01:20:00.034Z"
+}

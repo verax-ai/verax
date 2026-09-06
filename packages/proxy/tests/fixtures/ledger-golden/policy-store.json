@@ -1,0 +1,40 @@
+{
+  "d573ff18b5342d034f91511cac6ba63ca62cf6f53a7fb03740016efce53f6676": {
+    "version": 1,
+    "default": "deny",
+    "rules": [
+      {
+        "id": "memory-get",
+        "tool": "memory.get",
+        "requires": [
+          "verax:read"
+        ],
+        "text": "Reading memory needs the read scope."
+      },
+      {
+        "id": "memory-put",
+        "tool": "memory.put",
+        "requires": [
+          "verax:memory"
+        ],
+        "text": "Writing memory needs the memory scope."
+      },
+      {
+        "id": "audit-explain",
+        "tool": "audit.explain",
+        "requires": [
+          "verax:read"
+        ],
+        "text": "Reading an explanation needs the read scope."
+      },
+      {
+        "id": "message-read",
+        "tool": "message.read",
+        "requires": [
+          "verax:read"
+        ],
+        "text": "Reading the inbox needs the read scope."
+      }
+    ]
+  }
+}

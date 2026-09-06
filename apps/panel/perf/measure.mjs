@@ -30,6 +30,7 @@ export function readUrlArg(argv = process.argv) {
 export function withTier(url, n) {
   const u = new URL(url);
   u.searchParams.set("tier", String(n));
+  u.searchParams.set("tab", "anatomy");
   return u.href;
 }
 
