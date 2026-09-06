@@ -158,7 +158,7 @@ export function runReconcile(
   }
   try {
     const raw = readFileSync(parsed.channelPath, "utf8");
-    const channel =
+    const card =
       parsed.channel === "card" && parsed.currency
         ? parseCardCsv(raw, {
             currency: parsed.currency,
@@ -166,17 +166,20 @@ export function runReconcile(
             delimiter: parsed.delimiter,
             decimal: parsed.decimal,
           })
-        : parseChannelJsonl(raw);
+        : undefined;
+    const channel = card ?? parseChannelJsonl(raw);
     const effects = loadEffectsFromDir(parsed.stateDir);
     const report = reconcile(channel, effects, {
       toleranceMs: parsed.toleranceMs,
       window: parsed.window,
       approvals: parsed.channel === "card" ? loadApprovalsFromDir(parsed.stateDir) : undefined,
+      skipped: card?.skipped,
     });
     writeFileSync(parsed.outPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8" });
     if (parsed.channel === "card") {
+      const mismatch = report.ghost.filter((g) => g.reason === "amount-mismatch").length;
       writeErr(
-        `matched ${report.matched.length} · ghost ${report.ghost.length} · authorizedUnpaid ${report.authorizedUnpaid.length}\n`,
+        `matched ${report.matched.length} · ghost ${report.ghost.length} · authorizedUnpaid ${report.authorizedUnpaid.length} · mismatch ${mismatch}\n`,
       );
     }
     return 0;

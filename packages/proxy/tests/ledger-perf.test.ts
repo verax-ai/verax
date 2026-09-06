@@ -157,7 +157,7 @@ describe("B8 FileLedger append cost and durability", () => {
 });
 
 describe("S1F resolvedBy cost", () => {
-  it("approve and explain(pending defer) stay under 200ms after 600 decisions", async () => {
+  it("approve stays O(1) on inputs.jsonl after 600 decisions", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-resolve-cost-"));
     const ledger = new FileLedger(dir);
     const approvePolicy = loadPolicy({

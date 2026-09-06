@@ -86,8 +86,10 @@ schema failure → `deny spend-args-invalid`. Wrong ISO-4217 currency →
 is read from the approvals snapshot (`subject === "spend"`, `status`
 pending or approved, same currency, `createdAtMs` on the UTC day;
 expired does not count; missing `createdAtMs` is `expiresAtMs −
-approvalTtlMs`). After approve, the effect row is "payment
-authorized" (`effectClass: "spend"`, `effectHash` =
+approvalTtlMs`). A `spend-reauth-required` deny does not drop the
+first approved snapshot from the daily total (conservative: the
+unused authorization still counts). After approve, the effect row is
+"payment authorized" (`effectClass: "spend"`, `effectHash` =
 `effectDescriptor("spend", args)`). **The body does not move
 money.** A human pays in the payee's own console and writes
 `spend.reference` = `verax:<defer ref>` on the statement. A `_ref`
@@ -101,12 +103,17 @@ settlements). A typed file is not a rail. P4 `reconcile` already
 names `ghost` / `unsent` / `outOfScope` without calling `audit()`.
 S2 extends Verax `ChannelRow` with optional `amountMinor` and `currency`
 (not a Cedulon field). `verax reconcile --channel card` parses CSV →
-`ChannelRow`. Match: amount + currency (minor-unit tolerance) + time
-window; `ref` if present. Report buckets: `matched` · `ghost`
-(statement row, no authorization) · `authorizedUnpaid` (approved
-`spend` effect, no statement row). `unsent` remains for other
-classes. If a rail later signs extracts, `explain` already accepts
-`SignedRailExtract`.
+`ChannelRow`. Statement amounts are two-decimal (TRY-style): the cell
+is multiplied by 100 and rounded. Quoted cells follow RFC 4180 (`""`
+escape, delimiter inside quotes); a bad data row is skipped
+(`scope.skipped`), it does not drop the file. Match: amount +
+currency (minor-unit tolerance ±1) + time window. A `verax:` ref
+still requires amount and currency; a mismatch is ghost
+`amount-mismatch` and leaves the effect in `authorizedUnpaid`.
+Report buckets: `matched` · `ghost` (statement row, no
+authorization) · `authorizedUnpaid` (approved `spend` effect, no
+statement row). `unsent` remains for other classes. If a rail later
+signs extracts, `explain` already accepts `SignedRailExtract`.
 
 **Accept.** Fixture statement: 3 matched, 1 ghost, 1
 `authorizedUnpaid`. Policy fixtures replace the hard

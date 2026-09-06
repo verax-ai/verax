@@ -153,4 +153,54 @@ describe("card:", () => {
     const refunded = reconcile(refundRows, [], { toleranceMs: 3 * 86_400_000 });
     assert.equal(refunded.outOfScope.length, 1);
   });
+
+  it("D4: a verax ref with the wrong amount is ghost, not matched", () => {
+    const noon = Date.UTC(2026, 8, 6, 12);
+    const channel = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;TRUE REKLAM verax:d1;-2.000,00\n", {
+      currency: "TRY",
+    });
+    const approval: ApprovalRow = {
+      ref: "d1",
+      requestHash: "00".repeat(32),
+      subject: "spend",
+      args: { amountMinor: 125_050, currency: "TRY", payee: "true-ads", reference: "verax:d1" },
+      ruleId: "spend-true",
+      ruleText: "t",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 125_050,
+      createdAtMs: noon,
+      expiresAtMs: noon + 86_400_000,
+      status: "approved",
+      brain: "brain-1",
+      allowRef: "g1",
+    };
+    const effect: LedgerEffect = {
+      row: { ref: "g1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
+      witnessClass: "self",
+    };
+    const report = reconcile(channel, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
+    assert.equal(report.matched.some((m) => m.channel.ref === "d1"), false);
+    assert.equal(report.ghost.length, 1);
+    assert.equal(report.ghost[0]!.reason, "amount-mismatch");
+    assert.ok(report.ghost[0]!.nearestEffectDtMs !== undefined);
+    assert.equal(report.authorizedUnpaid.length, 1);
+    assert.equal(report.authorizedUnpaid[0]!.ref, "g1");
+  });
+
+  it("D1q: a quoted cell with the delimiter parses; a bad row is skipped", () => {
+    const quoted = parseCardCsv('Tarih;Açıklama;Tutar\n06.09.2026;"TRUE; REKLAM verax:d3";-50,00\n', {
+      currency: "TRY",
+    });
+    assert.equal(quoted.length, 1);
+    assert.equal(quoted[0]!.ref, "d3");
+    assert.equal(quoted[0]!.amountMinor, 5_000);
+    const mixed = parseCardCsv(
+      "Tarih;Açıklama;Tutar\nnot-a-date;x;-1,00\n06.09.2026;TRUE verax:d1;-1,00\n",
+      { currency: "TRY" },
+    );
+    assert.equal(mixed.length, 1);
+    assert.equal(mixed[0]!.ref, "d1");
+    assert.equal(mixed.skipped.length, 1);
+    assert.equal(mixed.skipped[0]!.line, 2);
+  });
 });

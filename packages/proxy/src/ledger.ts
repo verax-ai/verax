@@ -149,6 +149,21 @@ function asEffectRow(row: EffectRow): EffectRow {
   };
 }
 
+function asStoredEffect(
+  row: EffectRow,
+  witnessClass: WitnessClass,
+  resultHash: string | undefined,
+  signer: EffectSigner | undefined,
+): LedgerEffect {
+  const stored: LedgerEffect = {
+    row: asEffectRow(row),
+    witnessClass,
+    ...signedEffectFields(row, witnessClass, resultHash, signer),
+  };
+  if (resultHash !== undefined) stored.resultHash = resultHash;
+  return stored;
+}
+
 /** Slim index row. The Ledger interface stays closed. */
 export type DecisionIndexRow = {
   ref: string;
@@ -233,25 +248,23 @@ export class MemoryLedger implements Ledger {
   ): Promise<void> {
     const existing = this._effects.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
-      this._effects.push({
-        row: {
-          ref: row.ref,
-          effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
-          effectClass: "duplicate-effect",
-          timestampMs: row.timestampMs,
-          actor: row.actor,
-        },
-        witnessClass: DEFAULT_WITNESS,
-        resultHash,
-      });
+      this._effects.push(
+        asStoredEffect(
+          {
+            ref: row.ref,
+            effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
+            effectClass: "duplicate-effect",
+            timestampMs: row.timestampMs,
+            actor: row.actor,
+          },
+          DEFAULT_WITNESS,
+          resultHash,
+          undefined,
+        ),
+      );
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    this._effects.push({
-      row: asEffectRow(row),
-      witnessClass,
-      resultHash,
-      ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
-    });
+    this._effects.push(asStoredEffect(row, witnessClass, resultHash, this.effectSigner));
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
@@ -461,28 +474,28 @@ export class FileLedger implements Ledger {
     resultHash?: string,
   ): Promise<void> {
     if (row.effectClass !== "duplicate-effect" && this.effectRefs.has(row.ref)) {
-      const marker: LedgerEffect = {
-        row: {
-          ref: row.ref,
-          effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
-          effectClass: "duplicate-effect",
-          timestampMs: row.timestampMs,
-          actor: row.actor,
-        },
-        witnessClass: DEFAULT_WITNESS,
-        resultHash,
-      };
-      await appendDurable(this.effectsPath, lineOf(marker));
+      await appendDurable(
+        this.effectsPath,
+        lineOf(
+          asStoredEffect(
+            {
+              ref: row.ref,
+              effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
+              effectClass: "duplicate-effect",
+              timestampMs: row.timestampMs,
+              actor: row.actor,
+            },
+            DEFAULT_WITNESS,
+            resultHash,
+            undefined,
+          ),
+        ),
+      );
       throw new Error(`duplicate-effect:${row.ref}`);
     }
     await appendDurable(
       this.effectsPath,
-      lineOf({
-        row: asEffectRow(row),
-        witnessClass,
-        resultHash,
-        ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
-      }),
+      lineOf(asStoredEffect(row, witnessClass, resultHash, this.effectSigner)),
     );
     if (row.effectClass !== "duplicate-effect") this.effectRefs.add(row.ref);
   }

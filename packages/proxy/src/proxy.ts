@@ -364,10 +364,14 @@ export function createProxy(deps: ProxyDeps) {
         }
       }
 
-      const approvalRows = await approvals.listAll();
-      const verdict = deps.policy.evaluate(dispatched, principal, {
-        spentTodayMinor: (currency) => spentTodayMinorOf(approvalRows, timestampMs, currency),
-      });
+      let spendCtx: { spentTodayMinor: (currency: string) => number } | undefined;
+      if (dispatched.name === "spend") {
+        const approvalRows = await approvals.listAll();
+        spendCtx = {
+          spentTodayMinor: (currency) => spentTodayMinorOf(approvalRows, timestampMs, currency),
+        };
+      }
+      const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);
       let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
       let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
       const ref = given ?? deps.nonce();

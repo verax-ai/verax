@@ -1,8 +1,12 @@
 import { strict as assert } from "node:assert";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { approvePending } from "../src/approvals.ts";
-import { MemoryLedger } from "../src/ledger.ts";
+import { explain } from "../src/explain.ts";
+import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import { loadPolicy } from "../src/policy.ts";
 import { createProxy } from "../src/proxy.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER, queuedNonce, tickingNow } from "./helpers.ts";
@@ -255,5 +259,59 @@ describe("spend policy and authorize-once", () => {
     const again = await proxy.call(call, { brain: "brain-1", scopes: new Set(["verax:memory"]) });
     assert.equal(again.isError, false);
     assert.equal(inner, 2);
+  });
+
+  it("r: FileLedger approve writes a spend effect and retry replays", async () => {
+    for (const ledger of [new MemoryLedger(), new FileLedger(mkdtempSync(join(tmpdir(), "verax-spend-file-")))]) {
+      const now = tickingNow();
+      let inner = 0;
+      const proxy = createProxy({
+        policy: loadPolicy(SPEND_POLICY),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now,
+        nonce: queuedNonce(["r-allow"]),
+        inner: async () => {
+          inner += 1;
+          return { content: [{ type: "text", text: "ok" }], isError: false };
+        },
+      });
+      try {
+        await proxy.call({ name: "spend", arguments: { ...spendArgs, _ref: "r1" } }, payer);
+        const approved = await approvePending({
+          ledger,
+          recordSigner: RECORD_SIGNER,
+          now,
+          nonce: queuedNonce(["ra1"]),
+          ref: "r1",
+          approverId: "op",
+          policyHash: (await ledger.decisions())[0]!.claims.policyHash,
+          approvals: proxy.approvals,
+          inputsLog: proxy.inputsLog,
+        });
+        assert.equal(approved.ok, true);
+        const effects = await ledger.effects();
+        assert.equal(effects.filter((e) => e.row.effectClass === "spend").length, 1);
+        assert.equal(effects[0]!.row.ref, "ra1");
+        assert.equal(effects[0]!.row.actor, "op");
+        if ("dir" in ledger && typeof ledger.dir === "string") {
+          const lines = readFileSync(join(ledger.dir, "effects.jsonl"), "utf8")
+            .trim()
+            .split("\n")
+            .filter((l) => l !== "");
+          assert.equal(lines.length, 1);
+        }
+        const retry = await proxy.call({ name: "spend", arguments: { ...spendArgs, _ref: "r1" } }, payer);
+        assert.match(retry.content[0]?.text ?? "", /allowed:ra1/);
+        assert.equal(inner, 0);
+        const ex = await explain(ledger, "ra1");
+        assert.equal(ex.effect?.row.effectClass, "spend");
+        assert.equal(ex.balanced, true);
+        assert.equal(ex.pair?.defer?.claims.ref, "r1");
+      } finally {
+        if ("close" in ledger && typeof ledger.close === "function") ledger.close();
+      }
+    }
   });
 });

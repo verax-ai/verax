@@ -18,7 +18,12 @@ export type ChannelRow = {
   amountMinor?: number;
   currency?: string;
   credit?: boolean;
+  reason?: string;
 };
+
+export type CardCsvSkip = { line: number; reason: string };
+
+export type ParsedCardCsv = ChannelRow[] & { skipped: CardCsvSkip[] };
 
 export type ReconcileReport = {
   scope: {
@@ -26,6 +31,7 @@ export type ReconcileReport = {
     windowStartMs: number;
     windowEndMs: number;
     rowCount: number;
+    skipped?: CardCsvSkip[];
   };
   matched: Array<{ channel: ChannelRow; effect: EffectRow }>;
   ghost: ChannelRow[];
@@ -95,14 +101,77 @@ function parseCardAmount(raw: string, decimal: "," | "."): number {
   return Math.round(n * 100);
 }
 
-export function parseCardCsv(text: string, opts: CardCsvOpts): ChannelRow[] {
+/** RFC 4180 cells: delimiter inside quotes, `""` escape, CRLF in a quoted field. */
+function parseCsvRecords(text: string, delimiter: string): { line: number; cells: string[] }[] {
+  const src = text.replace(/^\uFEFF/, "");
+  const records: { line: number; cells: string[] }[] = [];
+  let cells: string[] = [];
+  let cur = "";
+  let inQuotes = false;
+  let line = 1;
+  let recordStartLine = 1;
+  const flushRecord = () => {
+    cells.push(cur);
+    if (cells.some((c) => c !== "")) {
+      records.push({ line: recordStartLine, cells });
+    }
+    cells = [];
+    cur = "";
+    recordStartLine = line;
+  };
+  for (let i = 0; i < src.length; i += 1) {
+    const ch = src[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') {
+          cur += '"';
+          i += 1;
+          continue;
+        }
+        inQuotes = false;
+        continue;
+      }
+      if (ch === "\n") line += 1;
+      cur += ch;
+      continue;
+    }
+    if (ch === '"') {
+      inQuotes = true;
+      continue;
+    }
+    if (ch === delimiter) {
+      cells.push(cur);
+      cur = "";
+      continue;
+    }
+    if (ch === "\r" && src[i + 1] === "\n") {
+      line += 1;
+      flushRecord();
+      i += 1;
+      continue;
+    }
+    if (ch === "\n") {
+      line += 1;
+      flushRecord();
+      continue;
+    }
+    cur += ch;
+  }
+  if (inQuotes) {
+    throw new Error("card-csv-unclosed-quote");
+  }
+  if (cur !== "" || cells.length > 0) flushRecord();
+  return records;
+}
+
+export function parseCardCsv(text: string, opts: CardCsvOpts): ParsedCardCsv {
   const delimiter = opts.delimiter ?? ";";
   const decimal = opts.decimal ?? ",";
   const dateFormat = opts.dateFormat ?? "DD.MM.YYYY";
   const columns = opts.columns ?? { date: "Tarih", amount: "Tutar", description: "Açıklama" };
-  const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter((l) => l !== "");
-  if (lines.length === 0) return [];
-  const header = lines[0]!.split(delimiter).map((h) => h.trim());
+  const records = parseCsvRecords(text, delimiter);
+  if (records.length === 0) return Object.assign([] as ChannelRow[], { skipped: [] as CardCsvSkip[] });
+  const header = records[0]!.cells.map((h) => h.trim());
   const dateIdx = header.indexOf(columns.date);
   const amountIdx = header.indexOf(columns.amount);
   const descIdx = header.indexOf(columns.description);
@@ -111,33 +180,41 @@ export function parseCardCsv(text: string, opts: CardCsvOpts): ChannelRow[] {
     throw new Error("card-csv-columns");
   }
   const rows: ChannelRow[] = [];
-  for (const line of lines.slice(1)) {
-    const cells = line.split(delimiter);
-    const date = cells[dateIdx] ?? "";
-    const amountRaw = cells[amountIdx] ?? "";
-    const description = cells[descIdx] ?? "";
-    const signed = parseCardAmount(amountRaw, decimal);
-    const amountMinor = Math.abs(signed);
-    const occurredAtMs = parseCardDate(date, dateFormat);
-    const refHit = VERAX_REF.exec(description);
-    const idCell = idIdx >= 0 ? (cells[idIdx] ?? "").trim() : "";
-    const externalId =
-      idCell !== ""
-        ? idCell
-        : createHash("sha256").update(`${date}|${amountRaw}|${description}`, "utf8").digest("hex");
-    const row: ChannelRow = {
-      channel: "card",
-      externalId,
-      occurredAtMs,
-      subject: "spend",
-      amountMinor,
-      currency: opts.currency,
-    };
-    if (refHit) row.ref = refHit[1];
-    if (signed > 0) row.credit = true;
-    rows.push(row);
+  const skipped: CardCsvSkip[] = [];
+  for (const rec of records.slice(1)) {
+    try {
+      const cells = rec.cells;
+      const date = cells[dateIdx] ?? "";
+      const amountRaw = cells[amountIdx] ?? "";
+      const description = cells[descIdx] ?? "";
+      const signed = parseCardAmount(amountRaw, decimal);
+      const amountMinor = Math.abs(signed);
+      const occurredAtMs = parseCardDate(date, dateFormat);
+      const refHit = VERAX_REF.exec(description);
+      const idCell = idIdx >= 0 ? (cells[idIdx] ?? "").trim() : "";
+      const externalId =
+        idCell !== ""
+          ? idCell
+          : createHash("sha256").update(`${date}|${amountRaw}|${description}`, "utf8").digest("hex");
+      const row: ChannelRow = {
+        channel: "card",
+        externalId,
+        occurredAtMs,
+        subject: "spend",
+        amountMinor,
+        currency: opts.currency,
+      };
+      if (refHit) row.ref = refHit[1];
+      if (signed > 0) row.credit = true;
+      rows.push(row);
+    } catch (err) {
+      skipped.push({
+        line: rec.line,
+        reason: err instanceof Error ? err.message : "card-csv-row",
+      });
+    }
   }
-  return rows;
+  return Object.assign(rows, { skipped });
 }
 
 export function parseChannelJsonl(text: string): ChannelRow[] {
@@ -181,9 +258,12 @@ function nearestEffectDtMs(row: ChannelRow, effects: readonly LedgerEffect[]): n
   return best;
 }
 
-function asGhost(row: ChannelRow, effects: readonly LedgerEffect[]): ChannelRow {
+function asGhost(row: ChannelRow, effects: readonly LedgerEffect[], reason?: string): ChannelRow {
   const dt = nearestEffectDtMs(row, effects);
-  return dt === undefined ? { ...row } : { ...row, nearestEffectDtMs: dt };
+  const ghost: ChannelRow = { ...row };
+  if (dt !== undefined) ghost.nearestEffectDtMs = dt;
+  if (reason !== undefined) ghost.reason = reason;
+  return ghost;
 }
 
 function approvalForEffect(approvals: readonly ApprovalRow[] | undefined, effectRef: string): ApprovalRow | undefined {
@@ -209,7 +289,12 @@ function amountsClose(a?: number, b?: number): boolean {
 export function reconcile(
   channelRows: readonly ChannelRow[],
   effects: readonly LedgerEffect[],
-  opts?: { toleranceMs?: number; window?: { startMs: number; endMs: number }; approvals?: readonly ApprovalRow[] },
+  opts?: {
+    toleranceMs?: number;
+    window?: { startMs: number; endMs: number };
+    approvals?: readonly ApprovalRow[];
+    skipped?: CardCsvSkip[];
+  },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;
   if (channelRows.length === 0) {
@@ -256,12 +341,22 @@ export function reconcile(
         continue;
       }
       const dt = Math.abs(row.occurredAtMs - effects[idx]!.row.timestampMs);
-      if (dt <= toleranceMs) {
-        used.add(idx);
-        matched.push({ channel: row, effect: effects[idx]!.row });
-      } else {
+      if (dt > toleranceMs) {
         ghost.push(asGhost(row, effects));
+        continue;
       }
+      const fromSnap = effectAmount(effects[idx]!, opts?.approvals);
+      const haveAmounts = row.amountMinor !== undefined && fromSnap.amountMinor !== undefined;
+      const haveCurrency = row.currency !== undefined && fromSnap.currency !== undefined;
+      if (
+        (haveAmounts && !amountsClose(row.amountMinor, fromSnap.amountMinor)) ||
+        (haveCurrency && row.currency !== fromSnap.currency)
+      ) {
+        ghost.push(asGhost(row, effects, "amount-mismatch"));
+        continue;
+      }
+      used.add(idx);
+      matched.push({ channel: row, effect: effects[idx]!.row });
       continue;
     }
     const near = effects.findIndex((e, i) => {
@@ -288,7 +383,13 @@ export function reconcile(
   const unsent = leftover.filter((e) => e.row.effectClass !== "spend").map((e) => e.row);
 
   return {
-    scope: { channel, windowStartMs, windowEndMs, rowCount: channelRows.length },
+    scope: {
+      channel,
+      windowStartMs,
+      windowEndMs,
+      rowCount: channelRows.length,
+      ...(opts?.skipped ? { skipped: opts.skipped } : {}),
+    },
     matched,
     ghost,
     unsent,

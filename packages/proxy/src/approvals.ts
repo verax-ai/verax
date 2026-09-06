@@ -251,13 +251,25 @@ export async function approvePending(opts: {
   );
   noteResolution(opts.ledger, opts.ref, { ref: allowRef, kind: "allow" });
   if (snap.subject === "spend") {
-    await opts.ledger.appendEffect({
+    const resultHash = sha256Canonical({
+      authorized: true,
       ref: allowRef,
-      effectHash,
-      effectClass: "spend",
-      timestampMs: opts.now(),
-      actor: snap.brain,
+      amountMinor: snap.args.amountMinor,
+      currency: snap.args.currency,
+      payee: snap.args.payee,
+      reference: snap.args.reference,
     });
+    await opts.ledger.appendEffect(
+      {
+        ref: allowRef,
+        effectHash,
+        effectClass: "spend",
+        timestampMs: opts.now(),
+        actor: opts.approverId,
+      },
+      "self",
+      resultHash,
+    );
   }
   await opts.approvals.updateStatus(opts.ref, "approved", { allowRef });
   return { ok: true, allowRef };
