@@ -27,10 +27,11 @@ function asWarning(f: Finding): ExplainWarning {
   return { id: f.id, code: f.code, detail: f.detail };
 }
 
-function conditionName(f: Finding): string | null {
+function conditionName(f: Finding, extractPresented: boolean): string | null {
   if (f.code === "unauthenticated-issuer") return "issuer unpinned";
   if (f.code === "unauthenticated-extract") {
-    return f.detail.includes("unsigned") ? "extract unsigned" : "extract unpinned";
+    // Name from whether an extract was handed to audit, not Cedulon detail text.
+    return extractPresented ? "extract unpinned" : "extract unsigned";
   }
   return null;
 }
@@ -71,6 +72,8 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     throw new Error(`explain-unknown-ref:${ref}`);
   }
   const effect = effects.find((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect") ?? null;
+  const presentedExtract = opts?.extract ?? effect?.receipt;
+  const extractPresented = Boolean(presentedExtract);
   const resolvedTrust = resolveIssuerTrust(opts);
   const issuerTrust = resolvedTrust.pin;
   const pinSource = resolvedTrust.source;
@@ -81,7 +84,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     settlements: effects.map((e) => e.row),
     profile: DECISION_PROFILE,
     ...(issuerTrust ? { issuerTrust } : {}),
-    ...(opts?.extract ?? effect?.receipt ? { extract: opts?.extract ?? effect?.receipt } : {}),
+    ...(presentedExtract ? { extract: presentedExtract } : {}),
   });
   const dropped = [
     ...new Set(
@@ -113,7 +116,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   if (self) conditions.push("self witness");
   if (pinSource === "own-key") conditions.push("issuer pinned to own key");
   for (const w of applicableWarnings) {
-    const name = conditionName(w);
+    const name = conditionName(w, extractPresented);
     if (name && !conditions.includes(name)) conditions.push(name);
   }
   const issuerMismatch = applicable.concat(applicableWarnings).some(

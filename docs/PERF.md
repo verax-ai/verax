@@ -17,6 +17,9 @@ Old particle-only cloud (DEVIR 2026-09-05):
 | 30000 | 6.7 frames/s |
 | 15000 | 240 frames/s |
 
+This is a single-machine measurement, not an fps claim. The adaptive
+page dropped to 15k points in 7 s on that run.
+
 New textured mesh + particles (Chromium headed, default GPU):
 
 | Draw | Bloom | P95 (ms) | Frames |

@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdtempSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -65,6 +65,47 @@ function spawnOpener(dir: string): SpawnedOpener {
   return { child, firstLine, done };
 }
 
+const WORKER_MS = 30_000;
+
+function withTimeout<T>(p: Promise<T>, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`worker-timeout:${label}`)), WORKER_MS);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
+function endOpener(opener: SpawnedOpener): void {
+  try {
+    opener.child.stdin?.end();
+  } catch {
+    // already closed
+  }
+}
+
+function killOpener(opener: SpawnedOpener): void {
+  const pid = opener.child.pid;
+  try {
+    opener.child.kill();
+  } catch {
+    // already gone
+  }
+  if (process.platform === "win32" && pid != null) {
+    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+  }
+}
+
 describe("D FileLedger directory lock", () => {
   it("a second FileLedger on the same dir throws ledger-locked", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-lock-"));
@@ -118,18 +159,35 @@ describe("D FileLedger directory lock", () => {
     second.close();
   });
 
-  it("1: two spawned bodies on the same dir leave one writer", async () => {
+  it("1: two spawned bodies on the same dir leave one writer", { timeout: WORKER_MS + 5_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-two-"));
     const first = spawnOpener(dir);
-    const openedLine = await first.firstLine;
-    assert.match(openedLine, /^OPENED:/);
-    const second = spawnOpener(dir);
-    const secondLine = await second.firstLine;
-    assert.match(secondLine, /^ERR:ledger-locked:/);
-    first.child.stdin?.end();
-    const lines = (await Promise.all([first.done, second.done])).map((s) => s.split(/\r?\n/)[0] ?? "");
-    const opened = lines.filter((l) => l.startsWith("OPENED:"));
-    const locked = lines.filter((l) => l.startsWith("ERR:ledger-locked:"));
-    assert.deepEqual({ opened: opened.length, locked: locked.length }, { opened: 1, locked: 1 });
+    let second: SpawnedOpener | undefined;
+    try {
+      const openedLine = await withTimeout(first.firstLine, "first");
+      assert.match(openedLine, /^OPENED:/);
+      second = spawnOpener(dir);
+      const secondLine = await withTimeout(second.firstLine, "second");
+      assert.match(secondLine, /^ERR:ledger-locked:/);
+      endOpener(first);
+      endOpener(second);
+      const lines = (
+        await Promise.all([
+          withTimeout(first.done, "first-done"),
+          withTimeout(second.done, "second-done"),
+        ])
+      ).map((s) => s.split(/\r?\n/)[0] ?? "");
+      const opened = lines.filter((l) => l.startsWith("OPENED:"));
+      const locked = lines.filter((l) => l.startsWith("ERR:ledger-locked:"));
+      assert.deepEqual({ opened: opened.length, locked: locked.length }, { opened: 1, locked: 1 });
+    } finally {
+      endOpener(first);
+      if (second) endOpener(second);
+      await new Promise((r) => setTimeout(r, 50));
+      if (first.child.exitCode == null && first.child.signalCode == null) killOpener(first);
+      if (second && second.child.exitCode == null && second.child.signalCode == null) {
+        killOpener(second);
+      }
+    }
   });
 });
