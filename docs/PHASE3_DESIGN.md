@@ -16,24 +16,34 @@ signer process and evidence-copy/heartbeat are Phase 4 (threat:
 
 **Threat.** The brain is hostile: any tool name, any arguments, any
 replay (`THREAT_MODEL.md`). A grant is a signed decision, not a mood.
-An approval is of one concrete command, not a batch.
+An approval is of one concrete command, not a batch. The host
+operator is trusted; anyone outside the OS is not.
 
 **Decision.** A rule may set `mode: "approve"`. After fail-closed
 checks pass, the proxy writes `decision: "defer"` (`reasonCode:
 approval-required`, `effectHash: null`, `effectClass` may name the
 tool). It does not call `inner`. Index: `<stateDir>/approvals.jsonl`
-(operator snapshot: `ref`, `requestHash`, `subject`, args, expiry,
-status). Signed truth is the decision chain, not the index. CLI
-`verax approve <stateDir> <ref>` recomputes `requestHash` from the
-snapshot and refuses a mismatch. The chained `allow` uses the same
-`requestHash`, `reasonCode: approved-by-operator`,
-`prevRecordHash = hash(defer)`, `effectHash = requestHash` (the
-intended effect is the authorized request). Expiry writes `deny` /
-`expired`. The brain retries the same arguments (same
-`requestHash`); different arguments are a new decision. There is no
-“approve all”. Optional `_ref` (stripped like `_inputs`) is the
-idempotency key; see §7. `spend.reference` is a payee memo, not
-`ref`.
+(operator snapshot: `ref`, `requestHash`, `subject`, args, **rule
+sentence**, **inputs summary**, **amount/payee** when present,
+expiry, status). Signed truth is the decision chain, not the index.
+S1 approve is **CLI only** (`verax approve <stateDir> <ref>`). The
+panel lists pending rows and has no approve control. Panel approve
+is after S5, under a separate `verax:approve` scope. The CLI
+recomputes `requestHash` from the snapshot and refuses a mismatch.
+The chained `allow` uses the same `requestHash`, `reasonCode:
+approved-by-operator`, `prevRecordHash = hash(defer)`, and
+`effectHash = sha256Canonical(effectDescriptor(name, args))` — the
+same descriptor the effect row will use. `requestHash` is only the
+defer↔allow bind; it is not the effect hash (a mismatch would be
+Cedulon `effect-mismatch`). The allow's `inputsHash` document
+carries `approver` (OS user / operator id, `via: "cli"`). Expiry is
+**lazy**: the next call that names that `_ref`, or `verax approve`,
+writes `deny` / `expired`. The brain retries the same arguments
+(same `requestHash`); different arguments are a new decision. There
+is no "approve all". Optional `_ref` (stripped like `_inputs`) is
+the idempotency key; see §7. `spend.reference` is a payee memo, not
+`ref`. If the body holds `ledger.lock`, the CLI queues
+`approval-commands.jsonl` and the next `proxy.call` applies it.
 
 **Types.** No new claims. Queue file is Verax. `ExplainResult` may
 gain a Verax `pair` (`defer` + resolution) so explain shows both
@@ -41,8 +51,9 @@ records; Cedulon `audit()` still sees the whole chain.
 
 **Accept (red first).** Defer is signed and chained. Approve is a
 second signed record. Different args → new defer. After TTL →
-`expired`. Panel has no “approve all” control (UI test). Same
-`_ref` + same `requestHash` → no third record.
+`expired`. Panel has no "approve all" control (UI test). Same
+`_ref` + same `requestHash` → no third record. Approved `allow`
+`effectHash` equals `effectDescriptor`, not `requestHash`.
 
 **STATUS.** Carries a defer→allow pair and an approvals index;
 unproven until an operator approves a live hostile-brain call.
@@ -57,10 +68,11 @@ not pay.
 Policy: amount cap, payee allow-list, daily total; **always**
 `defer` when those pass. Over cap / unknown payee / daily breach →
 `deny` (`spend-cap` / `spend-payee` / `spend-daily`). `pay` stays
-`spend-not-wired`. After approve, the effect row is “payment
-authorized” (`effectClass: "spend"`, `effectHash = requestHash`).
-**The body does not move money.** A human pays in the payee’s own
-console. The statement arrives later as operator CSV.
+`spend-not-wired`. After approve, the effect row is "payment
+authorized" (`effectClass: "spend"`, `effectHash` =
+`effectDescriptor("spend", args)`). **The body does not move
+money.** A human pays in the payee's own console. The statement
+arrives later as operator CSV.
 
 **Adapter.** Do not mint a Cedulon `SignedRailExtract` over that CSV:
 the extract type is a signed rail window (`accountId`, `railId`,
@@ -88,11 +100,13 @@ card statement is compared to a production ledger.
 **Threat.** Access paths: the brain must not get unbounded exit
 (`THREAT_MODEL.md` — any arguments).
 
-**Decision.** `policy.egress[]` is a host allow-list. Any call that
-names `host` or `url` is checked; missing host on an egress tool →
-`deny egress-host-missing`; host not listed → `deny egress-blocked`
-(signed, no `inner`). `message.read` has no destination and skips
-the check. S3 adds `message.send` as a **no-network** stub (tenant
+**Decision.** `policy.egress[]` is a host allow-list. A tool is
+egress only when the policy/registry marks it `egress: true` and
+names a host extractor for that tool. A marked tool whose extractor
+returns no host → `deny egress-host-missing` (fail closed). Host
+not listed → `deny egress-blocked` (signed, no `inner`). Do not
+sniff `host` / `url` keys on arbitrary arguments. `message.read` is
+not egress. S3 adds `message.send` as a **no-network** stub (tenant
 `outbox.jsonl` only) so a deny is a real ledger row. Mail/WA later
 reuse the same list.
 
@@ -110,9 +124,10 @@ refusal; Phase 4 proves a second copy.
 
 **Decision.**
 
-- Rate: count signed decisions for `principal.brain` in the last
-  60 s and per UTC day (ledger is the counter; unreadable ledger →
-  fail closed). Breach → `deny rate-limited` / `deny daily-limited`.
+- Rate: in-memory counters seeded from the ledger at open
+  (`effectRefs` pattern) and incremented on append. Only `allow`
+  and `defer` count; `deny` does not. Unreadable ledger → fail
+  closed. Breach → `deny rate-limited` / `deny daily-limited`.
 - Disk: free space on `stateDir` below `policy.limits.diskFreeBytes`
   (default 64 MiB) → `deny ledger-disk-low`. If the deny cannot be
   appended, HTTP 507 and a metrics bump — no silent drop.
@@ -120,7 +135,7 @@ refusal; Phase 4 proves a second copy.
   work is `deny halted` (still signed). Clear the file to resume.
 - Revoke: S3 tokens carry `jti`. Dev issuer `POST /revoke`. Body
   checks `<stateDir>/revoked-jti.jsonl`. Unknown/revoked `jti` →
-  401, no decision record (same as today’s unauthenticated path).
+  401, no decision record (same as today's unauthenticated path).
 
 **Accept.** Each deny code has a ledger fixture. Halt still appends.
 Revoke rejects the next Bearer. Disk test injects the free-space
@@ -134,19 +149,20 @@ a production halt and a stolen-token drill with an external issuer.
 **Threat.** Pilot accept: "another customer's record". Memory is
 flat under `stateDir/memory` today.
 
-**Decision.** Tenant key = SHA-256 of
-`{ brain, sub, aud }` (canonical). `principal.brain` is JWT `sub`
-today; `aud` is the separator for two customers on one body. Memory
-and inbox live under `tenants/<tenantKey>/`. `memory.get` of another
-tenant’s id → `deny tenant-mismatch` (signed, no body). Not “one
-tenant per `stateDir`”: one body may host several triplets. Legacy
-`memory/` without a prefix: `verax doctor` warns; reads do not
-silently merge.
+**Decision.** `aud` names the body (`VERAX_AUDIENCE`) and is the
+same for every caller on that body; it cannot separate customers.
+Tenant key = SHA-256 of `{ iss, sub }` plus an explicit
+`tenant` / `org` JWT claim when present (else `iss` + `sub`).
+`principal.brain` is JWT `sub` today. Memory and inbox live under
+`tenants/<tenantKey>/`. `memory.get` of another tenant's id →
+`deny tenant-mismatch` (signed, no body). Not "one tenant per
+`stateDir`". Legacy `memory/` without a prefix: `verax doctor`
+warns; reads do not silently merge.
 
-**Accept.** Two tokens, same `stateDir`, different `sub` or `aud`;
-A `memory.put`, B `memory.get` → `tenant-mismatch` on the ledger.
-That is the Phase 3 slice of the pilot test; a full stolen-token
-scenario stays Phase 4.
+**Accept.** Same `aud`, different `sub` **and** different
+`iss` / `tenant`; A `memory.put`, B `memory.get` →
+`tenant-mismatch` on the ledger. That is the Phase 3 slice of the
+pilot test; a full stolen-token scenario stays Phase 4.
 
 **STATUS.** Carries path split + `tenant-mismatch`; unproven until
 two live customers share one body.
@@ -161,12 +177,13 @@ Vite proxy from the environment; the dev issuer has JWKS only
 (PKCE S256) and `POST /token` to the **development** issuer
 (`NODE_ENV=production` still exits). Panel session uses the code
 flow; access tokens stay in memory, not `localStorage`, not the
-bundle. Desktop MCP brains may still read a token file. The body
-stays issuer-agnostic (RFC 9728 PRM `authorization_servers`,
-`jose` verify). **Option B** (Auth0/Keycloak) is configuration of
-that same interface, not a Phase 3 dependency: a local product
-must not require a vendor to prove PKCE. Tokens are not printed
-and do not leave env/file except the in-memory panel session.
+bundle. A refresh loses the session and runs `authorize` again
+(accepted). After S5 the Vite proxy may still inject
+`VERAX_DEV_TOKEN` for **dev-only** tooling (desktop MCP brains,
+tests); that path is not the panel session. The body stays
+issuer-agnostic (RFC 9728 PRM `authorization_servers`, `jose`
+verify). **Option B** (Auth0/Keycloak) is configuration of that
+same interface, not a Phase 3 dependency. Tokens are not printed.
 
 **Accept.** Authorize without `code_challenge` fails. Token
 response is not in a panel source file. PRM still lists the
@@ -177,21 +194,26 @@ authorization server is pinned in PRM.
 
 ## 7. Retry and idempotency (lands with S1)
 
-**Threat.** Hostile replay; “duplicate-effect retry … not designed”
-(`STATUS.md`).
+**Threat.** Hostile replay; "duplicate-effect retry … not designed"
+(`STATUS.md`). The brain chooses `_ref`.
 
 **Decision.** `_ref` is the idempotency key (Cedulon `ref` /
-`nonce`, as today when generated). Same `requestHash` + same `ref`
-→ return the existing decision, no new record. Different `ref` →
-new decision. Same `ref` + different `requestHash` → `deny
-ref-reuse`. A second **effect** on the same `ref` already becomes
-`LedgerEffect.row.effectClass: "duplicate-effect"`
+`nonce` when generated). Format: opaque, length 1–64, characters
+`[A-Za-z0-9._-]`. Invalid → `deny ref-invalid` with a **new**
+generated `ref`/`nonce`. Same `requestHash` + same `ref` → return
+the existing decision, no new record. Different `ref` → new
+decision. Same `ref` + different `requestHash` → `deny ref-reuse`
+written under a **new** `ref`/`nonce` (Cedulon nonce uniqueness).
+Per-tenant namespace for `_ref` lands with S4 (today the key is
+the raw `_ref`; S4 prefixes the tenant key so tenants cannot
+pre-empt each other). A second **effect** on the same `ref`
+already becomes `LedgerEffect.row.effectClass: "duplicate-effect"`
 (`ledger.ts`; `explain` skips that class). Do not invent another
 flag. Late channel events stay P4 `ghost` / `outOfScope`.
 
 **Accept.** Replay same `_ref` + args: one decision. Second
 `appendEffect`: `duplicate-effect` marker, existing tests stay
-green.
+green. Bad `_ref` → `ref-invalid` with a different claims.ref.
 
 **STATUS.** Carries decision-side short-circuit; unproven until a
 production brain retries after process restart.
@@ -219,13 +241,13 @@ until brains declare on every production call.
 
 | Slice | Lands | Tests first |
 | --- | --- | --- |
-| S1 | defer, approvals.jsonl, `verax approve`, panel pending list, explain pair, expiry, §7 | red: pair, expiry, no approve-all, idempotent `_ref` |
-| S2 | `spend` + always-defer, card CSV, `authorizedUnpaid` | red: 3/1/1 fixture; STATUS “does not pay” |
-| S3 | egress, rate/daily/disk, `verax halt`, `jti` revoke | red: each `reasonCode` |
-| S4 | tenant triplet, path split, `tenant-mismatch` | red: cross-tenant get |
-| S5 | dev-issuer authorize + PKCE, panel session | red: missing challenge |
+| S1 | defer, approvals.jsonl, `verax approve` (CLI only), panel pending list (no button), explain pair, lazy expiry, §7 | red: pair, expiry, no approve-all, idempotent `_ref`, effectHash = descriptor |
+| S2 | `spend` + always-defer, card CSV, `authorizedUnpaid` | red: 3/1/1 fixture; STATUS "does not pay" |
+| S3 | egress extractors, rate/daily/disk, `verax halt`, `jti` revoke | red: each `reasonCode` |
+| S4 | tenant `iss`+`sub`(+claim), path split, `_ref` namespace | red: same `aud`, different `iss`/`tenant` |
+| S5 | dev-issuer authorize + PKCE, panel session; Vite inject stays dev-only | red: missing challenge |
 
-One commit per slice. `STATUS.md` gains that slice’s line only
+One commit per slice. `STATUS.md` gains that slice's line only
 when tests are green. Policy document stays `version: 1` with
 additive optional fields (`mode`, `egress`, `requireInputs`,
 `limits`, `spend` on a rule).
