@@ -89,7 +89,7 @@ export type DecisionInputRow = {
 export type DecisionInputs = {
   principal: { brain: string; scopes: string[] };
   inputs: DecisionInputRow[];
-  approver?: { id: string; via: "cli"; resolves: string };
+  approver?: { id: string; via: "cli" | "proxy"; resolves: string };
 };
 
 export type InputsLog = {

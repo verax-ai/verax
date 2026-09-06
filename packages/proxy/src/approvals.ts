@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { signDecisionRecord } from "@cedulon/core";
-import { appendDurable, lookupDecisionByRef } from "./ledger.ts";
+import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import type { DecisionInputs, InputsLog, Ledger, RecordSigner } from "./types.ts";
@@ -129,6 +129,10 @@ export function loadApprovalsFromDir(dir: string): ApprovalRow[] {
 export type ApproveResult = { ok: true; allowRef: string } | { ok: false; reason: string };
 
 async function hasResolves(inputsLog: InputsLog, ledger: Ledger, deferRef: string): Promise<boolean> {
+  const indexed = ledger as Ledger & { lookupResolvedBy?: (ref: string) => unknown };
+  if (typeof indexed.lookupResolvedBy === "function") {
+    return indexed.lookupResolvedBy(deferRef) != null;
+  }
   for (const d of await ledger.decisions()) {
     if (!d.claims.ref || d.claims.ref === deferRef) continue;
     const inp = await inputsLog.get(d.claims.ref);
@@ -150,13 +154,24 @@ export async function approvePending(opts: {
 }): Promise<ApproveResult> {
   const inputsLog = opts.inputsLog ?? inputsLogFor(opts.ledger);
   const defer = await lookupDecisionByRef(opts.ledger, opts.ref);
-  if (!defer || defer.claims.decision !== "defer") return { ok: false, reason: "unknown-ref" };
+  if (!defer || defer.decision !== "defer") return { ok: false, reason: "unknown-ref" };
   const snap = await opts.approvals.get(opts.ref);
   if (snap && snap.status !== "pending") return { ok: false, reason: "already-resolved" };
-  if (await hasResolves(inputsLog, opts.ledger, opts.ref)) return { ok: false, reason: "already-resolved" };
+  const resolved = lookupResolvedBy(opts.ledger, opts.ref);
+  if (resolved || (await hasResolves(inputsLog, opts.ledger, opts.ref))) {
+    const hit = resolved ?? lookupResolvedBy(opts.ledger, opts.ref);
+    if (snap?.status === "pending" && hit) {
+      await opts.approvals.updateStatus(
+        opts.ref,
+        hit.kind === "allow" ? "approved" : "expired",
+        hit.kind === "allow" ? { allowRef: hit.ref } : undefined,
+      );
+    }
+    return { ok: false, reason: "already-resolved" };
+  }
   if (!snap) return { ok: false, reason: "snapshot-missing" };
   const requestHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
-  if (requestHash !== defer.claims.requestHash || requestHash !== snap.requestHash) {
+  if (requestHash !== defer.requestHash || requestHash !== snap.requestHash) {
     return { ok: false, reason: "hash-mismatch" };
   }
   if (opts.now() > snap.expiresAtMs) {
@@ -173,8 +188,8 @@ export async function approvePending(opts: {
       signDecisionRecord(
         {
           decider: "verax-operator",
-          subject: defer.claims.subject,
-          requestHash: defer.claims.requestHash,
+          subject: defer.subject,
+          requestHash: defer.requestHash,
           policyHash: opts.policyHash,
           inputsHash,
           decision: "deny",
@@ -189,6 +204,7 @@ export async function approvePending(opts: {
         opts.recordSigner.publicKeyPem,
       ),
     );
+    noteResolution(opts.ledger, opts.ref, { ref: expireRef, kind: "expired" });
     await opts.approvals.updateStatus(opts.ref, "expired");
     return { ok: false, reason: "expired" };
   }
@@ -206,8 +222,8 @@ export async function approvePending(opts: {
     signDecisionRecord(
       {
         decider: "verax-operator",
-        subject: defer.claims.subject,
-        requestHash: defer.claims.requestHash,
+        subject: defer.subject,
+        requestHash: defer.requestHash,
         policyHash: opts.policyHash,
         inputsHash,
         decision: "allow",
@@ -222,6 +238,7 @@ export async function approvePending(opts: {
       opts.recordSigner.publicKeyPem,
     ),
   );
+  noteResolution(opts.ledger, opts.ref, { ref: allowRef, kind: "allow" });
   await opts.approvals.updateStatus(opts.ref, "approved", { allowRef });
   return { ok: true, allowRef };
 }
@@ -245,7 +262,9 @@ export async function drainApprovalCommands(
     try {
       renameSync(live, processing);
     } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EPERM" || code === "EBUSY") return;
+      if (code !== "ENOENT") throw err;
     }
   }
   let names: string[];
@@ -258,15 +277,28 @@ export async function drainApprovalCommands(
     throw err;
   }
   const donePath = join(dir, "approval-commands.applied.jsonl");
+  const poisonPath = join(dir, "approval-commands.poison.jsonl");
   for (const name of names) {
     const file = join(dir, name);
-    const text = readFileSync(file, "utf8");
-    for (const line of text.split("\n")) {
-      if (line === "") continue;
-      const cmd = JSON.parse(line) as ApprovalCommand;
-      await apply(cmd);
-      appendFileSync(donePath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+    try {
+      const text = readFileSync(file, "utf8");
+      for (const line of text.split("\n")) {
+        if (line === "") continue;
+        try {
+          const cmd = JSON.parse(line) as ApprovalCommand;
+          await apply(cmd);
+          appendFileSync(donePath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+        } catch (err) {
+          const error = err instanceof Error ? err.message : String(err);
+          appendFileSync(
+            poisonPath,
+            `${JSON.stringify({ line, error, atMs: Date.now() })}\n`,
+            { encoding: "utf8", mode: 0o600 },
+          );
+        }
+      }
+    } finally {
+      unlinkSync(file);
     }
-    unlinkSync(file);
   }
 }

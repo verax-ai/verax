@@ -23,7 +23,7 @@ import type {
   LedgerEffect,
   WitnessClass,
 } from "./types.ts";
-import type { SignedDecisionRecord } from "@cedulon/core";
+import type { DecisionKind, SignedDecisionRecord } from "@cedulon/core";
 import { sha256Canonical } from "./hash.ts";
 
 export type PermissionCheck = "owner-only" | "not checked on this platform";
@@ -149,16 +149,55 @@ function asEffectRow(row: EffectRow): EffectRow {
   };
 }
 
+/** Slim index row. The Ledger interface stays closed. */
+export type DecisionIndexRow = {
+  ref: string;
+  requestHash: string;
+  decision: DecisionKind;
+  reasonCode: string;
+  subject: string;
+  policyHash: string;
+};
+
+export type ResolutionHit = { ref: string; kind: "allow" | "expired" };
+
+function indexRowOf(signed: SignedDecisionRecord): DecisionIndexRow | null {
+  if (typeof signed.claims.ref !== "string") return null;
+  return {
+    ref: signed.claims.ref,
+    requestHash: signed.claims.requestHash,
+    decision: signed.claims.decision,
+    reasonCode: signed.claims.reasonCode,
+    subject: signed.claims.subject,
+    policyHash: signed.claims.policyHash,
+  };
+}
+
+function resolutionKindOf(row: DecisionIndexRow): ResolutionHit["kind"] | null {
+  if (row.decision === "allow") return "allow";
+  if (row.reasonCode === "expired") return "expired";
+  return null;
+}
+
 export class MemoryLedger implements Ledger {
   readonly permissionCheck: PermissionCheck = "owner-only";
   effectSigner?: EffectSigner;
   private readonly _decisions: SignedDecisionRecord[] = [];
   private readonly _effects: LedgerEffect[] = [];
-  private readonly byRef = new Map<string, SignedDecisionRecord>();
+  private readonly byRef = new Map<string, DecisionIndexRow>();
+  private readonly resolvedBy = new Map<string, ResolutionHit>();
   private readonly q = new SerialQueue();
 
-  lookupByRef(ref: string): SignedDecisionRecord | null {
+  lookupByRef(ref: string): DecisionIndexRow | null {
     return this.byRef.get(ref) ?? null;
+  }
+
+  lookupResolvedBy(deferRef: string): ResolutionHit | null {
+    return this.resolvedBy.get(deferRef) ?? null;
+  }
+
+  noteResolution(deferRef: string, hit: ResolutionHit): void {
+    this.resolvedBy.set(deferRef, hit);
   }
 
   hasPrimaryEffect(ref: string): boolean {
@@ -168,7 +207,8 @@ export class MemoryLedger implements Ledger {
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
       this._decisions.push(signed);
-      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
+      const row = indexRowOf(signed);
+      if (row) this.byRef.set(row.ref, row);
     });
   }
 
@@ -177,7 +217,8 @@ export class MemoryLedger implements Ledger {
       const last = this._decisions[this._decisions.length - 1];
       const signed = build(last ? decisionRecordHash(last) : null);
       this._decisions.push(signed);
-      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
+      const row = indexRowOf(signed);
+      if (row) this.byRef.set(row.ref, row);
     });
   }
 
@@ -272,7 +313,8 @@ export class FileLedger implements Ledger {
   private lost = false;
   private tailHash: string | null = null;
   private readonly effectRefs = new Set<string>();
-  private readonly byRef = new Map<string, SignedDecisionRecord>();
+  private readonly byRef = new Map<string, DecisionIndexRow>();
+  private readonly resolvedBy = new Map<string, ResolutionHit>();
 
   constructor(dir: string) {
     this.dir = dir;
@@ -288,14 +330,39 @@ export class FileLedger implements Ledger {
   private loadCaches(): void {
     this.effectRefs.clear();
     this.byRef.clear();
+    this.resolvedBy.clear();
     const decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
     for (const rec of decisions) {
-      if (typeof rec.claims.ref === "string") this.byRef.set(rec.claims.ref, rec);
+      const row = indexRowOf(rec);
+      if (row) this.byRef.set(row.ref, row);
     }
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
+    }
+    this.loadResolvedBy();
+  }
+
+  /** Single pass over inputs.jsonl. FileInputsLog itself stays cache-less. */
+  private loadResolvedBy(): void {
+    let text: string;
+    try {
+      text = ledgerFs.readFileSync(join(this.dir, "inputs.jsonl"), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const row = JSON.parse(line) as { ref?: unknown; inputs?: { approver?: { resolves?: unknown } } };
+      if (typeof row.ref !== "string") continue;
+      const resolves = row.inputs?.approver?.resolves;
+      if (typeof resolves !== "string") continue;
+      const indexed = this.byRef.get(row.ref);
+      if (!indexed) continue;
+      const kind = resolutionKindOf(indexed);
+      if (kind) this.resolvedBy.set(resolves, { ref: row.ref, kind });
     }
   }
 
@@ -363,7 +430,8 @@ export class FileLedger implements Ledger {
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
-      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
+      const row = indexRowOf(signed);
+      if (row) this.byRef.set(row.ref, row);
     });
   }
 
@@ -375,7 +443,8 @@ export class FileLedger implements Ledger {
       const signed = build(prev);
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
-      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
+      const row = indexRowOf(signed);
+      if (row) this.byRef.set(row.ref, row);
     });
   }
 
@@ -438,8 +507,16 @@ export class FileLedger implements Ledger {
     return signWindow(await this.effects(), window, signer);
   }
 
-  lookupByRef(ref: string): SignedDecisionRecord | null {
+  lookupByRef(ref: string): DecisionIndexRow | null {
     return this.byRef.get(ref) ?? null;
+  }
+
+  lookupResolvedBy(deferRef: string): ResolutionHit | null {
+    return this.resolvedBy.get(deferRef) ?? null;
+  }
+
+  noteResolution(deferRef: string, hit: ResolutionHit): void {
+    this.resolvedBy.set(deferRef, hit);
   }
 
   hasPrimaryEffect(ref: string): boolean {
@@ -470,14 +547,28 @@ function signWindow(
 
 /** Extra methods on FileLedger / MemoryLedger. The Ledger interface stays closed. */
 type LedgerIndex = {
-  lookupByRef?: (ref: string) => SignedDecisionRecord | null;
+  lookupByRef?: (ref: string) => DecisionIndexRow | null;
   hasPrimaryEffect?: (ref: string) => boolean;
+  lookupResolvedBy?: (deferRef: string) => ResolutionHit | null;
+  noteResolution?: (deferRef: string, hit: ResolutionHit) => void;
 };
 
-export async function lookupDecisionByRef(ledger: Ledger, ref: string): Promise<SignedDecisionRecord | null> {
+export async function lookupDecisionByRef(ledger: Ledger, ref: string): Promise<DecisionIndexRow | null> {
   const extra = ledger as Ledger & LedgerIndex;
   if (typeof extra.lookupByRef === "function") return extra.lookupByRef(ref);
-  return (await ledger.decisions()).find((d) => d.claims.ref === ref) ?? null;
+  const found = (await ledger.decisions()).find((d) => d.claims.ref === ref);
+  return found ? indexRowOf(found) : null;
+}
+
+export function lookupResolvedBy(ledger: Ledger, deferRef: string): ResolutionHit | null {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.lookupResolvedBy === "function") return extra.lookupResolvedBy(deferRef);
+  return null;
+}
+
+export function noteResolution(ledger: Ledger, deferRef: string, hit: ResolutionHit): void {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.noteResolution === "function") extra.noteResolution(deferRef, hit);
 }
 
 export async function hasPrimaryEffect(ledger: Ledger, ref: string): Promise<boolean> {

@@ -4,7 +4,7 @@ import type { EffectRow } from "@cedulon/effect-extract";
 import { approvePending, approvalsLogFor, drainApprovalCommands } from "./approvals.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import { hasPrimaryEffect, lookupDecisionByRef } from "./ledger.ts";
+import { hasPrimaryEffect, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
 export const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -120,6 +120,11 @@ export function createProxy(deps: ProxyDeps) {
         deps.recordSigner.publicKeyPem,
       ),
     );
+    if (opts.inputs.approver?.resolves) {
+      const kind =
+        opts.reasonCode === "expired" ? "expired" : opts.decision === "allow" ? "allow" : null;
+      if (kind) noteResolution(deps.ledger, opts.inputs.approver.resolves, { ref: opts.ref, kind });
+    }
   }
 
   async function runInner(call: ToolCall, principal: Principal, ref: string): Promise<ToolResult> {
@@ -203,7 +208,7 @@ export function createProxy(deps: ProxyDeps) {
       if (stateDir) {
         await drainApprovalCommands(stateDir, async (cmd) => {
           const defer = await lookupDecisionByRef(deps.ledger, cmd.ref);
-          if (!defer || defer.claims.decision !== "defer") return;
+          if (!defer || defer.decision !== "defer") return;
           await approvePending({
             ledger: deps.ledger,
             recordSigner: deps.recordSigner,
@@ -211,7 +216,7 @@ export function createProxy(deps: ProxyDeps) {
             nonce: deps.nonce,
             ref: cmd.ref,
             approverId: cmd.approverId,
-            policyHash: defer.claims.policyHash,
+            policyHash: defer.policyHash,
             approvals,
             inputsLog,
           });
@@ -241,7 +246,7 @@ export function createProxy(deps: ProxyDeps) {
       if (typeof given === "string") {
         const existing = await lookupDecisionByRef(deps.ledger, given);
         if (existing) {
-          if (existing.claims.requestHash !== requestHash) {
+          if (existing.requestHash !== requestHash) {
             const ref = deps.nonce();
             await writeRecord({
               decision: "deny",
@@ -255,8 +260,13 @@ export function createProxy(deps: ProxyDeps) {
             });
             return denied("ref-reuse", ref);
           }
-          if (existing.claims.decision === "defer") {
+          if (existing.decision === "defer") {
             const snap = await approvals.get(given);
+            const boundHit = lookupResolvedBy(deps.ledger, given);
+            if (boundHit?.kind === "expired") {
+              if (snap?.status === "pending") await approvals.updateStatus(given, "expired");
+              return denied("expired", boundHit.ref);
+            }
             if (snap && timestampMs > snap.expiresAtMs) {
               const expireRef = deps.nonce();
               await writeRecord({
@@ -266,7 +276,7 @@ export function createProxy(deps: ProxyDeps) {
                 requestHash,
                 inputs: {
                   ...resolved.inputs,
-                  approver: { id: "verax-proxy", via: "cli", resolves: given },
+                  approver: { id: "verax-proxy", via: "proxy", resolves: given },
                 },
                 effectHash: null,
                 subject: call.name,
@@ -275,29 +285,29 @@ export function createProxy(deps: ProxyDeps) {
               await approvals.updateStatus(given, "expired");
               return denied("expired", expireRef);
             }
-            const allow = snap?.allowRef ? await lookupDecisionByRef(deps.ledger, snap.allowRef) : null;
-            if (
-              allow?.claims.ref &&
-              allow.claims.decision === "allow" &&
-              allow.claims.reasonCode === "approved-by-operator"
-            ) {
-              const bound = await inputsLog.get(allow.claims.ref);
+            const allowRef = snap?.allowRef ?? (boundHit?.kind === "allow" ? boundHit.ref : undefined);
+            const allow = allowRef ? await lookupDecisionByRef(deps.ledger, allowRef) : null;
+            if (allow?.ref && allow.decision === "allow" && allow.reasonCode === "approved-by-operator") {
+              const bound = await inputsLog.get(allow.ref);
               if (bound?.approver?.resolves && bound.approver.resolves !== given) {
                 return deferred(given);
               }
-              if (await hasPrimaryEffect(deps.ledger, allow.claims.ref)) return allowedReplay(allow.claims.ref);
-              return runInner(dispatched, principal, allow.claims.ref);
+              if (!snap?.allowRef) {
+                await approvals.updateStatus(given, "approved", { allowRef: allow.ref });
+              }
+              if (await hasPrimaryEffect(deps.ledger, allow.ref)) return allowedReplay(allow.ref);
+              return runInner(dispatched, principal, allow.ref);
             }
             return deferred(given);
           }
-          if (existing.claims.decision === "deny") {
-            return denied(existing.claims.reasonCode, given);
+          if (existing.decision === "deny") {
+            return denied(existing.reasonCode, given);
           }
-          if (existing.claims.decision === "allow" && existing.claims.ref) {
-            if (await hasPrimaryEffect(deps.ledger, existing.claims.ref)) {
-              return allowedReplay(existing.claims.ref);
+          if (existing.decision === "allow" && existing.ref) {
+            if (await hasPrimaryEffect(deps.ledger, existing.ref)) {
+              return allowedReplay(existing.ref);
             }
-            return runInner(dispatched, principal, existing.claims.ref);
+            return runInner(dispatched, principal, existing.ref);
           }
         }
       }

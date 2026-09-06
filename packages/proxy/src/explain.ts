@@ -4,9 +4,11 @@ import type { SignedDecisionRecord } from "@cedulon/core";
 import { approvalsLogFor, type ApprovalsLog } from "./approvals.ts";
 import { sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
+import { lookupResolvedBy } from "./ledger.ts";
 import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger } from "./types.ts";
 
 async function pairFor(
+  ledger: Ledger,
   decisions: SignedDecisionRecord[],
   record: SignedDecisionRecord,
   inputsLog: InputsLog,
@@ -14,22 +16,23 @@ async function pairFor(
 ): Promise<ExplainPair> {
   const ref = record.claims.ref;
   if (!ref) return { defer: null, resolution: null };
-  const own = await inputsLog.get(ref);
-  if (own?.approver?.resolves) {
-    const defer = decisions.find((d) => d.claims.ref === own.approver?.resolves) ?? null;
-    return { defer, resolution: record };
-  }
   if (record.claims.decision === "defer") {
     const snap = await approvals.get(ref);
     if (snap?.allowRef) {
       const resolution = decisions.find((d) => d.claims.ref === snap.allowRef) ?? null;
       return { defer: record, resolution };
     }
-    for (const d of decisions) {
-      if (!d.claims.ref || d === record) continue;
-      const inp = await inputsLog.get(d.claims.ref);
-      if (inp?.approver?.resolves === ref) return { defer: record, resolution: d };
+    const hit = lookupResolvedBy(ledger, ref);
+    if (hit) {
+      const resolution = decisions.find((d) => d.claims.ref === hit.ref) ?? null;
+      return { defer: record, resolution };
     }
+    return { defer: null, resolution: null };
+  }
+  const own = await inputsLog.get(ref);
+  if (own?.approver?.resolves) {
+    const defer = decisions.find((d) => d.claims.ref === own.approver?.resolves) ?? null;
+    return { defer, resolution: record };
   }
   return { defer: null, resolution: null };
 }
@@ -199,7 +202,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   return {
     record,
     effect,
-    pair: await pairFor(decisions, record, inputsLog, approvals),
+    pair: await pairFor(ledger, decisions, record, inputsLog, approvals),
     witnessClass,
     balanced,
     chain,

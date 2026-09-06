@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -360,5 +360,131 @@ describe("approval queue", () => {
     assert.deepEqual(seen, ["a"]);
     assert.equal(existsSync(join(dir, "approval-commands.jsonl")), true);
     assert.match(readFileSync(join(dir, "approval-commands.jsonl"), "utf8"), /"ref":"b"/);
+  });
+
+  it("l: retry repairs the snapshot after updateStatus throws once", async () => {
+    const ledger = new MemoryLedger();
+    const now = tickingNow();
+    const { proxy, innerCalls } = proxyOf({ ledger, now, nonce: queuedNonce(["unused"]) });
+    const call = { ...putCall, arguments: { ...putCall.arguments, _ref: "r1" } };
+    await proxy.call(call, principal);
+    const policyHash = (await ledger.decisions())[0]!.claims.policyHash;
+    const orig = proxy.approvals.updateStatus.bind(proxy.approvals);
+    let armed = true;
+    proxy.approvals.updateStatus = async (...args: Parameters<typeof orig>) => {
+      if (armed) {
+        armed = false;
+        throw new Error("simulated crash after ledger append");
+      }
+      return orig(...args);
+    };
+    await assert.rejects(
+      () =>
+        approvePending({
+          ledger,
+          recordSigner: RECORD_SIGNER,
+          now,
+          nonce: queuedNonce(["a1"]),
+          ref: "r1",
+          approverId: "op-1",
+          policyHash,
+          approvals: proxy.approvals,
+          inputsLog: proxy.inputsLog,
+        }),
+      /simulated crash after ledger append/,
+    );
+    const retry = await proxy.call(call, principal);
+    assert.equal(retry.isError, false);
+    assert.equal(innerCalls(), 1);
+    const second = await approvePending({
+      ledger,
+      recordSigner: RECORD_SIGNER,
+      now,
+      nonce: queuedNonce(["a2"]),
+      ref: "r1",
+      approverId: "op-1",
+      policyHash,
+      approvals: proxy.approvals,
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(second.ok, false);
+    if (second.ok === false) assert.equal(second.reason, "already-resolved");
+    assert.equal((await proxy.approvals.listPending()).length, 0);
+    const snap = await proxy.approvals.get("r1");
+    assert.equal(snap?.status, "approved");
+    assert.equal(snap?.allowRef, "a1");
+  });
+
+  it("m: expiry crash does not write a second expired record", async () => {
+    const ledger = new MemoryLedger();
+    let t = 100;
+    const { proxy } = proxyOf({
+      ledger,
+      now: () => t,
+      nonce: queuedNonce(["e1", "e2"]),
+    });
+    const call = { ...putCall, arguments: { ...putCall.arguments, _ref: "m1" } };
+    await proxy.call(call, principal);
+    const orig = proxy.approvals.updateStatus.bind(proxy.approvals);
+    let armed = true;
+    proxy.approvals.updateStatus = async (...args: Parameters<typeof orig>) => {
+      if (armed) {
+        armed = false;
+        throw new Error("simulated crash after ledger append");
+      }
+      return orig(...args);
+    };
+    t = 100 + 1_000 + 1;
+    await assert.rejects(() => proxy.call(call, principal), /simulated crash after ledger append/);
+    const second = await proxy.call(call, principal);
+    assert.match(second.content[0]?.text ?? "", /denied:expired:e1/);
+    const expired = (await ledger.decisions()).filter((d) => d.claims.reasonCode === "expired");
+    assert.equal(expired.length, 1);
+    assert.equal(expired[0]!.claims.ref, "e1");
+  });
+
+  it("n: a truncated queue line is poisoned and drain stays usable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-poison-"));
+    writeFileSync(join(dir, "approval-commands.jsonl"), '{"ref":"a","approverId":"op","atMs":1}\n{"ref":"b"', "utf8");
+    const seen: string[] = [];
+    await drainApprovalCommands(dir, async (cmd) => {
+      seen.push(cmd.ref);
+    });
+    assert.deepEqual(seen, ["a"]);
+    const poisonPath = join(dir, "approval-commands.poison.jsonl");
+    assert.equal(existsSync(poisonPath), true);
+    const poison = readFileSync(poisonPath, "utf8")
+      .trim()
+      .split("\n")
+      .filter((line) => line !== "");
+    assert.equal(poison.length, 1);
+    const leftover = readdirSync(dir).filter((n) => n.startsWith("approval-commands"));
+    assert.equal(
+      leftover.some((n) => n.startsWith("approval-commands.processing-")),
+      false,
+    );
+    await drainApprovalCommands(dir, async (cmd) => {
+      seen.push(cmd.ref);
+    });
+    assert.deepEqual(seen, ["a"]);
+  });
+
+  it("o: lazy expiry written by the proxy claims via proxy", async () => {
+    const ledger = new MemoryLedger();
+    let t = 100;
+    const { proxy } = proxyOf({
+      ledger,
+      now: () => t,
+      nonce: queuedNonce(["e1"]),
+    });
+    const call = { ...putCall, arguments: { ...putCall.arguments, _ref: "x1" } };
+    await proxy.call(call, principal);
+    t = 100 + 1_000 + 1;
+    const out = await proxy.call(call, principal);
+    assert.match(out.content[0]?.text ?? "", /denied:expired:e1/);
+    const inputs = await proxy.inputsLog.get("e1");
+    assert.equal(inputs?.approver?.via, "proxy");
+    assert.equal(inputs?.approver?.id, "verax-proxy");
+    assert.equal(inputs?.approver?.resolves, "x1");
   });
 });

@@ -43,6 +43,8 @@ approved` on the approvals snapshot. `already-resolved` is snapshot
 command; it is not the effect hash (a mismatch would be Cedulon
 `effect-mismatch`). The allow's `inputsHash` document carries
 `approver` (OS user / operator id, `via: "cli"`, `resolves`).
+`via: "proxy"` is only on the lazy-expiry record; `allow` is always
+`cli`.
 `explain.pair` uses `resolves` / snapshot `allowRef`. Expiry is
 **lazy**: the next call that names that `_ref`, or `verax approve`,
 writes `deny` / `expired`. The brain retries the same arguments
