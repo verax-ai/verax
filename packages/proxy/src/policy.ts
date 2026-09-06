@@ -1,6 +1,7 @@
 import { parseIJson } from "@cedulon/core";
+import { defaultDiskFreeBytes } from "./disk.ts";
 import { sha256Canonical } from "./hash.ts";
-import type { Policy, PolicyDecision, PolicyEvalCtx, Principal, ToolCall } from "./types.ts";
+import type { Policy, PolicyDecision, PolicyEvalCtx, PolicyLimits, Principal, ToolCall } from "./types.ts";
 
 export type PolicySpend = {
   maxAmountMinor: number;
@@ -24,6 +25,11 @@ export type PolicyDocument = {
   default: "deny";
   approvalTtlMs?: number;
   egress?: readonly string[];
+  limits?: {
+    ratePerMinute?: number;
+    dailyMax?: number;
+    diskFreeBytes?: number;
+  };
   rules: PolicyRule[];
 };
 
@@ -167,7 +173,27 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
     }
     document.approvalTtlMs = rec.approvalTtlMs;
   }
+  if (rec.limits !== undefined) {
+    document.limits = asLimits(rec.limits);
+  }
   return document;
+}
+
+function asLimits(raw: unknown): NonNullable<PolicyDocument["limits"]> {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("policy-limits");
+  }
+  const rec = raw as Record<string, unknown>;
+  const limits: NonNullable<PolicyDocument["limits"]> = {};
+  for (const key of ["ratePerMinute", "dailyMax", "diskFreeBytes"] as const) {
+    if (rec[key] === undefined) continue;
+    const n = rec[key];
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) {
+      throw new Error("policy-limits");
+    }
+    limits[key] = n;
+  }
+  return limits;
 }
 
 export function ruleTextHash(text: string): string {
@@ -177,9 +203,15 @@ export function ruleTextHash(text: string): string {
 export function loadPolicy(json: unknown): Policy {
   const document = parsePolicyDocument(json);
   const hash = sha256Canonical(document);
+  const limits: PolicyLimits = {
+    diskFreeBytes: document.limits?.diskFreeBytes ?? defaultDiskFreeBytes(),
+    ...(document.limits?.ratePerMinute !== undefined ? { ratePerMinute: document.limits.ratePerMinute } : {}),
+    ...(document.limits?.dailyMax !== undefined ? { dailyMax: document.limits.dailyMax } : {}),
+  };
   return {
     hash,
     approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
+    limits,
     rule(id: string | null) {
       if (id === null) return null;
       const found = document.rules.find((r) => r.id === id);

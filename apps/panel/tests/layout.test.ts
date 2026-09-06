@@ -59,8 +59,10 @@ describe("observatory layout", () => {
             if (/Failed to load resource: the server responded with a status of 500/.test(text)) return;
             consoleErrors.push(`${url} ${text}`.trim());
           });
-          await page.goto(ready, { waitUntil: "networkidle" });
+          await page.goto(ready, { waitUntil: "domcontentloaded" });
           await page.getByRole("tab", { name: "Genel durum" }).waitFor({ state: "visible", timeout: 30_000 });
+          await page.locator(".obs-detail").waitFor({ state: "visible", timeout: 30_000 });
+          await page.locator(".obs-timeline").waitFor({ state: "visible", timeout: 30_000 });
           const labels = await page.locator("[role=tab]").allTextContents();
           if (JSON.stringify(labels) !== JSON.stringify([...TABS])) {
             fails.push(`${view.name}: tabs ${JSON.stringify(labels)}`);

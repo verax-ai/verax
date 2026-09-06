@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // Development only; not an authorization server; no authorize endpoint.
 
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8 } from "jose";
 
@@ -59,21 +60,55 @@ const token = await new SignJWT({ scope })
   .setAudience(audience)
   .setIssuedAt()
   .setExpirationTime("10m")
+  .setJti(randomUUID())
   .sign(key);
 
 writeFileSync(outPath, token, { encoding: "utf8", mode: 0o600 });
 chmodSync(outPath, 0o600);
 
+async function readJson(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const text = Buffer.concat(chunks).toString("utf8");
+  if (text === "") return {};
+  return JSON.parse(text);
+}
+
 const server = createServer((req, res) => {
-  const url = new URL(req.url ?? "/", "http://127.0.0.1");
-  if (url.pathname === "/.well-known/jwks.json") {
-    const body = JSON.stringify({ keys: [jwk] });
-    res.writeHead(200, { "content-type": "application/json" });
-    res.end(body);
-    return;
-  }
-  res.writeHead(404);
-  res.end();
+  void (async () => {
+    const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    if (url.pathname === "/.well-known/jwks.json") {
+      const body = JSON.stringify({ keys: [jwk] });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(body);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/revoke") {
+      let parsed;
+      try {
+        parsed = await readJson(req);
+      } catch {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "bad-request" }));
+        return;
+      }
+      const jti = typeof parsed.jti === "string" ? parsed.jti : "";
+      if (jti === "") {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "jti-missing" }));
+        return;
+      }
+      appendFileSync(join(stateDir, "revoked-jti.jsonl"), `${JSON.stringify({ jti })}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ revoked: true }));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  })();
 });
 
 await new Promise((resolve, reject) => {

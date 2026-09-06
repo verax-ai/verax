@@ -30,9 +30,16 @@ export type PolicyEvalCtx = {
   spentTodayMinor?: (currency: string) => number;
 };
 
+export type PolicyLimits = {
+  ratePerMinute?: number;
+  dailyMax?: number;
+  diskFreeBytes: number;
+};
+
 export type Policy = {
   hash: string;
   approvalTtlMs: number;
+  limits: PolicyLimits;
   evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
   rule(id: string | null): { id: string; text: string } | null;
 };

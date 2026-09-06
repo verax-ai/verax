@@ -172,6 +172,7 @@ export type DecisionIndexRow = {
   reasonCode: string;
   subject: string;
   policyHash: string;
+  timestampMs: number;
 };
 
 export type ResolutionHit = { ref: string; kind: "allow" | "expired" };
@@ -185,6 +186,7 @@ function indexRowOf(signed: SignedDecisionRecord): DecisionIndexRow | null {
     reasonCode: signed.claims.reasonCode,
     subject: signed.claims.subject,
     policyHash: signed.claims.policyHash,
+    timestampMs: signed.claims.timestampMs,
   };
 }
 
@@ -199,6 +201,10 @@ function noteReauth(map: Map<string, string>, row: DecisionIndexRow): void {
   if (!map.has(row.requestHash)) map.set(row.requestHash, row.ref);
 }
 
+function noteCounted(times: number[], row: DecisionIndexRow): void {
+  if (row.decision === "allow" || row.decision === "defer") times.push(row.timestampMs);
+}
+
 export class MemoryLedger implements Ledger {
   readonly permissionCheck: PermissionCheck = "owner-only";
   effectSigner?: EffectSigner;
@@ -207,6 +213,8 @@ export class MemoryLedger implements Ledger {
   private readonly byRef = new Map<string, DecisionIndexRow>();
   private readonly resolvedBy = new Map<string, ResolutionHit>();
   private readonly reauthByHash = new Map<string, string>();
+  private readonly countedAt: number[] = [];
+  countsReadable = true;
   private readonly q = new SerialQueue();
 
   lookupByRef(ref: string): DecisionIndexRow | null {
@@ -225,6 +233,10 @@ export class MemoryLedger implements Ledger {
     return this.reauthByHash.get(requestHash) ?? null;
   }
 
+  countedTimes(): number[] {
+    return this.countedAt;
+  }
+
   hasPrimaryEffect(ref: string): boolean {
     return this._effects.some((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect");
   }
@@ -236,6 +248,7 @@ export class MemoryLedger implements Ledger {
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
       }
     });
   }
@@ -249,6 +262,7 @@ export class MemoryLedger implements Ledger {
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
       }
     });
   }
@@ -345,6 +359,8 @@ export class FileLedger implements Ledger {
   private readonly byRef = new Map<string, DecisionIndexRow>();
   private readonly resolvedBy = new Map<string, ResolutionHit>();
   private readonly reauthByHash = new Map<string, string>();
+  private readonly countedAt: number[] = [];
+  countsReadable = true;
 
   constructor(dir: string) {
     this.dir = dir;
@@ -362,7 +378,14 @@ export class FileLedger implements Ledger {
     this.byRef.clear();
     this.resolvedBy.clear();
     this.reauthByHash.clear();
-    const decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
+    this.countedAt.length = 0;
+    this.countsReadable = true;
+    let decisions: SignedDecisionRecord[] = [];
+    try {
+      decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
+    } catch {
+      this.countsReadable = false;
+    }
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
     for (const rec of decisions) {
@@ -370,6 +393,7 @@ export class FileLedger implements Ledger {
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
       }
     }
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
@@ -468,6 +492,7 @@ export class FileLedger implements Ledger {
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
       }
     });
   }
@@ -484,6 +509,7 @@ export class FileLedger implements Ledger {
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
       }
     });
   }
@@ -563,6 +589,10 @@ export class FileLedger implements Ledger {
     return this.reauthByHash.get(requestHash) ?? null;
   }
 
+  countedTimes(): number[] {
+    return this.countedAt;
+  }
+
   hasPrimaryEffect(ref: string): boolean {
     return this.effectRefs.has(ref);
   }
@@ -596,6 +626,8 @@ type LedgerIndex = {
   lookupResolvedBy?: (deferRef: string) => ResolutionHit | null;
   noteResolution?: (deferRef: string, hit: ResolutionHit) => void;
   lookupReauthByHash?: (requestHash: string) => string | null;
+  countedTimes?: () => number[];
+  countsReadable?: boolean;
 };
 
 export async function lookupDecisionByRef(ledger: Ledger, ref: string): Promise<DecisionIndexRow | null> {
@@ -614,6 +646,26 @@ export function lookupResolvedBy(ledger: Ledger, deferRef: string): ResolutionHi
 export function noteResolution(ledger: Ledger, deferRef: string, hit: ResolutionHit): void {
   const extra = ledger as Ledger & LedgerIndex;
   if (typeof extra.noteResolution === "function") extra.noteResolution(deferRef, hit);
+}
+
+export function countedWork(
+  ledger: Ledger,
+  nowMs: number,
+): { ok: true; minute: number; day: number } | { ok: false } {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (extra.countsReadable === false) return { ok: false };
+  if (typeof extra.countedTimes !== "function") return { ok: false };
+  const times = extra.countedTimes();
+  const minuteStart = nowMs - 60_000;
+  const day = new Date(nowMs);
+  const dayStart = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+  let minute = 0;
+  let dayCount = 0;
+  for (const t of times) {
+    if (t >= minuteStart && t <= nowMs) minute += 1;
+    if (t >= dayStart && t <= nowMs) dayCount += 1;
+  }
+  return { ok: true, minute, day: dayCount };
 }
 
 export async function lookupReauthByHash(ledger: Ledger, requestHash: string): Promise<string | null> {

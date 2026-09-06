@@ -10,6 +10,7 @@ const repoRoot = join(pkgRoot, "..", "..");
 
 const ALLOWED = new Set([
   "createProxy",
+  "LedgerDenyUnrecorded",
   "loadPolicy",
   "FileLedger",
   "MemoryLedger",

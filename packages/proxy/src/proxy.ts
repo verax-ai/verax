@@ -1,11 +1,31 @@
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { signDecisionRecord } from "@cedulon/core";
 import type { DecisionKind } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
 import { approvePending, approvalsLogFor, drainApprovalCommands } from "./approvals.ts";
+import { diskProbe } from "./disk.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import { hasPrimaryEffect, lookupDecisionByRef, lookupReauthByHash, lookupResolvedBy, noteResolution } from "./ledger.ts";
+import {
+  countedWork,
+  hasPrimaryEffect,
+  lookupDecisionByRef,
+  lookupReauthByHash,
+  lookupResolvedBy,
+  noteResolution,
+} from "./ledger.ts";
 import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
+
+export class LedgerDenyUnrecorded extends Error {
+  readonly reasonCode: string;
+  constructor(reasonCode: string, cause?: unknown) {
+    super(`ledger-deny-unrecorded:${reasonCode}`);
+    this.name = "LedgerDenyUnrecorded";
+    this.reasonCode = reasonCode;
+    if (cause !== undefined) this.cause = cause;
+  }
+}
 
 export const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -125,6 +145,31 @@ export function createProxy(deps: ProxyDeps) {
         opts.reasonCode === "expired" ? "expired" : opts.decision === "allow" ? "allow" : null;
       if (kind) noteResolution(deps.ledger, opts.inputs.approver.resolves, { ref: opts.ref, kind });
     }
+  }
+
+  async function writeRecordOrUnrecorded(opts: Parameters<typeof writeRecord>[0]): Promise<void> {
+    if (diskProbe.failAppend) {
+      throw new LedgerDenyUnrecorded("ledger-disk-low");
+    }
+    try {
+      await writeRecord(opts);
+    } catch (err) {
+      if (opts.reasonCode === "ledger-disk-low") {
+        throw new LedgerDenyUnrecorded("ledger-disk-low", err);
+      }
+      throw err;
+    }
+  }
+
+  function rateBound(timestampMs: number, wouldCount: boolean): string | null {
+    if (!wouldCount) return null;
+    const limits = deps.policy.limits;
+    if (limits.ratePerMinute === undefined && limits.dailyMax === undefined) return null;
+    const counts = countedWork(deps.ledger, timestampMs);
+    if (!counts.ok) return "rate-limited";
+    if (limits.ratePerMinute !== undefined && counts.minute >= limits.ratePerMinute) return "rate-limited";
+    if (limits.dailyMax !== undefined && counts.day >= limits.dailyMax) return "daily-limited";
+    return null;
   }
 
   function utcDayStart(ms: number): number {
@@ -269,6 +314,34 @@ export function createProxy(deps: ProxyDeps) {
       const requestHash = sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
+      if (stateDir && existsSync(join(stateDir, "halted"))) {
+        const ref = deps.nonce();
+        await writeRecord({
+          decision: "deny",
+          reasonCode: "halted",
+          ref,
+          requestHash,
+          inputs: resolved.inputs,
+          effectHash: null,
+          subject: call.name,
+          timestampMs,
+        });
+        return denied("halted", ref);
+      }
+      if (stateDir && diskProbe.freeBytes(stateDir) < deps.policy.limits.diskFreeBytes) {
+        const ref = deps.nonce();
+        await writeRecordOrUnrecorded({
+          decision: "deny",
+          reasonCode: "ledger-disk-low",
+          ref,
+          requestHash,
+          inputs: resolved.inputs,
+          effectHash: null,
+          subject: call.name,
+          timestampMs,
+        });
+        return denied("ledger-disk-low", ref);
+      }
       const given = readRef(call.arguments);
 
       if (given === "invalid") {
@@ -371,6 +444,11 @@ export function createProxy(deps: ProxyDeps) {
       const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);
       let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
       let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
+      const bound = rateBound(timestampMs, decision === "allow" || decision === "defer");
+      if (bound) {
+        decision = "deny";
+        reasonCode = bound;
+      }
       const ref = given ?? deps.nonce();
       const allow = decision === "allow";
       await writeRecord({

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -61,6 +61,19 @@ describe("6 dev-issuer.mjs", () => {
         audience: "http://127.0.0.1:8787",
       });
       assert.equal(payload.sub, "dev-brain");
+      assert.equal(typeof payload.jti, "string");
+      assert.equal((payload.jti as string).length > 0, true);
+
+      const revoke = await fetch(`${origin}/revoke`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jti: payload.jti }),
+        signal: AbortSignal.timeout(1000),
+      });
+      assert.equal(revoke.status, 200);
+      const revokedPath = join(stateDir, "revoked-jti.jsonl");
+      assert.equal(existsSync(revokedPath), true);
+      assert.match(readFileSync(revokedPath, "utf8"), new RegExp(`"jti":"${payload.jti}"`));
     } finally {
       child.kill("SIGTERM");
       await closed;

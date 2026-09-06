@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { join } from "node:path";
 import { generateKeyPair, SignJWT, exportJWK } from "jose";
 
 export type DevIssuer = {
@@ -12,9 +15,12 @@ export type DevIssuer = {
     alg?: string;
     scope?: string;
     omitExp?: boolean;
+    omitJti?: boolean;
+    jti?: string;
     iatSkewSec?: number;
     nbfSkewSec?: number;
   }) => Promise<string>;
+  revoke: (jti: string, stateDir: string) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -59,7 +65,14 @@ export async function startDevIssuer(bindPort: number, audience: string): Promis
       } else {
         jwt.setExpirationTime("10m");
       }
+      if (over.omitJti !== true) {
+        jwt.setJti(over.jti ?? randomUUID());
+      }
       return jwt.sign(privateKey);
+    },
+    async revoke(jti, stateDir) {
+      mkdirSync(stateDir, { recursive: true });
+      appendFileSync(join(stateDir, "revoked-jti.jsonl"), `${JSON.stringify({ jti })}\n`, "utf8");
     },
     close: () =>
       new Promise((resolve, reject) => {

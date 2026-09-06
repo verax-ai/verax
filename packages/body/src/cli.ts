@@ -1,6 +1,7 @@
 import { runApprove } from "./approve-cli.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
+import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runReconcile } from "./reconcile-cli.ts";
 import { runUnlock } from "./unlock.ts";
@@ -8,6 +9,14 @@ import { runUnlock } from "./unlock.ts";
 const argv = process.argv.slice(2);
 if (argv[0] === "approve") {
   process.exit(await runApprove(argv));
+}
+if (argv[0] === "halt") {
+  const stateDir = argv[1];
+  if (!stateDir) {
+    process.stderr.write("verax halt <stateDir>\n");
+    process.exit(78);
+  }
+  process.exit(runHalt(stateDir));
 }
 if (argv[0] === "unlock") {
   const force = argv.includes("--force");
