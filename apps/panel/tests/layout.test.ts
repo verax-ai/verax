@@ -17,6 +17,7 @@ const VIEWS = [
 ] as const;
 
 const TABS = ["Genel durum", "Sistem haritası", "İşlem geçmişi", "Anatomi"] as const;
+const TAB_FILES = ["status", "map", "history", "anatomy"] as const;
 
 describe("observatory layout", () => {
   it("keeps four tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
@@ -93,6 +94,14 @@ describe("observatory layout", () => {
           }
           if (pageErrors.length) fails.push(`${view.name}: pageerror ${pageErrors.join(" | ")}`);
           if (consoleErrors.length) fails.push(`${view.name}: console ${consoleErrors.join(" | ")}`);
+          for (let t = 0; t < TABS.length; t += 1) {
+            await page.getByRole("tab", { name: TABS[t] }).click();
+            await page.waitForTimeout(200);
+            await page.screenshot({
+              path: join(shotDir, `${view.name}-${TAB_FILES[t]}.png`),
+              fullPage: false,
+            });
+          }
           await page.screenshot({ path: join(shotDir, `${view.name}.png`), fullPage: false });
           await page.close();
         }

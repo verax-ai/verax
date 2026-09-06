@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { panelCopy } from "../copy.ts";
 import type { RailAction, RailFinding, RailWarning } from "./types.ts";
 
 export type RailContestResult = {
@@ -29,6 +30,7 @@ function iconOf(kind: "allow" | "deny" | "threw"): string {
 }
 
 export function Rail({ actions, onContest, onSelect }: RailProps) {
+  const copy = panelCopy();
   const [open, setOpen] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
   const [stamp, setStamp] = useState<Record<string, string>>({});
   const [findings, setFindings] = useState<Record<string, RailFinding>>({});
@@ -96,7 +98,7 @@ export function Rail({ actions, onContest, onSelect }: RailProps) {
                     </p>
                   ) : null}
                   <p className="witness">witness {witness ?? "none"}</p>
-                  <h2>What did you do</h2>
+                  <h2>{copy["rail.q1"]}</h2>
                   <p>
                     {action.record.claims.subject} {action.record.claims.decision}{" "}
                     {action.record.claims.reasonCode} at {action.record.claims.timestampMs} by{" "}
@@ -111,17 +113,17 @@ export function Rail({ actions, onContest, onSelect }: RailProps) {
                   ) : (
                     <p>no effect row</p>
                   )}
-                  <h2>Is there a counterpart</h2>
+                  <h2>{copy["rail.q2"]}</h2>
                   <p>
                     {finding?.code ?? "not requested"} {finding?.label ?? ""} hashes{" "}
                     {action.record.claims.effectHash ?? "none"} /{" "}
                     {action.effect?.row.effectHash ?? "none"}
                   </p>
-                  <h2>Was the information current</h2>
-                  <p>not tracked yet</p>
-                  <h2>What did it do to the company</h2>
-                  <p>not connected</p>
-                  <h2>Was it within the rules</h2>
+                  <h2>{copy["rail.q3"]}</h2>
+                  <p>{copy["rail.q3.empty"]}</p>
+                  <h2>{copy["rail.q4"]}</h2>
+                  <p>{copy["rail.q4.empty"]}</p>
+                  <h2>{copy["rail.q5"]}</h2>
                   {missing ? (
                     <p className="rule-missing">{missing}</p>
                   ) : (

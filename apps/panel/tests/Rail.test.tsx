@@ -42,8 +42,8 @@ describe("account-for rail", () => {
 
   it("keeps questions 3 and 4 visible", () => {
     render(<Rail actions={actions} />);
-    expect(screen.getByText("not tracked yet")).toBeTruthy();
-    expect(screen.getByText("not connected")).toBeTruthy();
+    expect(screen.getByText("henüz izlenmiyor")).toBeTruthy();
+    expect(screen.getByText("bağlı değil")).toBeTruthy();
   });
 
   it("P2-11: a 401 contest shows re-audit failed, not re-audited at", async () => {

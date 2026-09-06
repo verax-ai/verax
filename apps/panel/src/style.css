@@ -101,13 +101,27 @@ body {
 .muted {
   color: #8aa0b5;
 }
+.anatomy {
+  position: relative;
+  min-height: 28rem;
+}
 .anatomy-labels {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem 1rem;
+  position: absolute;
+  inset: 0;
   list-style: none;
-  padding: 0.5rem 0;
+  padding: 0;
   margin: 0;
+  pointer-events: none;
+}
+.anatomy-labels li {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  font-size: 0.75rem;
+  color: #c5d0dc;
+  white-space: nowrap;
+}
+.system-map .edge-flash {
+  stroke: #eaf2f8;
 }
 .system-map {
   width: 100%;

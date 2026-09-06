@@ -105,6 +105,28 @@ describe("observatory", () => {
     expect(document.body.textContent).not.toMatch(/receipt var/);
   });
 
+  it("draws one map edge per unique brain-subject pair", () => {
+    const demo = loadDemoActions();
+    const pairs = new Set(
+      demo.map((a) => `${a.inputs?.principal.brain ?? "unknown"}\t${a.record.claims.subject}`),
+    );
+    render(<Observatory actions={demo} status="ok" demo={true} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Sistem haritası" }));
+    const edges = [...document.querySelectorAll(".system-map line[data-edge]")];
+    expect(edges.length).toBe(pairs.size);
+    const bySubject = new Map<string, { x2: string | null; y2: string | null }>();
+    for (const el of edges) {
+      const pair = el.getAttribute("data-edge") ?? "";
+      const subject = pair.split("|")[1] ?? "";
+      bySubject.set(subject, { x2: el.getAttribute("x2"), y2: el.getAttribute("y2") });
+    }
+    const subjects = [...bySubject.keys()];
+    expect(subjects.length).toBeGreaterThan(1);
+    const a = bySubject.get(subjects[0]!)!;
+    const b = bySubject.get(subjects[1]!)!;
+    expect(`${a.x2},${a.y2}`).not.toBe(`${b.x2},${b.y2}`);
+  });
+
   it("demo data has no rule-missing rows", () => {
     render(<Observatory actions={loadDemoActions()} status="ok" demo={true} />);
     fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
