@@ -145,6 +145,19 @@ describe("historical policy sentence", () => {
   });
 });
 
+function stubLedgerFetch(handler: (url: string) => Response | Promise<Response>) {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.includes("reconcile-report")) {
+        return new Response("missing", { status: 404 });
+      }
+      return handler(url);
+    }),
+  );
+}
+
 describe("panel ledger fetch states", () => {
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -152,10 +165,7 @@ describe("panel ledger fetch states", () => {
   });
 
   it("shows error and the HTTP status when the ledger returns 500", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ error: "fault" }), { status: 500 })),
-    );
+    stubLedgerFetch(() => new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
     render(<App />);
     await waitFor(() => {
       expect(screen.getByText("error")).toBeTruthy();
@@ -166,10 +176,7 @@ describe("panel ledger fetch states", () => {
   });
 
   it("shows empty when the ledger has no decisions or effects", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async () => new Response(JSON.stringify({ decisions: [], effects: [] }), { status: 200 })),
-    );
+    stubLedgerFetch(() => new Response(JSON.stringify({ decisions: [], effects: [] }), { status: 200 }));
     render(<App />);
     await waitFor(() => {
       expect(screen.getByText("empty")).toBeTruthy();
@@ -183,11 +190,11 @@ describe("panel ledger fetch states", () => {
       effects: [],
       policies: { aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] } },
     };
-    const fetchMock = vi
+    const ledgerFetch = vi
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(ledgerBody), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
-    vi.stubGlobal("fetch", fetchMock);
+    stubLedgerFetch(() => ledgerFetch());
     render(<App />);
     await waitFor(() => {
       expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
@@ -200,7 +207,7 @@ describe("panel ledger fetch states", () => {
   });
 
   it("shows error when the ledger body is not JSON", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("not-json {", { status: 200 })));
+    stubLedgerFetch(() => new Response("not-json {", { status: 200 }));
     render(<App />);
     await waitFor(() => {
       expect(screen.getByText("error")).toBeTruthy();

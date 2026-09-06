@@ -135,6 +135,7 @@ Each line is what the tree carries, then what stays open.
 - F6 — Explain: carries the call-time row receipt; no window extract is signed at audit time; unproven until a production contest is compared to the call-time receipt.
 - F7 — Inputs I/O: carries `fsync` on the inputs document before the decision lands; unproven until the same crash-restart drill as G6.
 - F8 — Healthz: carries `ok` only for an unauthenticated probe; ledger counts require `verax:read`; unproven until an unauthenticated probe is watched on a hosted body.
+- P4 — Reconcile: carries a channel-export matcher (`reconcile`) that names ghost / unsent / outOfScope without calling Cedulon `audit()`, a `verax reconcile` CLI, and a panel card that reads `/reconcile-report.json`; unproven until a live Sent export is compared to a production ledger.
 
 Remaining gaps, still open:
 

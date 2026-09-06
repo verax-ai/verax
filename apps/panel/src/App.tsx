@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Stage } from "@verax-ai/presence";
+import { ReconcileCard, type ReconcileCardReport } from "./ReconcileCard.tsx";
 import { parseLedger } from "./rail/parse.ts";
 import { Rail } from "./rail/Rail.tsx";
 import type { PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
@@ -19,6 +20,7 @@ export function App() {
   const [errorText, setErrorText] = useState<string | null>(null);
   const [lastReadMs, setLastReadMs] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [reconcileReport, setReconcileReport] = useState<ReconcileCardReport | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -81,6 +83,26 @@ export function App() {
   }, [load]);
 
   useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/reconcile-report.json");
+        if (!r.ok) {
+          setReconcileReport(null);
+          return;
+        }
+        const body = (await r.json()) as ReconcileCardReport;
+        if (body?.scope && typeof body.scope.channel === "string" && Array.isArray(body.ghost)) {
+          setReconcileReport(body);
+        } else {
+          setReconcileReport(null);
+        }
+      } catch {
+        setReconcileReport(null);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     const id = setInterval(() => setNowMs(Date.now()), 1_000);
     return () => clearInterval(id);
   }, []);
@@ -108,6 +130,7 @@ export function App() {
             Refresh
           </button>
         </div>
+        <ReconcileCard report={reconcileReport} />
         {status === "ok" || (status === "error" && actions.length > 0) ? (
           <Rail
             actions={actions}

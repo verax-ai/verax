@@ -8,7 +8,16 @@ import { fileURLToPath } from "node:url";
 const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = join(pkgRoot, "..", "..");
 
-const ALLOWED = new Set(["createProxy", "loadPolicy", "FileLedger", "MemoryLedger", "explain"]);
+const ALLOWED = new Set([
+  "createProxy",
+  "loadPolicy",
+  "FileLedger",
+  "MemoryLedger",
+  "explain",
+  "loadEffectsFromDir",
+  "parseChannelJsonl",
+  "reconcile",
+]);
 
 describe("B1 exports map", () => {
   it("package.json exports only the root entry", () => {

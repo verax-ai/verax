@@ -51,6 +51,16 @@ aside {
 .rail-status.stale {
   color: #c45c5c;
 }
+.reconcile-card {
+  width: 22rem;
+  margin-left: auto;
+  padding: 0 1rem;
+}
+.reconcile-card p {
+  margin: 0.6rem 0 0;
+  font-size: 0.85rem;
+  color: #c5d0dc;
+}
 .refresh {
   display: inline-flex;
   background: #162033;
