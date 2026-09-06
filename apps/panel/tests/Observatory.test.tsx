@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
+import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle, RailAction } from "../src/rail/types.ts";
 
@@ -81,6 +82,12 @@ describe("observatory", () => {
     const line = document.querySelector(".detail-pane .rule-missing");
     expect(line?.textContent).toBe("identity hash on the record; inputs document unavailable");
     expect(line?.className).toMatch(/rule-missing/);
+  });
+
+  it("demo data has no rule-missing rows", () => {
+    render(<Observatory actions={loadDemoActions()} status="ok" demo={true} />);
+    fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
+    expect(document.querySelectorAll(".rule-missing").length).toBe(0);
   });
 
   it("shows ÖRNEK SENARYO on demo data and hides it on live data", () => {
