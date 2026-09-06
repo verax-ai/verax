@@ -58,6 +58,19 @@ const TOOL_META = [
     },
   },
   {
+    name: "message.send",
+    description: "Queue a message on the local outbox. Does not open a network.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        to: { type: "string" },
+        text: { type: "string" },
+      },
+      required: ["to", "text"],
+    },
+  },
+  {
     name: "spend",
     description: "Authorizes a payment; does not move money.",
     inputSchema: {

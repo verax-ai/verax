@@ -16,13 +16,27 @@ export type PolicyRule = {
   text: string;
   mode?: "allow" | "approve";
   spend?: PolicySpend;
+  egress?: true;
 };
 
 export type PolicyDocument = {
   version: 1;
   default: "deny";
   approvalTtlMs?: number;
+  egress?: readonly string[];
   rules: PolicyRule[];
+};
+
+/** Named per tool. Do not sniff `host` / `url` on arbitrary arguments. */
+export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => string | undefined> = {
+  "message.send": (args) => {
+    const to = args.to;
+    if (typeof to !== "string" || to === "") return undefined;
+    const at = to.lastIndexOf("@");
+    const host = (at >= 0 ? to.slice(at + 1) : to).trim().toLowerCase();
+    if (host === "" || host.includes("/") || host.includes(" ")) return undefined;
+    return host;
+  },
 };
 
 const DEFAULT_APPROVAL_TTL_MS = 86_400_000;
@@ -64,6 +78,12 @@ function asRule(raw: unknown, index: number): PolicyRule {
       throw new Error(`policy-rule-spend-missing:${rec.id}`);
     }
     rule.spend = asSpend(rec.spend, rec.id);
+  }
+  if (rec.egress !== undefined) {
+    if (rec.egress !== true) {
+      throw new Error(`policy-rule-egress:${rec.id}`);
+    }
+    rule.egress = true;
   }
   return rule;
 }
@@ -132,6 +152,15 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
     default: "deny",
     rules: rec.rules.map(asRule),
   };
+  if (rec.egress !== undefined) {
+    if (
+      !Array.isArray(rec.egress) ||
+      rec.egress.some((h) => typeof h !== "string" || h.trim() === "")
+    ) {
+      throw new Error("policy-egress");
+    }
+    document.egress = rec.egress as string[];
+  }
   if (rec.approvalTtlMs !== undefined) {
     if (typeof rec.approvalTtlMs !== "number" || !Number.isFinite(rec.approvalTtlMs) || rec.approvalTtlMs < 0) {
       throw new Error("policy-approval-ttl");
@@ -200,6 +229,17 @@ export function loadPolicy(json: unknown): Policy {
       for (const scope of rule.requires) {
         if (!principal.scopes.has(scope)) {
           return { decision: "deny", reasonCode: "scope-missing", rule: rule.id };
+        }
+      }
+      if (rule.egress === true) {
+        const extract = HOST_EXTRACTORS[call.name];
+        const host = extract ? extract(call.arguments) : undefined;
+        if (!extract || host === undefined) {
+          return { decision: "deny", reasonCode: "egress-host-missing", rule: rule.id };
+        }
+        const allowed = document.egress ?? [];
+        if (!allowed.includes(host)) {
+          return { decision: "deny", reasonCode: "egress-blocked", rule: rule.id };
         }
       }
       if (rule.mode === "approve") {
