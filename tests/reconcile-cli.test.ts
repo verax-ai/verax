@@ -25,7 +25,7 @@ function spawnCli(args: string[]): Promise<{ code: number; err: string }> {
 }
 
 describe("verax reconcile CLI", () => {
-  it("writes a report with 3 matched, 1 ghost, 1 unsent, 1 outOfScope", async () => {
+  it("writes a report with 3 matched, 2 ghost, 1 unsent, 0 outOfScope", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-reconcile-cli-"));
     const out = join(dir, "report.json");
     const ran = await spawnCli(["reconcile", stateDir, channel, "--out", out]);
@@ -44,9 +44,36 @@ describe("verax reconcile CLI", () => {
       rowCount: 5,
     });
     assert.equal(report.matched.length, 3);
-    assert.equal(report.ghost.length, 1);
+    assert.equal(report.ghost.length, 2);
     assert.equal(report.unsent.length, 1);
+    assert.equal(report.outOfScope.length, 0);
+  });
+
+  it("--window-start/--window-end puts msg-far in outOfScope", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-reconcile-win-"));
+    const out = join(dir, "report.json");
+    const ran = await spawnCli([
+      "reconcile",
+      stateDir,
+      channel,
+      "--window-start",
+      "20",
+      "--window-end",
+      "60",
+      "--out",
+      out,
+    ]);
+    assert.equal(ran.code, 0, ran.err);
+    const report = JSON.parse(readFileSync(out, "utf8")) as {
+      ghost: { externalId: string }[];
+      outOfScope: { externalId: string }[];
+    };
     assert.equal(report.outOfScope.length, 1);
+    assert.equal(report.outOfScope[0]?.externalId, "msg-far");
+    assert.equal(
+      report.ghost.some((g) => g.externalId === "msg-far"),
+      false,
+    );
   });
 
   it("usage without --out exits 78", async () => {

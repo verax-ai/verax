@@ -19,7 +19,7 @@ function loadEffects(): LedgerEffect[] {
 }
 
 describe("reconcile channel export against the ledger", () => {
-  it("sent fixture: 3 matched, 1 ghost, 1 unsent, 1 outOfScope; scope window is min/max", () => {
+  it("sent fixture: 3 matched, 2 ghost, 1 unsent, 0 outOfScope; msg-far is ghost", () => {
     const channel = parseChannelJsonl(readFileSync(sentPath, "utf8"));
     assert.equal(channel.length, 5);
     const report = reconcile(channel, loadEffects());
@@ -34,23 +34,48 @@ describe("reconcile channel export against the ledger", () => {
       report.matched.map((m) => m.effect.ref),
       ["n1", "n2", "n3"],
     );
-    assert.equal(report.ghost.length, 1);
-    assert.equal(report.ghost[0]?.externalId, "msg-ghost");
+    assert.equal(report.ghost.length, 2);
+    assert.deepEqual(
+      report.ghost.map((g) => g.externalId).sort(),
+      ["msg-far", "msg-ghost"],
+    );
+    assert.equal(
+      report.ghost.find((g) => g.externalId === "msg-far")?.nearestEffectDtMs !== undefined,
+      true,
+    );
     assert.equal(report.unsent.length, 1);
     assert.equal(report.unsent[0]?.ref, "n6");
-    assert.equal(report.outOfScope.length, 1);
-    assert.equal(report.outOfScope[0]?.externalId, "msg-far");
+    assert.equal(report.outOfScope.length, 0);
   });
 
-  it("a class match outside toleranceMs is outOfScope, not ghost", () => {
+  it("a class match outside toleranceMs is ghost when no explicit window", () => {
     const channel = parseChannelJsonl(readFileSync(sentPath, "utf8"));
     const tight = reconcile(channel, loadEffects(), { toleranceMs: 1 });
-    assert.ok(tight.outOfScope.some((r) => r.externalId === "msg-far"));
+    assert.equal(tight.outOfScope.length, 0);
+    assert.ok(tight.ghost.some((r) => r.externalId === "msg-far"));
     const loose = reconcile(channel, loadEffects(), { toleranceMs: 200_000 });
     assert.equal(
-      loose.outOfScope.some((r) => r.externalId === "msg-far"),
+      loose.ghost.some((r) => r.externalId === "msg-far"),
       false,
     );
     assert.ok(loose.matched.some((m) => m.effect.ref === "n6"));
+  });
+
+  it("an explicit window puts rows outside it in outOfScope", () => {
+    const channel = parseChannelJsonl(readFileSync(sentPath, "utf8"));
+    const report = reconcile(channel, loadEffects(), { window: { startMs: 20, endMs: 60 } });
+    assert.deepEqual(report.scope, {
+      channel: "sent",
+      windowStartMs: 20,
+      windowEndMs: 60,
+      rowCount: 5,
+    });
+    assert.equal(report.outOfScope.length, 1);
+    assert.equal(report.outOfScope[0]?.externalId, "msg-far");
+    assert.ok(report.ghost.some((r) => r.externalId === "msg-ghost"));
+    assert.equal(
+      report.ghost.some((r) => r.externalId === "msg-far"),
+      false,
+    );
   });
 });

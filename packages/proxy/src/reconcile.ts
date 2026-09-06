@@ -12,6 +12,7 @@ export type ChannelRow = {
   subject: string;
   actor?: string;
   ref?: string;
+  nearestEffectDtMs?: number;
 };
 
 export type ReconcileReport = {
@@ -87,10 +88,24 @@ export function loadEffectsFromDir(stateDir: string): LedgerEffect[] {
  * is not called; buckets use that vocabulary (ghost / unsent / outOfScope
  * are the unreconciled classes).
  */
+function nearestEffectDtMs(row: ChannelRow, effects: readonly LedgerEffect[]): number | undefined {
+  let best: number | undefined;
+  for (const effect of effects) {
+    const dt = Math.abs(row.occurredAtMs - effect.row.timestampMs);
+    if (best === undefined || dt < best) best = dt;
+  }
+  return best;
+}
+
+function asGhost(row: ChannelRow, effects: readonly LedgerEffect[]): ChannelRow {
+  const dt = nearestEffectDtMs(row, effects);
+  return dt === undefined ? { ...row } : { ...row, nearestEffectDtMs: dt };
+}
+
 export function reconcile(
   channelRows: readonly ChannelRow[],
   effects: readonly LedgerEffect[],
-  opts?: { toleranceMs?: number },
+  opts?: { toleranceMs?: number; window?: { startMs: number; endMs: number } },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;
   if (channelRows.length === 0) {
@@ -104,8 +119,9 @@ export function reconcile(
   }
   const channel = channelRows[0]!.channel;
   const times = channelRows.map((r) => r.occurredAtMs);
-  const windowStartMs = Math.min(...times);
-  const windowEndMs = Math.max(...times);
+  const explicit = opts?.window;
+  const windowStartMs = explicit ? explicit.startMs : Math.min(...times);
+  const windowEndMs = explicit ? explicit.endMs : Math.max(...times);
   const used = new Set<number>();
   const matched: ReconcileReport["matched"] = [];
   const ghost: ChannelRow[] = [];
@@ -115,10 +131,14 @@ export function reconcile(
     if (row.channel !== channel) {
       throw new Error(`channel-mixed:${row.channel}`);
     }
+    if (explicit && (row.occurredAtMs < windowStartMs || row.occurredAtMs > windowEndMs)) {
+      outOfScope.push(row);
+      continue;
+    }
     if (typeof row.ref === "string" && row.ref !== "") {
       const idx = effects.findIndex((e, i) => !used.has(i) && e.row.ref === row.ref);
       if (idx === -1) {
-        ghost.push(row);
+        ghost.push(asGhost(row, effects));
         continue;
       }
       const dt = Math.abs(row.occurredAtMs - effects[idx]!.row.timestampMs);
@@ -126,7 +146,7 @@ export function reconcile(
         used.add(idx);
         matched.push({ channel: row, effect: effects[idx]!.row });
       } else {
-        outOfScope.push(row);
+        ghost.push(asGhost(row, effects));
       }
       continue;
     }
@@ -141,11 +161,7 @@ export function reconcile(
       matched.push({ channel: row, effect: effects[near]!.row });
       continue;
     }
-    if (effects.some((e) => e.row.effectClass === row.subject)) {
-      outOfScope.push(row);
-    } else {
-      ghost.push(row);
-    }
+    ghost.push(asGhost(row, effects));
   }
 
   const lo = windowStartMs - toleranceMs;

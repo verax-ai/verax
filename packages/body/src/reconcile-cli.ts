@@ -7,10 +7,13 @@ export function parseReconcileArgs(argv: string[]): {
   channelPath: string;
   outPath: string;
   toleranceMs: number;
+  window?: { startMs: number; endMs: number };
 } | { error: string } {
   const rest = argv.slice(1);
   let toleranceMs = 60_000;
   let outPath: string | undefined;
+  let windowStart: number | undefined;
+  let windowEnd: number | undefined;
   const positionals: string[] = [];
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i]!;
@@ -19,6 +22,20 @@ export function parseReconcileArgs(argv: string[]): {
       const n = Number(raw);
       if (!Number.isFinite(n) || n < 0) return { error: "tolerance-invalid" };
       toleranceMs = n;
+      i += 1;
+      continue;
+    }
+    if (a === "--window-start") {
+      const n = Number(rest[i + 1]);
+      if (!Number.isFinite(n)) return { error: "window-invalid" };
+      windowStart = n;
+      i += 1;
+      continue;
+    }
+    if (a === "--window-end") {
+      const n = Number(rest[i + 1]);
+      if (!Number.isFinite(n)) return { error: "window-invalid" };
+      windowEnd = n;
       i += 1;
       continue;
     }
@@ -37,7 +54,14 @@ export function parseReconcileArgs(argv: string[]): {
   if (!stateDir || !channelPath || !outPath) {
     return { error: "usage" };
   }
-  return { stateDir, channelPath, outPath, toleranceMs };
+  if ((windowStart === undefined) !== (windowEnd === undefined)) {
+    return { error: "window-invalid" };
+  }
+  const window =
+    windowStart !== undefined && windowEnd !== undefined
+      ? { startMs: windowStart, endMs: windowEnd }
+      : undefined;
+  return { stateDir, channelPath, outPath, toleranceMs, window };
 }
 
 export function runReconcile(
@@ -47,7 +71,9 @@ export function runReconcile(
   const parsed = parseReconcileArgs(argv);
   if ("error" in parsed) {
     if (parsed.error === "usage") {
-      writeErr("verax reconcile <stateDir> <channel.jsonl> [--tolerance 60000] --out report.json\n");
+      writeErr(
+        "verax reconcile <stateDir> <channel.jsonl> [--tolerance 60000] [--window-start ms --window-end ms] --out report.json\n",
+      );
       return 78;
     }
     writeErr(`${parsed.error}\n`);
@@ -56,7 +82,10 @@ export function runReconcile(
   try {
     const channel = parseChannelJsonl(readFileSync(parsed.channelPath, "utf8"));
     const effects = loadEffectsFromDir(parsed.stateDir);
-    const report = reconcile(channel, effects, { toleranceMs: parsed.toleranceMs });
+    const report = reconcile(channel, effects, {
+      toleranceMs: parsed.toleranceMs,
+      window: parsed.window,
+    });
     writeFileSync(parsed.outPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8" });
     return 0;
   } catch (err) {
