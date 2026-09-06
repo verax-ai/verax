@@ -245,9 +245,17 @@ export async function runDesktop(
       stopAll();
       return 1;
     }
+    const profileDir = join(opts.stateDir, "browser-profile");
+    mkdirSync(profileDir, { recursive: true });
     const browserArgv = scriptBrowser
       ? [opts.browser!, url]
-      : [`--app=${url}`, "--window-size=1360,880"];
+      : [
+          `--user-data-dir=${profileDir}`,
+          "--no-first-run",
+          "--no-default-browser-check",
+          `--app=${url}`,
+          "--window-size=1360,880",
+        ];
     const browser = spawnLogged(browserBin, browserArgv, cleanEnv(), repoRoot);
     kids.push(browser);
     collectOutput(browser, log);
@@ -265,9 +273,23 @@ export async function runDesktop(
     };
     process.once("SIGINT", onSignal);
     process.once("SIGTERM", onSignal);
-    await new Promise<void>((resolve) => {
-      browser.on("close", () => resolve());
+    const closed = new Promise<void>((resolve) => {
+      browser.once("close", () => resolve());
     });
+    const exitedEarly = await Promise.race([
+      closed.then(() => true),
+      new Promise<boolean>((resolve) => {
+        setTimeout(() => resolve(false), 3_000);
+      }),
+    ]);
+    if (exitedEarly) {
+      writeErr("desktop-browser-exited-early\n");
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+      stopAll();
+      return 1;
+    }
+    await closed;
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
     stopAll();

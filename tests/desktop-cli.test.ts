@@ -12,6 +12,7 @@ import { portOpen } from "../packages/body/src/desktop.ts";
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "..", "packages", "body", "src", "cli.ts");
 const fakeBrowser = join(here, "..", "packages", "body", "tests", "fixtures", "fake-browser.mjs");
+const fakeBrowserExit = join(here, "..", "packages", "body", "tests", "fixtures", "fake-browser-exit.mjs");
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -152,6 +153,67 @@ describe("verax desktop CLI", () => {
         assert.equal(empty, true, `ports-still-open after ${emptiedMs}ms\n${sink.text}`);
         assert.equal(emptiedMs < 5000, true, `teardown-ms:${emptiedMs}`);
         process.stdout.write(`desktop-teardown-ms=${emptiedMs}\n`);
+      } finally {
+        if (child?.pid) killTree(child.pid);
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "treats a browser that exits within 3s as desktop-browser-exited-early",
+    { timeout: 180_000 },
+    async () => {
+      const stateDir = mkdtempSync(join(tmpdir(), "verax-desktop-early-"));
+      const [issuerPort, bodyPort, panelPort] = await Promise.all([
+        freePort(),
+        freePort(),
+        freePort(),
+      ]);
+      const sink = { text: "" };
+      let child: ChildProcess | undefined;
+      try {
+        child = spawn(
+          process.execPath,
+          [
+            "--experimental-strip-types",
+            cli,
+            "desktop",
+            "--state",
+            stateDir,
+            "--port",
+            String(panelPort),
+            "--issuer-port",
+            String(issuerPort),
+            "--body-port",
+            String(bodyPort),
+            "--browser",
+            fakeBrowserExit,
+          ],
+          {
+            env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+            stdio: ["ignore", "pipe", "pipe"],
+            windowsHide: true,
+          },
+        );
+        const feed = (c: Buffer | string) => {
+          sink.text += String(c);
+        };
+        child.stdout?.on("data", feed);
+        child.stderr?.on("data", feed);
+
+        const code = await new Promise<number>((resolve) => {
+          child!.on("close", (exit) => resolve(exit ?? 1));
+        });
+        assert.equal(code, 1, `expected-exit-1\n${sink.text}`);
+        assert.match(sink.text, /desktop-browser-exited-early/);
+        const empty = await waitUntil(async () => {
+          const a = await portOpen(issuerPort);
+          const b = await portOpen(bodyPort);
+          const c = await portOpen(panelPort);
+          return !a && !b && !c;
+        }, 5_000);
+        assert.equal(empty, true, `ports-still-open\n${sink.text}`);
       } finally {
         if (child?.pid) killTree(child.pid);
         rmSync(stateDir, { recursive: true, force: true });
