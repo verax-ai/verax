@@ -207,6 +207,16 @@ describe("panel ledger fetch states", () => {
     });
   });
 
+  it("keeps data-status=error and no rows when fetch rejects", async () => {
+    stubLedgerFetch(() => Promise.reject(new Error("offline")));
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector("[data-status]")?.getAttribute("data-status")).toBe("error");
+    });
+    expect(document.querySelectorAll(".row").length).toBe(0);
+    expect(screen.getByRole("button", { name: "Örnek senaryoyu göster" })).toBeTruthy();
+  });
+
   it("shows error when the ledger body is not JSON", async () => {
     stubLedgerFetch(() => new Response("not-json {", { status: 200 }));
     render(<App />);

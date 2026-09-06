@@ -84,12 +84,6 @@ export function App() {
     } catch {
       setStatus("error");
       setErrorText("ledger unreachable: network");
-      if (actions.length === 0) {
-        setActions(loadDemoActions());
-        setDemo(true);
-        setStatus("ok");
-        setLastReadMs(Date.now());
-      }
     }
   }, [actions.length]);
 
@@ -157,6 +151,10 @@ export function App() {
         stale={stale}
         ageMs={ageMs}
         onRefresh={() => void load()}
+        onShowDemo={() => {
+          setActions(loadDemoActions());
+          setDemo(true);
+        }}
         onContest={async (ref) => {
           const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
           const body = (await res.json().catch(() => ({}))) as {
