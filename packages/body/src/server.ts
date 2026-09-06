@@ -3,7 +3,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { BodyConfig } from "./config.ts";
-import { explain } from "@verax-ai/proxy";
+import { explain, loadApprovalsFromDir } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpUnauthenticated } from "./metrics.ts";
 import { loadOrCreateSigners } from "./keys.ts";
@@ -221,6 +221,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             policy: { hash: services.policyHash, document: services.policyDocument },
             policies: readPolicySnapshots(config.stateDir, hashes),
             inputs: await matchingInputs(config.stateDir, decisions),
+            approvals: loadApprovalsFromDir(config.stateDir),
           });
           return;
         }

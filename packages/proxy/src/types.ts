@@ -28,7 +28,9 @@ export type PolicyDecision = {
 
 export type Policy = {
   hash: string;
+  approvalTtlMs: number;
   evaluate(call: ToolCall, principal: Principal): PolicyDecision;
+  rule(id: string | null): { id: string; text: string } | null;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
@@ -87,6 +89,7 @@ export type DecisionInputRow = {
 export type DecisionInputs = {
   principal: { brain: string; scopes: string[] };
   inputs: DecisionInputRow[];
+  approver?: { id: string; via: "cli" };
 };
 
 export type InputsLog = {
@@ -143,9 +146,15 @@ export type ExplainTrustRoot = {
   source: "env" | "own-key" | null;
 };
 
+export type ExplainPair = {
+  defer: SignedDecisionRecord | null;
+  resolution: SignedDecisionRecord | null;
+};
+
 export type ExplainResult = {
   record: SignedDecisionRecord;
   effect: LedgerEffect | null;
+  pair?: ExplainPair;
   finding: ExplainFinding;
   witnessClass: WitnessClass | null;
   balanced: boolean;

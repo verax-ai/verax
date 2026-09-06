@@ -2,11 +2,14 @@ export { createProxy } from "./proxy.ts";
 export { loadPolicy } from "./policy.ts";
 export { FileLedger, MemoryLedger } from "./ledger.ts";
 export { explain } from "./explain.ts";
+export { approvePending, approvalsLogFor, enqueueApprovalCommand, loadApprovalsFromDir } from "./approvals.ts";
 export { loadEffectsFromDir, parseChannelJsonl, reconcile } from "./reconcile.ts";
+export type { ApprovalRow, ApproveResult } from "./approvals.ts";
 export type { ChannelRow, ReconcileReport } from "./reconcile.ts";
 export type {
   EffectSigner,
   ExplainChain,
+  ExplainPair,
   ExplainFinding,
   ExplainOpts,
   ExplainResult,

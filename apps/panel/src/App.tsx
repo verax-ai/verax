@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Observatory, type Healthz } from "./observatory/Observatory.tsx";
 import { loadDemoActions } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
-import type { PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
+import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
@@ -24,6 +24,7 @@ export function App() {
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [reconcileReport, setReconcileReport] = useState<ReconcileCardReport | null>(null);
   const [health, setHealth] = useState<Healthz>(null);
+  const [pending, setPending] = useState<PendingApproval[]>([]);
 
   const load = useCallback(async () => {
     if (wantDemo() && actions.length === 0) {
@@ -55,6 +56,7 @@ export function App() {
         policies?: Record<string, PolicyBundle["document"]>;
         policy?: PolicyBundle;
         inputs?: Record<string, import("./rail/types.ts").RailInputs>;
+        approvals?: PendingApproval[];
       };
       try {
         body = (await r.json()) as typeof body;
@@ -76,10 +78,12 @@ export function App() {
       setDemo(false);
       if (parsed.length === 0) {
         setActions([]);
+        setPending(Array.isArray(body.approvals) ? body.approvals : []);
         setStatus("empty");
         return;
       }
       setActions(parsed);
+      setPending(Array.isArray(body.approvals) ? body.approvals : []);
       setStatus("ok");
     } catch {
       setStatus("error");
@@ -150,6 +154,7 @@ export function App() {
         errorText={errorText}
         stale={stale}
         ageMs={ageMs}
+        pending={pending}
         onRefresh={() => void load()}
         onShowDemo={() => {
           setActions(loadDemoActions());
@@ -164,6 +169,7 @@ export function App() {
             warnings?: { id: string; code: string; detail?: string }[];
             witnessClass?: string | null;
             trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+            pair?: { defer: { decision: string; reasonCode: string } | null; resolution: { decision: string; reasonCode: string } | null };
           };
           if (!res.ok || typeof body.reAuditedAt !== "number") {
             return { error: `re-audit failed (${res.status})` };

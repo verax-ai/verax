@@ -7,13 +7,17 @@ export type PolicyRule = {
   tool: string;
   requires: readonly string[];
   text: string;
+  mode?: "allow" | "approve";
 };
 
 export type PolicyDocument = {
   version: 1;
   default: "deny";
+  approvalTtlMs?: number;
   rules: PolicyRule[];
 };
+
+const DEFAULT_APPROVAL_TTL_MS = 86_400_000;
 
 const SPEND_TOOLS = new Set(["spend", "pay"]);
 
@@ -34,12 +38,19 @@ function asRule(raw: unknown, index: number): PolicyRule {
   if (typeof rec.text !== "string" || rec.text.trim() === "") {
     throw new Error(`policy-rule-text:${rec.id}`);
   }
-  return {
+  const rule: PolicyRule = {
     id: rec.id,
     tool: rec.tool,
     requires: rec.requires as string[],
     text: rec.text,
   };
+  if (rec.mode !== undefined) {
+    if (rec.mode !== "allow" && rec.mode !== "approve") {
+      throw new Error(`policy-rule-mode:${rec.id}`);
+    }
+    rule.mode = rec.mode;
+  }
+  return rule;
 }
 
 export function parsePolicyDocument(json: unknown): PolicyDocument {
@@ -57,11 +68,18 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
   if (!Array.isArray(rec.rules)) {
     throw new Error("policy-rules");
   }
-  return {
+  const document: PolicyDocument = {
     version: 1,
     default: "deny",
     rules: rec.rules.map(asRule),
   };
+  if (rec.approvalTtlMs !== undefined) {
+    if (typeof rec.approvalTtlMs !== "number" || !Number.isFinite(rec.approvalTtlMs) || rec.approvalTtlMs < 0) {
+      throw new Error("policy-approval-ttl");
+    }
+    document.approvalTtlMs = rec.approvalTtlMs;
+  }
+  return document;
 }
 
 export function ruleTextHash(text: string): string {
@@ -73,6 +91,12 @@ export function loadPolicy(json: unknown): Policy {
   const hash = sha256Canonical(document);
   return {
     hash,
+    approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
+    rule(id: string | null) {
+      if (id === null) return null;
+      const found = document.rules.find((r) => r.id === id);
+      return found ? { id: found.id, text: found.text } : null;
+    },
     evaluate(call: ToolCall, principal: Principal): PolicyDecision {
       if (SPEND_TOOLS.has(call.name)) {
         return { decision: "deny", reasonCode: "spend-not-wired", rule: null };
@@ -85,6 +109,9 @@ export function loadPolicy(json: unknown): Policy {
         if (!principal.scopes.has(scope)) {
           return { decision: "deny", reasonCode: "scope-missing", rule: rule.id };
         }
+      }
+      if (rule.mode === "approve") {
+        return { decision: "defer", reasonCode: "approval-required", rule: rule.id };
       }
       return { decision: "allow", reasonCode: "allow", rule: rule.id };
     },

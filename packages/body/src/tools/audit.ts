@@ -25,6 +25,12 @@ export async function auditExplain(
           guarantee: result.guarantee,
           warnings: result.warnings,
           trustRoot: result.trustRoot,
+          pair: result.pair
+            ? {
+                defer: result.pair.defer?.claims ?? null,
+                resolution: result.pair.resolution?.claims ?? null,
+              }
+            : undefined,
         }),
       },
     ],

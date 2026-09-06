@@ -1,8 +1,29 @@
 import { audit, DECISION_PROFILE, type Finding, type IssuerTrustPin, type PresentedExtract } from "@cedulon/audit";
-import { findDecisionRecordChainBreak } from "@cedulon/core";
+import { decisionRecordHash, findDecisionRecordChainBreak } from "@cedulon/core";
+import type { SignedDecisionRecord } from "@cedulon/core";
 import { sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import type { ExplainOpts, ExplainResult, ExplainWarning, Ledger } from "./types.ts";
+import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, Ledger } from "./types.ts";
+
+function pairFor(decisions: SignedDecisionRecord[], record: SignedDecisionRecord): ExplainPair {
+  if (record.claims.decision === "defer") {
+    const resolution =
+      decisions.find(
+        (d) =>
+          d.claims.prevRecordHash === decisionRecordHash(record) &&
+          d.claims.requestHash === record.claims.requestHash,
+      ) ?? null;
+    return { defer: record, resolution };
+  }
+  if (typeof record.claims.prevRecordHash === "string") {
+    const defer =
+      decisions.find(
+        (d) => decisionRecordHash(d) === record.claims.prevRecordHash && d.claims.decision === "defer",
+      ) ?? null;
+    if (defer) return { defer, resolution: record };
+  }
+  return { defer: null, resolution: null };
+}
 
 const WINDOW_COVERAGE = "window-coverage";
 
@@ -168,6 +189,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   return {
     record,
     effect,
+    pair: pairFor(decisions, record),
     witnessClass,
     balanced,
     chain,

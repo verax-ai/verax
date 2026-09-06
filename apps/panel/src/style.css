@@ -34,6 +34,12 @@ body {
   padding: 0.75rem 1rem;
   border-bottom: 1px solid #1a2a40;
 }
+.pending-approvals {
+  margin: 1rem 0;
+}
+.pending-approvals ul {
+  padding-left: 1.2rem;
+}
 .obs-left {
   grid-area: left;
   padding: 1rem;

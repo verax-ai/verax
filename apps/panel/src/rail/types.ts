@@ -64,6 +64,19 @@ export type RailWarning = {
   detail?: string;
 };
 
+export type PendingApproval = {
+  ref: string;
+  requestHash: string;
+  subject: string;
+  ruleText: string | null;
+  inputsSummary: { count: number; ids: string[] };
+  amount?: unknown;
+  payee?: unknown;
+  expiresAtMs: number;
+  status: "pending" | "approved" | "expired";
+  brain: string;
+};
+
 export type RailAction = {
   record: RailDecision;
   effect: RailEffect | null;
