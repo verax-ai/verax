@@ -21,6 +21,13 @@ if (!entry || typeof entry.p95 !== "number") {
   process.stdout.write(`no baseline for ${key}; recorded\n`);
   process.exit(0);
 }
+const minFrames = Number(process.env.VERAX_PERF_MIN_FRAMES ?? (process.env.GITHUB_ACTIONS ? 10 : 30));
+const frames = typeof last.frames === "number" ? last.frames : 0;
+const p95 = typeof last.p95 === "number" ? last.p95 : 0;
+if (frames < minFrames || p95 === 0) {
+  process.stderr.write("panel-perf: no frames\n");
+  process.exit(1);
+}
 const limit = entry.p95 * 1.3;
 if (last.p95 > limit) {
   process.stderr.write(

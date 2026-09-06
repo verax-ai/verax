@@ -46,6 +46,14 @@ function readBloom(): boolean {
   return new URLSearchParams(window.location.search).get("bloom") === "1";
 }
 
+function FrameSampler() {
+  useFrame((_, dt) => {
+    const w = window as Window & { __veraxPushFrame?: (ms: number) => void };
+    w.__veraxPushFrame?.(dt * 1000);
+  });
+  return null;
+}
+
 function ProceduralBreath({ children }: { children: ReactNode }) {
   const ref = useRef<Group>(null);
   useFrame(() => {
@@ -131,6 +139,7 @@ export function Stage({
         gl={{ antialias: false, toneMapping: ACESFilmicToneMapping, toneMappingExposure: 1.05 }}
       >
         <Lights color={params.coreColor} />
+        <FrameSampler />
         {cloud && meta && fit ? (
           <group position={fit.position} scale={fit.scale}>
             {breath === "procedural" ? (

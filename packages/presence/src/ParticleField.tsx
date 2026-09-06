@@ -136,7 +136,7 @@ export function ParticleField({
     geo.setDrawRange(0, count);
   }, [geo, count]);
 
-  useFrame((state, dt) => {
+  useFrame((state) => {
     const elapsed = (performance.now() - startedAtMs) / 1000;
     const uniforms = matRef.current.uniforms;
     uniforms.uTime.value = elapsed;
@@ -154,8 +154,6 @@ export function ParticleField({
       0,
     ];
     uniforms.uPull.value = pullTarget ? pullTarget.slice() : chest;
-    const w = window as Window & { __veraxPushFrame?: (ms: number) => void };
-    w.__veraxPushFrame?.(dt * 1000);
   });
 
   return <points geometry={geo} material={material} />;
