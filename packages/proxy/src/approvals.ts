@@ -1,4 +1,18 @@
-import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+} from "node:fs";
+
+/** I/O seam so drain-busy tests can inject rename failures. */
+export const approvalFs = {
+  renameSync,
+};
+
+export const drainMetrics = { renameBusy: 0 };
 import { join } from "node:path";
 import { signDecisionRecord } from "@cedulon/core";
 import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
@@ -292,10 +306,14 @@ export async function drainApprovalCommands(
   if (existsSync(live)) {
     const processing = join(dir, `approval-commands.processing-${Date.now()}-${process.pid}`);
     try {
-      renameSync(live, processing);
+      approvalFs.renameSync(live, processing);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (code === "EPERM" || code === "EBUSY") return;
+      if (code === "EPERM" || code === "EBUSY") {
+        drainMetrics.renameBusy += 1;
+        process.stderr.write(`verax-drain: rename-busy ${code} count=${drainMetrics.renameBusy}\n`);
+        return;
+      }
       if (code !== "ENOENT") throw err;
     }
   }

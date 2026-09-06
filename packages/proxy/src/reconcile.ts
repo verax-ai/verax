@@ -286,6 +286,22 @@ function amountsClose(a?: number, b?: number): boolean {
   return Math.abs(a - b) <= 1;
 }
 
+/** One side priced and the other not is not a match. Both unpriced (sent) still is. */
+function amountGate(
+  row: ChannelRow,
+  fromSnap: { amountMinor?: number; currency?: string },
+): "match" | "unpriced" | "unknown" | "mismatch" {
+  const rowPriced = row.amountMinor !== undefined;
+  const snapPriced = fromSnap.amountMinor !== undefined;
+  if (rowPriced !== snapPriced) return "unknown";
+  if (!rowPriced) return "unpriced";
+  if (!amountsClose(row.amountMinor, fromSnap.amountMinor)) return "mismatch";
+  if (row.currency !== undefined && fromSnap.currency !== undefined && row.currency !== fromSnap.currency) {
+    return "mismatch";
+  }
+  return "match";
+}
+
 export function reconcile(
   channelRows: readonly ChannelRow[],
   effects: readonly LedgerEffect[],
@@ -346,12 +362,12 @@ export function reconcile(
         continue;
       }
       const fromSnap = effectAmount(effects[idx]!, opts?.approvals);
-      const haveAmounts = row.amountMinor !== undefined && fromSnap.amountMinor !== undefined;
-      const haveCurrency = row.currency !== undefined && fromSnap.currency !== undefined;
-      if (
-        (haveAmounts && !amountsClose(row.amountMinor, fromSnap.amountMinor)) ||
-        (haveCurrency && row.currency !== fromSnap.currency)
-      ) {
+      const gate = amountGate(row, fromSnap);
+      if (gate === "unknown") {
+        ghost.push(asGhost(row, effects, "amount-unknown"));
+        continue;
+      }
+      if (gate === "mismatch") {
         ghost.push(asGhost(row, effects, "amount-mismatch"));
         continue;
       }
@@ -359,21 +375,25 @@ export function reconcile(
       matched.push({ channel: row, effect: effects[idx]!.row });
       continue;
     }
+    let unknownNear = false;
     const near = effects.findIndex((e, i) => {
       if (used.has(i) || e.row.effectClass !== row.subject) return false;
       if (Math.abs(row.occurredAtMs - e.row.timestampMs) > toleranceMs) return false;
       const fromSnap = effectAmount(e, opts?.approvals);
-      if (fromSnap.amountMinor === undefined || fromSnap.currency === undefined) {
-        return true;
+      const gate = amountGate(row, fromSnap);
+      if (gate === "unknown") {
+        unknownNear = true;
+        return false;
       }
-      return amountsClose(row.amountMinor, fromSnap.amountMinor) && row.currency === fromSnap.currency;
+      if (gate === "mismatch") return false;
+      return true;
     });
     if (near !== -1) {
       used.add(near);
       matched.push({ channel: row, effect: effects[near]!.row });
       continue;
     }
-    ghost.push(asGhost(row, effects));
+    ghost.push(asGhost(row, effects, unknownNear ? "amount-unknown" : undefined));
   }
 
   const lo = windowStartMs - toleranceMs;

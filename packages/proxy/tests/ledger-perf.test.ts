@@ -239,3 +239,85 @@ describe("S1F resolvedBy cost", () => {
     }
   });
 });
+
+describe("S2-5 spend-reauth requestHash index", () => {
+  it("reauth lookup does not reread decisions.jsonl after 600 records", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-reauth-cost-"));
+    const ledger = new FileLedger(dir);
+    const spendPolicy = loadPolicy({
+      version: 1,
+      default: "deny",
+      approvalTtlMs: 86_400_000,
+      rules: [
+        {
+          id: "spend-true",
+          tool: "spend",
+          requires: ["verax:pay"],
+          mode: "approve",
+          text: "Spends need operator approval.",
+          spend: { maxAmountMinor: 200_000, currency: "TRY", payees: ["true-ads"], dailyMaxMinor: 300_000 },
+        },
+      ],
+    });
+    const payer = { brain: "brain-1", scopes: new Set(["verax:pay"]) };
+    const args = { amountMinor: 125_050, currency: "TRY", payee: "true-ads", reference: "verax:d1", _ref: "p1" };
+    try {
+      for (let i = 0; i < 600; i += 1) {
+        await ledger.appendDecisionChained((prev) => cheapRecord(i, prev));
+      }
+      const origEffect = ledger.appendEffect.bind(ledger);
+      let skip = true;
+      ledger.appendEffect = async (...args: Parameters<typeof origEffect>) => {
+        if (skip) {
+          skip = false;
+          throw new Error("crash before effect");
+        }
+        return origEffect(...args);
+      };
+      const proxy = createProxy({
+        policy: spendPolicy,
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(1_000, 10),
+        nonce: queuedNonce(["reauth-1"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call({ name: "spend", arguments: args }, payer);
+      const policyHash = (await ledger.decisions()).find((d) => d.claims.ref === "p1")!.claims.policyHash;
+      await assert.rejects(
+        () =>
+          approvePending({
+            ledger,
+            recordSigner: RECORD_SIGNER,
+            now: tickingNow(10_000, 10),
+            nonce: queuedNonce(["a1"]),
+            ref: "p1",
+            approverId: "op",
+            policyHash,
+            approvals: proxy.approvals,
+            inputsLog: proxy.inputsLog,
+          }),
+        /crash before effect/,
+      );
+      const origRead = ledgerFs.readFile.bind(ledgerFs);
+      let reads = 0;
+      ledgerFs.readFile = (async (path: Parameters<typeof origRead>[0], ...rest: unknown[]) => {
+        if (String(path).endsWith("decisions.jsonl")) reads += 1;
+        return origRead(path, ...(rest as []));
+      }) as typeof ledgerFs.readFile;
+      try {
+        const t0 = performance.now();
+        const retry = await proxy.call({ name: "spend", arguments: args }, payer);
+        const ms = performance.now() - t0;
+        console.log(`reauth-after n=600 reads=${reads} ms=${ms.toFixed(1)}`);
+        assert.match(retry.content[0]?.text ?? "", /denied:spend-reauth-required:reauth-1/);
+        assert.equal(reads, 0, `reauth reread decisions.jsonl ${reads} times`);
+      } finally {
+        ledgerFs.readFile = origRead;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+});

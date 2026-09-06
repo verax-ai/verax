@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -80,5 +80,30 @@ describe("verax reconcile CLI", () => {
     const ran = await spawnCli(["reconcile", stateDir, channel]);
     assert.equal(ran.code, 78);
     assert.match(ran.err, /verax reconcile /);
+  });
+
+  it("S2F-1: card stderr names unknown when the snapshot has no amount", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-reconcile-unknown-"));
+    const csv = join(dir, "card.csv");
+    writeFileSync(csv, "Tarih;Açıklama;Tutar\n06.09.2026;UNKNOWN MERCHANT;-10,00\n", "utf8");
+    writeFileSync(
+      join(dir, "effects.jsonl"),
+      `${JSON.stringify({
+        row: {
+          ref: "probe-x",
+          effectHash: "11".repeat(32),
+          effectClass: "spend",
+          timestampMs: Date.UTC(2026, 8, 6, 12),
+        },
+        witnessClass: "self",
+      })}\n`,
+      "utf8",
+    );
+    const out = join(dir, "report.json");
+    const ran = await spawnCli(["reconcile", dir, csv, "--channel", "card", "--currency", "TRY", "--out", out]);
+    assert.equal(ran.code, 0, ran.err);
+    assert.match(ran.err, /unknown 1/);
+    assert.match(ran.err, /matched 0/);
+    assert.match(ran.err, /ghost 1/);
   });
 });

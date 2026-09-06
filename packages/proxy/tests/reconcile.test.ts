@@ -203,4 +203,40 @@ describe("card:", () => {
     assert.equal(mixed.skipped.length, 1);
     assert.equal(mixed.skipped[0]!.line, 2);
   });
+
+  it("S2F-1: a priced row does not match an unpriced snapshot", () => {
+    const noon = Date.UTC(2026, 8, 6, 12);
+    const channel = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;UNKNOWN MERCHANT;-10,00\n", {
+      currency: "TRY",
+    });
+    const effect: LedgerEffect = {
+      row: { ref: "probe-x", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
+      witnessClass: "self",
+    };
+    const report = reconcile(channel, [effect], { toleranceMs: 3 * 86_400_000, approvals: [] });
+    assert.equal(report.matched.length, 0);
+    assert.equal(report.ghost.length, 1);
+    assert.equal(report.ghost[0]!.reason, "amount-unknown");
+    assert.equal(report.authorizedUnpaid.length, 1);
+    assert.equal(report.authorizedUnpaid[0]!.ref, "probe-x");
+  });
+
+  it("S2F-1 sent: both unpriced sides still match on class and time", () => {
+    const channel = parseChannelJsonl(
+      JSON.stringify({
+        channel: "sent",
+        externalId: "msg-1",
+        occurredAtMs: 20,
+        subject: "message.read",
+      }),
+    );
+    const effect: LedgerEffect = {
+      row: { ref: "n1", effectHash: "11".repeat(32), effectClass: "message.read", timestampMs: 20 },
+      witnessClass: "self",
+    };
+    const report = reconcile(channel, [effect]);
+    assert.equal(report.matched.length, 1);
+    assert.equal(report.ghost.length, 0);
+    assert.equal(report.matched[0]!.effect.ref, "n1");
+  });
 });

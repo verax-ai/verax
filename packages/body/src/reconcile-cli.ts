@@ -178,8 +178,9 @@ export function runReconcile(
     writeFileSync(parsed.outPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8" });
     if (parsed.channel === "card") {
       const mismatch = report.ghost.filter((g) => g.reason === "amount-mismatch").length;
+      const unknown = report.ghost.filter((g) => g.reason === "amount-unknown").length;
       writeErr(
-        `matched ${report.matched.length} · ghost ${report.ghost.length} · authorizedUnpaid ${report.authorizedUnpaid.length} · mismatch ${mismatch}\n`,
+        `matched ${report.matched.length} · ghost ${report.ghost.length} · authorizedUnpaid ${report.authorizedUnpaid.length} · mismatch ${mismatch} · unknown ${unknown}\n`,
       );
     }
     return 0;

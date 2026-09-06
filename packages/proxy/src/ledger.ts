@@ -194,6 +194,11 @@ function resolutionKindOf(row: DecisionIndexRow): ResolutionHit["kind"] | null {
   return null;
 }
 
+function noteReauth(map: Map<string, string>, row: DecisionIndexRow): void {
+  if (row.reasonCode !== "spend-reauth-required") return;
+  if (!map.has(row.requestHash)) map.set(row.requestHash, row.ref);
+}
+
 export class MemoryLedger implements Ledger {
   readonly permissionCheck: PermissionCheck = "owner-only";
   effectSigner?: EffectSigner;
@@ -201,6 +206,7 @@ export class MemoryLedger implements Ledger {
   private readonly _effects: LedgerEffect[] = [];
   private readonly byRef = new Map<string, DecisionIndexRow>();
   private readonly resolvedBy = new Map<string, ResolutionHit>();
+  private readonly reauthByHash = new Map<string, string>();
   private readonly q = new SerialQueue();
 
   lookupByRef(ref: string): DecisionIndexRow | null {
@@ -215,6 +221,10 @@ export class MemoryLedger implements Ledger {
     this.resolvedBy.set(deferRef, hit);
   }
 
+  lookupReauthByHash(requestHash: string): string | null {
+    return this.reauthByHash.get(requestHash) ?? null;
+  }
+
   hasPrimaryEffect(ref: string): boolean {
     return this._effects.some((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect");
   }
@@ -223,7 +233,10 @@ export class MemoryLedger implements Ledger {
     return this.q.enqueue(async () => {
       this._decisions.push(signed);
       const row = indexRowOf(signed);
-      if (row) this.byRef.set(row.ref, row);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+      }
     });
   }
 
@@ -233,7 +246,10 @@ export class MemoryLedger implements Ledger {
       const signed = build(last ? decisionRecordHash(last) : null);
       this._decisions.push(signed);
       const row = indexRowOf(signed);
-      if (row) this.byRef.set(row.ref, row);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+      }
     });
   }
 
@@ -328,6 +344,7 @@ export class FileLedger implements Ledger {
   private readonly effectRefs = new Set<string>();
   private readonly byRef = new Map<string, DecisionIndexRow>();
   private readonly resolvedBy = new Map<string, ResolutionHit>();
+  private readonly reauthByHash = new Map<string, string>();
 
   constructor(dir: string) {
     this.dir = dir;
@@ -344,12 +361,16 @@ export class FileLedger implements Ledger {
     this.effectRefs.clear();
     this.byRef.clear();
     this.resolvedBy.clear();
+    this.reauthByHash.clear();
     const decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
     for (const rec of decisions) {
       const row = indexRowOf(rec);
-      if (row) this.byRef.set(row.ref, row);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+      }
     }
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
@@ -444,7 +465,10 @@ export class FileLedger implements Ledger {
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
       const row = indexRowOf(signed);
-      if (row) this.byRef.set(row.ref, row);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+      }
     });
   }
 
@@ -457,7 +481,10 @@ export class FileLedger implements Ledger {
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
       const row = indexRowOf(signed);
-      if (row) this.byRef.set(row.ref, row);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+      }
     });
   }
 
@@ -532,6 +559,10 @@ export class FileLedger implements Ledger {
     this.resolvedBy.set(deferRef, hit);
   }
 
+  lookupReauthByHash(requestHash: string): string | null {
+    return this.reauthByHash.get(requestHash) ?? null;
+  }
+
   hasPrimaryEffect(ref: string): boolean {
     return this.effectRefs.has(ref);
   }
@@ -564,6 +595,7 @@ type LedgerIndex = {
   hasPrimaryEffect?: (ref: string) => boolean;
   lookupResolvedBy?: (deferRef: string) => ResolutionHit | null;
   noteResolution?: (deferRef: string, hit: ResolutionHit) => void;
+  lookupReauthByHash?: (requestHash: string) => string | null;
 };
 
 export async function lookupDecisionByRef(ledger: Ledger, ref: string): Promise<DecisionIndexRow | null> {
@@ -582,6 +614,17 @@ export function lookupResolvedBy(ledger: Ledger, deferRef: string): ResolutionHi
 export function noteResolution(ledger: Ledger, deferRef: string, hit: ResolutionHit): void {
   const extra = ledger as Ledger & LedgerIndex;
   if (typeof extra.noteResolution === "function") extra.noteResolution(deferRef, hit);
+}
+
+export async function lookupReauthByHash(ledger: Ledger, requestHash: string): Promise<string | null> {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.lookupReauthByHash === "function") return extra.lookupReauthByHash(requestHash);
+  for (const d of await ledger.decisions()) {
+    if (d.claims.reasonCode === "spend-reauth-required" && d.claims.requestHash === requestHash && d.claims.ref) {
+      return d.claims.ref;
+    }
+  }
+  return null;
 }
 
 export async function hasPrimaryEffect(ledger: Ledger, ref: string): Promise<boolean> {

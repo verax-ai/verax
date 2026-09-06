@@ -106,7 +106,9 @@ S2 extends Verax `ChannelRow` with optional `amountMinor` and `currency`
 `ChannelRow`. Statement amounts are two-decimal (TRY-style): the cell
 is multiplied by 100 and rounded. Quoted cells follow RFC 4180 (`""`
 escape, delimiter inside quotes); a bad data row is skipped
-(`scope.skipped`), it does not drop the file. Match: amount +
+(`scope.skipped`), it does not drop the file. An unclosed quote
+(`card-csv-unclosed-quote`) fails the whole file: a truncated
+download must not be treated as a complete statement. Match: amount +
 currency (minor-unit tolerance ±1) + time window. A `verax:` ref
 still requires amount and currency; a mismatch is ghost
 `amount-mismatch` and leaves the effect in `authorizedUnpaid`.

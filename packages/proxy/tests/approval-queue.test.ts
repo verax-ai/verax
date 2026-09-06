@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { decisionRecordHash } from "@cedulon/core";
 
-import { approvePending, drainApprovalCommands, enqueueApprovalCommand } from "../src/approvals.ts";
+import {
+  approvalFs,
+  approvePending,
+  drainApprovalCommands,
+  drainMetrics,
+  enqueueApprovalCommand,
+} from "../src/approvals.ts";
 import { explain } from "../src/explain.ts";
 import { effectDescriptor, sha256Canonical } from "../src/hash.ts";
 import { MemoryLedger } from "../src/ledger.ts";
@@ -486,5 +492,35 @@ describe("approval queue", () => {
     assert.equal(inputs?.approver?.via, "proxy");
     assert.equal(inputs?.approver?.id, "verax-proxy");
     assert.equal(inputs?.approver?.resolves, "x1");
+  });
+
+  it("S2-8: a busy rename writes stderr and increments a counter", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-drain-busy-"));
+    enqueueApprovalCommand(dir, { ref: "a", approverId: "op", atMs: 1 });
+    const orig = approvalFs.renameSync;
+    const before = drainMetrics.renameBusy;
+    const writes: string[] = [];
+    const origWrite = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+      writes.push(String(chunk));
+      return (origWrite as (c: string | Uint8Array, ...a: unknown[]) => boolean)(chunk, ...rest);
+    }) as typeof process.stderr.write;
+    approvalFs.renameSync = () => {
+      const err = new Error("busy") as NodeJS.ErrnoException;
+      err.code = "EBUSY";
+      throw err;
+    };
+    try {
+      const seen: string[] = [];
+      await drainApprovalCommands(dir, async (cmd) => {
+        seen.push(cmd.ref);
+      });
+      assert.deepEqual(seen, []);
+      assert.equal(drainMetrics.renameBusy, before + 1);
+      assert.ok(writes.some((w) => /verax-drain: rename-busy EBUSY count=/.test(w)));
+    } finally {
+      approvalFs.renameSync = orig;
+      process.stderr.write = origWrite;
+    }
   });
 });

@@ -4,7 +4,7 @@ import type { EffectRow } from "@cedulon/effect-extract";
 import { approvePending, approvalsLogFor, drainApprovalCommands } from "./approvals.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import { hasPrimaryEffect, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
+import { hasPrimaryEffect, lookupDecisionByRef, lookupReauthByHash, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
 export const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -154,11 +154,8 @@ export function createProxy(deps: ProxyDeps) {
     timestampMs: number,
     subject: string,
   ): Promise<ToolResult> {
-    for (const d of await deps.ledger.decisions()) {
-      if (d.claims.reasonCode === "spend-reauth-required" && d.claims.requestHash === requestHash && d.claims.ref) {
-        return denied("spend-reauth-required", d.claims.ref);
-      }
-    }
+    const existingReauth = await lookupReauthByHash(deps.ledger, requestHash);
+    if (existingReauth) return denied("spend-reauth-required", existingReauth);
     const ref = deps.nonce();
     await writeRecord({
       decision: "deny",
