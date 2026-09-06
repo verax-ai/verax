@@ -154,18 +154,30 @@ export class MemoryLedger implements Ledger {
   effectSigner?: EffectSigner;
   private readonly _decisions: SignedDecisionRecord[] = [];
   private readonly _effects: LedgerEffect[] = [];
+  private readonly byRef = new Map<string, SignedDecisionRecord>();
   private readonly q = new SerialQueue();
+
+  lookupByRef(ref: string): SignedDecisionRecord | null {
+    return this.byRef.get(ref) ?? null;
+  }
+
+  hasPrimaryEffect(ref: string): boolean {
+    return this._effects.some((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect");
+  }
 
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
       this._decisions.push(signed);
+      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
     });
   }
 
   async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
       const last = this._decisions[this._decisions.length - 1];
-      this._decisions.push(build(last ? decisionRecordHash(last) : null));
+      const signed = build(last ? decisionRecordHash(last) : null);
+      this._decisions.push(signed);
+      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
     });
   }
 
@@ -260,6 +272,7 @@ export class FileLedger implements Ledger {
   private lost = false;
   private tailHash: string | null = null;
   private readonly effectRefs = new Set<string>();
+  private readonly byRef = new Map<string, SignedDecisionRecord>();
 
   constructor(dir: string) {
     this.dir = dir;
@@ -274,9 +287,13 @@ export class FileLedger implements Ledger {
   /** After lock handoff a new instance reloads; the lost owner cannot append. */
   private loadCaches(): void {
     this.effectRefs.clear();
+    this.byRef.clear();
     const decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
+    for (const rec of decisions) {
+      if (typeof rec.claims.ref === "string") this.byRef.set(rec.claims.ref, rec);
+    }
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
     }
@@ -346,6 +363,7 @@ export class FileLedger implements Ledger {
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
+      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
     });
   }
 
@@ -357,6 +375,7 @@ export class FileLedger implements Ledger {
       const signed = build(prev);
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
+      if (typeof signed.claims.ref === "string") this.byRef.set(signed.claims.ref, signed);
     });
   }
 
@@ -418,6 +437,14 @@ export class FileLedger implements Ledger {
   async exportExtract(window: ExtractWindow, signer: EffectSigner): Promise<SignedEffectExtract> {
     return signWindow(await this.effects(), window, signer);
   }
+
+  lookupByRef(ref: string): SignedDecisionRecord | null {
+    return this.byRef.get(ref) ?? null;
+  }
+
+  hasPrimaryEffect(ref: string): boolean {
+    return this.effectRefs.has(ref);
+  }
 }
 
 function signWindow(
@@ -439,6 +466,24 @@ function signWindow(
     signer.privateKeyPem,
     signer.publicKeyPem,
   );
+}
+
+/** Extra methods on FileLedger / MemoryLedger. The Ledger interface stays closed. */
+type LedgerIndex = {
+  lookupByRef?: (ref: string) => SignedDecisionRecord | null;
+  hasPrimaryEffect?: (ref: string) => boolean;
+};
+
+export async function lookupDecisionByRef(ledger: Ledger, ref: string): Promise<SignedDecisionRecord | null> {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.lookupByRef === "function") return extra.lookupByRef(ref);
+  return (await ledger.decisions()).find((d) => d.claims.ref === ref) ?? null;
+}
+
+export async function hasPrimaryEffect(ledger: Ledger, ref: string): Promise<boolean> {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.hasPrimaryEffect === "function") return extra.hasPrimaryEffect(ref);
+  return (await ledger.effects()).some((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect");
 }
 
 export function witnessClassSummary(effects: readonly LedgerEffect[]): Record<WitnessClass, number> {

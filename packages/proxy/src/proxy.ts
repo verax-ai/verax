@@ -4,6 +4,7 @@ import type { EffectRow } from "@cedulon/effect-extract";
 import { approvePending, approvalsLogFor, drainApprovalCommands } from "./approvals.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
+import { hasPrimaryEffect, lookupDecisionByRef } from "./ledger.ts";
 import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
 export const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -201,9 +202,8 @@ export function createProxy(deps: ProxyDeps) {
     async call(call: ToolCall, principal: Principal): Promise<ToolResult> {
       if (stateDir) {
         await drainApprovalCommands(stateDir, async (cmd) => {
-          const decisions = await deps.ledger.decisions();
-          const defer = decisions.find((d) => d.claims.ref === cmd.ref && d.claims.decision === "defer");
-          if (!defer) return;
+          const defer = await lookupDecisionByRef(deps.ledger, cmd.ref);
+          if (!defer || defer.claims.decision !== "defer") return;
           await approvePending({
             ledger: deps.ledger,
             recordSigner: deps.recordSigner,
@@ -239,8 +239,7 @@ export function createProxy(deps: ProxyDeps) {
       }
 
       if (typeof given === "string") {
-        const decisions = await deps.ledger.decisions();
-        const existing = decisions.find((d) => d.claims.ref === given);
+        const existing = await lookupDecisionByRef(deps.ledger, given);
         if (existing) {
           if (existing.claims.requestHash !== requestHash) {
             const ref = deps.nonce();
@@ -265,7 +264,10 @@ export function createProxy(deps: ProxyDeps) {
                 reasonCode: "expired",
                 ref: expireRef,
                 requestHash,
-                inputs: resolved.inputs,
+                inputs: {
+                  ...resolved.inputs,
+                  approver: { id: "verax-proxy", via: "cli", resolves: given },
+                },
                 effectHash: null,
                 subject: call.name,
                 timestampMs,
@@ -273,18 +275,17 @@ export function createProxy(deps: ProxyDeps) {
               await approvals.updateStatus(given, "expired");
               return denied("expired", expireRef);
             }
-            const allow = decisions.find(
-              (d) =>
-                d.claims.requestHash === requestHash &&
-                d.claims.decision === "allow" &&
-                d.claims.reasonCode === "approved-by-operator",
-            );
-            if (allow?.claims.ref) {
-              const effects = await deps.ledger.effects();
-              const have = effects.some(
-                (e) => e.row.ref === allow.claims.ref && e.row.effectClass !== "duplicate-effect",
-              );
-              if (have) return allowedReplay(allow.claims.ref);
+            const allow = snap?.allowRef ? await lookupDecisionByRef(deps.ledger, snap.allowRef) : null;
+            if (
+              allow?.claims.ref &&
+              allow.claims.decision === "allow" &&
+              allow.claims.reasonCode === "approved-by-operator"
+            ) {
+              const bound = await inputsLog.get(allow.claims.ref);
+              if (bound?.approver?.resolves && bound.approver.resolves !== given) {
+                return deferred(given);
+              }
+              if (await hasPrimaryEffect(deps.ledger, allow.claims.ref)) return allowedReplay(allow.claims.ref);
               return runInner(dispatched, principal, allow.claims.ref);
             }
             return deferred(given);
@@ -293,11 +294,9 @@ export function createProxy(deps: ProxyDeps) {
             return denied(existing.claims.reasonCode, given);
           }
           if (existing.claims.decision === "allow" && existing.claims.ref) {
-            const effects = await deps.ledger.effects();
-            const have = effects.some(
-              (e) => e.row.ref === existing.claims.ref && e.row.effectClass !== "duplicate-effect",
-            );
-            if (have) return allowedReplay(existing.claims.ref);
+            if (await hasPrimaryEffect(deps.ledger, existing.claims.ref)) {
+              return allowedReplay(existing.claims.ref);
+            }
             return runInner(dispatched, principal, existing.claims.ref);
           }
         }

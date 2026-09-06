@@ -1,7 +1,7 @@
-import { appendFileSync, existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { signDecisionRecord, decisionRecordHash } from "@cedulon/core";
-import { appendDurable } from "./ledger.ts";
+import { signDecisionRecord } from "@cedulon/core";
+import { appendDurable, lookupDecisionByRef } from "./ledger.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import type { DecisionInputs, InputsLog, Ledger, RecordSigner } from "./types.ts";
@@ -19,13 +19,14 @@ export type ApprovalRow = {
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;
+  allowRef?: string;
 };
 
 export type ApprovalsLog = {
   append(row: ApprovalRow): Promise<void>;
   get(ref: string): Promise<ApprovalRow | null>;
   listPending(): Promise<ApprovalRow[]>;
-  updateStatus(ref: string, status: "approved" | "expired"): Promise<void>;
+  updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void>;
 };
 
 function lastByRef(rows: ApprovalRow[]): Map<string, ApprovalRow> {
@@ -45,49 +46,54 @@ function parseLines(text: string): ApprovalRow[] {
 
 export class MemoryApprovalsLog implements ApprovalsLog {
   private readonly rows: ApprovalRow[] = [];
+  private readonly byRef = new Map<string, ApprovalRow>();
 
   async append(row: ApprovalRow): Promise<void> {
     this.rows.push(row);
+    this.byRef.set(row.ref, row);
   }
 
   async get(ref: string): Promise<ApprovalRow | null> {
-    return lastByRef(this.rows).get(ref) ?? null;
+    return this.byRef.get(ref) ?? null;
   }
 
   async listPending(): Promise<ApprovalRow[]> {
-    return [...lastByRef(this.rows).values()].filter((r) => r.status === "pending");
+    return [...this.byRef.values()].filter((r) => r.status === "pending");
   }
 
-  async updateStatus(ref: string, status: "approved" | "expired"): Promise<void> {
-    const cur = await this.get(ref);
+  async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
+    const cur = this.byRef.get(ref);
     if (!cur) return;
-    this.rows.push({ ...cur, status });
+    await this.append({ ...cur, status, ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}) });
   }
 }
 
 export class FileApprovalsLog implements ApprovalsLog {
   private readonly path: string;
+  private readonly byRef = new Map<string, ApprovalRow>();
 
   constructor(dir: string) {
     this.path = join(dir, "approvals.jsonl");
+    for (const row of this.read()) this.byRef.set(row.ref, row);
   }
 
   async append(row: ApprovalRow): Promise<void> {
     await appendDurable(this.path, `${JSON.stringify(row)}\n`);
+    this.byRef.set(row.ref, row);
   }
 
   async get(ref: string): Promise<ApprovalRow | null> {
-    return lastByRef(this.read()).get(ref) ?? null;
+    return this.byRef.get(ref) ?? null;
   }
 
   async listPending(): Promise<ApprovalRow[]> {
-    return [...lastByRef(this.read()).values()].filter((r) => r.status === "pending");
+    return [...this.byRef.values()].filter((r) => r.status === "pending");
   }
 
-  async updateStatus(ref: string, status: "approved" | "expired"): Promise<void> {
-    const cur = await this.get(ref);
+  async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
+    const cur = this.byRef.get(ref);
     if (!cur) return;
-    await this.append({ ...cur, status });
+    await this.append({ ...cur, status, ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}) });
   }
 
   private read(): ApprovalRow[] {
@@ -122,6 +128,15 @@ export function loadApprovalsFromDir(dir: string): ApprovalRow[] {
 
 export type ApproveResult = { ok: true; allowRef: string } | { ok: false; reason: string };
 
+async function hasResolves(inputsLog: InputsLog, ledger: Ledger, deferRef: string): Promise<boolean> {
+  for (const d of await ledger.decisions()) {
+    if (!d.claims.ref || d.claims.ref === deferRef) continue;
+    const inp = await inputsLog.get(d.claims.ref);
+    if (inp?.approver?.resolves === deferRef) return true;
+  }
+  return false;
+}
+
 export async function approvePending(opts: {
   ledger: Ledger;
   recordSigner: RecordSigner;
@@ -134,17 +149,11 @@ export async function approvePending(opts: {
   inputsLog?: InputsLog;
 }): Promise<ApproveResult> {
   const inputsLog = opts.inputsLog ?? inputsLogFor(opts.ledger);
-  const decisions = await opts.ledger.decisions();
-  const defer = decisions.find((d) => d.claims.ref === opts.ref && d.claims.decision === "defer");
-  if (!defer) return { ok: false, reason: "unknown-ref" };
-  const already = decisions.find(
-    (d) =>
-      d.claims.requestHash === defer.claims.requestHash &&
-      d.claims.prevRecordHash === decisionRecordHash(defer) &&
-      (d.claims.decision === "allow" || d.claims.reasonCode === "expired"),
-  );
-  if (already) return { ok: false, reason: "already-resolved" };
+  const defer = await lookupDecisionByRef(opts.ledger, opts.ref);
+  if (!defer || defer.claims.decision !== "defer") return { ok: false, reason: "unknown-ref" };
   const snap = await opts.approvals.get(opts.ref);
+  if (snap && snap.status !== "pending") return { ok: false, reason: "already-resolved" };
+  if (await hasResolves(inputsLog, opts.ledger, opts.ref)) return { ok: false, reason: "already-resolved" };
   if (!snap) return { ok: false, reason: "snapshot-missing" };
   const requestHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
   if (requestHash !== defer.claims.requestHash || requestHash !== snap.requestHash) {
@@ -156,6 +165,7 @@ export async function approvePending(opts: {
     const inputs: DecisionInputs = {
       principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
       inputs: prior?.inputs ?? [],
+      approver: { id: opts.approverId, via: "cli", resolves: opts.ref },
     };
     const inputsHash = sha256Canonical(inputs);
     await inputsLog.append(expireRef, inputs);
@@ -187,7 +197,7 @@ export async function approvePending(opts: {
   const inputs: DecisionInputs = {
     principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
     inputs: prior?.inputs ?? [],
-    approver: { id: opts.approverId, via: "cli" },
+    approver: { id: opts.approverId, via: "cli", resolves: opts.ref },
   };
   const inputsHash = sha256Canonical(inputs);
   const effectHash = sha256Canonical(effectDescriptor(snap.subject, snap.args));
@@ -212,7 +222,7 @@ export async function approvePending(opts: {
       opts.recordSigner.publicKeyPem,
     ),
   );
-  await opts.approvals.updateStatus(opts.ref, "approved");
+  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef });
   return { ok: true, allowRef };
 }
 
@@ -229,22 +239,34 @@ export async function drainApprovalCommands(
   dir: string,
   apply: (cmd: ApprovalCommand) => Promise<void>,
 ): Promise<void> {
-  const path = join(dir, "approval-commands.jsonl");
-  if (!existsSync(path)) return;
-  let text: string;
+  const live = join(dir, "approval-commands.jsonl");
+  if (existsSync(live)) {
+    const processing = join(dir, `approval-commands.processing-${Date.now()}-${process.pid}`);
+    try {
+      renameSync(live, processing);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
+  let names: string[];
   try {
-    text = readFileSync(path, "utf8");
+    names = readdirSync(dir)
+      .filter((n) => n.startsWith("approval-commands.processing-"))
+      .sort();
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     throw err;
   }
   const donePath = join(dir, "approval-commands.applied.jsonl");
-  for (const line of text.split("\n")) {
-    if (line === "") continue;
-    const cmd = JSON.parse(line) as ApprovalCommand;
-    await apply(cmd);
-    appendFileSync(donePath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+  for (const name of names) {
+    const file = join(dir, name);
+    const text = readFileSync(file, "utf8");
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const cmd = JSON.parse(line) as ApprovalCommand;
+      await apply(cmd);
+      appendFileSync(donePath, `${line}\n`, { encoding: "utf8", mode: 0o600 });
+    }
+    unlinkSync(file);
   }
-  writeFileSync(path, "", { encoding: "utf8", mode: 0o600 });
-  unlinkSync(path);
 }

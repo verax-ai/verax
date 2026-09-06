@@ -1,26 +1,35 @@
 import { audit, DECISION_PROFILE, type Finding, type IssuerTrustPin, type PresentedExtract } from "@cedulon/audit";
-import { decisionRecordHash, findDecisionRecordChainBreak } from "@cedulon/core";
+import { findDecisionRecordChainBreak } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
+import { approvalsLogFor, type ApprovalsLog } from "./approvals.ts";
 import { sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, Ledger } from "./types.ts";
+import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger } from "./types.ts";
 
-function pairFor(decisions: SignedDecisionRecord[], record: SignedDecisionRecord): ExplainPair {
-  if (record.claims.decision === "defer") {
-    const resolution =
-      decisions.find(
-        (d) =>
-          d.claims.prevRecordHash === decisionRecordHash(record) &&
-          d.claims.requestHash === record.claims.requestHash,
-      ) ?? null;
-    return { defer: record, resolution };
+async function pairFor(
+  decisions: SignedDecisionRecord[],
+  record: SignedDecisionRecord,
+  inputsLog: InputsLog,
+  approvals: ApprovalsLog,
+): Promise<ExplainPair> {
+  const ref = record.claims.ref;
+  if (!ref) return { defer: null, resolution: null };
+  const own = await inputsLog.get(ref);
+  if (own?.approver?.resolves) {
+    const defer = decisions.find((d) => d.claims.ref === own.approver?.resolves) ?? null;
+    return { defer, resolution: record };
   }
-  if (typeof record.claims.prevRecordHash === "string") {
-    const defer =
-      decisions.find(
-        (d) => decisionRecordHash(d) === record.claims.prevRecordHash && d.claims.decision === "defer",
-      ) ?? null;
-    if (defer) return { defer, resolution: record };
+  if (record.claims.decision === "defer") {
+    const snap = await approvals.get(ref);
+    if (snap?.allowRef) {
+      const resolution = decisions.find((d) => d.claims.ref === snap.allowRef) ?? null;
+      return { defer: record, resolution };
+    }
+    for (const d of decisions) {
+      if (!d.claims.ref || d === record) continue;
+      const inp = await inputsLog.get(d.claims.ref);
+      if (inp?.approver?.resolves === ref) return { defer: record, resolution: d };
+    }
   }
   return { defer: null, resolution: null };
 }
@@ -144,6 +153,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     (f) => f.code === "issuer-key-mismatch" || (pinned && f.code === "unauthenticated-issuer"),
   );
   const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
+  const approvals = approvalsLogFor(ledger);
   const inputsDoc = record.claims.ref ? await inputsLog.get(record.claims.ref) : null;
   const inputsMismatch = Boolean(
     inputsDoc &&
@@ -189,7 +199,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   return {
     record,
     effect,
-    pair: pairFor(decisions, record),
+    pair: await pairFor(decisions, record, inputsLog, approvals),
     witnessClass,
     balanced,
     chain,

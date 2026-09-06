@@ -1,8 +1,11 @@
 import { strict as assert } from "node:assert";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { decisionRecordHash } from "@cedulon/core";
 
-import { approvePending } from "../src/approvals.ts";
+import { approvePending, drainApprovalCommands, enqueueApprovalCommand } from "../src/approvals.ts";
 import { explain } from "../src/explain.ts";
 import { effectDescriptor, sha256Canonical } from "../src/hash.ts";
 import { MemoryLedger } from "../src/ledger.ts";
@@ -31,15 +34,37 @@ const putCall = {
   arguments: { id: "n1", body: "hello", source: { kind: "test" }, validUntilMs: 9_999 },
 };
 
+const MIXED_POLICY = {
+  version: 1,
+  default: "deny",
+  approvalTtlMs: 86_400_000,
+  rules: [
+    {
+      id: "memory-put-approve",
+      tool: "memory.put",
+      requires: ["verax:memory"],
+      mode: "approve",
+      text: "Writes need operator approval.",
+    },
+    {
+      id: "memory-get",
+      tool: "memory.get",
+      requires: ["verax:read"],
+      text: "Reading memory needs the read scope.",
+    },
+  ],
+} as const;
+
 function proxyOf(opts: {
   ledger: MemoryLedger;
   now: () => number;
   nonce: () => string;
+  policy?: unknown;
   inner?: () => Promise<{ content: { type: "text"; text: string }[]; isError: boolean }>;
 }) {
   let innerCalls = 0;
   const proxy = createProxy({
-    policy: loadPolicy(APPROVE_POLICY),
+    policy: loadPolicy(opts.policy ?? APPROVE_POLICY),
     recordSigner: RECORD_SIGNER,
     effectSigner: EFFECT_SIGNER,
     ledger: opts.ledger,
@@ -113,6 +138,10 @@ describe("approval queue", () => {
     const inputs = await proxy.inputsLog.get(recs[1]!.claims.ref!);
     assert.equal(inputs?.approver?.id, "op-1");
     assert.equal(inputs?.approver?.via, "cli");
+    assert.equal(inputs?.approver?.resolves, "d1");
+    const snap = await proxy.approvals.get("d1");
+    assert.equal(snap?.status, "approved");
+    assert.equal(snap?.allowRef, "a1");
   });
 
   it("c: different arguments are a new defer", async () => {
@@ -238,5 +267,98 @@ describe("approval queue", () => {
     const fromAllow = await explain(ledger, "a1");
     assert.equal(fromAllow.pair?.defer?.claims.ref, "d1");
     assert.equal(fromAllow.pair?.resolution?.claims.decision, "allow");
+  });
+
+  it("i: an interleaved decision still pairs and a second approve is refused", async () => {
+    const ledger = new MemoryLedger();
+    const now = tickingNow();
+    const { proxy } = proxyOf({
+      ledger,
+      now,
+      nonce: queuedNonce(["d1", "g1", "a1", "a2"]),
+      policy: MIXED_POLICY,
+    });
+    await proxy.call(putCall, principal);
+    await proxy.call(
+      { name: "memory.get", arguments: { id: "x" } },
+      { brain: "brain-1", scopes: new Set(["verax:read"]) },
+    );
+    const defer = (await ledger.decisions())[0]!;
+    const first = await approvePending({
+      ledger,
+      recordSigner: RECORD_SIGNER,
+      now,
+      nonce: queuedNonce(["a1"]),
+      ref: "d1",
+      approverId: "op-1",
+      policyHash: defer.claims.policyHash,
+      approvals: proxy.approvals,
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(first.ok, true);
+    const second = await approvePending({
+      ledger,
+      recordSigner: RECORD_SIGNER,
+      now,
+      nonce: queuedNonce(["a2"]),
+      ref: "d1",
+      approverId: "op-1",
+      policyHash: defer.claims.policyHash,
+      approvals: proxy.approvals,
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(second.ok, false);
+    if (second.ok === false) assert.equal(second.reason, "already-resolved");
+    const recs = await ledger.decisions();
+    assert.equal(recs.filter((d) => d.claims.reasonCode === "approved-by-operator").length, 1);
+    const fromDefer = await explain(ledger, "d1");
+    assert.equal(fromDefer.pair?.resolution?.claims.ref, "a1");
+    const allowInputs = await proxy.inputsLog.get("a1");
+    assert.equal(allowInputs?.approver?.resolves, "d1");
+    const snap = await proxy.approvals.get("d1");
+    assert.equal(snap?.status, "approved");
+    assert.equal(snap?.allowRef, "a1");
+  });
+
+  it("j: a second _ref for the same command does not ride the first approval", async () => {
+    const ledger = new MemoryLedger();
+    const now = tickingNow();
+    const { proxy, innerCalls } = proxyOf({
+      ledger,
+      now,
+      nonce: queuedNonce(["gen"]),
+    });
+    const args = putCall.arguments;
+    await proxy.call({ name: "memory.put", arguments: { ...args, _ref: "s1" } }, principal);
+    await proxy.call({ name: "memory.put", arguments: { ...args, _ref: "s2" } }, principal);
+    await approvePending({
+      ledger,
+      recordSigner: RECORD_SIGNER,
+      now,
+      nonce: queuedNonce(["a1"]),
+      ref: "s1",
+      approverId: "op-1",
+      policyHash: (await ledger.decisions())[0]!.claims.policyHash,
+      approvals: proxy.approvals,
+      inputsLog: proxy.inputsLog,
+    });
+    const out = await proxy.call({ name: "memory.put", arguments: { ...args, _ref: "s2" } }, principal);
+    assert.match(out.content[0]?.text ?? "", /deferred:approval-required:s2/);
+    assert.equal(innerCalls(), 0);
+    const snap = await proxy.approvals.get("s2");
+    assert.equal(snap?.status, "pending");
+  });
+
+  it("k: drain renames first so a later enqueue is not unlinked", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-drain-"));
+    enqueueApprovalCommand(dir, { ref: "a", approverId: "op", atMs: 1 });
+    const seen: string[] = [];
+    await drainApprovalCommands(dir, async (cmd) => {
+      seen.push(cmd.ref);
+      if (cmd.ref === "a") enqueueApprovalCommand(dir, { ref: "b", approverId: "op", atMs: 2 });
+    });
+    assert.deepEqual(seen, ["a"]);
+    assert.equal(existsSync(join(dir, "approval-commands.jsonl")), true);
+    assert.match(readFileSync(join(dir, "approval-commands.jsonl"), "utf8"), /"ref":"b"/);
   });
 });

@@ -31,19 +31,28 @@ panel lists pending rows and has no approve control. Panel approve
 is after S5, under a separate `verax:approve` scope. The CLI
 recomputes `requestHash` from the snapshot and refuses a mismatch.
 The chained `allow` uses the same `requestHash`, `reasonCode:
-approved-by-operator`, `prevRecordHash = hash(defer)`, and
+approved-by-operator`, and
 `effectHash = sha256Canonical(effectDescriptor(name, args))` — the
-same descriptor the effect row will use. `requestHash` is only the
-defer↔allow bind; it is not the effect hash (a mismatch would be
-Cedulon `effect-mismatch`). The allow's `inputsHash` document
-carries `approver` (OS user / operator id, `via: "cli"`). Expiry is
+same descriptor the effect row will use. `prevRecordHash` is only
+the chain pointer (whatever was last written); it is **not** the
+defer↔allow bind. The bind is `approver.resolves = defer.ref` on
+the allow's `inputsHash` document, plus `allowRef` / `status:
+approved` on the approvals snapshot. `already-resolved` is snapshot
+`status !== pending` or any record whose inputs have
+`resolves === ref`. `requestHash` still matches the approved
+command; it is not the effect hash (a mismatch would be Cedulon
+`effect-mismatch`). The allow's `inputsHash` document carries
+`approver` (OS user / operator id, `via: "cli"`, `resolves`).
+`explain.pair` uses `resolves` / snapshot `allowRef`. Expiry is
 **lazy**: the next call that names that `_ref`, or `verax approve`,
 writes `deny` / `expired`. The brain retries the same arguments
 (same `requestHash`); different arguments are a new decision. There
 is no "approve all". Optional `_ref` (stripped like `_inputs`) is
 the idempotency key; see §7. `spend.reference` is a payee memo, not
 `ref`. If the body holds `ledger.lock`, the CLI queues
-`approval-commands.jsonl` and the next `proxy.call` applies it.
+`approval-commands.jsonl` and the next `proxy.call` applies it
+(drain **renames** the live file to `.processing-<ts>` first, then
+applies; a CLI append during drain lands on the original name).
 
 **Types.** No new claims. Queue file is Verax. `ExplainResult` may
 gain a Verax `pair` (`defer` + resolution) so explain shows both
@@ -210,6 +219,19 @@ pre-empt each other). A second **effect** on the same `ref`
 already becomes `LedgerEffect.row.effectClass: "duplicate-effect"`
 (`ledger.ts`; `explain` skips that class). Do not invent another
 flag. Late channel events stay P4 `ghost` / `outOfScope`.
+
+S1 retry is **at-least-once** for the inner call: if an approved
+`allow` exists and the primary effect row is missing (crash after
+the decision, before `appendEffect`), the same `_ref` re-runs
+`inner`. Side-effecting tools must be idempotent at the tool.
+**S2 `spend` must not re-run `inner` without a new operator
+approval** — authorize-once, even when the effect row is missing.
+
+A `_ref` retry uses **that** defer's resolution only (`allowRef` /
+`resolves ===` the given `_ref`). Another defer with the same
+`requestHash` is not a grant. Lookup is O(1) via an in-memory
+`ref → record` index on FileLedger / MemoryLedger (the `Ledger`
+interface stays closed).
 
 **Accept.** Replay same `_ref` + args: one decision. Second
 `appendEffect`: `duplicate-effect` marker, existing tests stay
