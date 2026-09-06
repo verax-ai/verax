@@ -61,6 +61,7 @@ export function Observatory({
   stale = false,
   ageMs = null,
   onRefresh,
+  onShowDemo,
   onContest,
 }: {
   actions: RailAction[];
@@ -72,6 +73,7 @@ export function Observatory({
   stale?: boolean;
   ageMs?: number | null;
   onRefresh?: () => void;
+  onShowDemo?: () => void;
   onContest?: (ref: string) => Promise<RailContestResult | void>;
 }) {
   const initialTab = useMemo<TabId>(() => {
@@ -190,6 +192,11 @@ export function Observatory({
         {onRefresh ? (
           <button type="button" className="refresh focusable" onClick={onRefresh}>
             Refresh
+          </button>
+        ) : null}
+        {status === "error" && onShowDemo ? (
+          <button type="button" className="refresh focusable" onClick={onShowDemo}>
+            Örnek senaryoyu göster
           </button>
         ) : null}
       </div>
@@ -394,7 +401,10 @@ function DetailPane({
           </p>
           <h3>Kanıt</h3>
           <p>
-            {action.effect ? `${action.effect.row.effectClass} receipt ${action.effect ? "var" : "yok"}` : "etki yok"} · tanık {witness ?? "none"}
+            {action.effect
+              ? `${action.effect.row.effectClass} receipt ${action.effect.receipt ? "var" : "yok"} · attestation ${action.effect.attestation ? "var" : "yok"}`
+              : "etki yok"}{" "}
+            · tanık {witness ?? "none"}
           </p>
           <h3>Kanıt kapsamı</h3>
           <p data-testid="evidence-scope">

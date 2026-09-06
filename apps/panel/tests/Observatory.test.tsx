@@ -84,6 +84,27 @@ describe("observatory", () => {
     expect(line?.className).toMatch(/rule-missing/);
   });
 
+  it("says receipt yok when an effect has no receipt", () => {
+    const bare: RailAction[] = [
+      {
+        ...actions[0]!,
+        effect: actions[0]!.effect
+          ? { ...actions[0]!.effect, receipt: undefined, attestation: undefined }
+          : {
+              row: {
+                ref: actions[0]!.record.claims.ref ?? "n1",
+                effectClass: "memory.get",
+                effectHash: "aa".repeat(32),
+                timestampMs: 10,
+              },
+            },
+      },
+    ];
+    render(<Observatory actions={bare} status="ok" demo={false} />);
+    expect(document.body.textContent).toMatch(/receipt yok/);
+    expect(document.body.textContent).not.toMatch(/receipt var/);
+  });
+
   it("demo data has no rule-missing rows", () => {
     render(<Observatory actions={loadDemoActions()} status="ok" demo={true} />);
     fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
