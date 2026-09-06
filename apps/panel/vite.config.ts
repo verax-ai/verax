@@ -14,6 +14,7 @@ export default defineConfig(({ mode }) => {
       dedupe: ["react", "react-dom", "three"],
     },
     server: {
+      fs: { allow: ["..", "../.."] },
       proxy: {
         "/api": {
           target,
@@ -24,6 +25,21 @@ export default defineConfig(({ mode }) => {
             });
           },
         },
+        "/healthz": {
+          target,
+          changeOrigin: true,
+          configure: (proxy) => {
+            proxy.on("proxyReq", (req) => {
+              if (token) req.setHeader("Authorization", `Bearer ${token}`);
+            });
+          },
+        },
+      },
+    },
+    preview: {
+      proxy: {
+        "/api": { target, changeOrigin: true },
+        "/healthz": { target, changeOrigin: true },
       },
     },
   };

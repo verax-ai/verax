@@ -196,6 +196,7 @@ describe("panel ledger fetch states", () => {
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
     stubLedgerFetch(() => ledgerFetch());
     render(<App />);
+    fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
     });

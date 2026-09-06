@@ -1,28 +1,37 @@
 import { useCallback, useEffect, useState } from "react";
-import { Stage } from "@verax-ai/presence";
-import { ReconcileCard, type ReconcileCardReport } from "./ReconcileCard.tsx";
+import { Observatory, type Healthz } from "./observatory/Observatory.tsx";
+import { loadDemoActions } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
-import { Rail } from "./rail/Rail.tsx";
 import type { PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
+import type { ReconcileCardReport } from "./ReconcileCard.tsx";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 5_000;
 
-function ageLabel(ageMs: number): string {
-  return `last read ${Math.max(0, Math.floor(ageMs / 1000))} s ago`;
+function wantDemo(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("demo") === "1";
 }
 
 export function App() {
   const [status, setStatus] = useState<RailStatus>("loading");
   const [actions, setActions] = useState<RailAction[]>([]);
+  const [demo, setDemo] = useState(false);
   const [errorText, setErrorText] = useState<string | null>(null);
   const [lastReadMs, setLastReadMs] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [reconcileReport, setReconcileReport] = useState<ReconcileCardReport | null>(null);
+  const [health, setHealth] = useState<Healthz>(null);
 
   const load = useCallback(async () => {
+    if (wantDemo() && actions.length === 0) {
+      setActions(loadDemoActions());
+      setDemo(true);
+      setStatus("ok");
+      setLastReadMs(Date.now());
+    }
     try {
       const r = await fetch("/api/ledger?from=0&to=9999999999999");
       if (!r.ok) {
@@ -32,6 +41,9 @@ export function App() {
           if (typeof errBody.error === "string") detail = errBody.error;
         } catch {
           detail = "";
+        }
+        if (wantDemo()) {
+          return;
         }
         setStatus("error");
         setErrorText(`ledger unreachable: ${r.status}${detail ? ` ${detail}` : ""}`);
@@ -61,6 +73,7 @@ export function App() {
       );
       setLastReadMs(Date.now());
       setErrorText(null);
+      setDemo(false);
       if (parsed.length === 0) {
         setActions([]);
         setStatus("empty");
@@ -71,8 +84,14 @@ export function App() {
     } catch {
       setStatus("error");
       setErrorText("ledger unreachable: network");
+      if (actions.length === 0) {
+        setActions(loadDemoActions());
+        setDemo(true);
+        setStatus("ok");
+        setLastReadMs(Date.now());
+      }
     }
-  }, []);
+  }, [actions.length]);
 
   useEffect(() => {
     void load();
@@ -81,6 +100,22 @@ export function App() {
     }, REFRESH_MS);
     return () => clearInterval(id);
   }, [load]);
+
+  useEffect(() => {
+    void (async () => {
+      try {
+        const r = await fetch("/healthz");
+        if (!r.ok) {
+          setHealth(null);
+          return;
+        }
+        const body = (await r.json()) as Healthz;
+        setHealth(body && typeof body === "object" ? body : null);
+      } catch {
+        setHealth(null);
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -111,47 +146,33 @@ export function App() {
   const stale = ageMs !== null && ageMs > STALE_MS;
 
   return (
-    <main className="shell">
-      <Stage />
-      <aside>
-        <h1>Account for</h1>
-        <div className="rail-head">
-          <p className={`rail-status ${status}${stale ? " stale" : ""}`} data-status={status}>
-            {status === "error" ? (
-              <>
-                <span>error</span> {errorText}
-              </>
-            ) : (
-              status
-            )}
-          </p>
-          {ageMs !== null ? <p className={stale ? "age stale" : "age"}>{ageLabel(ageMs)}</p> : null}
-          <button type="button" className="refresh focusable" onClick={() => void load()}>
-            Refresh
-          </button>
-        </div>
-        <ReconcileCard report={reconcileReport} />
-        {status === "ok" || (status === "error" && actions.length > 0) ? (
-          <Rail
-            actions={actions}
-            onContest={async (ref) => {
-              const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
-              const body = (await res.json().catch(() => ({}))) as {
-                reAuditedAt?: number;
-                finding?: RailFinding;
-                guarantee?: "unconditional" | "conditional";
-                warnings?: { id: string; code: string; detail?: string }[];
-                witnessClass?: string | null;
-                trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
-              };
-              if (!res.ok || typeof body.reAuditedAt !== "number") {
-                return { error: `re-audit failed (${res.status})` };
-              }
-              return body;
-            }}
-          />
-        ) : null}
-      </aside>
+    <main className="shell observatory-shell">
+      <Observatory
+        actions={actions}
+        status={status}
+        demo={demo}
+        health={health}
+        reconcile={reconcileReport}
+        errorText={errorText}
+        stale={stale}
+        ageMs={ageMs}
+        onRefresh={() => void load()}
+        onContest={async (ref) => {
+          const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
+          const body = (await res.json().catch(() => ({}))) as {
+            reAuditedAt?: number;
+            finding?: RailFinding;
+            guarantee?: "unconditional" | "conditional";
+            warnings?: { id: string; code: string; detail?: string }[];
+            witnessClass?: string | null;
+            trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+          };
+          if (!res.ok || typeof body.reAuditedAt !== "number") {
+            return { error: `re-audit failed (${res.status})` };
+          }
+          return body;
+        }}
+      />
     </main>
   );
 }

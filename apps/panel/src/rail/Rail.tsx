@@ -1,19 +1,20 @@
 import { useState } from "react";
 import type { RailAction, RailFinding, RailWarning } from "./types.ts";
 
+export type RailContestResult = {
+  reAuditedAt?: number;
+  finding?: RailFinding;
+  guarantee?: "unconditional" | "conditional";
+  warnings?: RailWarning[];
+  witnessClass?: string | null;
+  trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+  error?: string;
+};
+
 export type RailProps = {
   actions: RailAction[];
-  onContest?: (
-    ref: string,
-  ) => Promise<{
-    reAuditedAt?: number;
-    finding?: RailFinding;
-    guarantee?: "unconditional" | "conditional";
-    warnings?: RailWarning[];
-    witnessClass?: string | null;
-    trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
-    error?: string;
-  } | void>;
+  onContest?: (ref: string) => Promise<RailContestResult | void>;
+  onSelect?: (ref: string) => void;
 };
 
 function kindOf(action: RailAction): "allow" | "deny" | "threw" {
@@ -27,7 +28,7 @@ function iconOf(kind: "allow" | "deny" | "threw"): string {
   return "!";
 }
 
-export function Rail({ actions, onContest }: RailProps) {
+export function Rail({ actions, onContest, onSelect }: RailProps) {
   const [open, setOpen] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
   const [stamp, setStamp] = useState<Record<string, string>>({});
   const [findings, setFindings] = useState<Record<string, RailFinding>>({});
@@ -73,7 +74,10 @@ export function Rail({ actions, onContest }: RailProps) {
                 type="button"
                 className={`row focusable ${kind}`}
                 aria-expanded={expanded}
-                onClick={() => setOpen(expanded ? null : ref)}
+                onClick={() => {
+                  setOpen(expanded ? null : ref);
+                  onSelect?.(ref);
+                }}
               >
                 <span className="icon" aria-hidden="true">
                   {iconOf(kind)}

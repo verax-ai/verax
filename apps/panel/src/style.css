@@ -1,15 +1,140 @@
 :root {
-  color: #e8eef5;
-  background: #0b1220;
+  color: #eaf2f8;
+  background: #02060f;
   font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 18px;
 }
 body {
   margin: 0;
 }
 .shell {
-  display: grid;
-  grid-template-columns: 1fr 22rem;
   min-height: 100vh;
+}
+.observatory-shell {
+  overflow-x: hidden;
+}
+.observatory {
+  display: grid;
+  grid-template-areas:
+    "top top top"
+    "left main detail"
+    "time time time";
+  grid-template-columns: 13rem 1fr 22rem;
+  grid-template-rows: auto 1fr auto;
+  min-height: 100vh;
+  background: #02060f;
+  color: #eaf2f8;
+}
+.obs-top {
+  grid-area: top;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  border-bottom: 1px solid #1a2a40;
+}
+.obs-left {
+  grid-area: left;
+  padding: 1rem;
+  border-right: 1px solid #1a2a40;
+  overflow: auto;
+}
+.obs-main {
+  grid-area: main;
+  min-width: 0;
+  overflow: auto;
+  padding: 0.5rem;
+}
+.obs-detail {
+  grid-area: detail;
+  padding: 1rem;
+  border-left: 1px solid #1a2a40;
+  overflow: auto;
+}
+.obs-timeline {
+  grid-area: time;
+  border-top: 1px solid #1a2a40;
+  overflow-x: auto;
+}
+.obs-timeline ol {
+  display: flex;
+  gap: 0.5rem;
+  list-style: none;
+  margin: 0;
+  padding: 0.6rem 1rem;
+}
+.obs-timeline button,
+.obs-left button {
+  background: #0d1828;
+  color: inherit;
+  border: 1px solid #1a2a40;
+  padding: 0.35rem 0.5rem;
+  cursor: pointer;
+}
+[role="tablist"] {
+  display: flex;
+  gap: 0.25rem;
+}
+[role="tab"] {
+  background: transparent;
+  color: inherit;
+  border: 1px solid #1a2a40;
+  padding: 0.45rem 0.8rem;
+  cursor: pointer;
+  min-height: 44px;
+}
+[role="tab"][aria-selected="true"] {
+  border-color: #5ce1ff;
+}
+.demo-badge {
+  position: absolute;
+  top: 0.4rem;
+  right: 0.8rem;
+  margin: 0;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid #d4a017;
+  color: #d4a017;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+}
+.muted {
+  color: #8aa0b5;
+}
+.anatomy-labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  list-style: none;
+  padding: 0.5rem 0;
+  margin: 0;
+}
+.system-map {
+  width: 100%;
+  max-width: 40rem;
+  height: auto;
+}
+.observatory h2,
+.observatory h3 {
+  font-size: 1rem;
+  margin: 0.8rem 0 0.3rem;
+}
+@media (max-width: 800px) {
+  .observatory {
+    grid-template-areas:
+      "top"
+      "main"
+      "detail"
+      "left"
+      "time";
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+  .obs-left,
+  .obs-detail {
+    border: 0;
+    border-top: 1px solid #1a2a40;
+  }
 }
 .stage {
   position: relative;

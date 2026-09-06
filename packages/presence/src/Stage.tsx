@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Canvas } from "@react-three/fiber";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Canvas, useFrame } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
-import { ACESFilmicToneMapping } from "three";
+import { ACESFilmicToneMapping, Group } from "three";
 import { ChestCore } from "./ChestCore.tsx";
 import { Figure } from "./Figure.tsx";
 import { Lights } from "./Lights.tsx";
@@ -46,7 +46,34 @@ function readBloom(): boolean {
   return new URLSearchParams(window.location.search).get("bloom") === "1";
 }
 
-export function Stage() {
+function ProceduralBreath({ children }: { children: ReactNode }) {
+  const ref = useRef<Group>(null);
+  useFrame(() => {
+    if (!ref.current) return;
+    const reduce =
+      typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce) {
+      ref.current.scale.set(1, 1, 1);
+      ref.current.rotation.z = 0;
+      return;
+    }
+    const t = performance.now() / 1000;
+    const s = 1 + 0.02 * Math.sin(t * 1.2);
+    ref.current.scale.setScalar(s);
+    ref.current.rotation.z = 0.015 * Math.sin(t * 0.8);
+  });
+  return <group ref={ref}>{children}</group>;
+}
+
+export function Stage({
+  particles = true,
+  rain = true,
+  breath = "presence",
+}: {
+  particles?: boolean;
+  rain?: boolean;
+  breath?: "presence" | "procedural";
+} = {}) {
   const startedAtMs = useMemo(() => performance.now(), []);
   const forcedState = useMemo(() => readForcedState(), []);
   const presence = useMemo(
@@ -98,7 +125,7 @@ export function Stage() {
   return (
     <div className="stage">
       {missing ? <p className="model-missing">model missing, run pack-model</p> : null}
-      <MatrixRain on={!low} />
+      {rain ? <MatrixRain on={!low} /> : null}
       <Canvas
         camera={{ position: [0, 0.2, 5.4], fov: 44 }}
         gl={{ antialias: false, toneMapping: ACESFilmicToneMapping, toneMappingExposure: 1.05 }}
@@ -106,21 +133,47 @@ export function Stage() {
         <Lights color={params.coreColor} />
         {cloud && meta && fit ? (
           <group position={fit.position} scale={fit.scale}>
-            <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} assetBase={assetBase()} />
-            <ParticleField
-              cloud={cloud}
-              meta={meta}
-              count={Math.min(count, meta.count)}
-              params={params}
-              presence={state}
-              startedAtMs={startedAtMs}
-            />
-            <ChestCore
-              box={meta.bbox}
-              color={params.coreColor}
-              ringSpin={params.ringSpin}
-              breathAmp={params.breathAmp}
-            />
+            {breath === "procedural" ? (
+              <ProceduralBreath>
+                <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} assetBase={assetBase()} />
+                {particles ? (
+                  <ParticleField
+                    cloud={cloud}
+                    meta={meta}
+                    count={Math.min(count, meta.count)}
+                    params={params}
+                    presence={state}
+                    startedAtMs={startedAtMs}
+                  />
+                ) : null}
+                <ChestCore
+                  box={meta.bbox}
+                  color={params.coreColor}
+                  ringSpin={0}
+                  breathAmp={0}
+                />
+              </ProceduralBreath>
+            ) : (
+              <>
+                <Figure presence={state} startedAtMs={startedAtMs} onMissing={onMissing} assetBase={assetBase()} />
+                {particles ? (
+                  <ParticleField
+                    cloud={cloud}
+                    meta={meta}
+                    count={Math.min(count, meta.count)}
+                    params={params}
+                    presence={state}
+                    startedAtMs={startedAtMs}
+                  />
+                ) : null}
+                <ChestCore
+                  box={meta.bbox}
+                  color={params.coreColor}
+                  ringSpin={params.ringSpin}
+                  breathAmp={params.breathAmp}
+                />
+              </>
+            )}
           </group>
         ) : null}
         {bloom ? (
