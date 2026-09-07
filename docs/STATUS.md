@@ -164,6 +164,9 @@ decision/effect line to `evidence-copy/` and writes `heartbeat.json`
 (`alive` + last row n). `verax doctor` is the speaker: a stale
 heartbeat is `heartbeat` / silent; a short or corrupt copy is
 `evidence-copy`. The panel is a session UI and is not watching this.
+Seven pilot drills live in `tests/pilot-drills.test.ts` (stolen token,
+hostile tool, cross-tenant record, repeated `_ref`, tampered memory,
+full disk, silenced copy). They are tests, not a live body.
 
 Remaining gaps, still open:
 
