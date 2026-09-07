@@ -2,7 +2,16 @@ import { randomBytes, generateKeyPairSync } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import {
+  buildCheckpointClaims,
+  checkpointHash,
+  signCheckpoint,
+  totalsFromDecisionRecords,
+  type SignedCheckpoint,
+} from "@cedulon/checkpoint";
+import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import type { LedgerEffect } from "@verax-ai/proxy";
+import { checkpointsPath } from "../../proxy/src/checkpoints.ts";
 import { signEffectAttestation } from "../../proxy/src/ledger.ts";
 import { pidAlive } from "./unlock.ts";
 
@@ -129,6 +138,90 @@ function send(res: ServerResponse, status: number, body: unknown): void {
   res.end(text);
 }
 
+export type CheckpointWindow = {
+  epoch: number;
+  startMs: number;
+  endMs: number;
+};
+
+function loadDecisions(stateDir: string): SignedDecisionRecord[] {
+  try {
+    const text = readFileSync(join(stateDir, "decisions.jsonl"), "utf8");
+    const out: SignedDecisionRecord[] = [];
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      out.push(JSON.parse(line) as SignedDecisionRecord);
+    }
+    return out;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+function lastCheckpointHash(stateDir: string): string | null {
+  try {
+    const text = readFileSync(checkpointsPath(stateDir), "utf8").trim();
+    if (text === "") return null;
+    const lines = text.split("\n").filter((l) => l !== "");
+    const last = JSON.parse(lines[lines.length - 1] ?? "{}") as SignedCheckpoint;
+    if (typeof last.coseHex !== "string" || !last.claims) return null;
+    return checkpointHash(last);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    return null;
+  }
+}
+
+function signWindowCheckpoint(
+  stateDir: string,
+  window: CheckpointWindow,
+  keys: { privateKeyPem: string; publicKeyPem: string },
+): SignedCheckpoint {
+  const startMs = window.startMs;
+  const endMs = window.endMs;
+  const inWindow = loadDecisions(stateDir).filter(
+    (d) => d.claims.timestampMs >= startMs && d.claims.timestampMs < endMs,
+  );
+  const claims = buildCheckpointClaims(
+    window.epoch,
+    inWindow,
+    startMs,
+    endMs,
+    lastCheckpointHash(stateDir),
+    totalsFromDecisionRecords,
+    (row) => decisionRecordHash(row),
+  );
+  const signed = signCheckpoint(claims, keys.privateKeyPem, keys.publicKeyPem);
+  appendFileSync(checkpointsPath(stateDir), `${JSON.stringify(signed)}\n`, { encoding: "utf8" });
+  return signed;
+}
+
+export async function requestWitnessCheckpoint(
+  stateDir: string,
+  window: CheckpointWindow,
+): Promise<SignedCheckpoint | null> {
+  const listen = readWitnessListen(stateDir);
+  if (!listen || !pidAlive(listen.pid)) return null;
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 800);
+    const res = await fetch(`http://127.0.0.1:${listen.port}/checkpoint`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: listen.token, ...window }),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const body = (await res.json()) as SignedCheckpoint;
+    if (typeof body.coseHex !== "string" || !body.claims) return null;
+    return body;
+  } catch {
+    return null;
+  }
+}
+
 export async function requestWitnessSign(
   stateDir: string,
   row: EffectRowWire,
@@ -225,6 +318,35 @@ export async function runWitness(stateDir: string): Promise<void> {
           const resultHash = typeof body.resultHash === "string" ? body.resultHash : undefined;
           const signed = signEffectAttestation(row, WITNESS_CLASS, resultHash, keys);
           send(res, 200, { witnessClass: WITNESS_CLASS, ...signed });
+          return;
+        }
+        if (req.method === "POST" && url.pathname === "/checkpoint") {
+          const body = (await readJson(req)) as {
+            token?: unknown;
+            epoch?: unknown;
+            startMs?: unknown;
+            endMs?: unknown;
+          };
+          if (body.token !== token) {
+            send(res, 401, { error: "unauthorized" });
+            return;
+          }
+          if (
+            typeof body.epoch !== "number" ||
+            !Number.isInteger(body.epoch) ||
+            typeof body.startMs !== "number" ||
+            typeof body.endMs !== "number" ||
+            body.endMs <= body.startMs
+          ) {
+            send(res, 400, { error: "window-invalid" });
+            return;
+          }
+          const signed = signWindowCheckpoint(
+            stateDir,
+            { epoch: body.epoch, startMs: body.startMs, endMs: body.endMs },
+            keys,
+          );
+          send(res, 200, signed);
           return;
         }
         send(res, 404, { error: "not-found" });

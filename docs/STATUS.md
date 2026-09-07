@@ -28,9 +28,10 @@ Known gaps:
 
 - all witnesses are self in phase 1; reconciliation is conditional by
   construction
-- explain does not call signCheckpoint; durable checkpoint production
-  is the phase 4 night watch. Until then window-coverage is
-  notApplicable and balanced ignores that code
+- explain does not call `signCheckpoint` itself. `verax witness`
+  writes a durable signed checkpoint to `checkpoints.jsonl`. Without
+  that file, window-coverage stays notApplicable and balanced ignores
+  that code. With a covering checkpoint the finding is evaluated.
 - a successful allow hashes what the proxy dispatched
   (`{ tool, arguments }`); whether the tool did that is the witness's
   job (phase 4), not the tool's self-report. The ToolResult hash lives
@@ -156,7 +157,9 @@ The body never loads that file (`loadOrCreateSigners` still only has
 record + effect). A reachable witness writes `witnessClass: "same-org"`
 and a `witness-status.jsonl` `signed` row. An unreachable witness leaves
 the class `self` and records `self-fallback` / `unreachable`. That is
-not a third-party witness.
+not a third-party witness. The same process signs a durable checkpoint
+onto `checkpoints.jsonl`; `explain` then evaluates window-coverage
+instead of listing it as notApplicable.
 
 Remaining gaps, still open:
 
