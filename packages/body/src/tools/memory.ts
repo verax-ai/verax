@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { canonical } from "@cedulon/core";
-import type { ToolCall, ToolResult } from "@verax-ai/proxy";
+import { tenantKey, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
 
 function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
@@ -17,11 +18,44 @@ function jsonResult(value: unknown, isError = false): ToolResult {
   };
 }
 
+function resolveMemoryPath(stateDir: string, id: string, principal: Principal): string | null {
+  if (!ID_RE.test(id)) return null;
+  const memoryDir = resolve(stateDir, "tenants", tenantKey(principal), "memory");
+  const path = resolve(memoryDir, `${id}.json`);
+  const prefix = memoryDir.endsWith(sep) ? memoryDir : `${memoryDir}${sep}`;
+  if (!path.startsWith(prefix)) return null;
+  return path;
+}
+
+/** True when `id` exists under a different tenant. Does not read legacy `memory/`. */
+export function memoryBelongsToOtherTenant(stateDir: string, id: string, selfKey: string): boolean {
+  if (!ID_RE.test(id)) return false;
+  const tenantsRoot = resolve(stateDir, "tenants");
+  if (!existsSync(tenantsRoot)) return false;
+  let names: string[];
+  try {
+    names = readdirSync(tenantsRoot);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (name === selfKey) continue;
+    const path = resolve(tenantsRoot, name, "memory", `${id}.json`);
+    const prefix = resolve(tenantsRoot, name, "memory");
+    const guarded = prefix.endsWith(sep) ? prefix : `${prefix}${sep}`;
+    if (!path.startsWith(guarded)) continue;
+    if (existsSync(path)) return true;
+  }
+  return false;
+}
+
 export async function readMemoryMeta(
   stateDir: string,
   id: string,
+  principal?: Principal,
 ): Promise<{ versionHash: string; validFromMs: number; validUntilMs: number } | null> {
-  const path = resolveMemoryPath(stateDir, id);
+  if (!principal) return null;
+  const path = resolveMemoryPath(stateDir, id, principal);
   if (path === null) return null;
   try {
     const item = JSON.parse(await readFile(path, "utf8")) as {
@@ -44,21 +78,17 @@ export async function readMemoryMeta(
   }
 }
 
-function resolveMemoryPath(stateDir: string, id: string): string | null {
-  if (!ID_RE.test(id)) return null;
-  const memoryDir = resolve(stateDir, "memory");
-  const path = resolve(memoryDir, `${id}.json`);
-  const prefix = memoryDir.endsWith(sep) ? memoryDir : `${memoryDir}${sep}`;
-  if (!path.startsWith(prefix)) return null;
-  return path;
-}
-
-export async function memoryGet(call: ToolCall, stateDir: string, now: () => number): Promise<ToolResult> {
+export async function memoryGet(
+  call: ToolCall,
+  stateDir: string,
+  now: () => number,
+  principal: Principal,
+): Promise<ToolResult> {
   const id = call.arguments.id;
   if (typeof id !== "string" || id === "") {
     return jsonResult({ error: "id-required" }, true);
   }
-  const path = resolveMemoryPath(stateDir, id);
+  const path = resolveMemoryPath(stateDir, id, principal);
   if (path === null) {
     return jsonResult({ error: "id-invalid" }, true);
   }
@@ -84,7 +114,7 @@ export async function memoryGet(call: ToolCall, stateDir: string, now: () => num
   }
 }
 
-export async function memoryPut(call: ToolCall, stateDir: string): Promise<ToolResult> {
+export async function memoryPut(call: ToolCall, stateDir: string, principal: Principal): Promise<ToolResult> {
   const id = call.arguments.id;
   const body = call.arguments.body;
   const source = call.arguments.source;
@@ -93,7 +123,7 @@ export async function memoryPut(call: ToolCall, stateDir: string): Promise<ToolR
   if (typeof id !== "string" || id === "") {
     return jsonResult({ error: "id-required" }, true);
   }
-  const path = resolveMemoryPath(stateDir, id);
+  const path = resolveMemoryPath(stateDir, id, principal);
   if (path === null) {
     return jsonResult({ error: "id-invalid" }, true);
   }
@@ -113,7 +143,7 @@ export async function memoryPut(call: ToolCall, stateDir: string): Promise<ToolR
     validUntilMs,
     versionHash,
   };
-  const dir = resolve(stateDir, "memory");
+  const dir = resolve(stateDir, "tenants", tenantKey(principal), "memory");
   await mkdir(dir, { recursive: true, mode: 0o700 });
   await writeFile(path, `${JSON.stringify(rec)}\n`, {
     encoding: "utf8",

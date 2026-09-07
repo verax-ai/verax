@@ -45,7 +45,19 @@ export function createVerifier(jwksUrl: string, issuer: string, audience: string
         if (part !== "") scopes.add(part);
       }
     }
-    return { principal: { brain: sub, scopes }, payload };
+    const iss = typeof payload.iss === "string" ? payload.iss : undefined;
+    const tenant = typeof payload.tenant === "string" && payload.tenant !== "" ? payload.tenant : undefined;
+    const org = typeof payload.org === "string" && payload.org !== "" ? payload.org : undefined;
+    return {
+      principal: {
+        brain: sub,
+        scopes,
+        ...(iss ? { iss } : {}),
+        ...(tenant ? { tenant } : {}),
+        ...(org ? { org } : {}),
+      },
+      payload,
+    };
   };
 }
 

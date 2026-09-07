@@ -19,6 +19,9 @@ export type DevIssuer = {
     jti?: string;
     iatSkewSec?: number;
     nbfSkewSec?: number;
+    sub?: string;
+    tenant?: string;
+    org?: string;
   }) => Promise<string>;
   revoke: (jti: string, stateDir: string) => Promise<void>;
   close: () => Promise<void>;
@@ -49,9 +52,12 @@ export async function startDevIssuer(bindPort: number, audience: string): Promis
     port,
     async sign(over = {}) {
       const nowSec = Math.floor(Date.now() / 1000);
-      const jwt = new SignJWT({ scope: over.scope ?? "verax:read verax:memory" })
+      const claims: Record<string, unknown> = { scope: over.scope ?? "verax:read verax:memory" };
+      if (over.tenant) claims.tenant = over.tenant;
+      if (over.org) claims.org = over.org;
+      const jwt = new SignJWT(claims)
         .setProtectedHeader({ alg: "ES256", kid: "test" })
-        .setSubject("brain-1")
+        .setSubject(over.sub ?? "brain-1")
         .setIssuer(issuerUrl)
         .setAudience(over.aud ?? audience)
         .setIssuedAt(nowSec + (over.iatSkewSec ?? 0));

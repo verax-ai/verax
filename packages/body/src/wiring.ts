@@ -2,6 +2,7 @@ import {
   createProxy,
   FileLedger,
   loadPolicy,
+  tenantKey,
   type EffectSigner,
   type ExplainOpts,
   type Principal,
@@ -11,8 +12,7 @@ import {
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
 import { persistPolicySnapshot } from "./policy-store.ts";
-import { readMemoryMeta } from "./tools/memory.ts";
-import { memoryGet, memoryPut } from "./tools/memory.ts";
+import { memoryBelongsToOtherTenant, memoryGet, memoryPut, readMemoryMeta } from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead, messageSend } from "./tools/message.ts";
 import { spendAuthorize } from "./tools/spend.ts";
@@ -58,8 +58,8 @@ export function createBodyServices(opts: {
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
-  registry.set("memory.get", (call) => memoryGet(call, opts.stateDir, now));
-  registry.set("memory.put", (call) => memoryPut(call, opts.stateDir));
+  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal));
+  registry.set("memory.put", (call, principal) => memoryPut(call, opts.stateDir, principal));
   const explainOpts = async (): Promise<ExplainOpts> => {
     const env = process.env.VERAX_RECORD_PUBKEY_PIN;
     const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
@@ -75,8 +75,10 @@ export function createBodyServices(opts: {
     };
   };
   registry.set("audit.explain", async (call) => auditExplain(call, ledger, await explainOpts()));
-  registry.set("message.read", (call) => messageRead(call, opts.stateDir));
-  registry.set("message.send", (call, _principal, ref) => messageSend(call, opts.stateDir, ref ?? ""));
+  registry.set("message.read", (call, principal) => messageRead(call, opts.stateDir, principal));
+  registry.set("message.send", (call, principal, ref) =>
+    messageSend(call, opts.stateDir, ref ?? "", principal),
+  );
   registry.set("spend", (call, _principal, ref) => spendAuthorize(call, ref ?? ""));
 
   const inner: ToolFn = async (call, principal, ref) => {
@@ -98,7 +100,13 @@ export function createBodyServices(opts: {
     now,
     nonce,
     inner,
-    resolveInput: (id) => readMemoryMeta(opts.stateDir, id),
+    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal),
+    checkTenantMismatch: async (call, principal) => {
+      if (call.name !== "memory.get") return false;
+      const id = call.arguments.id;
+      if (typeof id !== "string") return false;
+      return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal));
+    },
   });
 
   return {

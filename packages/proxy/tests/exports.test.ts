@@ -23,6 +23,7 @@ const ALLOWED = new Set([
   "parseChannelJsonl",
   "parseCardCsv",
   "reconcile",
+  "tenantKey",
 ]);
 
 describe("B1 exports map", () => {

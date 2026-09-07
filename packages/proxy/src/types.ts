@@ -5,6 +5,12 @@ import type { EffectRow, SignedEffectExtract } from "@cedulon/effect-extract";
 export type Principal = {
   brain: string;
   scopes: ReadonlySet<string>;
+  /** JWT `iss`. Optional so existing fixtures stay `{ brain, scopes }`. */
+  iss?: string;
+  /** Explicit JWT `tenant` claim, when the issuer sends one. */
+  tenant?: string;
+  /** Explicit JWT `org` claim, when the issuer sends one and `tenant` is absent. */
+  org?: string;
 };
 
 /** Same shape as `@cedulon/mcp-guard` so a later wrap can sit on this type. */
@@ -98,7 +104,7 @@ export type DecisionInputRow = {
 };
 
 export type DecisionInputs = {
-  principal: { brain: string; scopes: string[] };
+  principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: DecisionInputRow[];
   approver?: { id: string; via: "cli" | "proxy"; resolves: string };
 };
@@ -123,7 +129,9 @@ export type ProxyDeps = {
   nonce: () => string;
   inner: (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
   inputsLog?: InputsLog;
-  resolveInput?: (id: string) => Promise<ResolvedInput | null>;
+  resolveInput?: (id: string, principal?: Principal) => Promise<ResolvedInput | null>;
+  /** True when memory.get names an id that lives under another tenant. */
+  checkTenantMismatch?: (call: ToolCall, principal: Principal) => Promise<boolean>;
 };
 
 export type ExplainFinding = {

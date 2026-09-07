@@ -16,7 +16,9 @@ import {
   type EffectRow,
   type SignedEffectExtract,
 } from "@cedulon/effect-extract";
+import { tenantKey } from "./tenant.ts";
 import type {
+  DecisionInputs,
   EffectSigner,
   ExtractWindow,
   Ledger,
@@ -221,6 +223,11 @@ export class MemoryLedger implements Ledger {
     return this.byRef.get(ref) ?? null;
   }
 
+  noteTenantRef(key: string, ref: string): void {
+    const row = this.byRef.get(ref);
+    if (row) this.byRef.set(`${key}:${ref}`, row);
+  }
+
   lookupResolvedBy(deferRef: string): ResolutionHit | null {
     return this.resolvedBy.get(deferRef) ?? null;
   }
@@ -388,18 +395,53 @@ export class FileLedger implements Ledger {
     }
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
+    const rowsByRef = new Map<string, DecisionIndexRow[]>();
     for (const rec of decisions) {
       const row = indexRowOf(rec);
       if (row) {
         this.byRef.set(row.ref, row);
+        const list = rowsByRef.get(row.ref) ?? [];
+        list.push(row);
+        rowsByRef.set(row.ref, list);
         noteReauth(this.reauthByHash, row);
         noteCounted(this.countedAt, row);
       }
     }
+    this.loadTenantRefs(rowsByRef);
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
     }
     this.loadResolvedBy();
+  }
+
+  /** Pair inputs.jsonl with decisions so a restart keeps per-tenant `_ref` keys. */
+  private loadTenantRefs(rowsByRef: Map<string, DecisionIndexRow[]>): void {
+    let text: string;
+    try {
+      text = ledgerFs.readFileSync(join(this.dir, "inputs.jsonl"), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    const seen = new Map<string, number>();
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const row = JSON.parse(line) as { ref?: unknown; inputs?: DecisionInputs };
+      if (typeof row.ref !== "string") continue;
+      const principal = row.inputs?.principal;
+      if (!principal || typeof principal.brain !== "string") continue;
+      const idx = seen.get(row.ref) ?? 0;
+      seen.set(row.ref, idx + 1);
+      const indexed = rowsByRef.get(row.ref)?.[idx];
+      if (!indexed) continue;
+      const key = tenantKey({
+        brain: principal.brain,
+        iss: principal.iss,
+        tenant: principal.tenant,
+        org: principal.org,
+      });
+      this.byRef.set(`${key}:${row.ref}`, indexed);
+    }
   }
 
   /** Single pass over inputs.jsonl. FileInputsLog itself stays cache-less. */
@@ -577,6 +619,11 @@ export class FileLedger implements Ledger {
     return this.byRef.get(ref) ?? null;
   }
 
+  noteTenantRef(key: string, ref: string): void {
+    const row = this.byRef.get(ref);
+    if (row) this.byRef.set(`${key}:${ref}`, row);
+  }
+
   lookupResolvedBy(deferRef: string): ResolutionHit | null {
     return this.resolvedBy.get(deferRef) ?? null;
   }
@@ -622,6 +669,7 @@ function signWindow(
 /** Extra methods on FileLedger / MemoryLedger. The Ledger interface stays closed. */
 type LedgerIndex = {
   lookupByRef?: (ref: string) => DecisionIndexRow | null;
+  noteTenantRef?: (key: string, ref: string) => void;
   hasPrimaryEffect?: (ref: string) => boolean;
   lookupResolvedBy?: (deferRef: string) => ResolutionHit | null;
   noteResolution?: (deferRef: string, hit: ResolutionHit) => void;
@@ -630,11 +678,23 @@ type LedgerIndex = {
   countsReadable?: boolean;
 };
 
-export async function lookupDecisionByRef(ledger: Ledger, ref: string): Promise<DecisionIndexRow | null> {
+export async function lookupDecisionByRef(
+  ledger: Ledger,
+  ref: string,
+  key?: string,
+): Promise<DecisionIndexRow | null> {
   const extra = ledger as Ledger & LedgerIndex;
-  if (typeof extra.lookupByRef === "function") return extra.lookupByRef(ref);
+  if (typeof extra.lookupByRef === "function") {
+    if (key) return extra.lookupByRef(`${key}:${ref}`);
+    return extra.lookupByRef(ref);
+  }
   const found = (await ledger.decisions()).find((d) => d.claims.ref === ref);
   return found ? indexRowOf(found) : null;
+}
+
+export function noteTenantRef(ledger: Ledger, key: string, ref: string): void {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.noteTenantRef === "function") extra.noteTenantRef(key, ref);
 }
 
 export function lookupResolvedBy(ledger: Ledger, deferRef: string): ResolutionHit | null {

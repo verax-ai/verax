@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { tenantKey } from "@verax-ai/proxy";
+
 import { createBodyServices } from "../src/wiring.ts";
 
 function testKeys() {
@@ -46,12 +48,15 @@ describe("message.send stub", () => {
       effectSigner: keys,
     });
     try {
+      const sender = { brain: "brain-1", scopes: new Set(["verax:act"]) };
       const out = await services.proxy.call(
         { name: "message.send", arguments: { to: "alice@mail.example", text: "hi" } },
-        { brain: "brain-1", scopes: new Set(["verax:act"]) },
+        sender,
       );
       assert.equal(out.isError, false);
-      const line = JSON.parse(readFileSync(join(dir, "outbox.jsonl"), "utf8").trim()) as {
+      const line = JSON.parse(
+        readFileSync(join(dir, "tenants", tenantKey(sender), "outbox.jsonl"), "utf8").trim(),
+      ) as {
         to: string;
         text: string;
         ref: string;

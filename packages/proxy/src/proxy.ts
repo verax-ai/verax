@@ -14,8 +14,27 @@ import {
   lookupReauthByHash,
   lookupResolvedBy,
   noteResolution,
+  noteTenantRef,
 } from "./ledger.ts";
+import { tenantKey } from "./tenant.ts";
 import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
+
+function scopedClaimsRef(principal: Principal, raw: string): string {
+  if (principal.iss || principal.tenant || principal.org) {
+    return `${tenantKey(principal)}:${raw}`;
+  }
+  return raw;
+}
+
+function principalInputs(principal: Principal): DecisionInputs["principal"] {
+  return {
+    brain: principal.brain,
+    scopes: [...principal.scopes].sort(),
+    ...(principal.iss ? { iss: principal.iss } : {}),
+    ...(principal.tenant ? { tenant: principal.tenant } : {}),
+    ...(principal.org ? { org: principal.org } : {}),
+  };
+}
 
 export class LedgerDenyUnrecorded extends Error {
   readonly reasonCode: string;
@@ -256,14 +275,14 @@ export function createProxy(deps: ProxyDeps) {
     const declared = declaredInputs(call.arguments);
     if (declared === "invalid") {
       return {
-        inputs: { principal: { brain: principal.brain, scopes: [...principal.scopes].sort() }, inputs: [] },
+        inputs: { principal: principalInputs(principal), inputs: [] },
         reasonCode: "input-invalid",
       };
     }
     const rows: DecisionInputRow[] = [];
     if (declared) {
       for (const item of declared) {
-        const got = deps.resolveInput ? await deps.resolveInput(item.id) : null;
+        const got = deps.resolveInput ? await deps.resolveInput(item.id, principal) : null;
         if (
           !got ||
           got.versionHash !== item.versionHash ||
@@ -271,7 +290,7 @@ export function createProxy(deps: ProxyDeps) {
           got.validUntilMs < timestampMs
         ) {
           return {
-            inputs: { principal: { brain: principal.brain, scopes: [...principal.scopes].sort() }, inputs: [] },
+            inputs: { principal: principalInputs(principal), inputs: [] },
             reasonCode: "input-invalid",
           };
         }
@@ -284,7 +303,7 @@ export function createProxy(deps: ProxyDeps) {
       }
     }
     return {
-      inputs: { principal: { brain: principal.brain, scopes: [...principal.scopes].sort() }, inputs: rows },
+      inputs: { principal: principalInputs(principal), inputs: rows },
       reasonCode: null,
     };
   }
@@ -360,7 +379,7 @@ export function createProxy(deps: ProxyDeps) {
       }
 
       if (typeof given === "string") {
-        const existing = await lookupDecisionByRef(deps.ledger, given);
+        const existing = await lookupDecisionByRef(deps.ledger, given, tenantKey(principal));
         if (existing) {
           if (existing.requestHash !== requestHash) {
             const ref = deps.nonce();
@@ -449,7 +468,16 @@ export function createProxy(deps: ProxyDeps) {
         decision = "deny";
         reasonCode = bound;
       }
-      const ref = given ?? deps.nonce();
+      if (
+        !bound &&
+        decision === "allow" &&
+        deps.checkTenantMismatch &&
+        (await deps.checkTenantMismatch(dispatched, principal))
+      ) {
+        decision = "deny";
+        reasonCode = "tenant-mismatch";
+      }
+      const ref = typeof given === "string" ? scopedClaimsRef(principal, given) : deps.nonce();
       const allow = decision === "allow";
       await writeRecord({
         decision,
@@ -461,6 +489,9 @@ export function createProxy(deps: ProxyDeps) {
         subject: call.name,
         timestampMs,
       });
+      if (typeof given === "string") {
+        noteTenantRef(deps.ledger, tenantKey(principal), given);
+      }
       if (decision === "defer") {
         const rule = deps.policy.rule(verdict.rule);
         const amount = dispatched.name === "spend" ? dispatched.arguments.amountMinor : dispatched.arguments.amount;

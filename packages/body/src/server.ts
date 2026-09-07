@@ -158,11 +158,18 @@ export async function listen(config: BodyConfig): Promise<Server> {
     mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const auth = extra?.authInfo;
       const scopes = new Set(auth?.scopes ?? []);
-      const brain = typeof auth?.extra?.sub === "string" ? auth.extra.sub : (auth?.clientId ?? "unknown");
+      const bag = (auth?.extra ?? {}) as Record<string, unknown>;
+      const brain = typeof bag.sub === "string" ? bag.sub : (auth?.clientId ?? "unknown");
       try {
         return await services.proxy.call(
           { name: request.params.name, arguments: (request.params.arguments ?? {}) as Record<string, unknown> },
-          { brain, scopes },
+          {
+            brain,
+            scopes,
+            ...(typeof bag.iss === "string" ? { iss: bag.iss } : {}),
+            ...(typeof bag.tenant === "string" ? { tenant: bag.tenant } : {}),
+            ...(typeof bag.org === "string" ? { org: bag.org } : {}),
+          },
         );
       } catch (err) {
         if (err instanceof LedgerDenyUnrecorded) {
@@ -322,7 +329,12 @@ export async function listen(config: BodyConfig): Promise<Server> {
                   token,
                   clientId: verified.principal.brain,
                   scopes: [...verified.principal.scopes],
-                  extra: { sub: verified.principal.brain },
+                  extra: {
+                    sub: verified.principal.brain,
+                    ...(verified.principal.iss ? { iss: verified.principal.iss } : {}),
+                    ...(verified.principal.tenant ? { tenant: verified.principal.tenant } : {}),
+                    ...(verified.principal.org ? { org: verified.principal.org } : {}),
+                  },
                 },
               }),
               res,
