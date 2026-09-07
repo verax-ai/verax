@@ -1,4 +1,11 @@
-import { explain, type ExplainOpts, type Ledger, type ToolCall, type ToolResult } from "@verax-ai/proxy";
+import {
+  explain,
+  spokenReason,
+  type ExplainOpts,
+  type Ledger,
+  type ToolCall,
+  type ToolResult,
+} from "@verax-ai/proxy";
 
 export async function auditExplain(
   call: ToolCall,
@@ -17,11 +24,10 @@ export async function auditExplain(
     result = await explain(ledger, ref, opts);
   } catch (err) {
     if (err instanceof Error && err.message.startsWith("explain-unknown-ref:")) {
-      // No such record. Saying "denied" over a row the proxy allowed would make the
-      // answer disagree with the ledger; the refusal for another tenant's ref is a
-      // signed deny written by the proxy, not this string.
+      // Spoken the same as a tenant-mismatch refuse so the two calls look alike.
+      // The operator HTTP contest path still names unknown-ref.
       return {
-        content: [{ type: "text", text: JSON.stringify({ error: "unknown-ref" }) }],
+        content: [{ type: "text", text: JSON.stringify({ error: spokenReason("tenant-mismatch") }) }],
         isError: true,
       };
     }

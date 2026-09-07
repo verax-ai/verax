@@ -77,8 +77,9 @@ describe("S4 tenant boundary", () => {
         readerB,
       );
       assert.equal(got.isError, true);
-      assert.match(got.content[0]?.text ?? "", /denied:tenant-mismatch:/);
+      assert.deepEqual(parse(got), { error: "not-found", id: "note-1" });
       assert.equal(JSON.stringify(got).includes("alice-only"), false);
+      assert.equal(JSON.stringify(got).includes("tenant-mismatch"), false);
 
       const recs = await services.ledger.decisions();
       const mismatch = recs.filter((d) => d.claims.reasonCode === "tenant-mismatch");
@@ -223,9 +224,10 @@ describe("S5 A1 audit.explain tenant close", () => {
         readerB,
       );
       assert.equal(got.isError, true);
-      assert.match(got.content[0]?.text ?? "", /denied:tenant-mismatch:/);
+      assert.deepEqual(parse(got), { error: "not-found" });
       assert.equal(JSON.stringify(got).includes("\"record\""), false);
       assert.equal(JSON.stringify(got).includes("effectHash"), false);
+      assert.equal(JSON.stringify(got).includes("tenant-mismatch"), false);
 
       const recs = await services.ledger.decisions();
       const mismatch = recs.filter((d) => d.claims.reasonCode === "tenant-mismatch");
@@ -270,7 +272,7 @@ describe("S5 A1 audit.explain tenant close", () => {
         readerB,
       );
       assert.equal(cross.isError, true);
-      assert.match(cross.content[0]?.text ?? "", /denied:tenant-mismatch:/);
+      assert.deepEqual(parse(cross), { error: "not-found" });
 
       const own = await services.proxy.call(
         { name: "audit.explain", arguments: { ref: aliceRef } },
@@ -308,9 +310,9 @@ describe("S5 A1 audit.explain tenant close", () => {
   });
 });
 
-describe("S5 A2 uniform brain answer", () => {
-  it("what the brain is told matches the row that was written for it", async () => {
-    const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-oracle-"));
+describe("S6 spoken reason vs written reason", () => {
+  it("pins both the spoken text and the written row on the two memory.get paths", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s6-spoken-"));
     const keys = testKeys();
     const services = createBodyServices({
       stateDir,
@@ -329,15 +331,14 @@ describe("S5 A2 uniform brain answer", () => {
         { name: "memory.get", arguments: { id: "note-404" } },
         readerB,
       );
-      const otherText = other.content[0]?.text ?? "";
-      const missingText = missing.content[0]?.text ?? "";
-      // The cross-tenant read is refused and says so; the missing id was allowed and
-      // simply found nothing. A brain that is told "denied" over an allow row cannot
-      // trust any answer, and the uniform wording did not close the oracle anyway:
-      // the brain owns both records and can read them apart through audit.explain.
-      assert.match(otherText, /denied:tenant-mismatch:/);
-      assert.equal(JSON.parse(missingText).error, "not-found");
+      const otherBody = parse(other);
+      const missingBody = parse(missing);
+      assert.equal(otherBody.error, "not-found");
+      assert.equal(missingBody.error, "not-found");
+      assert.equal(otherBody.id, "note-1");
+      assert.equal(missingBody.id, "note-404");
       assert.equal(JSON.stringify(other).includes("alice-only"), false);
+      assert.equal(JSON.stringify(other).includes("tenant-mismatch"), false);
 
       const recs = await services.ledger.decisions();
       const getRows = recs.filter((d) => d.claims.subject === "memory.get");
@@ -347,6 +348,85 @@ describe("S5 A2 uniform brain answer", () => {
       assert.equal(refused.claims.decision, "deny");
       assert.ok(allowed, "the missing id must still be an allow row");
       assert.equal(allowed.claims.reasonCode, "allow");
+    } finally {
+      services.ledger.close();
+    }
+  });
+
+  it("another tenant's explain ref and a missing ref are the same spoken error", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s6-explain-spoken-"));
+    const keys = testKeys();
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: keys,
+      effectSigner: keys,
+    });
+    try {
+      await services.proxy.call(
+        { name: "memory.put", arguments: { ...putArgs, _ref: "invoice-1" } },
+        writerA,
+      );
+      const aliceRef = `${tenantKey(writerA)}:invoice-1`;
+      const other = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: aliceRef } },
+        readerB,
+      );
+      const missing = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: "no-such-ref" } },
+        readerB,
+      );
+      assert.deepEqual(parse(other), { error: "not-found" });
+      assert.deepEqual(parse(missing), { error: "not-found" });
+
+      const recs = await services.ledger.decisions();
+      const explainDeny = recs.find(
+        (d) => d.claims.subject === "audit.explain" && d.claims.reasonCode === "tenant-mismatch",
+      );
+      assert.ok(explainDeny);
+      assert.equal(explainDeny.claims.decision, "deny");
+    } finally {
+      services.ledger.close();
+    }
+  });
+
+  it("the brain can still tell its own two records apart through audit.explain", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s6-own-oracle-"));
+    const keys = testKeys();
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: keys,
+      effectSigner: keys,
+    });
+    try {
+      await services.proxy.call({ name: "memory.put", arguments: putArgs }, writerA);
+      await services.proxy.call({ name: "memory.get", arguments: { id: "note-1" } }, readerB);
+      await services.proxy.call({ name: "memory.get", arguments: { id: "note-404" } }, readerB);
+
+      const recs = await services.ledger.decisions();
+      const getRows = recs.filter((d) => d.claims.subject === "memory.get");
+      const refused = getRows.find((d) => d.claims.reasonCode === "tenant-mismatch");
+      const allowed = getRows.find((d) => d.claims.decision === "allow");
+      assert.ok(refused);
+      assert.ok(allowed);
+
+      const ownDeny = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: refused.claims.ref } },
+        readerB,
+      );
+      const ownAllow = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: allowed.claims.ref } },
+        readerB,
+      );
+      const denyBody = parse(ownDeny);
+      const allowBody = parse(ownAllow);
+      const denyRecord = denyBody.record as { decision?: string; reasonCode?: string };
+      const allowRecord = allowBody.record as { decision?: string; reasonCode?: string };
+      assert.equal(denyRecord.decision, "deny");
+      assert.equal(denyRecord.reasonCode, "tenant-mismatch");
+      assert.equal(allowRecord.decision, "allow");
+      assert.equal(allowRecord.reasonCode, "allow");
     } finally {
       services.ledger.close();
     }

@@ -5,6 +5,7 @@ export { explain } from "./explain.ts";
 export { approvePending, approvalsLogFor, enqueueApprovalCommand, loadApprovalsFromDir } from "./approvals.ts";
 export { loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "./reconcile.ts";
 export { tenantKey } from "./tenant.ts";
+export { spokenReason } from "./spoken-reason.ts";
 export type { ApprovalRow, ApproveResult } from "./approvals.ts";
 export type { CardCsvOpts, ChannelRow, ReconcileReport } from "./reconcile.ts";
 export type {

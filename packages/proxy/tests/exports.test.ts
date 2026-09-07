@@ -24,6 +24,7 @@ const ALLOWED = new Set([
   "parseCardCsv",
   "reconcile",
   "tenantKey",
+  "spokenReason",
 ]);
 
 describe("B1 exports map", () => {
