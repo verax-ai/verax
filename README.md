@@ -21,8 +21,10 @@ It listens on `VERAX_DEV_ISSUER_PORT` (default 8790).
 `NODE_ENV=production` exits.
 
 `apps/panel` is a 2D account-for rail beside a particle presence.
-In development the Vite proxy attaches `VERAX_DEV_TOKEN` from
-`.env.local` to `/api`; the browser does not hold the token.
+The panel session uses the code flow; the access token stays in
+memory and is dropped on refresh. Vite may still attach
+`VERAX_DEV_TOKEN` from `.env.local` to `/api` when the request has
+no Authorization header (desktop MCP brains and tests).
 Relative frame-time checks live in `apps/panel/perf`; they are not
 an absolute smoothness claim.
 
