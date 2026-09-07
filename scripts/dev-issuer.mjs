@@ -74,8 +74,52 @@ writeFileSync(outPath, token, { encoding: "utf8", mode: 0o600 });
 chmodSync(outPath, 0o600);
 
 const CODE_TTL_MS = 60_000;
+const CODE_LIMIT = 100;
+const DEFAULT_REDIRECTS = ["http://127.0.0.1:5173/", "http://127.0.0.1:4173/"];
 /** @type {Map<string, { challenge: string; redirectUri: string; expiresAtMs: number }>} */
 const codes = new Map();
+
+function redirectAllowList() {
+  const raw = process.env.VERAX_DEV_REDIRECT_URIS ?? "";
+  const listed = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  return listed.length > 0 ? listed : DEFAULT_REDIRECTS;
+}
+
+function normalizeRedirect(uri) {
+  const u = new URL(uri);
+  const path = u.pathname === "" ? "/" : u.pathname;
+  return `${u.origin}${path}`;
+}
+
+function redirectAllowed(uri) {
+  let normalized;
+  try {
+    normalized = normalizeRedirect(uri);
+  } catch {
+    return false;
+  }
+  return redirectAllowList().some((allowed) => {
+    try {
+      return normalizeRedirect(allowed) === normalized;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function pruneCodes(now = Date.now()) {
+  for (const [code, row] of codes) {
+    if (now > row.expiresAtMs) codes.delete(code);
+  }
+  while (codes.size >= CODE_LIMIT) {
+    const oldest = codes.keys().next().value;
+    if (typeof oldest !== "string") break;
+    codes.delete(oldest);
+  }
+}
 
 function s256(verifier) {
   return createHash("sha256").update(verifier).digest("base64url");
@@ -149,6 +193,11 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "invalid_request" });
         return;
       }
+      if (!redirectAllowed(redirectUri)) {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      pruneCodes();
       const code = randomBytes(32).toString("base64url");
       codes.set(code, {
         challenge,
