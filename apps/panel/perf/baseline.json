@@ -1,12 +1,7 @@
 {
-  "win32/swiftshader/local": {
-    "p95": 73.6,
-    "frames": 282,
-    "at": "2026-09-05T15:45:27.541Z"
-  },
-  "linux/swiftshader/gha-Linux": {
-    "p95": 1043.5,
-    "frames": 10,
-    "at": "2026-09-05T00:00:00.000Z"
+  "win32/swiftshader/local/galaxy@5000": {
+    "p95": 101.59999996423721,
+    "frames": 208,
+    "at": "2026-09-07T22:26:03.355Z"
   }
 }
