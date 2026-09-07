@@ -5,6 +5,7 @@ import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runReconcile } from "./reconcile-cli.ts";
 import { runUnlock } from "./unlock.ts";
+import { runWitness } from "./witness.ts";
 
 const argv = process.argv.slice(2);
 if (argv[0] === "approve") {
@@ -44,6 +45,15 @@ if (argv[0] === "reconcile") {
 }
 if (argv[0] === "desktop") {
   process.exit(await desktopMain(argv));
+}
+if (argv[0] === "witness") {
+  const stateDir = argv[1];
+  if (!stateDir) {
+    process.stderr.write("verax witness <stateDir>\n");
+    process.exit(78);
+  }
+  await runWitness(stateDir);
+  process.exit(0);
 }
 
 await main();

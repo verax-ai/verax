@@ -5,6 +5,7 @@ import { approvalsLogFor, type ApprovalsLog } from "./approvals.ts";
 import { sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { lookupResolvedBy } from "./ledger.ts";
+import { loadCheckpoints } from "./checkpoints.ts";
 import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger } from "./types.ts";
 
 async function pairFor(
@@ -89,13 +90,14 @@ function balancedSummary(
 
 /**
  * Re-runs the Cedulon decision profile on the whole ledger. Finding codes
- * are Cedulon's; this wrapper does not invent names. Phase 1 has no
- * durable checkpoint, so window-coverage is listed as notApplicable and
- * dropped from the finding set before balanced is computed. General
- * issuer/extract warnings and the audit guarantee are kept. A self
- * witness and each general Cedulon warning are named in the condition
- * list; "balanced" is never written alone, and "conditional" is never
- * written twice.
+ * are Cedulon's; this wrapper does not invent names. With no durable
+ * checkpoint on disk, window-coverage is listed as notApplicable and
+ * dropped from the finding set before balanced is computed. When
+ * `checkpoints.jsonl` has at least one signed row, that finding is kept.
+ * General issuer/extract warnings and the audit guarantee are kept. A
+ * self witness and each general Cedulon warning are named in the
+ * condition list; "balanced" is never written alone, and "conditional"
+ * is never written twice.
  */
 export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): Promise<ExplainResult> {
   const decisions = await ledger.decisions();
@@ -111,23 +113,32 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const issuerTrust = resolvedTrust.pin;
   const pinSource = resolvedTrust.source;
   const pinned = issuerTrust !== undefined;
+  const dir = (ledger as { dir?: unknown }).dir;
+  const checkpoints = typeof dir === "string" ? loadCheckpoints(dir) : [];
   const report = audit({
     receipts: decisions,
-    checkpoints: [],
+    checkpoints,
     settlements: effects.map((e) => e.row),
     profile: DECISION_PROFILE,
     ...(issuerTrust ? { issuerTrust } : {}),
     ...(presentedExtract ? { extract: presentedExtract } : {}),
   });
-  const dropped = [
-    ...new Set(
-      [...report.findings, ...report.warnings]
-        .filter((f) => f.code === WINDOW_COVERAGE)
-        .map((f) => f.code),
-    ),
-  ];
-  const applicable = report.findings.filter((f) => f.code !== WINDOW_COVERAGE);
-  const applicableWarnings = report.warnings.filter((f) => f.code !== WINDOW_COVERAGE);
+  const dropWindow = checkpoints.length === 0;
+  const dropped = dropWindow
+    ? [
+        ...new Set(
+          [...report.findings, ...report.warnings]
+            .filter((f) => f.code === WINDOW_COVERAGE)
+            .map((f) => f.code),
+        ),
+      ]
+    : [];
+  const applicable = dropWindow
+    ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE)
+    : report.findings;
+  const applicableWarnings = dropWindow
+    ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE)
+    : report.warnings;
   const refFindings = applicable.filter((f) => f.id === ref);
   const issuerFinding =
     applicable.find((f) => f.code === "issuer-key-mismatch" || f.id === "issuer") ??

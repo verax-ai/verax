@@ -137,6 +137,49 @@ describe("panel-perf", () => {
     }
   });
 
+  it("a throw after preview spawn still tears the child down", async () => {
+    // @ts-expect-error measure.mjs is an untyped script
+    const { runMeasure } = await import("../apps/panel/perf/measure.mjs");
+    assert.equal(typeof runMeasure, "function", "runMeasure export missing");
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
+      stdio: "ignore",
+      windowsHide: true,
+    });
+    const pid = child.pid;
+    if (typeof pid !== "number") {
+      assert.fail("no-pid");
+    }
+    process.kill(pid, 0);
+    const prevExit = process.exitCode;
+    let threw = false;
+    try {
+      await runMeasure({
+        startPreview: () => child,
+        afterPreview: () => {
+          throw new Error("vite-failed");
+        },
+      });
+    } catch (err) {
+      threw = err instanceof Error && err.message === "vite-failed";
+    } finally {
+      process.exitCode = prevExit;
+    }
+    assert.equal(threw, false, "runMeasure must swallow the throw and still tear down");
+    const deadline = Date.now() + 2000;
+    let dead = false;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        assert.equal((err as NodeJS.ErrnoException).code, "ESRCH");
+        dead = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(dead, true);
+  });
+
   it("stopPreview leaves the child pid dead", async () => {
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1e9)"], {
       stdio: "ignore",
@@ -165,6 +208,22 @@ describe("panel-perf", () => {
 });
 
 describe("preview readiness", () => {
+  it("withTier adds bloom=1 only when VERAX_PERF_BLOOM is 1", async () => {
+    // @ts-expect-error measure.mjs is an untyped script
+    const { withTier } = await import("../apps/panel/perf/measure.mjs");
+    const prev = process.env.VERAX_PERF_BLOOM;
+    delete process.env.VERAX_PERF_BLOOM;
+    try {
+      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("bloom"), null);
+      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("tier"), "60000");
+      process.env.VERAX_PERF_BLOOM = "1";
+      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("bloom"), "1");
+    } finally {
+      if (prev === undefined) delete process.env.VERAX_PERF_BLOOM;
+      else process.env.VERAX_PERF_BLOOM = prev;
+    }
+  });
+
   it("parses the Local: URL even when vite colours it", async () => {
     // @ts-expect-error measure.mjs is an untyped script
     const mod = await import("../apps/panel/perf/measure.mjs");

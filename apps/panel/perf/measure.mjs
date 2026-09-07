@@ -34,6 +34,9 @@ export function withTier(url, n) {
   // This harness measures frames, not the session: without `demo` the panel starts
   // the code flow and navigates away from the page being measured.
   u.searchParams.set("demo", "1");
+  if (process.env.VERAX_PERF_BLOOM === "1") {
+    u.searchParams.set("bloom", "1");
+  }
   return u.href;
 }
 
@@ -202,15 +205,8 @@ async function closeBrowser(browser) {
   }
 }
 
-async function main() {
-  const fakeRaw = process.env.VERAX_PERF_FAKE_FRAMES;
-  if (fakeRaw !== undefined && fakeRaw !== "") {
-    const n = Number(fakeRaw);
-    const count = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
-    finish(Array.from({ length: count }, () => 16.7));
-    process.exit(process.exitCode ?? 0);
-  }
-
+export async function runMeasure(hooks = {}) {
+  const start = hooks.startPreview ?? startPreview;
   let browser;
   let child;
   try {
@@ -220,8 +216,9 @@ async function main() {
       url = given;
     } else {
       const port = await resolvePort();
-      child = startPreview(port);
+      child = start(port);
       process.stderr.write(`preview-pid:${child.pid}\n`);
+      if (hooks.afterPreview) await hooks.afterPreview(child);
       url = await waitReady(child);
     }
     const { chromium } = await import("playwright");
@@ -263,6 +260,18 @@ async function main() {
     await closeBrowser(browser);
     stopPreview(child);
   }
+}
+
+async function main() {
+  const fakeRaw = process.env.VERAX_PERF_FAKE_FRAMES;
+  if (fakeRaw !== undefined && fakeRaw !== "") {
+    const n = Number(fakeRaw);
+    const count = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    finish(Array.from({ length: count }, () => 16.7));
+    process.exit(process.exitCode ?? 0);
+  }
+
+  await runMeasure();
   process.exit(process.exitCode ?? 0);
 }
 

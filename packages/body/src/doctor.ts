@@ -1,4 +1,4 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
@@ -106,6 +106,7 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
         });
       }
     }
+    checks.push(...evidenceChecks(stateDir, env));
   }
 
   const secretNames = Object.entries(env)
@@ -240,4 +241,104 @@ function scopeFromDevToken(raw: string | undefined): string | null {
 
 export function doctorExit(checks: readonly DoctorCheck[]): number {
   return checks.some((c) => c.level === "fail") ? 1 : 0;
+}
+
+function countJsonl(path: string): { lines: number; corrupt: boolean } {
+  if (!existsSync(path)) return { lines: 0, corrupt: false };
+  try {
+    const text = readFileSync(path, "utf8");
+    let lines = 0;
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      lines += 1;
+      try {
+        JSON.parse(line);
+      } catch {
+        return { lines, corrupt: true };
+      }
+    }
+    return { lines, corrupt: false };
+  } catch {
+    return { lines: 0, corrupt: true };
+  }
+}
+
+function heartbeatMaxMs(env: NodeJS.ProcessEnv): number {
+  const n = Number(env.VERAX_HEARTBEAT_MAX_MS ?? "30000");
+  return Number.isFinite(n) && n > 0 ? n : 30_000;
+}
+
+function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[] {
+  const checks: DoctorCheck[] = [];
+  const src = countJsonl(join(stateDir, "decisions.jsonl"));
+  const hbPath = join(stateDir, "heartbeat.json");
+  let hb: { atMs?: unknown; lastDecisionN?: unknown } | null = null;
+  if (existsSync(hbPath)) {
+    try {
+      hb = JSON.parse(readFileSync(hbPath, "utf8")) as { atMs?: unknown; lastDecisionN?: unknown };
+    } catch {
+      hb = null;
+    }
+  }
+  if (src.lines > 0 || hb) {
+    if (!hb || typeof hb.atMs !== "number") {
+      checks.push({
+        id: "heartbeat",
+        level: "fail",
+        detail: "ledger has rows but no readable heartbeat; the evidence service looks silent",
+      });
+    } else if (Date.now() - hb.atMs > heartbeatMaxMs(env)) {
+      checks.push({
+        id: "heartbeat",
+        level: "fail",
+        detail: `heartbeat is silent; last pulse ${hb.atMs} lastDecisionN ${String(hb.lastDecisionN ?? "?")}`,
+      });
+    } else {
+      checks.push({
+        id: "heartbeat",
+        level: "ok",
+        detail: `heartbeat live; lastDecisionN ${String(hb.lastDecisionN ?? "?")}`,
+      });
+    }
+  }
+  // Both halves of the evidence are mirrored, so both are compared: an effects
+  // copy that quietly drops rows is the same silence as a missing decision copy.
+  const srcEffects = countJsonl(join(stateDir, "effects.jsonl"));
+  const copy = countJsonl(join(stateDir, "evidence-copy", "decisions.jsonl"));
+  const copyEffects = countJsonl(join(stateDir, "evidence-copy", "effects.jsonl"));
+  const anything =
+    src.lines > 0 ||
+    srcEffects.lines > 0 ||
+    copy.lines > 0 ||
+    copyEffects.lines > 0 ||
+    copy.corrupt ||
+    copyEffects.corrupt;
+  if (anything) {
+    if (copy.corrupt || copyEffects.corrupt) {
+      checks.push({
+        id: "evidence-copy",
+        level: "fail",
+        detail: `evidence-copy/${copy.corrupt ? "decisions" : "effects"}.jsonl is corrupt`,
+      });
+    } else if (copy.lines < src.lines) {
+      checks.push({
+        id: "evidence-copy",
+        level: "fail",
+        detail: `evidence copy is stale: ${copy.lines} lines behind source ${src.lines}`,
+      });
+    } else if (copyEffects.lines < srcEffects.lines) {
+      checks.push({
+        id: "evidence-copy",
+        level: "fail",
+        detail: `evidence copy is stale on effects: ${copyEffects.lines} effect line(s) behind source ${srcEffects.lines}`,
+      });
+    } else {
+      checks.push({
+        id: "evidence-copy",
+        level: "ok",
+        detail: `evidence copy has ${copy.lines} decision line(s) and ${copyEffects.lines} effect line(s)`,
+      });
+    }
+  }
+  return checks;
 }

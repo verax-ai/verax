@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, open, readFile } from "node:fs/promises";
-import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 
 /** I/O seam so append-cost tests can count rereads without mocking node:fs. */
 export const ledgerFs = {
@@ -105,6 +105,20 @@ function ensureLedgerDir(dir: string): PermissionCheck {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
   return assertDirPrivate(dir);
+}
+
+export type RemoteWitnessSign = (
+  row: EffectRow,
+  resultHash: string | undefined,
+) => Promise<Pick<LedgerEffect, "receipt" | "attestation" | "witnessClass"> | null>;
+
+export function signEffectAttestation(
+  row: EffectRow,
+  witnessClass: WitnessClass,
+  resultHash: string | undefined,
+  signer: EffectSigner,
+): Pick<LedgerEffect, "receipt" | "attestation"> {
+  return signedEffectFields(row, witnessClass, resultHash, signer);
 }
 
 function signedEffectFields(
@@ -354,6 +368,8 @@ export class FileLedger implements Ledger {
   readonly permissionCheck: PermissionCheck;
   readonly dir: string;
   effectSigner?: EffectSigner;
+  /** Optional signer in another process. Null means stay `self`. */
+  remoteWitness?: RemoteWitnessSign;
   private readonly decisionsPath: string;
   private readonly effectsPath: string;
   private readonly lockPath: string;
@@ -368,6 +384,10 @@ export class FileLedger implements Ledger {
   private readonly reauthByHash = new Map<string, string>();
   private readonly countedAt: number[] = [];
   countsReadable = true;
+  private readonly copyDir: string;
+  private readonly heartbeatPath: string;
+  private decisionCount = 0;
+  private effectCount = 0;
 
   constructor(dir: string) {
     this.dir = dir;
@@ -375,6 +395,8 @@ export class FileLedger implements Ledger {
     this.decisionsPath = join(dir, "decisions.jsonl");
     this.effectsPath = join(dir, "effects.jsonl");
     this.lockPath = join(dir, "ledger.lock");
+    this.copyDir = join(dir, "evidence-copy");
+    this.heartbeatPath = join(dir, "heartbeat.json");
     this.acquireLock();
     this.loadCaches();
   }
@@ -393,6 +415,7 @@ export class FileLedger implements Ledger {
     } catch {
       this.countsReadable = false;
     }
+    this.decisionCount = decisions.length;
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
     const rowsByRef = new Map<string, DecisionIndexRow[]>();
@@ -408,7 +431,9 @@ export class FileLedger implements Ledger {
       }
     }
     this.loadTenantRefs(rowsByRef);
+    this.effectCount = 0;
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
+      this.effectCount += 1;
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
     }
     this.loadResolvedBy();
@@ -528,7 +553,9 @@ export class FileLedger implements Ledger {
     return this.q.enqueue(async () => {
       this.assertOwned();
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
-      await appendDurable(this.decisionsPath, lineOf(signed));
+      const line = lineOf(signed);
+      await appendDurable(this.decisionsPath, line);
+      await this.pulse("decisions.jsonl", line, "decision");
       this.tailHash = decisionRecordHash(signed);
       const row = indexRowOf(signed);
       if (row) {
@@ -545,7 +572,9 @@ export class FileLedger implements Ledger {
       const prev = await this.lastDecisionHashUnlocked();
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
       const signed = build(prev);
-      await appendDurable(this.decisionsPath, lineOf(signed));
+      const line = lineOf(signed);
+      await appendDurable(this.decisionsPath, line);
+      await this.pulse("decisions.jsonl", line, "decision");
       this.tailHash = decisionRecordHash(signed);
       const row = indexRowOf(signed);
       if (row) {
@@ -569,29 +598,27 @@ export class FileLedger implements Ledger {
     resultHash?: string,
   ): Promise<void> {
     if (row.effectClass !== "duplicate-effect" && this.effectRefs.has(row.ref)) {
-      await appendDurable(
-        this.effectsPath,
-        lineOf(
-          asStoredEffect(
-            {
-              ref: row.ref,
-              effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
-              effectClass: "duplicate-effect",
-              timestampMs: row.timestampMs,
-              actor: row.actor,
-            },
-            DEFAULT_WITNESS,
-            resultHash,
-            undefined,
-          ),
+      const dup = lineOf(
+        asStoredEffect(
+          {
+            ref: row.ref,
+            effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
+            effectClass: "duplicate-effect",
+            timestampMs: row.timestampMs,
+            actor: row.actor,
+          },
+          DEFAULT_WITNESS,
+          resultHash,
+          undefined,
         ),
       );
+      await appendDurable(this.effectsPath, dup);
+      await this.pulse("effects.jsonl", dup, "effect");
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    await appendDurable(
-      this.effectsPath,
-      lineOf(asStoredEffect(row, witnessClass, resultHash, this.effectSigner)),
-    );
+    const line = lineOf(await this.storeEffect(row, witnessClass, resultHash));
+    await appendDurable(this.effectsPath, line);
+    await this.pulse("effects.jsonl", line, "effect");
     if (row.effectClass !== "duplicate-effect") this.effectRefs.add(row.ref);
   }
 
@@ -642,6 +669,49 @@ export class FileLedger implements Ledger {
 
   hasPrimaryEffect(ref: string): boolean {
     return this.effectRefs.has(ref);
+  }
+
+  private async pulse(
+    name: "decisions.jsonl" | "effects.jsonl",
+    line: string,
+    kind: "decision" | "effect",
+  ): Promise<void> {
+    mkdirSync(this.copyDir, { recursive: true, mode: 0o700 });
+    appendFileSync(join(this.copyDir, name), line, { encoding: "utf8" });
+    if (kind === "decision") this.decisionCount += 1;
+    else this.effectCount += 1;
+    writeFileSync(
+      this.heartbeatPath,
+      `${JSON.stringify({
+        atMs: Date.now(),
+        pid: process.pid,
+        lastDecisionN: this.decisionCount,
+        lastEffectN: this.effectCount,
+      })}\n`,
+      { encoding: "utf8", mode: 0o600 },
+    );
+  }
+
+  private async storeEffect(
+    row: EffectRow,
+    witnessClass: WitnessClass,
+    resultHash: string | undefined,
+  ): Promise<LedgerEffect> {
+    if (this.remoteWitness && row.effectClass !== "duplicate-effect") {
+      const remote = await this.remoteWitness(row, resultHash);
+      if (remote?.attestation && remote.receipt && remote.witnessClass && remote.witnessClass !== "self") {
+        const stored: LedgerEffect = {
+          row: asEffectRow(row),
+          witnessClass: remote.witnessClass,
+          receipt: remote.receipt,
+          attestation: remote.attestation,
+        };
+        if (resultHash !== undefined) stored.resultHash = resultHash;
+        return stored;
+      }
+      return asStoredEffect(row, DEFAULT_WITNESS, resultHash, this.effectSigner);
+    }
+    return asStoredEffect(row, witnessClass, resultHash, this.effectSigner);
   }
 }
 
