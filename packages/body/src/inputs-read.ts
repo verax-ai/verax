@@ -36,6 +36,8 @@ export async function matchingInputs(
   return out;
 }
 
+type InputsPrincipal = { brain?: unknown; iss?: unknown; tenant?: unknown; org?: unknown };
+
 export async function inputsPrincipal(
   stateDir: string,
   ref: string,
@@ -47,10 +49,10 @@ export async function inputsPrincipal(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  let found: { brain?: unknown; iss?: unknown; tenant?: unknown; org?: unknown } | null = null;
+  let found: InputsPrincipal | null = null;
   for (const line of text.split("\n")) {
     if (line === "") continue;
-    const row = JSON.parse(line) as { ref?: string; inputs?: { principal?: typeof found } };
+    const row = JSON.parse(line) as { ref?: string; inputs?: { principal?: InputsPrincipal } };
     if (row.ref === ref) found = row.inputs?.principal ?? null;
   }
   if (!found || typeof found.brain !== "string") return null;
