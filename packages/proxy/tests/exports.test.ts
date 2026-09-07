@@ -10,13 +10,20 @@ const repoRoot = join(pkgRoot, "..", "..");
 
 const ALLOWED = new Set([
   "createProxy",
+  "LedgerDenyUnrecorded",
   "loadPolicy",
   "FileLedger",
   "MemoryLedger",
   "explain",
+  "approvePending",
+  "approvalsLogFor",
+  "enqueueApprovalCommand",
+  "loadApprovalsFromDir",
   "loadEffectsFromDir",
   "parseChannelJsonl",
+  "parseCardCsv",
   "reconcile",
+  "tenantKey",
 ]);
 
 describe("B1 exports map", () => {

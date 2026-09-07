@@ -1,4 +1,7 @@
+import { randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { createServer, type Server } from "node:http";
+import { join } from "node:path";
 import { generateKeyPair, SignJWT, exportJWK } from "jose";
 
 export type DevIssuer = {
@@ -12,9 +15,15 @@ export type DevIssuer = {
     alg?: string;
     scope?: string;
     omitExp?: boolean;
+    omitJti?: boolean;
+    jti?: string;
     iatSkewSec?: number;
     nbfSkewSec?: number;
+    sub?: string;
+    tenant?: string;
+    org?: string;
   }) => Promise<string>;
+  revoke: (jti: string, stateDir: string) => Promise<void>;
   close: () => Promise<void>;
 };
 
@@ -43,9 +52,12 @@ export async function startDevIssuer(bindPort: number, audience: string): Promis
     port,
     async sign(over = {}) {
       const nowSec = Math.floor(Date.now() / 1000);
-      const jwt = new SignJWT({ scope: over.scope ?? "verax:read verax:memory" })
+      const claims: Record<string, unknown> = { scope: over.scope ?? "verax:read verax:memory" };
+      if (over.tenant) claims.tenant = over.tenant;
+      if (over.org) claims.org = over.org;
+      const jwt = new SignJWT(claims)
         .setProtectedHeader({ alg: "ES256", kid: "test" })
-        .setSubject("brain-1")
+        .setSubject(over.sub ?? "brain-1")
         .setIssuer(issuerUrl)
         .setAudience(over.aud ?? audience)
         .setIssuedAt(nowSec + (over.iatSkewSec ?? 0));
@@ -59,7 +71,14 @@ export async function startDevIssuer(bindPort: number, audience: string): Promis
       } else {
         jwt.setExpirationTime("10m");
       }
+      if (over.omitJti !== true) {
+        jwt.setJti(over.jti ?? randomUUID());
+      }
       return jwt.sign(privateKey);
+    },
+    async revoke(jti, stateDir) {
+      mkdirSync(stateDir, { recursive: true });
+      appendFileSync(join(stateDir, "revoked-jti.jsonl"), `${JSON.stringify({ jti })}\n`, "utf8");
     },
     close: () =>
       new Promise((resolve, reject) => {

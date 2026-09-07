@@ -9,6 +9,10 @@ export type RailContestResult = {
   warnings?: RailWarning[];
   witnessClass?: string | null;
   trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+  pair?: {
+    defer: { decision: string; reasonCode: string } | null;
+    resolution: { decision: string; reasonCode: string } | null;
+  };
   error?: string;
 };
 
@@ -18,14 +22,16 @@ export type RailProps = {
   onSelect?: (ref: string) => void;
 };
 
-function kindOf(action: RailAction): "allow" | "deny" | "threw" {
+function kindOf(action: RailAction): "allow" | "deny" | "threw" | "defer" {
   if (action.effect?.row.effectClass.endsWith(":threw")) return "threw";
+  if (action.record.claims.decision === "defer") return "defer";
   return action.record.claims.decision === "deny" ? "deny" : "allow";
 }
 
-function iconOf(kind: "allow" | "deny" | "threw"): string {
+function iconOf(kind: "allow" | "deny" | "threw" | "defer"): string {
   if (kind === "allow") return "+";
   if (kind === "deny") return "x";
+  if (kind === "defer") return "?";
   return "!";
 }
 

@@ -16,14 +16,16 @@ import {
   type EffectRow,
   type SignedEffectExtract,
 } from "@cedulon/effect-extract";
+import { tenantKey } from "./tenant.ts";
 import type {
+  DecisionInputs,
   EffectSigner,
   ExtractWindow,
   Ledger,
   LedgerEffect,
   WitnessClass,
 } from "./types.ts";
-import type { SignedDecisionRecord } from "@cedulon/core";
+import type { DecisionKind, SignedDecisionRecord } from "@cedulon/core";
 import { sha256Canonical } from "./hash.ts";
 
 export type PermissionCheck = "owner-only" | "not checked on this platform";
@@ -149,23 +151,126 @@ function asEffectRow(row: EffectRow): EffectRow {
   };
 }
 
+function asStoredEffect(
+  row: EffectRow,
+  witnessClass: WitnessClass,
+  resultHash: string | undefined,
+  signer: EffectSigner | undefined,
+): LedgerEffect {
+  const stored: LedgerEffect = {
+    row: asEffectRow(row),
+    witnessClass,
+    ...signedEffectFields(row, witnessClass, resultHash, signer),
+  };
+  if (resultHash !== undefined) stored.resultHash = resultHash;
+  return stored;
+}
+
+/** Slim index row. The Ledger interface stays closed. */
+export type DecisionIndexRow = {
+  ref: string;
+  requestHash: string;
+  decision: DecisionKind;
+  reasonCode: string;
+  subject: string;
+  policyHash: string;
+  timestampMs: number;
+};
+
+export type ResolutionHit = { ref: string; kind: "allow" | "expired" };
+
+function indexRowOf(signed: SignedDecisionRecord): DecisionIndexRow | null {
+  if (typeof signed.claims.ref !== "string") return null;
+  return {
+    ref: signed.claims.ref,
+    requestHash: signed.claims.requestHash,
+    decision: signed.claims.decision,
+    reasonCode: signed.claims.reasonCode,
+    subject: signed.claims.subject,
+    policyHash: signed.claims.policyHash,
+    timestampMs: signed.claims.timestampMs,
+  };
+}
+
+function resolutionKindOf(row: DecisionIndexRow): ResolutionHit["kind"] | null {
+  if (row.decision === "allow") return "allow";
+  if (row.reasonCode === "expired") return "expired";
+  return null;
+}
+
+function noteReauth(map: Map<string, string>, row: DecisionIndexRow): void {
+  if (row.reasonCode !== "spend-reauth-required") return;
+  if (!map.has(row.requestHash)) map.set(row.requestHash, row.ref);
+}
+
+function noteCounted(times: number[], row: DecisionIndexRow): void {
+  if (row.decision === "allow" || row.decision === "defer") times.push(row.timestampMs);
+}
+
 export class MemoryLedger implements Ledger {
   readonly permissionCheck: PermissionCheck = "owner-only";
   effectSigner?: EffectSigner;
   private readonly _decisions: SignedDecisionRecord[] = [];
   private readonly _effects: LedgerEffect[] = [];
+  private readonly byRef = new Map<string, DecisionIndexRow>();
+  private readonly resolvedBy = new Map<string, ResolutionHit>();
+  private readonly reauthByHash = new Map<string, string>();
+  private readonly countedAt: number[] = [];
+  countsReadable = true;
   private readonly q = new SerialQueue();
+
+  lookupByRef(ref: string): DecisionIndexRow | null {
+    return this.byRef.get(ref) ?? null;
+  }
+
+  noteTenantRef(key: string, ref: string): void {
+    const row = this.byRef.get(ref);
+    if (row) this.byRef.set(`${key}:${ref}`, row);
+  }
+
+  lookupResolvedBy(deferRef: string): ResolutionHit | null {
+    return this.resolvedBy.get(deferRef) ?? null;
+  }
+
+  noteResolution(deferRef: string, hit: ResolutionHit): void {
+    this.resolvedBy.set(deferRef, hit);
+  }
+
+  lookupReauthByHash(requestHash: string): string | null {
+    return this.reauthByHash.get(requestHash) ?? null;
+  }
+
+  countedTimes(): number[] {
+    return this.countedAt;
+  }
+
+  hasPrimaryEffect(ref: string): boolean {
+    return this._effects.some((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect");
+  }
 
   async appendDecision(signed: SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
       this._decisions.push(signed);
+      const row = indexRowOf(signed);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
+      }
     });
   }
 
   async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
     return this.q.enqueue(async () => {
       const last = this._decisions[this._decisions.length - 1];
-      this._decisions.push(build(last ? decisionRecordHash(last) : null));
+      const signed = build(last ? decisionRecordHash(last) : null);
+      this._decisions.push(signed);
+      const row = indexRowOf(signed);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
+      }
     });
   }
 
@@ -180,25 +285,23 @@ export class MemoryLedger implements Ledger {
   ): Promise<void> {
     const existing = this._effects.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
-      this._effects.push({
-        row: {
-          ref: row.ref,
-          effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
-          effectClass: "duplicate-effect",
-          timestampMs: row.timestampMs,
-          actor: row.actor,
-        },
-        witnessClass: DEFAULT_WITNESS,
-        resultHash,
-      });
+      this._effects.push(
+        asStoredEffect(
+          {
+            ref: row.ref,
+            effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
+            effectClass: "duplicate-effect",
+            timestampMs: row.timestampMs,
+            actor: row.actor,
+          },
+          DEFAULT_WITNESS,
+          resultHash,
+          undefined,
+        ),
+      );
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    this._effects.push({
-      row: asEffectRow(row),
-      witnessClass,
-      resultHash,
-      ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
-    });
+    this._effects.push(asStoredEffect(row, witnessClass, resultHash, this.effectSigner));
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
@@ -260,6 +363,11 @@ export class FileLedger implements Ledger {
   private lost = false;
   private tailHash: string | null = null;
   private readonly effectRefs = new Set<string>();
+  private readonly byRef = new Map<string, DecisionIndexRow>();
+  private readonly resolvedBy = new Map<string, ResolutionHit>();
+  private readonly reauthByHash = new Map<string, string>();
+  private readonly countedAt: number[] = [];
+  countsReadable = true;
 
   constructor(dir: string) {
     this.dir = dir;
@@ -274,11 +382,87 @@ export class FileLedger implements Ledger {
   /** After lock handoff a new instance reloads; the lost owner cannot append. */
   private loadCaches(): void {
     this.effectRefs.clear();
-    const decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
+    this.byRef.clear();
+    this.resolvedBy.clear();
+    this.reauthByHash.clear();
+    this.countedAt.length = 0;
+    this.countsReadable = true;
+    let decisions: SignedDecisionRecord[] = [];
+    try {
+      decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
+    } catch {
+      this.countsReadable = false;
+    }
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
+    const rowsByRef = new Map<string, DecisionIndexRow[]>();
+    for (const rec of decisions) {
+      const row = indexRowOf(rec);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        const list = rowsByRef.get(row.ref) ?? [];
+        list.push(row);
+        rowsByRef.set(row.ref, list);
+        noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
+      }
+    }
+    this.loadTenantRefs(rowsByRef);
     for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
+    }
+    this.loadResolvedBy();
+  }
+
+  /** Pair inputs.jsonl with decisions so a restart keeps per-tenant `_ref` keys. */
+  private loadTenantRefs(rowsByRef: Map<string, DecisionIndexRow[]>): void {
+    let text: string;
+    try {
+      text = ledgerFs.readFileSync(join(this.dir, "inputs.jsonl"), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    const seen = new Map<string, number>();
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const row = JSON.parse(line) as { ref?: unknown; inputs?: DecisionInputs };
+      if (typeof row.ref !== "string") continue;
+      const principal = row.inputs?.principal;
+      if (!principal || typeof principal.brain !== "string") continue;
+      const idx = seen.get(row.ref) ?? 0;
+      seen.set(row.ref, idx + 1);
+      const indexed = rowsByRef.get(row.ref)?.[idx];
+      if (!indexed) continue;
+      const key = tenantKey({
+        brain: principal.brain,
+        iss: principal.iss,
+        tenant: principal.tenant,
+        org: principal.org,
+      });
+      this.byRef.set(`${key}:${row.ref}`, indexed);
+    }
+  }
+
+  /** Single pass over inputs.jsonl. FileInputsLog itself stays cache-less. */
+  private loadResolvedBy(): void {
+    let text: string;
+    try {
+      text = ledgerFs.readFileSync(join(this.dir, "inputs.jsonl"), "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw err;
+    }
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const row = JSON.parse(line) as { ref?: unknown; inputs?: { approver?: { resolves?: unknown } } };
+      if (typeof row.ref !== "string") continue;
+      const resolves = row.inputs?.approver?.resolves;
+      if (typeof resolves !== "string") continue;
+      const indexed = this.byRef.get(row.ref);
+      if (!indexed) continue;
+      const kind = resolutionKindOf(indexed);
+      if (kind) this.resolvedBy.set(resolves, { ref: row.ref, kind });
     }
   }
 
@@ -346,6 +530,12 @@ export class FileLedger implements Ledger {
       await mkdir(this.dir, { recursive: true, mode: 0o700 });
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
+      const row = indexRowOf(signed);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
+      }
     });
   }
 
@@ -357,6 +547,12 @@ export class FileLedger implements Ledger {
       const signed = build(prev);
       await appendDurable(this.decisionsPath, lineOf(signed));
       this.tailHash = decisionRecordHash(signed);
+      const row = indexRowOf(signed);
+      if (row) {
+        this.byRef.set(row.ref, row);
+        noteReauth(this.reauthByHash, row);
+        noteCounted(this.countedAt, row);
+      }
     });
   }
 
@@ -373,28 +569,28 @@ export class FileLedger implements Ledger {
     resultHash?: string,
   ): Promise<void> {
     if (row.effectClass !== "duplicate-effect" && this.effectRefs.has(row.ref)) {
-      const marker: LedgerEffect = {
-        row: {
-          ref: row.ref,
-          effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
-          effectClass: "duplicate-effect",
-          timestampMs: row.timestampMs,
-          actor: row.actor,
-        },
-        witnessClass: DEFAULT_WITNESS,
-        resultHash,
-      };
-      await appendDurable(this.effectsPath, lineOf(marker));
+      await appendDurable(
+        this.effectsPath,
+        lineOf(
+          asStoredEffect(
+            {
+              ref: row.ref,
+              effectHash: sha256Canonical({ refused: "duplicate-effect", ref: row.ref }),
+              effectClass: "duplicate-effect",
+              timestampMs: row.timestampMs,
+              actor: row.actor,
+            },
+            DEFAULT_WITNESS,
+            resultHash,
+            undefined,
+          ),
+        ),
+      );
       throw new Error(`duplicate-effect:${row.ref}`);
     }
     await appendDurable(
       this.effectsPath,
-      lineOf({
-        row: asEffectRow(row),
-        witnessClass,
-        resultHash,
-        ...signedEffectFields(row, witnessClass, resultHash, this.effectSigner),
-      }),
+      lineOf(asStoredEffect(row, witnessClass, resultHash, this.effectSigner)),
     );
     if (row.effectClass !== "duplicate-effect") this.effectRefs.add(row.ref);
   }
@@ -418,6 +614,35 @@ export class FileLedger implements Ledger {
   async exportExtract(window: ExtractWindow, signer: EffectSigner): Promise<SignedEffectExtract> {
     return signWindow(await this.effects(), window, signer);
   }
+
+  lookupByRef(ref: string): DecisionIndexRow | null {
+    return this.byRef.get(ref) ?? null;
+  }
+
+  noteTenantRef(key: string, ref: string): void {
+    const row = this.byRef.get(ref);
+    if (row) this.byRef.set(`${key}:${ref}`, row);
+  }
+
+  lookupResolvedBy(deferRef: string): ResolutionHit | null {
+    return this.resolvedBy.get(deferRef) ?? null;
+  }
+
+  noteResolution(deferRef: string, hit: ResolutionHit): void {
+    this.resolvedBy.set(deferRef, hit);
+  }
+
+  lookupReauthByHash(requestHash: string): string | null {
+    return this.reauthByHash.get(requestHash) ?? null;
+  }
+
+  countedTimes(): number[] {
+    return this.countedAt;
+  }
+
+  hasPrimaryEffect(ref: string): boolean {
+    return this.effectRefs.has(ref);
+  }
 }
 
 function signWindow(
@@ -439,6 +664,85 @@ function signWindow(
     signer.privateKeyPem,
     signer.publicKeyPem,
   );
+}
+
+/** Extra methods on FileLedger / MemoryLedger. The Ledger interface stays closed. */
+type LedgerIndex = {
+  lookupByRef?: (ref: string) => DecisionIndexRow | null;
+  noteTenantRef?: (key: string, ref: string) => void;
+  hasPrimaryEffect?: (ref: string) => boolean;
+  lookupResolvedBy?: (deferRef: string) => ResolutionHit | null;
+  noteResolution?: (deferRef: string, hit: ResolutionHit) => void;
+  lookupReauthByHash?: (requestHash: string) => string | null;
+  countedTimes?: () => number[];
+  countsReadable?: boolean;
+};
+
+export async function lookupDecisionByRef(
+  ledger: Ledger,
+  ref: string,
+  key?: string,
+): Promise<DecisionIndexRow | null> {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.lookupByRef === "function") {
+    if (key) return extra.lookupByRef(`${key}:${ref}`);
+    return extra.lookupByRef(ref);
+  }
+  const found = (await ledger.decisions()).find((d) => d.claims.ref === ref);
+  return found ? indexRowOf(found) : null;
+}
+
+export function noteTenantRef(ledger: Ledger, key: string, ref: string): void {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.noteTenantRef === "function") extra.noteTenantRef(key, ref);
+}
+
+export function lookupResolvedBy(ledger: Ledger, deferRef: string): ResolutionHit | null {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.lookupResolvedBy === "function") return extra.lookupResolvedBy(deferRef);
+  return null;
+}
+
+export function noteResolution(ledger: Ledger, deferRef: string, hit: ResolutionHit): void {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.noteResolution === "function") extra.noteResolution(deferRef, hit);
+}
+
+export function countedWork(
+  ledger: Ledger,
+  nowMs: number,
+): { ok: true; minute: number; day: number } | { ok: false } {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (extra.countsReadable === false) return { ok: false };
+  if (typeof extra.countedTimes !== "function") return { ok: false };
+  const times = extra.countedTimes();
+  const minuteStart = nowMs - 60_000;
+  const day = new Date(nowMs);
+  const dayStart = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate());
+  let minute = 0;
+  let dayCount = 0;
+  for (const t of times) {
+    if (t >= minuteStart && t <= nowMs) minute += 1;
+    if (t >= dayStart && t <= nowMs) dayCount += 1;
+  }
+  return { ok: true, minute, day: dayCount };
+}
+
+export async function lookupReauthByHash(ledger: Ledger, requestHash: string): Promise<string | null> {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.lookupReauthByHash === "function") return extra.lookupReauthByHash(requestHash);
+  for (const d of await ledger.decisions()) {
+    if (d.claims.reasonCode === "spend-reauth-required" && d.claims.requestHash === requestHash && d.claims.ref) {
+      return d.claims.ref;
+    }
+  }
+  return null;
+}
+
+export async function hasPrimaryEffect(ledger: Ledger, ref: string): Promise<boolean> {
+  const extra = ledger as Ledger & LedgerIndex;
+  if (typeof extra.hasPrimaryEffect === "function") return extra.hasPrimaryEffect(ref);
+  return (await ledger.effects()).some((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect");
 }
 
 export function witnessClassSummary(effects: readonly LedgerEffect[]): Record<WitnessClass, number> {

@@ -5,6 +5,12 @@ import type { EffectRow, SignedEffectExtract } from "@cedulon/effect-extract";
 export type Principal = {
   brain: string;
   scopes: ReadonlySet<string>;
+  /** JWT `iss`. Optional so existing fixtures stay `{ brain, scopes }`. */
+  iss?: string;
+  /** Explicit JWT `tenant` claim, when the issuer sends one. */
+  tenant?: string;
+  /** Explicit JWT `org` claim, when the issuer sends one and `tenant` is absent. */
+  org?: string;
 };
 
 /** Same shape as `@cedulon/mcp-guard` so a later wrap can sit on this type. */
@@ -26,9 +32,22 @@ export type PolicyDecision = {
   rule: string | null;
 };
 
+export type PolicyEvalCtx = {
+  spentTodayMinor?: (currency: string) => number;
+};
+
+export type PolicyLimits = {
+  ratePerMinute?: number;
+  dailyMax?: number;
+  diskFreeBytes: number;
+};
+
 export type Policy = {
   hash: string;
-  evaluate(call: ToolCall, principal: Principal): PolicyDecision;
+  approvalTtlMs: number;
+  limits: PolicyLimits;
+  evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
+  rule(id: string | null): { id: string; text: string } | null;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
@@ -85,8 +104,9 @@ export type DecisionInputRow = {
 };
 
 export type DecisionInputs = {
-  principal: { brain: string; scopes: string[] };
+  principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: DecisionInputRow[];
+  approver?: { id: string; via: "cli" | "proxy"; resolves: string };
 };
 
 export type InputsLog = {
@@ -107,9 +127,11 @@ export type ProxyDeps = {
   ledger: Ledger;
   now: () => number;
   nonce: () => string;
-  inner: (call: ToolCall, principal: Principal) => Promise<ToolResult>;
+  inner: (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
   inputsLog?: InputsLog;
-  resolveInput?: (id: string) => Promise<ResolvedInput | null>;
+  resolveInput?: (id: string, principal?: Principal) => Promise<ResolvedInput | null>;
+  /** True when memory.get names an id that lives under another tenant. */
+  checkTenantMismatch?: (call: ToolCall, principal: Principal) => Promise<boolean>;
 };
 
 export type ExplainFinding = {
@@ -143,9 +165,15 @@ export type ExplainTrustRoot = {
   source: "env" | "own-key" | null;
 };
 
+export type ExplainPair = {
+  defer: SignedDecisionRecord | null;
+  resolution: SignedDecisionRecord | null;
+};
+
 export type ExplainResult = {
   record: SignedDecisionRecord;
   effect: LedgerEffect | null;
+  pair?: ExplainPair;
   finding: ExplainFinding;
   witnessClass: WitnessClass | null;
   balanced: boolean;

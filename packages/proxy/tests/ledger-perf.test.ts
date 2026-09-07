@@ -9,6 +9,8 @@ import { fileURLToPath } from "node:url";
 
 import type { SignedDecisionRecord } from "@cedulon/core";
 
+import { approvePending } from "../src/approvals.ts";
+import { explain } from "../src/explain.ts";
 import { FileLedger, ledgerFs } from "../src/ledger.ts";
 import { createProxy } from "../src/proxy.ts";
 import { loadPolicy } from "../src/policy.ts";
@@ -149,6 +151,172 @@ describe("B8 FileLedger append cost and durability", () => {
       assert.equal(syncs, 2, `fsync count ${syncs} (want inputs + decision)`);
     } finally {
       proto.sync = origSync;
+      ledger.close();
+    }
+  });
+});
+
+describe("S1F resolvedBy cost", () => {
+  it("approve stays O(1) on inputs.jsonl after 600 decisions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-resolve-cost-"));
+    const ledger = new FileLedger(dir);
+    const approvePolicy = loadPolicy({
+      version: 1,
+      default: "deny",
+      approvalTtlMs: 86_400_000,
+      rules: [
+        {
+          id: "put-approve",
+          tool: "memory.put",
+          requires: ["verax:memory"],
+          mode: "approve",
+          text: "Writes need operator approval.",
+        },
+        { id: "get", tool: "memory.get", requires: ["verax:read"], text: "Reads need the read scope." },
+      ],
+    });
+    const principal = { brain: "brain-1", scopes: new Set(["verax:memory", "verax:read"]) };
+    let n = 0;
+    const proxy = createProxy({
+      policy: approvePolicy,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(1_000, 10),
+      nonce: () => `g${++n}`,
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    try {
+      for (let i = 0; i < 600; i += 1) {
+        await proxy.call({ name: "memory.get", arguments: { id: `k${i}` } }, principal);
+      }
+      await proxy.call(
+        {
+          name: "memory.put",
+          arguments: { id: "n5", body: "hello", source: { kind: "t" }, validUntilMs: 9_999, _ref: "r5" },
+        },
+        principal,
+      );
+      const origRead = ledgerFs.readFile.bind(ledgerFs);
+      let inputReads = 0;
+      ledgerFs.readFile = (async (path: Parameters<typeof origRead>[0], ...rest: unknown[]) => {
+        if (String(path).endsWith("inputs.jsonl")) inputReads += 1;
+        return origRead(path, ...(rest as []));
+      }) as typeof ledgerFs.readFile;
+      try {
+        inputReads = 0;
+        let t0 = performance.now();
+        await explain(ledger, "r5");
+        const explainMs = performance.now() - t0;
+        const explainReads = inputReads;
+        inputReads = 0;
+        t0 = performance.now();
+        const approved = await approvePending({
+          ledger,
+          recordSigner: RECORD_SIGNER,
+          now: tickingNow(10_000, 10),
+          nonce: queuedNonce(["a5"]),
+          ref: "r5",
+          approverId: "op",
+          policyHash: (await ledger.decisions()).find((d) => d.claims.ref === "r5")!.claims.policyHash,
+          approvals: proxy.approvals,
+          inputsLog: proxy.inputsLog,
+        });
+        const approveMs = performance.now() - t0;
+        const approveReads = inputReads;
+        console.log(
+          `resolve-cost explain=${explainMs.toFixed(0)}ms reads=${explainReads} approve=${approveMs.toFixed(0)}ms reads=${approveReads}`,
+        );
+        assert.equal(approved.ok, true);
+        assert.ok(explainReads < 5, `explain(pending defer) reread inputs.jsonl ${explainReads} times`);
+        assert.ok(approveReads < 5, `approve reread inputs.jsonl ${approveReads} times`);
+        assert.ok(approveMs < 200, `approve ${approveMs.toFixed(0)}ms (ceiling 200)`);
+      } finally {
+        ledgerFs.readFile = origRead;
+      }
+    } finally {
+      ledger.close();
+    }
+  });
+});
+
+describe("S2-5 spend-reauth requestHash index", () => {
+  it("reauth lookup does not reread decisions.jsonl after 600 records", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-reauth-cost-"));
+    const ledger = new FileLedger(dir);
+    const spendPolicy = loadPolicy({
+      version: 1,
+      default: "deny",
+      approvalTtlMs: 86_400_000,
+      rules: [
+        {
+          id: "spend-true",
+          tool: "spend",
+          requires: ["verax:pay"],
+          mode: "approve",
+          text: "Spends need operator approval.",
+          spend: { maxAmountMinor: 200_000, currency: "TRY", payees: ["true-ads"], dailyMaxMinor: 300_000 },
+        },
+      ],
+    });
+    const payer = { brain: "brain-1", scopes: new Set(["verax:pay"]) };
+    const args = { amountMinor: 125_050, currency: "TRY", payee: "true-ads", reference: "verax:d1", _ref: "p1" };
+    try {
+      for (let i = 0; i < 600; i += 1) {
+        await ledger.appendDecisionChained((prev) => cheapRecord(i, prev));
+      }
+      const origEffect = ledger.appendEffect.bind(ledger);
+      let skip = true;
+      ledger.appendEffect = async (...args: Parameters<typeof origEffect>) => {
+        if (skip) {
+          skip = false;
+          throw new Error("crash before effect");
+        }
+        return origEffect(...args);
+      };
+      const proxy = createProxy({
+        policy: spendPolicy,
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(1_000, 10),
+        nonce: queuedNonce(["reauth-1"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call({ name: "spend", arguments: args }, payer);
+      const policyHash = (await ledger.decisions()).find((d) => d.claims.ref === "p1")!.claims.policyHash;
+      await assert.rejects(
+        () =>
+          approvePending({
+            ledger,
+            recordSigner: RECORD_SIGNER,
+            now: tickingNow(10_000, 10),
+            nonce: queuedNonce(["a1"]),
+            ref: "p1",
+            approverId: "op",
+            policyHash,
+            approvals: proxy.approvals,
+            inputsLog: proxy.inputsLog,
+          }),
+        /crash before effect/,
+      );
+      const origRead = ledgerFs.readFile.bind(ledgerFs);
+      let reads = 0;
+      ledgerFs.readFile = (async (path: Parameters<typeof origRead>[0], ...rest: unknown[]) => {
+        if (String(path).endsWith("decisions.jsonl")) reads += 1;
+        return origRead(path, ...(rest as []));
+      }) as typeof ledgerFs.readFile;
+      try {
+        const t0 = performance.now();
+        const retry = await proxy.call({ name: "spend", arguments: args }, payer);
+        const ms = performance.now() - t0;
+        console.log(`reauth-after n=600 reads=${reads} ms=${ms.toFixed(1)}`);
+        assert.match(retry.content[0]?.text ?? "", /denied:spend-reauth-required:reauth-1/);
+        assert.equal(reads, 0, `reauth reread decisions.jsonl ${reads} times`);
+      } finally {
+        ledgerFs.readFile = origRead;
+      }
+    } finally {
       ledger.close();
     }
   });

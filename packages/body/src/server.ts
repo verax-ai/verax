@@ -1,11 +1,13 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { BodyConfig } from "./config.ts";
-import { explain } from "@verax-ai/proxy";
+import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
-import { bumpUnauthenticated } from "./metrics.ts";
+import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
+import { isRevokedJti } from "./revoke.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
@@ -57,9 +59,38 @@ const TOOL_META = [
       properties: {},
     },
   },
+  {
+    name: "message.send",
+    description: "Queue a message on the local outbox. Does not open a network.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        to: { type: "string" },
+        text: { type: "string" },
+      },
+      required: ["to", "text"],
+    },
+  },
+  {
+    name: "spend",
+    description: "Authorizes a payment; does not move money.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        amountMinor: { type: "integer" },
+        currency: { type: "string" },
+        payee: { type: "string" },
+        reference: { type: "string" },
+      },
+      required: ["amountMinor", "currency", "payee", "reference"],
+    },
+  },
 ];
 
 const MAX_BODY_BYTES = 1024 * 1024;
+const responseSlot = new AsyncLocalStorage<ServerResponse>();
 
 function contentLengthOverLimit(req: IncomingMessage): boolean {
   const raw = req.headers["content-length"];
@@ -127,11 +158,30 @@ export async function listen(config: BodyConfig): Promise<Server> {
     mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const auth = extra?.authInfo;
       const scopes = new Set(auth?.scopes ?? []);
-      const brain = typeof auth?.extra?.sub === "string" ? auth.extra.sub : (auth?.clientId ?? "unknown");
-      return services.proxy.call(
-        { name: request.params.name, arguments: (request.params.arguments ?? {}) as Record<string, unknown> },
-        { brain, scopes },
-      );
+      const bag = (auth?.extra ?? {}) as Record<string, unknown>;
+      const brain = typeof bag.sub === "string" ? bag.sub : (auth?.clientId ?? "unknown");
+      try {
+        return await services.proxy.call(
+          { name: request.params.name, arguments: (request.params.arguments ?? {}) as Record<string, unknown> },
+          {
+            brain,
+            scopes,
+            ...(typeof bag.iss === "string" ? { iss: bag.iss } : {}),
+            ...(typeof bag.tenant === "string" ? { tenant: bag.tenant } : {}),
+            ...(typeof bag.org === "string" ? { org: bag.org } : {}),
+          },
+        );
+      } catch (err) {
+        if (err instanceof LedgerDenyUnrecorded) {
+          await bumpMetric(config.stateDir, "disk_deny_unrecorded");
+          const res = responseSlot.getStore();
+          if (res && !res.headersSent) {
+            send(res, 507, { error: "insufficient-storage" });
+          }
+          throw err;
+        }
+        throw err;
+      }
     });
   };
 
@@ -149,7 +199,14 @@ export async function listen(config: BodyConfig): Promise<Server> {
       if (token) {
         try {
           const verified = await verify(token);
-          canRead = verified.principal.scopes.has("verax:read");
+          // A revoked or jti-less token is an unauthenticated probe here too.
+          // Revocation must not leave counts, last-decision time and lock
+          // state readable, or `jti revoke` claims more than it does.
+          const jti = typeof verified.payload.jti === "string" ? verified.payload.jti : "";
+          canRead =
+            jti !== "" &&
+            !isRevokedJti(config.stateDir, jti) &&
+            verified.principal.scopes.has("verax:read");
         } catch {
           canRead = false;
         }
@@ -199,6 +256,12 @@ export async function listen(config: BodyConfig): Promise<Server> {
       send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
       return;
     }
+    const jti = typeof verified.payload.jti === "string" ? verified.payload.jti : "";
+    if (jti === "" || isRevokedJti(config.stateDir, jti)) {
+      await bumpUnauthenticated(config.stateDir);
+      send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+      return;
+    }
     try {
       if (apiLedger || contest) {
         if (!verified.principal.scopes.has("verax:read")) {
@@ -221,6 +284,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             policy: { hash: services.policyHash, document: services.policyDocument },
             policies: readPolicySnapshots(config.stateDir, hashes),
             inputs: await matchingInputs(config.stateDir, decisions),
+            approvals: loadApprovalsFromDir(config.stateDir),
           });
           return;
         }
@@ -257,19 +321,41 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       try {
-        await transport.handleRequest(
-          Object.assign(req, {
-            auth: {
-              token,
-              clientId: verified.principal.brain,
-              scopes: [...verified.principal.scopes],
-              extra: { sub: verified.principal.brain },
-            },
-          }),
-          res,
-          parsed.value,
-        );
+        await responseSlot.run(res, async () => {
+          try {
+            await transport.handleRequest(
+              Object.assign(req, {
+                auth: {
+                  token,
+                  clientId: verified.principal.brain,
+                  scopes: [...verified.principal.scopes],
+                  extra: {
+                    sub: verified.principal.brain,
+                    ...(verified.principal.iss ? { iss: verified.principal.iss } : {}),
+                    ...(verified.principal.tenant ? { tenant: verified.principal.tenant } : {}),
+                    ...(verified.principal.org ? { org: verified.principal.org } : {}),
+                  },
+                },
+              }),
+              res,
+              parsed.value,
+            );
+          } catch (err) {
+            if (res.headersSent && res.statusCode === 507) return;
+            throw err;
+          }
+        });
       } catch (err) {
+        if (err instanceof LedgerDenyUnrecorded) {
+          if (!res.headersSent) {
+            await bumpMetric(config.stateDir, "disk_deny_unrecorded");
+            send(res, 507, { error: "insufficient-storage" });
+          }
+          return;
+        }
+        if (res.headersSent && res.statusCode === 507) {
+          return;
+        }
         const detail = err instanceof Error ? err.message : "fault";
         process.stderr.write(`verax-transport: ${detail}\n`);
         if (!res.headersSent) {

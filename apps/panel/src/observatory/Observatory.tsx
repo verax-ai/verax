@@ -3,7 +3,7 @@ import { Stage } from "@verax-ai/presence";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
 import { Rail, type RailContestResult } from "../rail/Rail.tsx";
-import type { RailAction, RailFinding, RailWarning } from "../rail/types.ts";
+import type { PendingApproval, RailAction, RailFinding, RailWarning } from "../rail/types.ts";
 import bodyEn from "../../../body-map/src/copy/en.json";
 import bodyTr from "../../../body-map/src/copy/tr.json";
 
@@ -64,10 +64,12 @@ export function Observatory({
   onRefresh,
   onShowDemo,
   onContest,
+  pending = [],
 }: {
   actions: RailAction[];
   status: ObservatoryStatus;
   demo: boolean;
+  pending?: PendingApproval[];
   health?: Healthz;
   reconcile?: ReconcileCardReport | null;
   errorText?: string | null;
@@ -94,6 +96,7 @@ export function Observatory({
         trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
         finding?: RailFinding;
         summary?: string;
+        pair?: { defer: { decision: string; reasonCode: string } | null; resolution: { decision: string; reasonCode: string } | null };
       }
     >
   >({});
@@ -146,6 +149,7 @@ export function Observatory({
           trustRoot: out.trustRoot,
           finding: out.finding,
           summary: out.finding?.summary,
+          pair: out.pair,
         },
       }));
     }
@@ -231,6 +235,7 @@ export function Observatory({
             lastMs={lastMs}
             witnessCounts={witnessCounts}
             reconcile={reconcile}
+            pending={pending}
           />
         ) : null}
         {tab === "map" ? <SystemMap actions={actions} /> : null}
@@ -268,6 +273,7 @@ export function Observatory({
           identityMissing={identityMissing}
           warnings={audit?.warnings ?? action?.warnings ?? []}
           witness={audit?.witnessClass ?? action?.witnessClass ?? action?.effect?.witnessClass ?? null}
+          pair={audit?.pair}
           onInspect={action?.record.claims.ref ? () => void contest(action.record.claims.ref as string) : undefined}
         />
       </aside>
@@ -299,16 +305,20 @@ function StatusView({
   lastMs,
   witnessCounts,
   reconcile,
+  pending,
 }: {
   actions: RailAction[];
   health: Healthz;
   lastMs: number | null;
   witnessCounts: Record<string, number>;
   reconcile: ReconcileCardReport | null;
+  pending: PendingApproval[];
 }) {
+  const copy = panelCopy();
   const effects = actions.filter((a) => a.effect).length;
   const lock = health && "lock" in health && health.lock != null ? String(typeof health.lock === "string" ? health.lock : health.lock.held ? "held" : "open") : "bağlı değil";
   const pinSource = actions.find((a) => a.trustRoot)?.trustRoot?.source;
+  const open = pending.filter((p) => p.status === "pending");
   return (
     <div className="status-view">
       <p>karar {health?.decisions ?? actions.length}</p>
@@ -317,6 +327,21 @@ function StatusView({
       <p>kilit {lock}</p>
       <p>tanık {Object.entries(witnessCounts).map(([k, n]) => `${k} ${n}`).join(" · ") || "bağlı değil"}</p>
       <p>pin kaynağı {pinSource ?? "denetlenmedi"}</p>
+      <section data-testid="pending-approvals" className="pending-approvals">
+        <h3>{copy["pending.title"]}</h3>
+        {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (
+          <ul>
+            {open.map((p) => (
+              <li key={p.ref}>
+                {p.ref} · {p.subject} · {p.ruleText ?? ""} · {p.brain}
+                {p.subject === "spend" && p.amount !== undefined && p.payee !== undefined
+                  ? ` · ${String(p.amount)} ${p.currency !== undefined ? String(p.currency) : ""} → ${String(p.payee)}`.replace("  ", " ")
+                  : `${p.payee !== undefined ? ` · ${String(p.payee)}` : ""}${p.amount !== undefined ? ` · ${String(p.amount)}` : ""}`}
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
       <ReconcileCard report={reconcile} />
     </div>
   );
@@ -418,6 +443,7 @@ function DetailPane({
   warnings,
   witness,
   onInspect,
+  pair,
 }: {
   action: RailAction | null;
   guarantee?: "unconditional" | "conditional";
@@ -427,6 +453,7 @@ function DetailPane({
   warnings: RailWarning[];
   witness: string | null;
   onInspect?: () => void;
+  pair?: { defer: { decision: string; reasonCode: string } | null; resolution: { decision: string; reasonCode: string } | null };
 }) {
   const copy = panelCopy();
   const missing = action?.rule && "missing" in action.rule ? action.rule.missing : null;
@@ -462,6 +489,11 @@ function DetailPane({
           <p>
             {action.record.claims.decision} {action.record.claims.reasonCode}
           </p>
+          {pair?.defer && pair.resolution ? (
+            <p data-testid="explain-pair">
+              {pair.defer.decision} {pair.defer.reasonCode} → {pair.resolution.decision} {pair.resolution.reasonCode}
+            </p>
+          ) : null}
           <h3>{copy["detail.evidence"]}</h3>
           <p>
             {action.effect

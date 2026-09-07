@@ -82,6 +82,13 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
   }
 
   if (stateDir !== "" && existsSync(stateDir)) {
+    if (existsSync(join(stateDir, "memory"))) {
+      checks.push({
+        id: "legacy-memory",
+        level: "warn",
+        detail: "legacy memory/ is present; reads do not merge it. Move records under tenants/<tenantKey>/memory/",
+      });
+    }
     const lockPath = join(stateDir, "ledger.lock");
     if (existsSync(lockPath)) {
       const existing = readLockFile(lockPath);

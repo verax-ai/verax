@@ -31,5 +31,7 @@
   "refresh": "Refresh",
   "showDemo": "Örnek senaryoyu göster",
   "map.body": "gövde",
-  "anatomy.approx": "yaklaşık"
+  "anatomy.approx": "yaklaşık",
+  "pending.title": "Onay bekleyen",
+  "pending.empty": "yok"
 }

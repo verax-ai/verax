@@ -1,6 +1,5 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { appendDurable } from "./ledger.ts";
+import { appendDurable, ledgerFs } from "./ledger.ts";
 import type { DecisionInputs, InputsLog } from "./types.ts";
 
 type Row = { ref: string; inputs: DecisionInputs };
@@ -31,7 +30,7 @@ export class FileInputsLog implements InputsLog {
   async get(ref: string): Promise<DecisionInputs | null> {
     let text: string;
     try {
-      text = await readFile(join(this.dir, "inputs.jsonl"), "utf8");
+      text = await ledgerFs.readFile(join(this.dir, "inputs.jsonl"), "utf8");
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw err;

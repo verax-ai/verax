@@ -31,5 +31,7 @@
   "refresh": "Refresh",
   "showDemo": "Show sample scenario",
   "map.body": "body",
-  "anatomy.approx": "approximate"
+  "anatomy.approx": "approximate",
+  "pending.title": "Pending approval",
+  "pending.empty": "none"
 }
