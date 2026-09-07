@@ -58,10 +58,10 @@ describe("quality ladder", () => {
 });
 
 describe("label LOD", () => {
-  it("keeps planet names at galaxy distance and hides star names", () => {
+  it("keeps planet names at galaxy distance and drops agent names first", () => {
     assert.equal(labelVisible("planet", 200, 48), true);
-    assert.equal(labelVisible("star", 200, 48), false);
-    assert.equal(labelVisible("star", 80, 48), true);
+    assert.equal(labelVisible("agent", 200, 48), true);
+    assert.equal(labelVisible("agent", 300, 48), false);
     assert.equal(labelVisible("planet", 0, 48), false);
   });
 });

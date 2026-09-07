@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
-import { Color, DoubleSide, Group, InstancedMesh, NoToneMapping, Object3D, type Mesh } from "three";
+import { CanvasTexture, Color, DoubleSide, Group, InstancedMesh, NoToneMapping, Object3D, type Mesh } from "three";
 import { cameraPosition, createOrbit, nudgeOrbit, stepOrbit, zoomOrbit, type Orbit } from "./camera.ts";
 import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
-import { labelVisible } from "./labels.ts";
+import { labelAspect, labelText, labelVisible, paintLabel } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
 import { easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
 import { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
+import type { Point3 } from "./address.ts";
 import { galaxyTier, readForcedTier } from "./quality.ts";
 
 export type GalaxySelect = { kind: "star" | "planet" | "agent" | "core"; id: string };
@@ -372,6 +373,40 @@ function EdgeArcs({
   );
 }
 
+type PaintedLabel = { id: string; at: Point3; map: CanvasTexture; aspect: number };
+
+/**
+ * One texture per name. A record with no name gets no sprite, and a page with
+ * no 2d context gets none either: an empty sprite would claim a name the
+ * viewer cannot read and cannot trace back to a record.
+ */
+function usePaintedLabels(items: readonly { id: string; label: string; at: Point3 }[]): PaintedLabel[] {
+  const painted = useMemo(() => {
+    if (typeof document === "undefined") return [];
+    const out: PaintedLabel[] = [];
+    for (const item of items) {
+      const text = labelText(item.label);
+      if (text === null) continue;
+      const canvas = document.createElement("canvas");
+      if (!paintLabel(canvas, text)) continue;
+      out.push({ id: item.id, at: item.at, map: new CanvasTexture(canvas), aspect: labelAspect(canvas) });
+    }
+    return out;
+  }, [items]);
+  useEffect(() => {
+    return () => {
+      for (const label of painted) label.map.dispose();
+    };
+  }, [painted]);
+  return painted;
+}
+
+// Screen-space heights (NDC, so 2 is the whole viewport). A label scaled in
+// world units shrinks with distance until it is a smudge, which reads as a
+// name without being one; these hold a readable size at every zoom.
+const PLANET_LABEL_HEIGHT = 0.05;
+const AGENT_LABEL_HEIGHT = 0.036;
+
 function LabelSprites({
   placed,
   distance,
@@ -388,29 +423,35 @@ function LabelSprites({
     if (!g.current) return;
     g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
   });
+  const planetLabels = usePaintedLabels(placed.planets);
+  const agentLabels = usePaintedLabels(placed.agents);
   const showPlanet = labelVisible("planet", distance, SCENE_RADIUS);
   const showAgent = labelVisible("agent", distance, SCENE_RADIUS);
-  const showStar = labelVisible("star", distance, SCENE_RADIUS);
   return (
     <group ref={g}>
       {showPlanet
-        ? placed.planets.map((p) => (
-            <sprite key={`l-p-${p.id}`} position={[p.at.x, p.at.y + 1.4, p.at.z]} scale={[4.5, 1.1, 1]}>
-              <spriteMaterial color={new Color(0.9, 0.92, 0.98)} opacity={0.85} depthWrite={false} />
+        ? planetLabels.map((l) => (
+            <sprite
+              key={`l-p-${l.id}`}
+              position={[l.at.x, l.at.y, l.at.z]}
+              // Sits above its body; an agent in the same group sits below,
+              // so two names on one address stay separately readable.
+              center={[0.5, -0.35]}
+              scale={[PLANET_LABEL_HEIGHT * l.aspect, PLANET_LABEL_HEIGHT, 1]}
+            >
+              <spriteMaterial map={l.map} transparent opacity={0.92} depthWrite={false} sizeAttenuation={false} />
             </sprite>
           ))
         : null}
       {showAgent
-        ? placed.agents.map((a) => (
-            <sprite key={`l-a-${a.id}`} position={[a.at.x, a.at.y + 0.9, a.at.z]} scale={[2.2, 0.6, 1]}>
-              <spriteMaterial color={new Color(0.75, 0.8, 0.9)} opacity={0.7} depthWrite={false} />
-            </sprite>
-          ))
-        : null}
-      {showStar
-        ? placed.stars.map((s) => (
-            <sprite key={`l-s-${s.id}`} position={[s.at.x, s.at.y + 0.35, s.at.z]} scale={[1.2, 0.35, 1]}>
-              <spriteMaterial color={new Color(0.7, 0.75, 0.9)} opacity={0.45} depthWrite={false} />
+        ? agentLabels.map((l) => (
+            <sprite
+              key={`l-a-${l.id}`}
+              position={[l.at.x, l.at.y, l.at.z]}
+              center={[0.5, 1.35]}
+              scale={[AGENT_LABEL_HEIGHT * l.aspect, AGENT_LABEL_HEIGHT, 1]}
+            >
+              <spriteMaterial map={l.map} transparent opacity={0.78} depthWrite={false} sizeAttenuation={false} />
             </sprite>
           ))
         : null}
