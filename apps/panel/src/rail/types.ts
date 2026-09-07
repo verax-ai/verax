@@ -13,7 +13,7 @@ export type RailDecision = {
 };
 
 export type RailInputs = {
-  principal: { brain: string; scopes: string[] };
+  principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: { id: string; versionHash: string; validFromMs: number; validUntilMs: number }[];
 };
 

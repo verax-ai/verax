@@ -20,7 +20,7 @@ authorization server. It serves `GET /authorize` (PKCE S256) and
 It listens on `VERAX_DEV_ISSUER_PORT` (default 8790).
 `NODE_ENV=production` exits.
 
-`apps/panel` is a 2D account-for rail beside a particle presence.
+`apps/panel` is a 2D account-for rail beside a three.js galaxy fed from the signed ledger.
 The panel session uses the code flow; the access token stays in
 memory and is dropped on refresh. Vite may still attach
 `VERAX_DEV_TOKEN` from `.env.local` to `/api` when the request has

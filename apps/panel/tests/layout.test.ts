@@ -16,11 +16,11 @@ const VIEWS = [
   { name: "390", width: 390, height: 844 },
 ] as const;
 
-const TABS = ["Genel durum", "Sistem haritası", "İşlem geçmişi", "Anatomi"] as const;
-const TAB_FILES = ["status", "map", "history", "anatomy"] as const;
+const TABS = ["Genel durum", "Galaksi", "Geçmiş"] as const;
+const TAB_FILES = ["status", "galaxy", "history"] as const;
 
 describe("observatory layout", () => {
-  it("keeps four tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
+  it("keeps three tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
     mkdirSync(shotDir, { recursive: true });
     const child = spawn(process.execPath, [viteJs, "--host", "127.0.0.1", "--port", "4189", "--strictPort"], {
       cwd: root,

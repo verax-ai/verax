@@ -1,10 +1,14 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval } from "../src/rail/types.ts";
 
 vi.mock("@verax-ai/presence", () => ({
   Stage: () => <div data-testid="stage" />,
+}));
+
+vi.mock("@verax-ai/galaxy/react", () => ({
+  Galaxy: () => <div data-testid="galaxy-stage" />,
 }));
 
 afterEach(() => {
@@ -34,6 +38,7 @@ describe("pending approvals", () => {
         pending={[row]}
       />,
     );
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     const list = screen.getByTestId("pending-approvals");
     expect(list.textContent).toMatch(/d1/);
     expect(list.textContent).toMatch(/Writes need operator approval/);
@@ -63,6 +68,7 @@ describe("pending approvals", () => {
         ]}
       />,
     );
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     const list = screen.getByTestId("pending-approvals");
     expect(list.textContent).toMatch(/125050 TRY → true-ads/);
     expect(list.textContent).toMatch(/Spends need operator approval/);

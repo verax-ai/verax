@@ -12,6 +12,10 @@ vi.mock("@verax-ai/presence", () => ({
   Stage: () => <div data-testid="stage" />,
 }));
 
+vi.mock("@verax-ai/galaxy/react", () => ({
+  Galaxy: () => <div data-testid="galaxy-stage" />,
+}));
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const golden = join(root, "packages", "proxy", "tests", "fixtures", "ledger-golden");
 const policy = JSON.parse(
@@ -47,20 +51,18 @@ afterEach(() => {
 });
 
 describe("observatory", () => {
-  it("renders four tabs", () => {
+  it("renders three tabs and defaults to galaxy", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual([
-      "Genel durum",
-      "Sistem haritası",
-      "İşlem geçmişi",
-      "Anatomi",
-    ]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Genel durum", "Galaksi", "Geçmiş"]);
+    expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("galaxy-stage")).toBeTruthy();
+    expect(screen.queryByTestId("stage")).toBeNull();
   });
 
   it("shows evidence scope with guarantee and pin:", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
-    fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     expect(screen.getByTestId("evidence-scope").textContent).toMatch(/guarantee/);
     expect(screen.getByTestId("evidence-scope").textContent).toMatch(/pin:/);
   });
@@ -78,7 +80,7 @@ describe("observatory", () => {
       },
     ];
     render(<Observatory actions={missing} status="ok" demo={false} />);
-    fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     const line = document.querySelector(".detail-pane .rule-missing");
     expect(line?.textContent).toBe("identity hash on the record; inputs document unavailable");
     expect(line?.className).toMatch(/rule-missing/);
@@ -105,31 +107,18 @@ describe("observatory", () => {
     expect(document.body.textContent).not.toMatch(/receipt var/);
   });
 
-  it("draws one map edge per unique brain-subject pair", () => {
-    const demo = loadDemoActions();
-    const pairs = new Set(
-      demo.map((a) => `${a.inputs?.principal.brain ?? "unknown"}\t${a.record.claims.subject}`),
-    );
-    render(<Observatory actions={demo} status="ok" demo={true} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Sistem haritası" }));
-    const edges = [...document.querySelectorAll(".system-map line[data-edge]")];
-    expect(edges.length).toBe(pairs.size);
-    const bySubject = new Map<string, { x2: string | null; y2: string | null }>();
-    for (const el of edges) {
-      const pair = el.getAttribute("data-edge") ?? "";
-      const subject = pair.split("|")[1] ?? "";
-      bySubject.set(subject, { x2: el.getAttribute("x2"), y2: el.getAttribute("y2") });
-    }
-    const subjects = [...bySubject.keys()];
-    expect(subjects.length).toBeGreaterThan(1);
-    const a = bySubject.get(subjects[0]!)!;
-    const b = bySubject.get(subjects[1]!)!;
-    expect(`${a.x2},${a.y2}`).not.toBe(`${b.x2},${b.y2}`);
+  it("keeps anatomy copy on the status document, not as a presence stage", () => {
+    render(<Observatory actions={actions} status="ok" demo={false} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    const doc = screen.getByTestId("anatomy-document");
+    expect(doc.textContent).toMatch(/Anatomi/);
+    expect(doc.textContent).toMatch(/head\.part|Kafa|Head/i);
+    expect(screen.queryByTestId("stage")).toBeNull();
   });
 
   it("demo data has no rule-missing rows", () => {
     render(<Observatory actions={loadDemoActions()} status="ok" demo={true} />);
-    fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     expect(document.querySelectorAll(".rule-missing").length).toBe(0);
   });
 
@@ -144,7 +133,7 @@ describe("observatory", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const list = screen.getByRole("tablist");
     fireEvent.keyDown(list, { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "Sistem haritası" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Geçmiş" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("does not add an animation class when reduced motion is set", () => {

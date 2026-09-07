@@ -107,6 +107,23 @@ body {
 .muted {
   color: #8aa0b5;
 }
+.galaxy-stage {
+  position: relative;
+  min-height: 28rem;
+  height: min(70vh, 42rem);
+  width: 100%;
+}
+.galaxy-stage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.anatomy-document {
+  margin-top: 1.5rem;
+}
+.anatomy-document ul {
+  padding-left: 1.2rem;
+}
 .anatomy {
   position: relative;
   min-height: 28rem;
