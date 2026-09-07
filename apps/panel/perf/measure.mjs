@@ -9,7 +9,15 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const outPath = process.env.VERAX_PERF_LAST ?? join(root, "perf", "last.json");
-const tier = Number(process.env.VERAX_PERF_TIER ?? "15000");
+/**
+ * Dust count the run asks the galaxy for. It must be a rung of the quality
+ * ladder (packages/galaxy/src/quality.ts); an unknown number is snapped and
+ * the run then measures a tier nobody chose. The lowest rung is the one this
+ * probe can repeat: it fills the 300-frame window, where the bloom rungs
+ * collect ~100-160 frames and the p95 swings 2x between identical runs.
+ */
+export const DEFAULT_TIER = 5000;
+const tier = Number(process.env.VERAX_PERF_TIER ?? String(DEFAULT_TIER));
 const gha = Boolean(process.env.GITHUB_ACTIONS);
 const headed = Boolean(process.env.VERAX_PERF_HEADED);
 const framesWanted = 300;
@@ -36,9 +44,8 @@ export function withTier(url, n) {
   // This harness measures frames, not the session: without `demo` the panel starts
   // the code flow and navigates away from the page being measured.
   u.searchParams.set("demo", "1");
-  if (process.env.VERAX_PERF_BLOOM === "1") {
-    u.searchParams.set("bloom", "1");
-  }
+  // No bloom flag: the scene never read one. Bloom comes with the tier
+  // (20000 full, 10000 mid, 5000 off), so ask for the rung you want.
   return u.href;
 }
 
@@ -46,7 +53,9 @@ function envKey() {
   const envTag = process.env.GITHUB_ACTIONS
     ? `gha-${process.env.RUNNER_OS ?? "unknown"}`
     : "local";
-  return `${process.platform}/${gl}/${envTag}`;
+  // The scene and the tier are part of what was measured: without them a
+  // galaxy run is compared against whatever scene held this key before it.
+  return `${process.platform}/${gl}/${envTag}/galaxy@${tier}`;
 }
 
 function p95Of(samples) {
