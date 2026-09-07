@@ -382,6 +382,9 @@ export function createProxy(deps: ProxyDeps) {
       }
 
       if (typeof given === "string") {
+        // The ledger, the approvals snapshot and the resolution index all key on the
+        // scoped ref. The brain only ever sees and resends the raw `_ref` it chose.
+        const scopedRef = scopedClaimsRef(principal, given);
         const existing = await lookupDecisionByRef(deps.ledger, given, tenantKey(principal));
         if (existing) {
           if (existing.requestHash !== requestHash) {
@@ -399,10 +402,10 @@ export function createProxy(deps: ProxyDeps) {
             return denied("ref-reuse", ref);
           }
           if (existing.decision === "defer") {
-            const snap = await approvals.get(given);
-            const boundHit = lookupResolvedBy(deps.ledger, given);
+            const snap = await approvals.get(scopedRef);
+            const boundHit = lookupResolvedBy(deps.ledger, scopedRef);
             if (boundHit?.kind === "expired") {
-              if (snap?.status === "pending") await approvals.updateStatus(given, "expired");
+              if (snap?.status === "pending") await approvals.updateStatus(scopedRef, "expired");
               return denied("expired", boundHit.ref);
             }
             if (snap && timestampMs > snap.expiresAtMs) {
@@ -414,24 +417,24 @@ export function createProxy(deps: ProxyDeps) {
                 requestHash,
                 inputs: {
                   ...resolved.inputs,
-                  approver: { id: "verax-proxy", via: "proxy", resolves: given },
+                  approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
                 },
                 effectHash: null,
                 subject: call.name,
                 timestampMs,
               });
-              await approvals.updateStatus(given, "expired");
+              await approvals.updateStatus(scopedRef, "expired");
               return denied("expired", expireRef);
             }
             const allowRef = snap?.allowRef ?? (boundHit?.kind === "allow" ? boundHit.ref : undefined);
             const allow = allowRef ? await lookupDecisionByRef(deps.ledger, allowRef) : null;
             if (allow?.ref && allow.decision === "allow" && allow.reasonCode === "approved-by-operator") {
               const bound = await inputsLog.get(allow.ref);
-              if (bound?.approver?.resolves && bound.approver.resolves !== given) {
+              if (bound?.approver?.resolves && bound.approver.resolves !== scopedRef) {
                 return deferred(given);
               }
               if (!snap?.allowRef) {
-                await approvals.updateStatus(given, "approved", { allowRef: allow.ref });
+                await approvals.updateStatus(scopedRef, "approved", { allowRef: allow.ref });
               }
               if (await hasPrimaryEffect(deps.ledger, allow.ref)) return allowedReplay(allow.ref);
               if (allow.subject === "spend") {
@@ -481,6 +484,8 @@ export function createProxy(deps: ProxyDeps) {
         reasonCode = "tenant-mismatch";
       }
       const ref = typeof given === "string" ? scopedClaimsRef(principal, given) : deps.nonce();
+      // What the brain is told: its own `_ref`, so a retry carries the same key back.
+      const shown = typeof given === "string" ? given : ref;
       const allow = decision === "allow";
       await writeRecord({
         decision,
@@ -519,10 +524,10 @@ export function createProxy(deps: ProxyDeps) {
           status: "pending",
           brain: principal.brain,
         });
-        return deferred(ref);
+        return deferred(shown);
       }
       if (!allow) {
-        return denied(reasonCode, ref);
+        return denied(reasonCode, shown);
       }
       return runInner(dispatched, principal, ref);
     },
