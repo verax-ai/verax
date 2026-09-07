@@ -101,18 +101,30 @@ function thrownPayload(err: unknown): unknown {
   return { name: "thrown" };
 }
 
-function declaredInputs(args: Record<string, unknown>): { id: string; versionHash: string }[] | "invalid" | null {
+function declaredInputs(
+  args: Record<string, unknown>,
+): { id: string; versionHash: string; source?: Record<string, unknown> }[] | "invalid" | null {
   if (!Object.prototype.hasOwnProperty.call(args, "_inputs")) return null;
   const raw = args._inputs;
   if (!Array.isArray(raw)) return "invalid";
-  const out: { id: string; versionHash: string }[] = [];
+  const out: { id: string; versionHash: string; source?: Record<string, unknown> }[] = [];
   for (const item of raw) {
     if (item === null || typeof item !== "object" || Array.isArray(item)) return "invalid";
     const rec = item as Record<string, unknown>;
     if (typeof rec.id !== "string" || rec.id === "" || typeof rec.versionHash !== "string" || rec.versionHash === "") {
       return "invalid";
     }
-    out.push({ id: rec.id, versionHash: rec.versionHash });
+    const row: { id: string; versionHash: string; source?: Record<string, unknown> } = {
+      id: rec.id,
+      versionHash: rec.versionHash,
+    };
+    if (rec.source !== undefined) {
+      if (rec.source === null || typeof rec.source !== "object" || Array.isArray(rec.source)) {
+        return "invalid";
+      }
+      row.source = rec.source as Record<string, unknown>;
+    }
+    out.push(row);
   }
   return out;
 }
@@ -294,6 +306,12 @@ export function createProxy(deps: ProxyDeps) {
         reasonCode: "input-invalid",
       };
     }
+    if (declared === null && deps.policy.requireInputs === true) {
+      return {
+        inputs: { principal: principalInputs(principal), inputs: [] },
+        reasonCode: "inputs-required",
+      };
+    }
     const rows: DecisionInputRow[] = [];
     if (declared) {
       for (const item of declared) {
@@ -309,12 +327,14 @@ export function createProxy(deps: ProxyDeps) {
             reasonCode: "input-invalid",
           };
         }
-        rows.push({
+        const row: DecisionInputRow = {
           id: item.id,
           versionHash: item.versionHash,
           validFromMs: got.validFromMs,
           validUntilMs: got.validUntilMs,
-        });
+        };
+        if (item.source) row.source = item.source;
+        rows.push(row);
       }
     }
     return {

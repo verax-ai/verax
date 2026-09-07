@@ -27,6 +27,8 @@ export type PolicyDocument = {
   default: "deny";
   approvalTtlMs?: number;
   egress?: readonly string[];
+  /** Body-wide: a call with no `_inputs` key is deny inputs-required. */
+  requireInputs?: true;
   limits?: {
     ratePerMinute?: number;
     dailyMax?: number;
@@ -189,6 +191,12 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
   if (rec.limits !== undefined) {
     document.limits = asLimits(rec.limits);
   }
+  if (rec.requireInputs !== undefined) {
+    if (rec.requireInputs !== true) {
+      throw new Error("policy-require-inputs");
+    }
+    document.requireInputs = true;
+  }
   return document;
 }
 
@@ -225,6 +233,7 @@ export function loadPolicy(json: unknown): Policy {
     hash,
     approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
     limits,
+    ...(document.requireInputs ? { requireInputs: true as const } : {}),
     rule(id: string | null) {
       if (id === null) return null;
       const found = document.rules.find((r) => r.id === id);
