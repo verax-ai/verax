@@ -8,10 +8,6 @@ import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle, RailAction } from "../src/rail/types.ts";
 
-vi.mock("@verax-ai/presence", () => ({
-  Stage: () => <div data-testid="stage" />,
-}));
-
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
 }));

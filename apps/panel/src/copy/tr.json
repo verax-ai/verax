@@ -1,7 +1,6 @@
 {
   "tab.status": "Genel durum",
   "tab.galaxy": "Galaksi",
-  "tab.map": "Sistem haritası",
   "tab.history": "Geçmiş",
   "tab.anatomy": "Anatomi",
   "rail.q1": "Ne yaptın",
@@ -31,7 +30,6 @@
   "records": "Kayıtlar",
   "refresh": "Refresh",
   "showDemo": "Örnek senaryoyu göster",
-  "map.body": "gövde",
   "anatomy.approx": "yaklaşık",
   "pending.title": "Onay bekleyen",
   "pending.empty": "yok"

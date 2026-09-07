@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
   return {
     plugins: [react()],
     optimizeDeps: {
-      exclude: ["@verax-ai/presence", "@verax-ai/galaxy"],
+      exclude: ["@verax-ai/galaxy"],
     },
     resolve: {
       dedupe: ["react", "react-dom", "three"],

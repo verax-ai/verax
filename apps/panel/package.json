@@ -15,7 +15,6 @@
   },
   "dependencies": {
     "@verax-ai/galaxy": "^0.0.0",
-    "@verax-ai/presence": "^0.0.0",
     "@react-three/fiber": "^9.1.2",
     "@react-three/postprocessing": "^3.0.4",
     "react": "^19.1.0",

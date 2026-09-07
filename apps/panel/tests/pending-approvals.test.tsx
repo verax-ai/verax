@@ -3,10 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval } from "../src/rail/types.ts";
 
-vi.mock("@verax-ai/presence", () => ({
-  Stage: () => <div data-testid="stage" />,
-}));
-
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
 }));

@@ -143,14 +143,6 @@ body {
   color: #c5d0dc;
   white-space: nowrap;
 }
-.system-map .edge-flash {
-  stroke: #eaf2f8;
-}
-.system-map {
-  width: 100%;
-  max-width: 40rem;
-  height: auto;
-}
 .observatory h2,
 .observatory h3 {
   font-size: 1rem;
