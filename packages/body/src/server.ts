@@ -192,7 +192,14 @@ export async function listen(config: BodyConfig): Promise<Server> {
       if (token) {
         try {
           const verified = await verify(token);
-          canRead = verified.principal.scopes.has("verax:read");
+          // A revoked or jti-less token is an unauthenticated probe here too.
+          // Revocation must not leave counts, last-decision time and lock
+          // state readable, or `jti revoke` claims more than it does.
+          const jti = typeof verified.payload.jti === "string" ? verified.payload.jti : "";
+          canRead =
+            jti !== "" &&
+            !isRevokedJti(config.stateDir, jti) &&
+            verified.principal.scopes.has("verax:read");
         } catch {
           canRead = false;
         }
