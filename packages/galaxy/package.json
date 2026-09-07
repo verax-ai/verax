@@ -14,5 +14,11 @@
   },
   "files": [
     "src"
-  ]
+  ],
+  "peerDependencies": {
+    "@react-three/fiber": "^9.1.2",
+    "@react-three/postprocessing": "^3.0.4",
+    "react": "^19.1.0",
+    "three": "0.184.0"
+  }
 }
