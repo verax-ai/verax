@@ -46,6 +46,8 @@ export type Policy = {
   hash: string;
   approvalTtlMs: number;
   limits: PolicyLimits;
+  /** Document-root posture. Absent keeps today's optional `_inputs`. */
+  requireInputs?: boolean;
   evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
   rule(id: string | null): { id: string; text: string } | null;
 };
@@ -101,6 +103,8 @@ export type DecisionInputRow = {
   versionHash: string;
   validFromMs: number;
   validUntilMs: number;
+  /** Optional provenance. Same idea as memory.put `source`; additive. */
+  source?: Record<string, unknown>;
 };
 
 export type DecisionInputs = {

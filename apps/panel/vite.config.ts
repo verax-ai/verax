@@ -38,6 +38,10 @@ export default defineConfig(({ mode }) => {
             });
           },
         },
+        "/.well-known": {
+          target,
+          changeOrigin: true,
+        },
       },
     },
     preview: {
@@ -63,6 +67,10 @@ export default defineConfig(({ mode }) => {
               }
             });
           },
+        },
+        "/.well-known": {
+          target,
+          changeOrigin: true,
         },
       },
     },

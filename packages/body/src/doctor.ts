@@ -132,7 +132,110 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
     });
   }
 
+  const panelPort = panelPortOf(env);
+  const portSource = env.VERAX_PANEL_PORT?.trim() ? "VERAX_PANEL_PORT" : "the 5173 default, VERAX_PANEL_PORT unset";
+  const redirectUris = redirectAllowList(env);
+  const panelRedirect = `http://127.0.0.1:${panelPort}/`;
+  // Nothing here opens a port: the number comes from the environment, so both
+  // lines name where it came from and an ok cannot be read as a live check.
+  if (redirectUris.some((u) => sameRedirect(u, panelRedirect))) {
+    checks.push({
+      id: "panel-redirect-uri",
+      level: "ok",
+      detail: `panel port ${panelPort} (${portSource}) is on the issuer redirect allow-list`,
+    });
+  } else {
+    checks.push({
+      id: "panel-redirect-uri",
+      level: "warn",
+      detail: `panel port ${panelPort} (${portSource}) is not on the issuer redirect allow-list; set VERAX_DEV_REDIRECT_URIS=${panelRedirect} or run verax desktop so it passes the panel port`,
+    });
+  }
+
+  const configuredIssuer = stripSlash(env.VERAX_ISSUER?.trim() ?? "");
+  const panelIssuer = stripSlash(env.VITE_VERAX_ISSUER?.trim() || "http://127.0.0.1:8790");
+  if (configuredIssuer !== "" && configuredIssuer === panelIssuer) {
+    checks.push({
+      id: "panel-issuer",
+      level: "ok",
+      detail: "panel last-resort issuer matches VERAX_ISSUER",
+    });
+  } else if (configuredIssuer !== "") {
+    checks.push({
+      id: "panel-issuer",
+      level: "warn",
+      detail: `panel last-resort issuer ${panelIssuer} differs from VERAX_ISSUER ${configuredIssuer}; the session reads authorization_servers from resource metadata — if that document is unreachable the panel will not start`,
+    });
+  }
+
+  const tokenScope = scopeFromDevToken(env.VERAX_DEV_TOKEN);
+  const mintScope = env.VERAX_DEV_SCOPE?.trim() ?? "";
+  const seenScope = tokenScope ?? (mintScope !== "" ? mintScope : null);
+  if (seenScope !== null) {
+    const parts = seenScope.split(/\s+/).filter((s) => s !== "");
+    if (parts.includes("verax:audit")) {
+      checks.push({
+        id: "dev-token-audit",
+        level: "ok",
+        detail: "development token scope includes verax:audit",
+      });
+    } else {
+      checks.push({
+        id: "dev-token-audit",
+        level: "warn",
+        detail: "development token scope lacks verax:audit; the panel cannot read /api/ledger or /healthz counts",
+      });
+    }
+  }
+
   return checks;
+}
+
+const DEFAULT_REDIRECTS = ["http://127.0.0.1:5173/", "http://127.0.0.1:4173/"];
+
+function stripSlash(s: string): string {
+  return s.replace(/\/$/, "");
+}
+
+function panelPortOf(env: NodeJS.ProcessEnv): number {
+  const raw = env.VERAX_PANEL_PORT?.trim() ?? "";
+  const n = Number(raw);
+  if (Number.isInteger(n) && n > 0 && n < 65536) return n;
+  return 5173;
+}
+
+function redirectAllowList(env: NodeJS.ProcessEnv): string[] {
+  const raw = env.VERAX_DEV_REDIRECT_URIS ?? "";
+  const listed = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  return listed.length > 0 ? listed : DEFAULT_REDIRECTS;
+}
+
+function sameRedirect(a: string, b: string): boolean {
+  try {
+    const na = new URL(a);
+    const nb = new URL(b);
+    const pa = na.pathname === "" ? "/" : na.pathname;
+    const pb = nb.pathname === "" ? "/" : nb.pathname;
+    return `${na.origin}${pa}` === `${nb.origin}${pb}`;
+  } catch {
+    return false;
+  }
+}
+
+function scopeFromDevToken(raw: string | undefined): string | null {
+  if (!raw || raw.trim() === "") return null;
+  const parts = raw.trim().split(".");
+  if (parts.length < 2) return null;
+  try {
+    const json = Buffer.from(parts[1]!, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { scope?: unknown };
+    return typeof payload.scope === "string" ? payload.scope : null;
+  } catch {
+    return null;
+  }
 }
 
 export function doctorExit(checks: readonly DoctorCheck[]): number {

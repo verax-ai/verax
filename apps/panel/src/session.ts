@@ -1,7 +1,9 @@
 const VERIFIER_KEY = "verax-pkce-verifier";
 const STATE_KEY = "verax-pkce-state";
+const PRM_PATH = "/.well-known/oauth-protected-resource";
 
 let token: string | null = null;
+let sessionError: string | null = null;
 
 export function accessToken(): string | null {
   return token;
@@ -11,12 +13,29 @@ export function rememberToken(next: string | null): void {
   token = next;
 }
 
-function issuerOrigin(): string {
+export function sessionIssueError(): string | null {
+  return sessionError;
+}
+
+function fallbackIssuer(): string {
   const fromEnv = import.meta.env.VITE_VERAX_ISSUER;
   if (typeof fromEnv === "string" && fromEnv.trim() !== "") {
     return fromEnv.replace(/\/$/, "");
   }
   return "http://127.0.0.1:8790";
+}
+
+async function issuerFromPrm(): Promise<string | null> {
+  try {
+    const res = await fetch(PRM_PATH);
+    if (!res.ok) return null;
+    const body = (await res.json()) as { authorization_servers?: unknown };
+    const first = Array.isArray(body.authorization_servers) ? body.authorization_servers[0] : undefined;
+    if (typeof first !== "string" || first.trim() === "") return null;
+    return first.replace(/\/$/, "");
+  } catch {
+    return null;
+  }
 }
 
 function redirectUri(): string {
@@ -40,12 +59,12 @@ async function s256(verifier: string): Promise<string> {
     .replace(/=+$/, "");
 }
 
-async function startAuthorize(): Promise<void> {
+async function startAuthorize(issuer: string): Promise<void> {
   const verifier = randomUrl();
   const state = randomUrl();
   sessionStorage.setItem(VERIFIER_KEY, verifier);
   sessionStorage.setItem(STATE_KEY, state);
-  const dest = new URL(`${issuerOrigin()}/authorize`);
+  const dest = new URL(`${issuer}/authorize`);
   dest.searchParams.set("response_type", "code");
   dest.searchParams.set("client_id", "verax-panel");
   dest.searchParams.set("redirect_uri", redirectUri());
@@ -59,9 +78,16 @@ function wantDemo(): boolean {
   return new URLSearchParams(window.location.search).get("demo") === "1";
 }
 
-export async function beginSession(): Promise<"ok" | "redirect" | "demo"> {
+export async function beginSession(): Promise<"ok" | "redirect" | "demo" | "error"> {
   if (wantDemo()) return "demo";
   if (token) return "ok";
+  const issuer = await issuerFromPrm();
+  if (!issuer) {
+    const fallback = fallbackIssuer();
+    sessionError = `resource metadata unreachable; last-resort issuer ${fallback}`;
+    return "error";
+  }
+  sessionError = null;
   const params = new URLSearchParams(window.location.search);
   const code = params.get("code");
   if (code) {
@@ -71,10 +97,10 @@ export async function beginSession(): Promise<"ok" | "redirect" | "demo"> {
     sessionStorage.removeItem(STATE_KEY);
     // A code that comes back without the state this tab sent is not ours.
     if (!verifier || !expectedState || params.get("state") !== expectedState) {
-      await startAuthorize();
+      await startAuthorize(issuer);
       return "redirect";
     }
-    const res = await fetch(`${issuerOrigin()}/token`, {
+    const res = await fetch(`${issuer}/token`, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({
@@ -86,12 +112,12 @@ export async function beginSession(): Promise<"ok" | "redirect" | "demo"> {
       }),
     });
     if (!res.ok) {
-      await startAuthorize();
+      await startAuthorize(issuer);
       return "redirect";
     }
     const body = (await res.json()) as { access_token?: unknown };
     if (typeof body.access_token !== "string" || body.access_token === "") {
-      await startAuthorize();
+      await startAuthorize(issuer);
       return "redirect";
     }
     token = body.access_token;
@@ -101,7 +127,7 @@ export async function beginSession(): Promise<"ok" | "redirect" | "demo"> {
     window.history.replaceState({}, "", `${window.location.pathname}${q ? `?${q}` : ""}${window.location.hash}`);
     return "ok";
   }
-  await startAuthorize();
+  await startAuthorize(issuer);
   return "redirect";
 }
 

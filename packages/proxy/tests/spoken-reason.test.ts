@@ -9,5 +9,6 @@ describe("spoken reason table", () => {
     assert.equal(spokenReason("scope-missing"), "scope-missing");
     assert.equal(spokenReason("egress-blocked"), "egress-blocked");
     assert.equal(spokenReason("allow"), "allow");
+    assert.equal(spokenReason("inputs-required"), "inputs-required");
   });
 });
