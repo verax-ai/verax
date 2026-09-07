@@ -28,9 +28,16 @@ New textured mesh + particles (Chromium headed, default GPU):
 | mesh + 10000 | off | 4.5 | 300 |
 | mesh + 5000 | off | 4.5 | 300 |
 | mesh + 20000 | on | 8.8 | 300 |
+| mesh + 60000 | off | 4.5 | 300 |
+| mesh + 60000 | on | 7.3 | 300 |
 
 Default tier (20000, bloom off) is under the 16.7 ms window. Bloom
 roughly doubles P95 and still stays under the window.
+
+60k on this Intel UHD (Chromium headed, idle, 7 September 2026) is
+also under the window: bloom off 4.5 ms p95, bloom on 7.3 ms p95,
+300 frames each. That is a measured number, not the old 3 frames/s
+particle-only hypothesis. The 16.7 ms target holds.
 
 ## Run it on an idle machine
 

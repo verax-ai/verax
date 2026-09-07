@@ -79,4 +79,29 @@ describe("2 verax unlock", () => {
     const ledger = new FileLedger(dir);
     ledger.close();
   });
+
+  it("writes unlink-failed when unlinkSync throws", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-unlock-unlink-"));
+    const pid = deadPid();
+    writeFileSync(
+      join(dir, "ledger.lock"),
+      `${JSON.stringify({ pid, startedAt: 33 })}\n`,
+      { encoding: "utf8" },
+    );
+    const err = Object.assign(new Error("busy"), { code: "EPERM" });
+    const code = runUnlock(dir, () => {}, {
+      unlink: () => {
+        throw err;
+      },
+    });
+    assert.equal(code, 1);
+    assert.equal(existsSync(join(dir, "ledger.lock")), true);
+    const lines = readFileSync(join(dir, "unlocks.jsonl"), "utf8")
+      .trim()
+      .split("\n")
+      .filter((l) => l !== "");
+    const last = JSON.parse(lines[lines.length - 1] ?? "{}") as { result?: string; error?: string };
+    assert.equal(last.result, "unlink-failed");
+    assert.equal(last.error, "EPERM");
+  });
 });

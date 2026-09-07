@@ -44,7 +44,7 @@ function appendUnlockRow(stateDir: string, row: Record<string, unknown>): void {
 export function runUnlock(
   stateDir: string,
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
-  options: { force?: boolean } = {},
+  options: { force?: boolean; unlink?: (path: string) => void } = {},
 ): number {
   const lockPath = join(stateDir, "ledger.lock");
   if (!existsSync(lockPath)) {
@@ -80,8 +80,9 @@ export function runUnlock(
     writeErr(`record-failed:${errnoCode(err)}\n`);
     return 1;
   }
+  const unlink = options.unlink ?? unlinkSync;
   try {
-    unlinkSync(lockPath);
+    unlink(lockPath);
   } catch (err) {
     const code = errnoCode(err);
     try {
