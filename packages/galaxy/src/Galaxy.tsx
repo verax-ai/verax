@@ -7,6 +7,7 @@ import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
 import { labelVisible } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
+import { easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
 import { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
 import { galaxyTier, readForcedTier } from "./quality.ts";
 
@@ -16,8 +17,10 @@ export type GalaxyProps = {
   model: GalaxyModel;
   reducedMotion?: boolean;
   onSelect?: (hit: GalaxySelect) => void;
-  /** 0 = closed sphere (loading), 1 = open. Commit D drives this. */
+  /** 0 = closed sphere, 1 = open. Omit to let click own the target. */
   open?: number;
+  /** Data arrived. Until then the closed sphere spins and ignores click. */
+  ready?: boolean;
 };
 
 function readReduced(): boolean {
@@ -54,27 +57,95 @@ function OrbitRig({
   return null;
 }
 
-function DustLayer({ count, reducedMotion }: { count: number; reducedMotion: boolean }) {
+function OpenDriver({
+  target,
+  reducedMotion,
+  openRef,
+}: {
+  target: number;
+  reducedMotion: boolean;
+  openRef: { current: number };
+}) {
+  useFrame((_, dt) => {
+    openRef.current = stepOpen(openRef.current, target, dt * 1000, reducedMotion);
+  });
+  return null;
+}
+
+function Flying({
+  id,
+  dest,
+  openRef,
+  reducedMotion,
+  children,
+}: {
+  id: string;
+  dest: { x: number; y: number; z: number };
+  openRef: { current: number };
+  reducedMotion: boolean;
+  children: React.ReactNode;
+}) {
+  const g = useRef<Group>(null);
+  const park = useMemo(() => parkPoint(id), [id]);
+  useFrame(() => {
+    if (!g.current) return;
+    const t = easeOpen(openRef.current, reducedMotion);
+    const at = mix3(park, dest, t);
+    g.current.position.set(at.x, at.y, at.z);
+    const s = 0.14 + 0.86 * t;
+    g.current.scale.setScalar(s);
+  });
+  return <group ref={g}>{children}</group>;
+}
+
+function DustLayer({
+  count,
+  reducedMotion,
+  openRef,
+}: {
+  count: number;
+  reducedMotion: boolean;
+  openRef: { current: number };
+}) {
   const mesh = useRef<InstancedMesh>(null);
   const positions = useMemo(() => dustPositions(count === 20_000 ? 0 : count === 10_000 ? 1 : 2, SCENE_RADIUS), [count]);
+  const parks = useMemo(() => {
+    const out = new Float32Array(count * 3);
+    for (let i = 0; i < count; i += 1) {
+      const p = parkPoint(`dust:${i}`);
+      out[i * 3] = p.x;
+      out[i * 3 + 1] = p.y;
+      out[i * 3 + 2] = p.z;
+    }
+    return out;
+  }, [count]);
+  const dummy = useMemo(() => new Object3D(), []);
+  const color = useMemo(() => new Color(0.18, 0.12, 0.28), []);
+  const lastT = useRef(-1);
   useEffect(() => {
+    lastT.current = -1;
+  }, [count]);
+  useFrame(() => {
     const m = mesh.current;
     if (!m) return;
-    const dummy = new Object3D();
-    const color = new Color(0.18, 0.12, 0.28);
-    for (let i = 0; i < count; i += 1) {
-      dummy.position.set(positions[i * 3] ?? 0, positions[i * 3 + 1] ?? 0, positions[i * 3 + 2] ?? 0);
-      dummy.scale.setScalar(0.22);
-      dummy.updateMatrix();
-      m.setMatrixAt(i, dummy.matrix);
-      m.setColorAt(i, color);
+    const t = easeOpen(openRef.current, reducedMotion);
+    if (Math.abs(t - lastT.current) > 1e-4) {
+      for (let i = 0; i < count; i += 1) {
+        dummy.position.set(
+          (parks[i * 3] ?? 0) + ((positions[i * 3] ?? 0) - (parks[i * 3] ?? 0)) * t,
+          (parks[i * 3 + 1] ?? 0) + ((positions[i * 3 + 1] ?? 0) - (parks[i * 3 + 1] ?? 0)) * t,
+          (parks[i * 3 + 2] ?? 0) + ((positions[i * 3 + 2] ?? 0) - (parks[i * 3 + 2] ?? 0)) * t,
+        );
+        dummy.scale.setScalar(0.22);
+        dummy.updateMatrix();
+        m.setMatrixAt(i, dummy.matrix);
+        m.setColorAt(i, color);
+      }
+      m.instanceMatrix.needsUpdate = true;
+      if (m.instanceColor) m.instanceColor.needsUpdate = true;
+      lastT.current = t;
     }
-    m.instanceMatrix.needsUpdate = true;
-    if (m.instanceColor) m.instanceColor.needsUpdate = true;
-  }, [count, positions]);
-  useFrame(() => {
-    if (!mesh.current || reducedMotion) return;
-    mesh.current.rotation.y += 0.00015;
+    if (!reducedMotion) m.rotation.y += 0.00015 * (1 - t * 0.7);
   });
   return (
     <instancedMesh ref={mesh} args={[undefined, undefined, count]} frustumCulled={false}>
@@ -84,16 +155,37 @@ function DustLayer({ count, reducedMotion }: { count: number; reducedMotion: boo
   );
 }
 
-function CoreMesh({ look, reducedMotion }: { look: Appearance; reducedMotion: boolean }) {
+function CoreMesh({
+  look,
+  reducedMotion,
+  openRef,
+  onSelect,
+}: {
+  look: Appearance;
+  reducedMotion: boolean;
+  openRef: { current: number };
+  onSelect?: (hit: GalaxySelect) => void;
+}) {
   const ref = useRef<Mesh>(null);
   useFrame(() => {
     if (!ref.current) return;
+    const t = easeOpen(openRef.current, reducedMotion);
     const pulse = reducedMotion ? look.size : look.size * (0.96 + 0.04 * Math.sin((performance.now() / 1000) * 1.1));
-    ref.current.scale.setScalar(look.unmeasured ? 1 : pulse);
+    const closed = 1.15 + (1 - t) * 0.2;
+    ref.current.scale.setScalar((look.unmeasured ? 1 : pulse) * closed);
+    if (!reducedMotion && t < 1) ref.current.rotation.y += 0.012 * (1 - t);
   });
   const c = look.unmeasured ? new Color(UNMEASURED_RGB.r, UNMEASURED_RGB.g, UNMEASURED_RGB.b) : rgb(look);
   return (
-    <mesh ref={ref} name="core" userData={{ kind: "core", id: "core" }}>
+    <mesh
+      ref={ref}
+      name="core"
+      userData={{ kind: "core", id: "core" }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect?.({ kind: "core", id: "core" });
+      }}
+    >
       <sphereGeometry args={[2.4, 24, 20]} />
       <meshBasicMaterial color={c} transparent opacity={look.unmeasured ? 0.35 : 0.85} />
     </mesh>
@@ -103,16 +195,18 @@ function CoreMesh({ look, reducedMotion }: { look: Appearance; reducedMotion: bo
 function PlanetMeshes({
   placed,
   reducedMotion,
+  openRef,
   onSelect,
 }: {
   placed: PlacedScene["planets"];
   reducedMotion: boolean;
+  openRef: { current: number };
   onSelect?: (hit: GalaxySelect) => void;
 }) {
   return (
     <group>
       {placed.map((p) => (
-        <group key={p.id} position={[p.at.x, p.at.y, p.at.z]}>
+        <Flying key={p.id} id={`planet:${p.id}`} dest={p.at} openRef={openRef} reducedMotion={reducedMotion}>
           <mesh
             name={`planet:${p.id}`}
             userData={{ kind: "planet", id: p.id }}
@@ -151,7 +245,7 @@ function PlanetMeshes({
               />
             </mesh>
           ) : null}
-        </group>
+        </Flying>
       ))}
     </group>
   );
@@ -159,31 +253,35 @@ function PlanetMeshes({
 
 function StarPoints({
   placed,
+  reducedMotion,
+  openRef,
   onSelect,
 }: {
   placed: PlacedScene["stars"];
+  reducedMotion: boolean;
+  openRef: { current: number };
   onSelect?: (hit: GalaxySelect) => void;
 }) {
   return (
     <group>
       {placed.map((s) => (
-        <mesh
-          key={s.id}
-          position={[s.at.x, s.at.y, s.at.z]}
-          name={`star:${s.id}`}
-          userData={{ kind: "star", id: s.id }}
-          onClick={(e) => {
-            e.stopPropagation();
-            onSelect?.({ kind: "star", id: s.id });
-          }}
-        >
-          <sphereGeometry args={[0.18, 8, 8]} />
-          <meshBasicMaterial
-            color={s.flag ? new Color(s.flag.r, s.flag.g, s.flag.b) : new Color(0.75, 0.8, 0.95)}
-            transparent
-            opacity={0.95}
-          />
-        </mesh>
+        <Flying key={s.id} id={s.id} dest={s.at} openRef={openRef} reducedMotion={reducedMotion}>
+          <mesh
+            name={`star:${s.id}`}
+            userData={{ kind: "star", id: s.id }}
+            onClick={(e) => {
+              e.stopPropagation();
+              onSelect?.({ kind: "star", id: s.id });
+            }}
+          >
+            <sphereGeometry args={[0.18, 8, 8]} />
+            <meshBasicMaterial
+              color={s.flag ? new Color(s.flag.r, s.flag.g, s.flag.b) : new Color(0.75, 0.8, 0.95)}
+              transparent
+              opacity={0.95}
+            />
+          </mesh>
+        </Flying>
       ))}
     </group>
   );
@@ -191,15 +289,19 @@ function StarPoints({
 
 function AgentMeshes({
   placed,
+  reducedMotion,
+  openRef,
   onSelect,
 }: {
   placed: PlacedScene["agents"];
+  reducedMotion: boolean;
+  openRef: { current: number };
   onSelect?: (hit: GalaxySelect) => void;
 }) {
   return (
     <group>
       {placed.map((a) => (
-        <group key={a.id} position={[a.at.x, a.at.y, a.at.z]}>
+        <Flying key={a.id} id={`agent:${a.id}`} dest={a.at} openRef={openRef} reducedMotion={reducedMotion}>
           <mesh
             name={`agent:${a.id}`}
             userData={{ kind: "agent", id: a.id }}
@@ -217,15 +319,30 @@ function AgentMeshes({
               <meshBasicMaterial color={new Color(0.7, 0.85, 1)} transparent opacity={0.55} side={DoubleSide} />
             </mesh>
           ) : null}
-        </group>
+        </Flying>
       ))}
     </group>
   );
 }
 
-function EdgeArcs({ edges }: { edges: PlacedScene["edges"] }) {
+function EdgeArcs({
+  edges,
+  openRef,
+  reducedMotion,
+}: {
+  edges: PlacedScene["edges"];
+  openRef: { current: number };
+  reducedMotion: boolean;
+}) {
+  const g = useRef<Group>(null);
+  useFrame(() => {
+    if (!g.current) return;
+    const t = easeOpen(openRef.current, reducedMotion);
+    g.current.visible = t > 0.72;
+    g.current.scale.setScalar(t);
+  });
   return (
-    <group>
+    <group ref={g}>
       {edges.map((e) => {
         const mx = (e.from.x + e.to.x) / 2;
         const my = (e.from.y + e.to.y) / 2 + 2.4;
@@ -258,15 +375,24 @@ function EdgeArcs({ edges }: { edges: PlacedScene["edges"] }) {
 function LabelSprites({
   placed,
   distance,
+  openRef,
+  reducedMotion,
 }: {
   placed: PlacedScene;
   distance: number;
+  openRef: { current: number };
+  reducedMotion: boolean;
 }) {
+  const g = useRef<Group>(null);
+  useFrame(() => {
+    if (!g.current) return;
+    g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
+  });
   const showPlanet = labelVisible("planet", distance, SCENE_RADIUS);
   const showAgent = labelVisible("agent", distance, SCENE_RADIUS);
   const showStar = labelVisible("star", distance, SCENE_RADIUS);
   return (
-    <group>
+    <group ref={g}>
       {showPlanet
         ? placed.planets.map((p) => (
             <sprite key={`l-p-${p.id}`} position={[p.at.x, p.at.y + 1.4, p.at.z]} scale={[4.5, 1.1, 1]}>
@@ -297,20 +423,22 @@ function SceneBody({
   reducedMotion,
   orbit,
   onSelect,
-  open,
+  target,
+  onCoreToggle,
 }: {
   model: GalaxyModel;
   reducedMotion: boolean;
   orbit: Orbit;
   onSelect?: (hit: GalaxySelect) => void;
-  open: number;
+  target: number;
+  onCoreToggle: () => void;
 }) {
   const placed = useMemo(() => placeScene(model), [model]);
   const search = typeof window !== "undefined" ? window.location.search : "";
   const forced = readForcedTier(search);
   const [tierIndex, setTierIndex] = useState(forced ?? 0);
   const quality = galaxyTier(tierIndex);
-  const group = useRef<Group>(null);
+  const openRef = useRef(target);
 
   useEffect(() => {
     const w = window as Window & { __veraxPushFrame?: (ms: number) => void; __veraxTier?: number };
@@ -326,22 +454,25 @@ function SceneBody({
     };
   }, [forced, quality.dust, tierIndex]);
 
-  useFrame(() => {
-    if (!group.current) return;
-    const t = Math.max(0, Math.min(1, open));
-    group.current.scale.setScalar(0.08 + t * 0.92);
-  });
-
   return (
-    <group ref={group}>
+    <group>
+      <OpenDriver target={target} reducedMotion={reducedMotion} openRef={openRef} />
       <OrbitRig orbit={orbit} reducedMotion={reducedMotion} />
-      <DustLayer count={quality.dust} reducedMotion={reducedMotion} />
-      <CoreMesh look={placed.core} reducedMotion={reducedMotion} />
-      <PlanetMeshes placed={placed.planets} reducedMotion={reducedMotion} onSelect={onSelect} />
-      <StarPoints placed={placed.stars} onSelect={onSelect} />
-      <AgentMeshes placed={placed.agents} onSelect={onSelect} />
-      <EdgeArcs edges={placed.edges} />
-      <LabelSprites placed={placed} distance={orbit.distance} />
+      <DustLayer count={quality.dust} reducedMotion={reducedMotion} openRef={openRef} />
+      <CoreMesh
+        look={placed.core}
+        reducedMotion={reducedMotion}
+        openRef={openRef}
+        onSelect={() => {
+          onCoreToggle();
+          onSelect?.({ kind: "core", id: "core" });
+        }}
+      />
+      <PlanetMeshes placed={placed.planets} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      <StarPoints placed={placed.stars} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      <AgentMeshes placed={placed.agents} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      <EdgeArcs edges={placed.edges} openRef={openRef} reducedMotion={reducedMotion} />
+      <LabelSprites placed={placed} distance={orbit.distance} openRef={openRef} reducedMotion={reducedMotion} />
       {quality.bloom.strength > 0 ? (
         <EffectComposer>
           <Bloom
@@ -356,14 +487,24 @@ function SceneBody({
   );
 }
 
-export function Galaxy({ model, reducedMotion, onSelect, open = 1 }: GalaxyProps) {
+export function Galaxy({ model, reducedMotion, onSelect, open, ready = true }: GalaxyProps) {
   const reduce = reducedMotion ?? readReduced();
   const orbit = useMemo(() => createOrbit(120), []);
   const dragging = useRef(false);
+  const moved = useRef(false);
   const last = useRef({ x: 0, y: 0 });
+  const queryOpen = typeof window !== "undefined" ? readOpenQuery(window.location.search) : null;
+  const [want, setWant] = useState(open ?? queryOpen ?? 0);
+  const target = ready ? (open ?? want) : 0;
+
+  const toggle = useCallback(() => {
+    if (!ready || open !== undefined) return;
+    setWant((w) => (w >= 0.5 ? 0 : 1));
+  }, [ready, open]);
 
   const onPointerDown = useCallback((e: ReactPointerEvent<HTMLDivElement>) => {
     dragging.current = true;
+    moved.current = false;
     last.current = { x: e.clientX, y: e.clientY };
   }, []);
   const onPointerUp = useCallback(() => {
@@ -373,6 +514,7 @@ export function Galaxy({ model, reducedMotion, onSelect, open = 1 }: GalaxyProps
     if (!dragging.current) return;
     const dx = (e.clientX - last.current.x) * 0.005;
     const dy = (e.clientY - last.current.y) * 0.004;
+    if (Math.abs(e.clientX - last.current.x) + Math.abs(e.clientY - last.current.y) > 6) moved.current = true;
     last.current = { x: e.clientX, y: e.clientY };
     nudgeOrbit(orbit, dx, dy, true);
   }, [orbit]);
@@ -388,6 +530,8 @@ export function Galaxy({ model, reducedMotion, onSelect, open = 1 }: GalaxyProps
     <div
       className="galaxy-stage"
       data-testid="galaxy-stage"
+      data-ready={ready ? "1" : "0"}
+      data-target={String(target)}
       onPointerDown={onPointerDown}
       onPointerUp={onPointerUp}
       onPointerLeave={onPointerUp}
@@ -400,9 +544,19 @@ export function Galaxy({ model, reducedMotion, onSelect, open = 1 }: GalaxyProps
         onCreated={({ gl }) => {
           gl.setClearColor(0x000000, 1);
         }}
+        onPointerMissed={() => {
+          if (!moved.current) toggle();
+        }}
       >
         <FrameSampler />
-        <SceneBody model={model} reducedMotion={reduce} orbit={orbit} onSelect={onSelect} open={open} />
+        <SceneBody
+          model={model}
+          reducedMotion={reduce}
+          orbit={orbit}
+          onSelect={onSelect}
+          target={target}
+          onCoreToggle={toggle}
+        />
       </Canvas>
     </div>
   );

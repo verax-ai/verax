@@ -243,6 +243,7 @@ export function Observatory({
         {tab === "galaxy" ? (
           <Galaxy
             model={ledgerToGalaxy(actions, health, reconcile)}
+            ready={status !== "loading"}
             onSelect={(hit) => {
               if (hit.kind === "star") setSelected(hit.id);
             }}

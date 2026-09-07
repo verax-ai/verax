@@ -214,8 +214,12 @@ describe("preview readiness", () => {
     const prev = process.env.VERAX_PERF_BLOOM;
     delete process.env.VERAX_PERF_BLOOM;
     try {
-      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("bloom"), null);
-      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("tier"), "60000");
+      const u = new URL(withTier("http://127.0.0.1:4173/", 60000));
+      assert.equal(u.searchParams.get("bloom"), null);
+      assert.equal(u.searchParams.get("tier"), "60000");
+      assert.equal(u.searchParams.get("tab"), "galaxy");
+      assert.equal(u.searchParams.get("open"), "1");
+      assert.equal(u.searchParams.get("demo"), "1");
       process.env.VERAX_PERF_BLOOM = "1";
       assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("bloom"), "1");
     } finally {

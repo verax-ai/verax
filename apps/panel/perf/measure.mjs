@@ -30,7 +30,9 @@ export function readUrlArg(argv = process.argv) {
 export function withTier(url, n) {
   const u = new URL(url);
   u.searchParams.set("tier", String(n));
-  u.searchParams.set("tab", "anatomy");
+  u.searchParams.set("tab", "galaxy");
+  // Expanded scene: without `open` the galaxy stays a closed sphere (loading / click).
+  u.searchParams.set("open", "1");
   // This harness measures frames, not the session: without `demo` the panel starts
   // the code flow and navigates away from the page being measured.
   u.searchParams.set("demo", "1");

@@ -12,9 +12,8 @@ export function hash01(seed: string): number {
 }
 
 /**
- * Permanent 3D address for a record id. Math matches the Tugra cockpit
- * `hashNokta` (FNV-1a on `:u`/`:v`/`:w`, cube-root radius, flattened Y).
- * Cluster order and array index are not inputs.
+ * Permanent 3D address for a record id. FNV-1a on `:u`/`:v`/`:w`,
+ * cube-root radius, flattened Y. Cluster order and array index are not inputs.
  */
 export function hashPoint(seed: string, radius: number): Point3 {
   const u = hash01(`${seed}:u`);
