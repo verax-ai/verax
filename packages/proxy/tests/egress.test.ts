@@ -123,6 +123,23 @@ describe("S3 egress allow-list", () => {
     }
   });
 
+  it("a to value with no @ is egress-host-missing, not a bare host", async () => {
+    const ledger = new MemoryLedger();
+    const proxy = createProxy({
+      policy: loadPolicy(SEND_POLICY),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["eg-bare"]),
+      inner: async () => ({ content: [{ type: "text", text: "sent" }], isError: false }),
+    });
+    const out = await proxy.call({ name: "message.send", arguments: { to: "mail.example", text: "hi" } }, sender);
+    assert.match(out.content[0]?.text ?? "", /denied:egress-host-missing:eg-bare/);
+    const rec = (await ledger.decisions())[0]!;
+    assert.equal(rec.claims.reasonCode, "egress-host-missing");
+  });
+
   it("message.read is not egress even when args name host or url", async () => {
     const got = loadPolicy(SEND_POLICY).evaluate(
       { name: "message.read", arguments: { host: "evil.example", url: "https://evil.example" } },

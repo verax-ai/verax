@@ -182,6 +182,60 @@ describe("S3 damage limits", () => {
     }
   });
 
+  it("halted wins over a zero disk probe and still appends", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-halt-disk-"));
+    writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
+    const ledger = new FileLedger(dir);
+    const orig = diskProbe.freeBytes;
+    diskProbe.freeBytes = (probeDir) => (probeDir === dir ? 0 : orig(probeDir));
+    const proxy = createProxy({
+      policy: policyOf({ diskFreeBytes: 64 * 1024 * 1024 }),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["halt-disk-1"]),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    try {
+      const out = await proxy.call({ name: "memory.get", arguments: { id: "a" } }, reader);
+      assert.match(out.content[0]?.text ?? "", /denied:halted:halt-disk-1/);
+      const recs = await ledger.decisions();
+      assert.equal(recs.length, 1);
+      assert.equal(recs[0]!.claims.reasonCode, "halted");
+      assert.equal(typeof recs[0]!.coseHex, "string");
+    } finally {
+      diskProbe.freeBytes = orig;
+      ledger.close();
+    }
+  });
+
+  it("a ledger with no .dir warns that halt and disk limits are inactive", () => {
+    const writes: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      writes.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      createProxy({
+        policy: policyOf({}),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger: new MemoryLedger(),
+        now: tickingNow(),
+        nonce: queuedNonce(["warn-1"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      assert.ok(
+        writes.some((w) => /halt and disk limits are inactive/.test(w)),
+        `stderr=${JSON.stringify(writes)}`,
+      );
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
   it("clearing halted resumes work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-halt-resume-"));
     const haltPath = join(dir, "halted");

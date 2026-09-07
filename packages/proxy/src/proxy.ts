@@ -125,6 +125,9 @@ export function createProxy(deps: ProxyDeps) {
   (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   const ledgerDir = (deps.ledger as unknown as { dir?: unknown }).dir;
   const stateDir = typeof ledgerDir === "string" ? ledgerDir : null;
+  if (stateDir === null) {
+    process.stderr.write("verax-proxy: halt and disk limits are inactive without a ledger directory\n");
+  }
 
   async function writeRecord(opts: {
     decision: DecisionKind;

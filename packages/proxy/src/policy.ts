@@ -39,7 +39,8 @@ export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => 
     const to = args.to;
     if (typeof to !== "string" || to === "") return undefined;
     const at = to.lastIndexOf("@");
-    const host = (at >= 0 ? to.slice(at + 1) : to).trim().toLowerCase();
+    if (at < 0) return undefined;
+    const host = to.slice(at + 1).trim().toLowerCase();
     if (host === "" || host.includes("/") || host.includes(" ")) return undefined;
     return host;
   },
