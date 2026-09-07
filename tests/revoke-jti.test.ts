@@ -100,12 +100,12 @@ describe("S3 jti revoke", () => {
     });
     const port = (server.address() as { port: number }).port;
     try {
-      const token = await issuer.sign({ jti: "tok-revoked-healthz", scope: "verax:read" });
+      const token = await issuer.sign({ jti: "tok-revoked-healthz", scope: "verax:read verax:audit" });
       const before = await fetch(`http://127.0.0.1:${port}/healthz`, {
         headers: { authorization: `Bearer ${token}` },
       });
-      // Control: the scope really does open the counts, so the assertion below
-      // is not passing for the wrong reason.
+      // Control: the operator scope really does open the counts, so the
+      // assertion below is not passing for the wrong reason.
       assert.equal(typeof ((await before.json()) as { decisions?: number }).decisions, "number");
 
       await issuer.revoke("tok-revoked-healthz", stateDir);

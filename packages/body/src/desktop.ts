@@ -90,6 +90,25 @@ export function killTree(pid: number | undefined): void {
   }
 }
 
+/** The panel's redirect is its own origin, so the issuer has to be told which port
+ *  this run put it on: the allow-list default only holds 5173 and 4173. */
+export function issuerEnv(
+  base: NodeJS.ProcessEnv,
+  opts: { stateDir: string; issuerPort: number; panelPort: number },
+  audience: string,
+  issuerUrl: string,
+): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    NODE_ENV: "development",
+    VERAX_STATE_DIR: opts.stateDir,
+    VERAX_DEV_ISSUER_PORT: String(opts.issuerPort),
+    VERAX_AUDIENCE: audience,
+    VERAX_ISSUER: issuerUrl,
+    VERAX_DEV_REDIRECT_URIS: `http://127.0.0.1:${opts.panelPort}/`,
+  };
+}
+
 function cleanEnv(): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" };
   delete env.VERAX_DEV_TOKEN;
@@ -158,14 +177,7 @@ export async function runDesktop(
     const issuer = spawnLogged(
       process.execPath,
       [issuerScript, "--out", tokenPath],
-      {
-        ...cleanEnv(),
-        NODE_ENV: "development",
-        VERAX_STATE_DIR: opts.stateDir,
-        VERAX_DEV_ISSUER_PORT: String(opts.issuerPort),
-        VERAX_AUDIENCE: audience,
-        VERAX_ISSUER: issuerUrl,
-      },
+      issuerEnv(cleanEnv(), opts, audience, issuerUrl),
       repoRoot,
     );
     kids.push(issuer);

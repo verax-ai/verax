@@ -117,7 +117,7 @@ describe("6 dev-issuer.mjs", () => {
         assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
       }
       const origin = `http://127.0.0.1:${outcome.port}`;
-      const redirect = "http://127.0.0.1/cb";
+      const redirect = "http://127.0.0.1:5173/";
       const missing = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}`,
         { redirect: "manual", signal: AbortSignal.timeout(2000) },
@@ -201,6 +201,133 @@ describe("6 dev-issuer.mjs", () => {
         signal: AbortSignal.timeout(2000),
       });
       assert.equal(wrongUri.status >= 400 && wrongUri.status < 500, true);
+    } finally {
+      child.kill("SIGTERM");
+      await closed;
+    }
+  });
+
+  it("refuses an unregistered redirect_uri with 400 and no Location", { timeout: 10000 }, async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-redir-"));
+    const outPath = join(stateDir, "token");
+    const child = spawn(process.execPath, [script, "--out", outPath], {
+      env: {
+        ...process.env,
+        VERAX_STATE_DIR: stateDir,
+        NODE_ENV: "development",
+        VERAX_DEV_ISSUER_PORT: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    const closed = new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    const ready = (async () => {
+      for (let i = 0; i < 40; i += 1) {
+        const match = LISTENING.exec(stderr);
+        if (match) return match[1] ?? "";
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return "";
+    })();
+    const outcome = await Promise.race([
+      closed.then((code) => ({ kind: "closed" as const, code })),
+      ready.then((port) => ({ kind: "ready" as const, port })),
+    ]);
+    try {
+      if (outcome.kind === "closed") {
+        assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
+      }
+      const origin = `http://127.0.0.1:${outcome.port}`;
+      const verifier = randomBytes(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const evil = await fetch(
+        `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent("http://evil.example/steal")}&code_challenge=${challenge}&code_challenge_method=S256`,
+        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+      );
+      assert.equal(evil.status, 400);
+      const body = (await evil.json()) as { error?: string };
+      assert.equal(body.error, "invalid_request");
+      assert.equal(evil.headers.get("location"), null);
+    } finally {
+      child.kill("SIGTERM");
+      await closed;
+    }
+  });
+
+  it("drops the oldest code when the map is full", { timeout: 20000 }, async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-codes-"));
+    const outPath = join(stateDir, "token");
+    const child = spawn(process.execPath, [script, "--out", outPath], {
+      env: {
+        ...process.env,
+        VERAX_STATE_DIR: stateDir,
+        NODE_ENV: "development",
+        VERAX_DEV_ISSUER_PORT: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    const closed = new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    const ready = (async () => {
+      for (let i = 0; i < 40; i += 1) {
+        const match = LISTENING.exec(stderr);
+        if (match) return match[1] ?? "";
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return "";
+    })();
+    const outcome = await Promise.race([
+      closed.then((code) => ({ kind: "closed" as const, code })),
+      ready.then((port) => ({ kind: "ready" as const, port })),
+    ]);
+    try {
+      if (outcome.kind === "closed") {
+        assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
+      }
+      const origin = `http://127.0.0.1:${outcome.port}`;
+      const redirect = "http://127.0.0.1:5173/";
+      const verifier = randomBytes(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const authorize = async () => {
+        const auth = await fetch(
+          `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+          { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        );
+        return new URL(auth.headers.get("location") ?? "", origin).searchParams.get("code") ?? "";
+      };
+      const first = await authorize();
+      assert.equal(first.length > 0, true);
+      for (let i = 0; i < 100; i += 1) {
+        const code = await authorize();
+        assert.equal(code.length > 0, true, `authorize ${i} had no code`);
+      }
+      const last = await authorize();
+      const exchange = async (code: string) =>
+        fetch(`${origin}/token`, {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: redirect,
+            code_verifier: verifier,
+          }),
+          signal: AbortSignal.timeout(2000),
+        });
+      const firstRes = await exchange(first);
+      assert.equal(firstRes.status, 400, "the oldest code must have been dropped");
+      const lastRes = await exchange(last);
+      assert.equal(lastRes.status, 200);
     } finally {
       child.kill("SIGTERM");
       await closed;

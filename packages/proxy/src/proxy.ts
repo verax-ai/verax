@@ -16,6 +16,7 @@ import {
   noteResolution,
   noteTenantRef,
 } from "./ledger.ts";
+import { spokenReason } from "./spoken-reason.ts";
 import { tenantKey } from "./tenant.ts";
 import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
@@ -48,7 +49,18 @@ export class LedgerDenyUnrecorded extends Error {
 
 export const REF_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-function denied(reasonCode: string, ref: string): ToolResult {
+function denied(reasonCode: string, ref: string, call?: ToolCall): ToolResult {
+  const spoken = spokenReason(reasonCode);
+  if (spoken !== reasonCode) {
+    const payload: Record<string, unknown> = { error: spoken };
+    if (call && typeof call.arguments.id === "string") {
+      payload.id = call.arguments.id;
+    }
+    return {
+      content: [{ type: "text", text: JSON.stringify(payload) }],
+      isError: true,
+    };
+  }
   return {
     content: [{ type: "text", text: `denied:${reasonCode}:${ref}` }],
     isError: true,
@@ -445,7 +457,7 @@ export function createProxy(deps: ProxyDeps) {
             return deferred(given);
           }
           if (existing.decision === "deny") {
-            return denied(existing.reasonCode, given);
+            return denied(existing.reasonCode, given, call);
           }
           if (existing.decision === "allow" && existing.ref) {
             if (await hasPrimaryEffect(deps.ledger, existing.ref)) {
@@ -527,7 +539,7 @@ export function createProxy(deps: ProxyDeps) {
         return deferred(shown);
       }
       if (!allow) {
-        return denied(reasonCode, shown);
+        return denied(reasonCode, shown, call);
       }
       return runInner(dispatched, principal, ref);
     },

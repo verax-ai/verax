@@ -75,6 +75,61 @@ describe("healthz counts", () => {
       await issuer.close();
     }
   });
+
+  it("counts require verax:audit; a brain read token and a scopeless token see ok only", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-healthz-audit-"));
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const bodyPort = (server.address() as { port: number }).port;
+    try {
+      const brain = await issuer.sign({ scope: "verax:read" });
+      const brainRes = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${brain}` },
+      });
+      assert.equal(brainRes.status, 200);
+      assert.deepEqual(await brainRes.json(), { ok: true });
+
+      const none = await issuer.sign({ scope: "" });
+      const noneRes = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${none}` },
+      });
+      assert.equal(noneRes.status, 200);
+      assert.deepEqual(await noneRes.json(), { ok: true });
+
+      const panel = await issuer.sign({ scope: "verax:read verax:audit" });
+      const panelRes = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${panel}` },
+      });
+      assert.equal(panelRes.status, 200);
+      const panelBody = (await panelRes.json()) as {
+        ok?: boolean;
+        decisions?: number;
+        effects?: number;
+        lastDecisionMs?: number | null;
+        lock?: string;
+      };
+      assert.equal(panelBody.ok, true);
+      assert.equal(panelBody.decisions, 0);
+      assert.equal(panelBody.effects, 0);
+      assert.equal(panelBody.lastDecisionMs, null);
+      assert.equal(panelBody.lock, "held");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
 });
 
 describe("B5 identity and scope + e2e", () => {
@@ -101,7 +156,7 @@ describe("B5 identity and scope + e2e", () => {
       assert.equal(anonBody.ok, true);
       assert.equal("decisions" in anonBody, false);
 
-      const readToken = await issuer.sign({ scope: "verax:read" });
+      const readToken = await issuer.sign({ scope: "verax:read verax:audit" });
       const health = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
         headers: { authorization: `Bearer ${readToken}` },
       });
@@ -164,7 +219,7 @@ describe("B5 identity and scope + e2e", () => {
       assert.match(readFileSync(join(stateDir, "effects.jsonl"), "utf8"), /memory\.put/);
 
       const healthAfter = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
-        headers: { authorization: `Bearer ${readOnly}` },
+        headers: { authorization: `Bearer ${readToken}` },
       });
       const afterBody = (await healthAfter.json()) as {
         decisions?: number;
