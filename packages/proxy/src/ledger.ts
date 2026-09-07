@@ -107,6 +107,20 @@ function ensureLedgerDir(dir: string): PermissionCheck {
   return assertDirPrivate(dir);
 }
 
+export type RemoteWitnessSign = (
+  row: EffectRow,
+  resultHash: string | undefined,
+) => Promise<Pick<LedgerEffect, "receipt" | "attestation" | "witnessClass"> | null>;
+
+export function signEffectAttestation(
+  row: EffectRow,
+  witnessClass: WitnessClass,
+  resultHash: string | undefined,
+  signer: EffectSigner,
+): Pick<LedgerEffect, "receipt" | "attestation"> {
+  return signedEffectFields(row, witnessClass, resultHash, signer);
+}
+
 function signedEffectFields(
   row: EffectRow,
   witnessClass: WitnessClass,
@@ -354,6 +368,8 @@ export class FileLedger implements Ledger {
   readonly permissionCheck: PermissionCheck;
   readonly dir: string;
   effectSigner?: EffectSigner;
+  /** Optional signer in another process. Null means stay `self`. */
+  remoteWitness?: RemoteWitnessSign;
   private readonly decisionsPath: string;
   private readonly effectsPath: string;
   private readonly lockPath: string;
@@ -588,10 +604,7 @@ export class FileLedger implements Ledger {
       );
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    await appendDurable(
-      this.effectsPath,
-      lineOf(asStoredEffect(row, witnessClass, resultHash, this.effectSigner)),
-    );
+    await appendDurable(this.effectsPath, lineOf(await this.storeEffect(row, witnessClass, resultHash)));
     if (row.effectClass !== "duplicate-effect") this.effectRefs.add(row.ref);
   }
 
@@ -642,6 +655,28 @@ export class FileLedger implements Ledger {
 
   hasPrimaryEffect(ref: string): boolean {
     return this.effectRefs.has(ref);
+  }
+
+  private async storeEffect(
+    row: EffectRow,
+    witnessClass: WitnessClass,
+    resultHash: string | undefined,
+  ): Promise<LedgerEffect> {
+    if (this.remoteWitness && row.effectClass !== "duplicate-effect") {
+      const remote = await this.remoteWitness(row, resultHash);
+      if (remote?.attestation && remote.receipt && remote.witnessClass && remote.witnessClass !== "self") {
+        const stored: LedgerEffect = {
+          row: asEffectRow(row),
+          witnessClass: remote.witnessClass,
+          receipt: remote.receipt,
+          attestation: remote.attestation,
+        };
+        if (resultHash !== undefined) stored.resultHash = resultHash;
+        return stored;
+      }
+      return asStoredEffect(row, DEFAULT_WITNESS, resultHash, this.effectSigner);
+    }
+    return asStoredEffect(row, witnessClass, resultHash, this.effectSigner);
   }
 }
 

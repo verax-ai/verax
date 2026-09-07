@@ -148,10 +148,23 @@ Each line is what the tree carries, then what stays open.
 - S6 — Spoken reason: `spokenReason` maps `tenant-mismatch` to `not-found` on the brain-facing string only. `memory.get` and `audit.explain` therefore answer another tenant's id/ref and a missing id/ref with the same `not-found` family; the ledger row stays `deny`/`tenant-mismatch` vs `allow`. Operator `explain()` and `/api/*` are unmasked. A brain that explains the two records it owns can still tell them apart. `/healthz` counts now require `verax:audit` (a brain `verax:read` token is `{ ok: true }` only). The development issuer refuses an unlisted `redirect_uri` and caps `codes` at 100. Unproven until two live customers share one body.
 - S7 — Inputs required: carries optional `policy.requireInputs` on the document root (`version: 1` stays). When it is `true`, a call with no `_inputs` key is a signed `deny inputs-required` (`effectHash: null`, no body). An empty array is a declaration and is not that deny. A broken declaration stays `input-invalid`. `inputs-required` is not masked. `DecisionInputRow` still names `validFromMs` / `validUntilMs`; optional `source` is additive. The panel reads `authorization_servers` from resource metadata before a session; an unreadable document is a visible rail error (last-resort issuer named, no silent redirect). `verax doctor` warns when the panel port is off the issuer redirect allow-list, when the panel last-resort issuer differs from `VERAX_ISSUER`, or when the development token scope lacks `verax:audit`. Doctor only reports. Unproven until brains declare `_inputs` on every production call.
 
+## Phase 4 — independent witness (this commit)
+
+`verax witness <stateDir>` is a second process. It holds
+`keys/witness.private.pem` and signs an effect row over loopback HTTP.
+The body never loads that file (`loadOrCreateSigners` still only has
+record + effect). A reachable witness writes `witnessClass: "same-org"`
+and a `witness-status.jsonl` `signed` row. An unreachable witness leaves
+the class `self` and records `self-fallback` / `unreachable`. That is
+not a third-party witness.
+
 Remaining gaps, still open:
 
 - `_inputs` is optional unless `policy.requireInputs` is `true`; without that flag a call with no declaration still stores `inputs: []`. The flag is off on the default policy. Production brains have not been required to declare yet.
-- every witness is still `self`
+- a FileLedger effect is `same-org` only when `verax witness` signed it
+  in another process; without that process the class is `self` and
+  `witness-status.jsonl` records the fallback. MemoryLedger tests and
+  the body effect key remain `self`. This is not a third-party witness.
 - Cedulon's `EffectRow` still cannot hold `resultHash`; the attestation does
 - a brain can still tell a cross-tenant miss from a missing id by explaining the two records it owns (`deny`/`tenant-mismatch` vs `allow`). The spoken answers on those two calls are now the same `not-found` family; that hop is the accepted remaining limit, not a claim that the oracle is closed
 - the development issuer is still not a production authorization server; `NODE_ENV=production` still exits. `/authorize` now refuses a `redirect_uri` outside `VERAX_DEV_REDIRECT_URIS` (default `http://127.0.0.1:5173/` and `http://127.0.0.1:4173/`) with `400 invalid_request`, and the in-memory `codes` map is capped at 100 (expired rows drop first, then the oldest)
