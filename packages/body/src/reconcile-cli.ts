@@ -36,6 +36,8 @@ function loadDescriptorsFromDir(stateDir: string): Record<string, string[]> {
 }
 
 const CARD_TOLERANCE_MS = 3 * 86_400_000;
+/** UTC-12 .. UTC+14 in minutes. */
+const MAX_TZ_OFFSET_MIN = 840;
 
 export function parseReconcileArgs(argv: string[]): {
   stateDir: string;
@@ -48,8 +50,10 @@ export function parseReconcileArgs(argv: string[]): {
   columns?: { date: string; amount: string; description: string; id?: string };
   delimiter?: ";" | ",";
   decimal?: "," | ".";
+  tzOffsetMinutes?: number;
 } | { error: string } {
   const rest = argv.slice(1);
+  let tzOffsetMinutes: number | undefined;
   let toleranceMs: number | undefined;
   let outPath: string | undefined;
   let windowStart: number | undefined;
@@ -121,6 +125,13 @@ export function parseReconcileArgs(argv: string[]): {
       i += 1;
       continue;
     }
+    if (a === "--tz-offset") {
+      const n = Number(rest[i + 1]);
+      if (!Number.isInteger(n) || Math.abs(n) > MAX_TZ_OFFSET_MIN) return { error: "tz-offset-invalid" };
+      tzOffsetMinutes = n;
+      i += 1;
+      continue;
+    }
     if (a === "--decimal") {
       const p = rest[i + 1];
       if (p !== "," && p !== ".") return { error: "decimal-invalid" };
@@ -155,6 +166,7 @@ export function parseReconcileArgs(argv: string[]): {
     columns,
     delimiter,
     decimal,
+    tzOffsetMinutes,
   };
 }
 
@@ -182,7 +194,7 @@ export function runReconcile(
   if ("error" in parsed) {
     if (parsed.error === "usage") {
       writeErr(
-        "verax reconcile <stateDir> <channel.jsonl> [--tolerance 60000] [--window-start ms --window-end ms] --out report.json\n",
+        "verax reconcile <stateDir> <channel.jsonl> [--tolerance 60000] [--window-start ms --window-end ms] [--tz-offset 180] --out report.json\n",
       );
       return 78;
     }
@@ -198,6 +210,7 @@ export function runReconcile(
             columns: parsed.columns,
             delimiter: parsed.delimiter,
             decimal: parsed.decimal,
+            tzOffsetMinutes: parsed.tzOffsetMinutes,
           })
         : undefined;
     const channel = card ?? parseChannelJsonl(raw);

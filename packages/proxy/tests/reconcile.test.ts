@@ -313,12 +313,21 @@ describe("card:", () => {
     assert.equal(report.matched[0]!.effect.ref, "a1");
   });
 
-  it("C2: a timed card row uses a minute window; a dateless row keeps the 3-day window on the row", () => {
-    const timed = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026 14:30;FACEBK FB.ME/ADS;-10,00\n", {
+  it("C2: a printed time is only a minute window when the statement's offset is given", () => {
+    // A statement prints local wall-clock time. Without an offset the body cannot place
+    // that time on the clock, so the row stays a day row and keeps the wide window.
+    const naive = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026 14:30;FACEBK FB.ME/ADS;-10,00\n", {
       currency: "TRY",
     });
+    assert.equal(naive[0]!.datePrecision, "day");
+    assert.equal(naive[0]!.occurredAtMs, Date.UTC(2026, 8, 6, 12, 0, 0));
+
+    const timed = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026 14:30;FACEBK FB.ME/ADS;-10,00\n", {
+      currency: "TRY",
+      tzOffsetMinutes: 180,
+    });
     assert.equal(timed[0]!.datePrecision, "minute");
-    assert.equal(timed[0]!.occurredAtMs, Date.UTC(2026, 8, 6, 14, 30, 0));
+    assert.equal(timed[0]!.occurredAtMs, Date.UTC(2026, 8, 6, 11, 30, 0));
     const day = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;FACEBK FB.ME/ADS;-10,00\n", {
       currency: "TRY",
     });
@@ -366,5 +375,43 @@ describe("card:", () => {
     assert.equal(timedReport.ghost.length, 1);
     assert.equal(timedReport.ghost[0]!.datePrecision, "minute");
     assert.ok((timedReport.ghost[0]!.toleranceMs ?? 0) < 86_400_000);
+  });
+
+  it("C2: with the offset given, a timed row matches the effect at that instant", () => {
+    // 14:30 in Istanbul is 11:30 UTC; the effect is written at the true instant.
+    const timed = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026 14:30;FACEBK FB.ME/ADS;-10,00\n", {
+      currency: "TRY",
+      tzOffsetMinutes: 180,
+    });
+    const effect: LedgerEffect = {
+      row: {
+        ref: "a1",
+        effectHash: "11".repeat(32),
+        effectClass: "spend",
+        timestampMs: Date.UTC(2026, 8, 6, 11, 30, 30),
+      },
+      witnessClass: "self",
+    };
+    const approval: ApprovalRow = {
+      ref: "d1",
+      requestHash: "00".repeat(32),
+      subject: "spend",
+      args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+      ruleId: "s",
+      ruleText: "t",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1_000,
+      payee: "ads-platform",
+      currency: "TRY",
+      createdAtMs: Date.UTC(2026, 8, 6, 11),
+      expiresAtMs: Date.UTC(2026, 8, 7, 11),
+      status: "approved",
+      brain: "brain-1",
+      allowRef: "a1",
+    };
+    const report = reconcile(timed, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
+    assert.equal(report.matched.length, 1);
+    assert.equal(report.matched[0]!.datePrecision, "minute");
+    assert.equal(report.matched[0]!.toleranceMs, 120_000);
   });
 });

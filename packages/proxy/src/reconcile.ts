@@ -89,6 +89,12 @@ export type CardCsvOpts = {
   delimiter?: ";" | ",";
   decimal?: "," | ".";
   dateFormat?: "DD.MM.YYYY" | "YYYY-MM-DD";
+  /**
+   * Minutes east of UTC that the statement's printed times are in (Istanbul: 180).
+   * A statement prints local wall-clock time and names no zone, so without this the
+   * time cannot be placed on the clock and the row stays a day row.
+   */
+  tzOffsetMinutes?: number;
 };
 
 const VERAX_REF = /verax:([A-Za-z0-9][A-Za-z0-9._-]{0,63})/;
@@ -97,28 +103,24 @@ const CARD_MINUTE_TOLERANCE_MS = 120_000;
 function parseCardDate(
   raw: string,
   format: "DD.MM.YYYY" | "YYYY-MM-DD",
+  tzOffsetMinutes?: number,
 ): { ms: number; precision: "day" | "minute" } {
   const t = raw.trim();
-  if (format === "YYYY-MM-DD") {
-    const m = /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(t);
-    if (!m) throw new Error(`card-csv-date:${raw}`);
-    if (m[4] !== undefined) {
-      return {
-        ms: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)),
-        precision: "minute",
-      };
-    }
-    return { ms: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0), precision: "day" };
-  }
-  const m = /^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(t);
+  const offset = Number.isFinite(tzOffsetMinutes) ? (tzOffsetMinutes as number) : null;
+  const pattern =
+    format === "YYYY-MM-DD"
+      ? /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/
+      : /^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/;
+  const m = pattern.exec(t);
   if (!m) throw new Error(`card-csv-date:${raw}`);
-  if (m[4] !== undefined) {
-    return {
-      ms: Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)),
-      precision: "minute",
-    };
+  const year = Number(format === "YYYY-MM-DD" ? m[1] : m[3]);
+  const month = Number(m[2]) - 1;
+  const day = Number(format === "YYYY-MM-DD" ? m[3] : m[1]);
+  if (m[4] !== undefined && offset !== null) {
+    const local = Date.UTC(year, month, day, Number(m[4]), Number(m[5]), Number(m[6] ?? 0));
+    return { ms: local - offset * 60_000, precision: "minute" };
   }
-  return { ms: Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12, 0, 0), precision: "day" };
+  return { ms: Date.UTC(year, month, day, 12, 0, 0), precision: "day" };
 }
 
 function rowToleranceMs(row: ChannelRow, fallback: number): number {
@@ -226,7 +228,7 @@ export function parseCardCsv(text: string, opts: CardCsvOpts): ParsedCardCsv {
       const description = cells[descIdx] ?? "";
       const signed = parseCardAmount(amountRaw, decimal);
       const amountMinor = Math.abs(signed);
-      const parsedDate = parseCardDate(date, dateFormat);
+      const parsedDate = parseCardDate(date, dateFormat, opts.tzOffsetMinutes);
       const refHit = VERAX_REF.exec(description);
       const idCell = idIdx >= 0 ? (cells[idIdx] ?? "").trim() : "";
       const externalId =
