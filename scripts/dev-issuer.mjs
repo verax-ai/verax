@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-// Development only; not an authorization server; no authorize endpoint.
+// Development only. PKCE S256 authorize/token for local panel sessions.
+// NODE_ENV=production still exits. Not a production authorization server.
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
@@ -53,25 +54,68 @@ const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
 const sub = process.env.VERAX_DEV_SUB ?? "dev-brain";
 const scope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory";
 
-const token = await new SignJWT({ scope })
-  .setProtectedHeader({ alg: "ES256", kid: "verax-dev" })
-  .setSubject(sub)
-  .setIssuer(issuer)
-  .setAudience(audience)
-  .setIssuedAt()
-  .setExpirationTime("10m")
-  .setJti(randomUUID())
-  .sign(key);
+async function mintAccessToken() {
+  return new SignJWT({ scope })
+    .setProtectedHeader({ alg: "ES256", kid: "verax-dev" })
+    .setSubject(sub)
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setIssuedAt()
+    .setExpirationTime("10m")
+    .setJti(randomUUID())
+    .sign(key);
+}
 
+const token = await mintAccessToken();
 writeFileSync(outPath, token, { encoding: "utf8", mode: 0o600 });
 chmodSync(outPath, 0o600);
 
-async function readJson(req) {
+const CODE_TTL_MS = 60_000;
+/** @type {Map<string, { challenge: string; redirectUri: string; expiresAtMs: number }>} */
+const codes = new Map();
+
+function s256(verifier) {
+  return createHash("sha256").update(verifier).digest("base64url");
+}
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, { "content-type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
+function redirectWith(res, redirectUri, params) {
+  let loc;
+  try {
+    loc = new URL(redirectUri);
+  } catch {
+    sendJson(res, 400, { error: "invalid_request" });
+    return;
+  }
+  for (const [k, v] of Object.entries(params)) {
+    if (typeof v === "string") loc.searchParams.set(k, v);
+  }
+  res.writeHead(302, { location: loc.toString() });
+  res.end();
+}
+
+async function readBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
-  const text = Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function readJson(req) {
+  const text = await readBody(req);
   if (text === "") return {};
   return JSON.parse(text);
+}
+
+function parseForm(text) {
+  const params = new URLSearchParams(text);
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const [k, v] of params) out[k] = v;
+  return out;
 }
 
 const server = createServer((req, res) => {
@@ -83,27 +127,92 @@ const server = createServer((req, res) => {
       res.end(body);
       return;
     }
+    if (req.method === "GET" && url.pathname === "/authorize") {
+      const responseType = url.searchParams.get("response_type");
+      const clientId = url.searchParams.get("client_id");
+      const redirectUri = url.searchParams.get("redirect_uri");
+      const challenge = url.searchParams.get("code_challenge");
+      const method = url.searchParams.get("code_challenge_method");
+      const state = url.searchParams.get("state");
+      if (responseType !== "code" || !clientId || !redirectUri) {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      if (!challenge) {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      if (method !== "S256") {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const code = randomBytes(32).toString("base64url");
+      codes.set(code, {
+        challenge,
+        redirectUri,
+        expiresAtMs: Date.now() + CODE_TTL_MS,
+      });
+      redirectWith(res, redirectUri, { code, ...(state ? { state } : {}) });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/token") {
+      let parsed;
+      try {
+        const text = await readBody(req);
+        const ctype = String(req.headers["content-type"] ?? "");
+        parsed = ctype.includes("application/json") ? JSON.parse(text || "{}") : parseForm(text);
+      } catch {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const grant = parsed.grant_type;
+      const code = parsed.code;
+      const redirectUri = parsed.redirect_uri;
+      const verifier = parsed.code_verifier;
+      if (grant !== "authorization_code" || typeof code !== "string" || typeof redirectUri !== "string" || typeof verifier !== "string") {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const row = codes.get(code);
+      codes.delete(code);
+      if (!row || Date.now() > row.expiresAtMs) {
+        sendJson(res, 400, { error: "invalid_grant" });
+        return;
+      }
+      if (redirectUri !== row.redirectUri) {
+        sendJson(res, 400, { error: "invalid_grant" });
+        return;
+      }
+      if (s256(verifier) !== row.challenge) {
+        sendJson(res, 400, { error: "invalid_grant" });
+        return;
+      }
+      const accessToken = await mintAccessToken();
+      sendJson(res, 200, {
+        access_token: accessToken,
+        token_type: "Bearer",
+        expires_in: 600,
+      });
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/revoke") {
       let parsed;
       try {
         parsed = await readJson(req);
       } catch {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "bad-request" }));
+        sendJson(res, 400, { error: "bad-request" });
         return;
       }
       const jti = typeof parsed.jti === "string" ? parsed.jti : "";
       if (jti === "") {
-        res.writeHead(400, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: "jti-missing" }));
+        sendJson(res, 400, { error: "jti-missing" });
         return;
       }
       appendFileSync(join(stateDir, "revoked-jti.jsonl"), `${JSON.stringify({ jti })}\n`, {
         encoding: "utf8",
         mode: 0o600,
       });
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ revoked: true }));
+      sendJson(res, 200, { revoked: true });
       return;
     }
     res.writeHead(404);

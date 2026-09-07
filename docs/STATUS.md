@@ -71,8 +71,10 @@ Known gaps:
 - field names not yet aligned with Tugra
 - no-bypass: CI scan + runtime registry; compiled-JS and foreign-binding
   paths are not covered
-- the development issuer is not an authorization server; it has no
-  authorize endpoint. It listens on `VERAX_DEV_ISSUER_PORT` (default 8790)
+- the development issuer is not a production authorization server. It
+  now serves local `GET /authorize` (PKCE S256) and `POST /token`.
+  `NODE_ENV=production` still exits. It listens on
+  `VERAX_DEV_ISSUER_PORT` (default 8790)
 - payload encryption and retention policy not designed
 - memory items are not bound to the decision that read them (question 3
   is "not tracked yet")

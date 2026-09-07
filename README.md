@@ -14,9 +14,11 @@ The accountable agent body. Design intent, not yet a claim:
 Status: skeleton. What the tree carries and what stays unproven is stated
 in `docs/STATUS.md`. Nothing in this repository is a claim beyond that file.
 
-`scripts/dev-issuer.mjs` is development only; not an authorization
-server; no authorize endpoint. It writes a token to `--out` and never
-prints one. It listens on `VERAX_DEV_ISSUER_PORT` (default 8790).
+`scripts/dev-issuer.mjs` is development only; not a production
+authorization server. It serves `GET /authorize` (PKCE S256) and
+`POST /token`, writes a token to `--out`, and never prints one.
+It listens on `VERAX_DEV_ISSUER_PORT` (default 8790).
+`NODE_ENV=production` exits.
 
 `apps/panel` is a 2D account-for rail beside a particle presence.
 In development the Vite proxy attaches `VERAX_DEV_TOKEN` from
