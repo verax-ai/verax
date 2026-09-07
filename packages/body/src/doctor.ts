@@ -133,19 +133,22 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
   }
 
   const panelPort = panelPortOf(env);
+  const portSource = env.VERAX_PANEL_PORT?.trim() ? "VERAX_PANEL_PORT" : "the 5173 default, VERAX_PANEL_PORT unset";
   const redirectUris = redirectAllowList(env);
   const panelRedirect = `http://127.0.0.1:${panelPort}/`;
+  // Nothing here opens a port: the number comes from the environment, so both
+  // lines name where it came from and an ok cannot be read as a live check.
   if (redirectUris.some((u) => sameRedirect(u, panelRedirect))) {
     checks.push({
       id: "panel-redirect-uri",
       level: "ok",
-      detail: `panel port ${panelPort} is on the issuer redirect allow-list`,
+      detail: `panel port ${panelPort} (${portSource}) is on the issuer redirect allow-list`,
     });
   } else {
     checks.push({
       id: "panel-redirect-uri",
       level: "warn",
-      detail: `panel port ${panelPort} is not on the issuer redirect allow-list; set VERAX_DEV_REDIRECT_URIS=${panelRedirect} or run verax desktop so it passes the panel port`,
+      detail: `panel port ${panelPort} (${portSource}) is not on the issuer redirect allow-list; set VERAX_DEV_REDIRECT_URIS=${panelRedirect} or run verax desktop so it passes the panel port`,
     });
   }
 

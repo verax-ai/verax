@@ -106,6 +106,24 @@ describe("doctor", () => {
     assert.equal(def?.level, "ok");
   });
 
+  it("says where the panel port came from, so an ok line is not read as a live check", () => {
+    const checks = runDoctor(
+      {
+        VERAX_ISSUER: "http://127.0.0.1:8790",
+        VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
+        VERAX_AUDIENCE: "http://127.0.0.1:8787",
+        VERAX_STATE_DIR: ".",
+        VERAX_POLICY_FILE: "x",
+      },
+      ["node", "cli.ts", "doctor"],
+    );
+    const check = checks.find((c) => c.id === "panel-redirect-uri");
+    assert.equal(check?.level, "ok");
+    // The doctor never opens the port; it reads an environment variable or falls
+    // back to 5173. The line has to say so, or a green reads as "I looked".
+    assert.match(check?.detail ?? "", /VERAX_PANEL_PORT/);
+  });
+
   it("warns when the panel last-resort issuer differs from VERAX_ISSUER", () => {
     const base = {
       VERAX_JWKS_URL: "http://127.0.0.1:8791/.well-known/jwks.json",

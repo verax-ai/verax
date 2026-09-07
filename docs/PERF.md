@@ -32,6 +32,21 @@ New textured mesh + particles (Chromium headed, default GPU):
 Default tier (20000, bloom off) is under the 16.7 ms window. Bloom
 roughly doubles P95 and still stays under the window.
 
+## Run it on an idle machine
+
+The harness reads roughly half again as slow when it runs on a busy one, and
+`check-baseline.mjs` compares against a stored per-environment number, so a
+measurement taken right after a build or a test run can fail a tree that did not
+change. Measured on this laptop on 7 September 2026, tier 15000, 300 frames:
+
+| Tree | Right after builds and tests | After 150 s idle |
+|---|---|---|
+| main (`b46632f`) | p95 93.2 / 92.8 ms | p95 60.8 ms |
+| the branch under test | p95 93.2 / 98.2 ms | p95 60.7 ms |
+
+Same numbers on both trees under the same conditions: that pair is what says the
+branch did not slow anything down. One run on a loaded machine says nothing.
+
 ## Software GL baselines
 
 | Machine | GPU | Date | Tier | P95 (ms) | Frames |
