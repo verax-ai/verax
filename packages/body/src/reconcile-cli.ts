@@ -1,6 +1,39 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { loadApprovalsFromDir, loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "@verax-ai/proxy";
+
+function loadDescriptorsFromDir(stateDir: string): Record<string, string[]> {
+  const dir = join(stateDir, "policies");
+  let names: string[];
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return {};
+  }
+  const out: Record<string, string[]> = {};
+  for (const name of names) {
+    if (!name.endsWith(".json")) continue;
+    try {
+      const doc = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
+        rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
+      };
+      if (!Array.isArray(doc.rules)) continue;
+      for (const rule of doc.rules) {
+        const spend = rule.spend;
+        if (!spend || !Array.isArray(spend.payees) || !Array.isArray(spend.descriptors)) continue;
+        const stamps = spend.descriptors.filter((d): d is string => typeof d === "string" && d !== "");
+        if (stamps.length === 0) continue;
+        for (const payee of spend.payees) {
+          if (typeof payee === "string" && payee !== "") out[payee] = stamps;
+        }
+      }
+    } catch {
+      // A bad snapshot is skipped; reconcile still runs the weaker path.
+    }
+  }
+  return out;
+}
 
 const CARD_TOLERANCE_MS = 3 * 86_400_000;
 
@@ -169,11 +202,16 @@ export function runReconcile(
         : undefined;
     const channel = card ?? parseChannelJsonl(raw);
     const effects = loadEffectsFromDir(parsed.stateDir);
+    const descriptorsByPayee =
+      parsed.channel === "card" ? loadDescriptorsFromDir(parsed.stateDir) : undefined;
     const report = reconcile(channel, effects, {
       toleranceMs: parsed.toleranceMs,
       window: parsed.window,
       approvals: parsed.channel === "card" ? loadApprovalsFromDir(parsed.stateDir) : undefined,
       skipped: card?.skipped,
+      ...(descriptorsByPayee && Object.keys(descriptorsByPayee).length > 0
+        ? { descriptorsByPayee }
+        : {}),
     });
     writeFileSync(parsed.outPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8" });
     if (parsed.channel === "card") {

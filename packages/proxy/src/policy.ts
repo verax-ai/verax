@@ -8,6 +8,8 @@ export type PolicySpend = {
   currency: string;
   payees: readonly string[];
   dailyMaxMinor?: number;
+  /** Statement stamps for this payee. Optional; never guessed. */
+  descriptors?: readonly string[];
 };
 
 export type PolicyRule = {
@@ -123,6 +125,16 @@ function asSpend(raw: unknown, id: string): PolicySpend {
       throw new Error(`policy-rule-spend-missing:${id}`);
     }
     spend.dailyMaxMinor = rec.dailyMaxMinor;
+  }
+  if (rec.descriptors !== undefined) {
+    if (
+      !Array.isArray(rec.descriptors) ||
+      rec.descriptors.length === 0 ||
+      rec.descriptors.some((d) => typeof d !== "string" || d === "")
+    ) {
+      throw new Error(`policy-rule-spend-descriptors:${id}`);
+    }
+    spend.descriptors = rec.descriptors as string[];
   }
   return spend;
 }

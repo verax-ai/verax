@@ -19,6 +19,11 @@ export type ChannelRow = {
   currency?: string;
   credit?: boolean;
   reason?: string;
+  /** Statement text when parsed from a card CSV. */
+  descriptor?: string;
+  datePrecision?: "day" | "minute";
+  /** Window used for this row. Set by reconcile. */
+  toleranceMs?: number;
 };
 
 export type CardCsvSkip = { line: number; reason: string };
@@ -33,7 +38,12 @@ export type ReconcileReport = {
     rowCount: number;
     skipped?: CardCsvSkip[];
   };
-  matched: Array<{ channel: ChannelRow; effect: EffectRow }>;
+  matched: Array<{
+    channel: ChannelRow;
+    effect: EffectRow;
+    datePrecision?: "day" | "minute";
+    toleranceMs?: number;
+  }>;
   ghost: ChannelRow[];
   unsent: EffectRow[];
   authorizedUnpaid: EffectRow[];
@@ -68,6 +78,8 @@ function asChannelRow(raw: unknown, line: number): ChannelRow {
   if (typeof o.amountMinor === "number") row.amountMinor = o.amountMinor;
   if (typeof o.currency === "string") row.currency = o.currency;
   if (o.credit === true) row.credit = true;
+  if (typeof o.descriptor === "string") row.descriptor = o.descriptor;
+  if (o.datePrecision === "day" || o.datePrecision === "minute") row.datePrecision = o.datePrecision;
   return row;
 }
 
@@ -80,17 +92,42 @@ export type CardCsvOpts = {
 };
 
 const VERAX_REF = /verax:([A-Za-z0-9][A-Za-z0-9._-]{0,63})/;
+const CARD_MINUTE_TOLERANCE_MS = 120_000;
 
-function parseCardDate(raw: string, format: "DD.MM.YYYY" | "YYYY-MM-DD"): number {
+function parseCardDate(
+  raw: string,
+  format: "DD.MM.YYYY" | "YYYY-MM-DD",
+): { ms: number; precision: "day" | "minute" } {
   const t = raw.trim();
   if (format === "YYYY-MM-DD") {
-    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(t);
+    const m = /^(\d{4})-(\d{2})-(\d{2})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(t);
     if (!m) throw new Error(`card-csv-date:${raw}`);
-    return Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+    if (m[4] !== undefined) {
+      return {
+        ms: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)),
+        precision: "minute",
+      };
+    }
+    return { ms: Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0), precision: "day" };
   }
-  const m = /^(\d{2})\.(\d{2})\.(\d{4})$/.exec(t);
+  const m = /^(\d{2})\.(\d{2})\.(\d{4})(?:\s+(\d{2}):(\d{2})(?::(\d{2}))?)?$/.exec(t);
   if (!m) throw new Error(`card-csv-date:${raw}`);
-  return Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12, 0, 0);
+  if (m[4] !== undefined) {
+    return {
+      ms: Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), Number(m[4]), Number(m[5]), Number(m[6] ?? 0)),
+      precision: "minute",
+    };
+  }
+  return { ms: Date.UTC(Number(m[3]), Number(m[2]) - 1, Number(m[1]), 12, 0, 0), precision: "day" };
+}
+
+function rowToleranceMs(row: ChannelRow, fallback: number): number {
+  return row.datePrecision === "minute" ? CARD_MINUTE_TOLERANCE_MS : fallback;
+}
+
+function descriptorHits(text: string, stamps: readonly string[]): boolean {
+  const hay = text.toUpperCase();
+  return stamps.some((s) => hay.includes(s.toUpperCase()));
 }
 
 function parseCardAmount(raw: string, decimal: "," | "."): number {
@@ -189,7 +226,7 @@ export function parseCardCsv(text: string, opts: CardCsvOpts): ParsedCardCsv {
       const description = cells[descIdx] ?? "";
       const signed = parseCardAmount(amountRaw, decimal);
       const amountMinor = Math.abs(signed);
-      const occurredAtMs = parseCardDate(date, dateFormat);
+      const parsedDate = parseCardDate(date, dateFormat);
       const refHit = VERAX_REF.exec(description);
       const idCell = idIdx >= 0 ? (cells[idIdx] ?? "").trim() : "";
       const externalId =
@@ -199,10 +236,12 @@ export function parseCardCsv(text: string, opts: CardCsvOpts): ParsedCardCsv {
       const row: ChannelRow = {
         channel: "card",
         externalId,
-        occurredAtMs,
+        occurredAtMs: parsedDate.ms,
         subject: "spend",
         amountMinor,
         currency: opts.currency,
+        descriptor: description,
+        datePrecision: parsedDate.precision,
       };
       if (refHit) row.ref = refHit[1];
       if (signed > 0) row.credit = true;
@@ -302,6 +341,19 @@ function amountGate(
   return "match";
 }
 
+function descriptorsFor(
+  effect: LedgerEffect,
+  approvals: readonly ApprovalRow[] | undefined,
+  byPayee: Readonly<Record<string, readonly string[]>> | undefined,
+): readonly string[] | undefined {
+  if (!byPayee) return undefined;
+  const snap = approvalForEffect(approvals, effect.row.ref);
+  const payee = snap && typeof snap.args.payee === "string" ? snap.args.payee : undefined;
+  if (!payee) return undefined;
+  const stamps = byPayee[payee];
+  return stamps && stamps.length > 0 ? stamps : undefined;
+}
+
 export function reconcile(
   channelRows: readonly ChannelRow[],
   effects: readonly LedgerEffect[],
@@ -310,6 +362,7 @@ export function reconcile(
     window?: { startMs: number; endMs: number };
     approvals?: readonly ApprovalRow[];
     skipped?: CardCsvSkip[];
+    descriptorsByPayee?: Readonly<Record<string, readonly string[]>>;
   },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;
@@ -345,6 +398,8 @@ export function reconcile(
       outOfScope.push(row);
       continue;
     }
+    const rowTol = rowToleranceMs(row, toleranceMs);
+    const marked = { ...row, toleranceMs: rowTol };
     if (typeof row.ref === "string" && row.ref !== "") {
       const idx = effects.findIndex(
         (e, i) =>
@@ -353,32 +408,46 @@ export function reconcile(
             opts?.approvals?.some((a) => a.ref === row.ref && a.allowRef === e.row.ref)),
       );
       if (idx === -1) {
-        ghost.push(asGhost(row, effects));
+        ghost.push(asGhost(marked, effects));
         continue;
       }
       const dt = Math.abs(row.occurredAtMs - effects[idx]!.row.timestampMs);
-      if (dt > toleranceMs) {
-        ghost.push(asGhost(row, effects));
+      if (dt > rowTol) {
+        ghost.push(asGhost(marked, effects));
         continue;
       }
       const fromSnap = effectAmount(effects[idx]!, opts?.approvals);
       const gate = amountGate(row, fromSnap);
       if (gate === "unknown") {
-        ghost.push(asGhost(row, effects, "amount-unknown"));
+        ghost.push(asGhost(marked, effects, "amount-unknown"));
         continue;
       }
       if (gate === "mismatch") {
-        ghost.push(asGhost(row, effects, "amount-mismatch"));
+        ghost.push(asGhost(marked, effects, "amount-mismatch"));
         continue;
       }
       used.add(idx);
-      matched.push({ channel: row, effect: effects[idx]!.row });
+      matched.push({
+        channel: marked,
+        effect: effects[idx]!.row,
+        datePrecision: row.datePrecision,
+        toleranceMs: rowTol,
+      });
       continue;
     }
     let unknownNear = false;
+    let descriptorMiss = false;
     const near = effects.findIndex((e, i) => {
       if (used.has(i) || e.row.effectClass !== row.subject) return false;
-      if (Math.abs(row.occurredAtMs - e.row.timestampMs) > toleranceMs) return false;
+      if (Math.abs(row.occurredAtMs - e.row.timestampMs) > rowTol) return false;
+      const stamps = descriptorsFor(e, opts?.approvals, opts?.descriptorsByPayee);
+      if (stamps) {
+        const text = row.descriptor ?? "";
+        if (!descriptorHits(text, stamps)) {
+          descriptorMiss = true;
+          return false;
+        }
+      }
       const fromSnap = effectAmount(e, opts?.approvals);
       const gate = amountGate(row, fromSnap);
       if (gate === "unknown") {
@@ -390,10 +459,20 @@ export function reconcile(
     });
     if (near !== -1) {
       used.add(near);
-      matched.push({ channel: row, effect: effects[near]!.row });
+      matched.push({
+        channel: marked,
+        effect: effects[near]!.row,
+        datePrecision: row.datePrecision,
+        toleranceMs: rowTol,
+      });
       continue;
     }
-    ghost.push(asGhost(row, effects, unknownNear ? "amount-unknown" : undefined));
+    const reason = descriptorMiss
+      ? "descriptor-mismatch"
+      : unknownNear
+        ? "amount-unknown"
+        : undefined;
+    ghost.push(asGhost(marked, effects, reason));
   }
 
   const lo = windowStartMs - toleranceMs;

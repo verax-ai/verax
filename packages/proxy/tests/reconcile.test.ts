@@ -239,4 +239,132 @@ describe("card:", () => {
     assert.equal(report.ghost.length, 0);
     assert.equal(report.matched[0]!.effect.ref, "n1");
   });
+
+  it("C1: an unknown statement stamp is ghost descriptor-mismatch, not a silent match", () => {
+    const noon = Date.UTC(2026, 8, 6, 12);
+    const channel = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;ACME STORE;-10,00\n", {
+      currency: "TRY",
+    });
+    const approval: ApprovalRow = {
+      ref: "d1",
+      requestHash: "00".repeat(32),
+      subject: "spend",
+      args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+      ruleId: "spend-true",
+      ruleText: "t",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1_000,
+      payee: "ads-platform",
+      currency: "TRY",
+      createdAtMs: noon,
+      expiresAtMs: noon + 86_400_000,
+      status: "approved",
+      brain: "brain-1",
+      allowRef: "a1",
+    };
+    const effect: LedgerEffect = {
+      row: { ref: "a1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
+      witnessClass: "self",
+    };
+    const report = reconcile(channel, [effect], {
+      toleranceMs: 3 * 86_400_000,
+      approvals: [approval],
+      descriptorsByPayee: { "ads-platform": ["FB.ME/ADS", "FACEBK"] },
+    });
+    assert.equal(report.matched.length, 0);
+    assert.equal(report.ghost.length, 1);
+    assert.equal(report.ghost[0]!.reason, "descriptor-mismatch");
+  });
+
+  it("C1: a configured stamp on the statement strengthens a no-ref match", () => {
+    const noon = Date.UTC(2026, 8, 6, 12);
+    const channel = parseCardCsv(
+      "Tarih;Açıklama;Tutar\n06.09.2026;Facebk *Heb3r4jdd4 Fb.Me/Ads;-10,00\n",
+      { currency: "TRY" },
+    );
+    const approval: ApprovalRow = {
+      ref: "d1",
+      requestHash: "00".repeat(32),
+      subject: "spend",
+      args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+      ruleId: "spend-true",
+      ruleText: "t",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1_000,
+      payee: "ads-platform",
+      currency: "TRY",
+      createdAtMs: noon,
+      expiresAtMs: noon + 86_400_000,
+      status: "approved",
+      brain: "brain-1",
+      allowRef: "a1",
+    };
+    const effect: LedgerEffect = {
+      row: { ref: "a1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
+      witnessClass: "self",
+    };
+    const report = reconcile(channel, [effect], {
+      toleranceMs: 3 * 86_400_000,
+      approvals: [approval],
+      descriptorsByPayee: { "ads-platform": ["FB.ME/ADS", "FACEBK"] },
+    });
+    assert.equal(report.matched.length, 1);
+    assert.equal(report.ghost.length, 0);
+    assert.equal(report.matched[0]!.effect.ref, "a1");
+  });
+
+  it("C2: a timed card row uses a minute window; a dateless row keeps the 3-day window on the row", () => {
+    const timed = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026 14:30;FACEBK FB.ME/ADS;-10,00\n", {
+      currency: "TRY",
+    });
+    assert.equal(timed[0]!.datePrecision, "minute");
+    assert.equal(timed[0]!.occurredAtMs, Date.UTC(2026, 8, 6, 14, 30, 0));
+    const day = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;FACEBK FB.ME/ADS;-10,00\n", {
+      currency: "TRY",
+    });
+    assert.equal(day[0]!.datePrecision, "day");
+    assert.equal(day[0]!.occurredAtMs, Date.UTC(2026, 8, 6, 12, 0, 0));
+
+    const farEffect: LedgerEffect = {
+      row: {
+        ref: "a1",
+        effectHash: "11".repeat(32),
+        effectClass: "spend",
+        timestampMs: Date.UTC(2026, 8, 7, 12, 0, 0),
+      },
+      witnessClass: "self",
+    };
+    const approval: ApprovalRow = {
+      ref: "d1",
+      requestHash: "00".repeat(32),
+      subject: "spend",
+      args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+      ruleId: "s",
+      ruleText: "t",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1_000,
+      payee: "ads-platform",
+      currency: "TRY",
+      createdAtMs: Date.UTC(2026, 8, 6, 12),
+      expiresAtMs: Date.UTC(2026, 8, 7, 12),
+      status: "approved",
+      brain: "brain-1",
+      allowRef: "a1",
+    };
+    const dayReport = reconcile(day, [farEffect], {
+      toleranceMs: 3 * 86_400_000,
+      approvals: [approval],
+    });
+    assert.equal(dayReport.matched.length, 1);
+    assert.equal(dayReport.matched[0]!.datePrecision, "day");
+    assert.equal(dayReport.matched[0]!.toleranceMs, 3 * 86_400_000);
+    const timedReport = reconcile(timed, [farEffect], {
+      toleranceMs: 3 * 86_400_000,
+      approvals: [approval],
+    });
+    assert.equal(timedReport.matched.length, 0);
+    assert.equal(timedReport.ghost.length, 1);
+    assert.equal(timedReport.ghost[0]!.datePrecision, "minute");
+    assert.ok((timedReport.ghost[0]!.toleranceMs ?? 0) < 86_400_000);
+  });
 });

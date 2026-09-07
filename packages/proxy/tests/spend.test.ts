@@ -7,7 +7,7 @@ import { describe, it } from "node:test";
 import { approvePending } from "../src/approvals.ts";
 import { explain } from "../src/explain.ts";
 import { FileLedger, MemoryLedger } from "../src/ledger.ts";
-import { loadPolicy } from "../src/policy.ts";
+import { loadPolicy, parsePolicyDocument } from "../src/policy.ts";
 import { createProxy } from "../src/proxy.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER, queuedNonce, tickingNow } from "./helpers.ts";
 
@@ -73,6 +73,26 @@ describe("spend policy and authorize-once", () => {
         }),
       /policy-rule-spend-missing:s/,
     );
+    const doc = parsePolicyDocument({
+      version: 1,
+      default: "deny",
+      rules: [
+        {
+          id: "s",
+          tool: "spend",
+          requires: ["verax:pay"],
+          mode: "approve",
+          text: "Spends need operator approval.",
+          spend: {
+            maxAmountMinor: 200_000,
+            currency: "TRY",
+            payees: ["ads-platform"],
+            descriptors: ["FB.ME/ADS", "FACEBK"],
+          },
+        },
+      ],
+    });
+    assert.deepEqual(doc.rules[0]!.spend?.descriptors, ["FB.ME/ADS", "FACEBK"]);
   });
 
   it("each spend deny is a signed ledger row", async () => {
