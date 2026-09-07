@@ -16,6 +16,7 @@ describe("panel session is not the Vite inject path", () => {
     assert.equal(app.includes("localStorage"), false);
     assert.match(session, /sessionStorage/);
     assert.match(session, /code_challenge_method/);
+    assert.match(app, /sessionIssueError|resource metadata unreachable/);
   });
 
   it("Vite still injects VERAX_DEV_TOKEN only when the request has no Authorization", () => {
@@ -23,5 +24,13 @@ describe("panel session is not the Vite inject path", () => {
     assert.match(vite, /VERAX_DEV_TOKEN/);
     assert.match(vite, /Authorization/);
     assert.match(vite, /getHeader\("Authorization"\)|hasHeader\("Authorization"\)|getHeader\('Authorization'\)/);
+  });
+
+  it("session reads authorization_servers and vite proxies the PRM path", () => {
+    const session = readFileSync(join(root, "src", "session.ts"), "utf8");
+    const vite = readFileSync(join(root, "vite.config.ts"), "utf8");
+    assert.match(session, /authorization_servers/);
+    assert.match(session, /oauth-protected-resource/);
+    assert.match(vite, /\/\.well-known/);
   });
 });

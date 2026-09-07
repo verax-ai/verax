@@ -6,7 +6,22 @@ import {
   authorizedFetch,
   beginSession,
   rememberToken,
+  sessionIssueError,
 } from "../src/session.ts";
+
+function prmResponse(issuer = "http://127.0.0.1:8790"): Response {
+  return new Response(
+    JSON.stringify({
+      authorization_servers: [issuer],
+      scopes_supported: ["verax:read", "verax:audit"],
+    }),
+    { status: 200, headers: { "content-type": "application/json" } },
+  );
+}
+
+function isPrm(input: RequestInfo | URL): boolean {
+  return String(input).includes("oauth-protected-resource");
+}
 
 afterEach(() => {
   cleanup();
@@ -57,6 +72,10 @@ describe("panel session", () => {
       hash: "",
       assign,
     });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => (isPrm(input) ? prmResponse() : new Response("{}", { status: 404 }))),
+    );
     const phase = await beginSession();
     expect(phase).toBe("redirect");
     expect(assign).toHaveBeenCalledTimes(1);
@@ -80,11 +99,14 @@ describe("panel session", () => {
       hash: "",
       assign,
     });
-    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (isPrm(input)) return prmResponse();
+      return new Response("{}", { status: 200 });
+    });
     vi.stubGlobal("fetch", fetchMock);
     const phase = await beginSession();
     expect(phase).toBe("redirect");
-    expect(fetchMock).not.toHaveBeenCalled();
+    expect(fetchMock.mock.calls.every((c) => isPrm(c[0] as RequestInfo | URL))).toBe(true);
     expect(assign).toHaveBeenCalledTimes(1);
     expect(accessToken()).toBeNull();
   });
@@ -102,21 +124,72 @@ describe("panel session", () => {
       assign,
     });
     vi.stubGlobal("history", { replaceState });
-    const fetchMock = vi.fn(async () =>
-      new Response(JSON.stringify({ access_token: "issued-token", token_type: "Bearer" }), {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      if (isPrm(input)) return prmResponse();
+      return new Response(JSON.stringify({ access_token: "issued-token", token_type: "Bearer" }), {
         status: 200,
         headers: { "content-type": "application/json" },
-      }),
-    );
+      });
+    });
     vi.stubGlobal("fetch", fetchMock);
     const phase = await beginSession();
     expect(phase).toBe("ok");
     expect(accessToken()).toBe("issued-token");
     expect(localStorage.length).toBe(0);
     expect(sessionStorage.getItem("verax-pkce-verifier")).toBeNull();
-    const body = String(fetchMock.mock.calls[0]![1]?.body ?? "");
+    const tokenCall = fetchMock.mock.calls.find((c) => !isPrm(c[0] as RequestInfo | URL));
+    const body = String(tokenCall?.[1]?.body ?? "");
     expect(body).toMatch(/code=abc/);
     expect(body).toMatch(/code_verifier=verifier-1/);
+  });
+
+  it("reads the issuer from resource metadata before authorize", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", {
+      search: "",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    });
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("oauth-protected-resource")) {
+        return new Response(
+          JSON.stringify({
+            authorization_servers: ["http://127.0.0.1:8791"],
+            scopes_supported: ["verax:read", "verax:audit"],
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const phase = await beginSession();
+    expect(phase).toBe("redirect");
+    expect(fetchMock).toHaveBeenCalled();
+    const dest = new URL(String(assign.mock.calls[0]![0]));
+    expect(dest.origin).toBe("http://127.0.0.1:8791");
+    expect(dest.pathname).toBe("/authorize");
+  });
+
+  it("PRM unreadability is a visible error, not a silent 8790 redirect", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", {
+      search: "",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 404 })));
+    const phase = await beginSession();
+    expect(phase).toBe("error");
+    expect(assign).not.toHaveBeenCalled();
+    expect(accessToken()).toBeNull();
+    expect(sessionIssueError()).toMatch(/resource metadata/);
+    expect(sessionIssueError()).toMatch(/8790/);
   });
 
   it("authorizedFetch sends the memory token and does not read VERAX_DEV_TOKEN", async () => {

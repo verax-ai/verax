@@ -4,7 +4,7 @@ import { loadDemoActions } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
 import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
-import { authorizedFetch, beginSession } from "./session.ts";
+import { authorizedFetch, beginSession, sessionIssueError } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
 
@@ -98,6 +98,11 @@ export function App() {
     void (async () => {
       const phase = await beginSession();
       if (cancelled || phase === "redirect") return;
+      if (phase === "error") {
+        setStatus("error");
+        setErrorText(sessionIssueError() ?? "resource metadata unreachable");
+        return;
+      }
       void load();
       id = setInterval(() => {
         void load();
