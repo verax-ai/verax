@@ -159,7 +159,11 @@ and a `witness-status.jsonl` `signed` row. An unreachable witness leaves
 the class `self` and records `self-fallback` / `unreachable`. That is
 not a third-party witness. The same process signs a durable checkpoint
 onto `checkpoints.jsonl`; `explain` then evaluates window-coverage
-instead of listing it as notApplicable.
+instead of listing it as notApplicable. FileLedger also appends each
+decision/effect line to `evidence-copy/` and writes `heartbeat.json`
+(`alive` + last row n). `verax doctor` is the speaker: a stale
+heartbeat is `heartbeat` / silent; a short or corrupt copy is
+`evidence-copy`. The panel is a session UI and is not watching this.
 
 Remaining gaps, still open:
 
