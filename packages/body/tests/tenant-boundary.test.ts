@@ -200,10 +200,6 @@ describe("S4 _ref namespace", () => {
   });
 });
 
-function brainPrefix(text: string): string {
-  return text.replace(/:[^:]*$/, "");
-}
-
 describe("S5 A1 audit.explain tenant close", () => {
   it("another tenant's ref is deny tenant-mismatch, signed, no record body", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-explain-"));
@@ -313,7 +309,7 @@ describe("S5 A1 audit.explain tenant close", () => {
 });
 
 describe("S5 A2 uniform brain answer", () => {
-  it("another tenant's id and a missing id look the same to the brain; the ledger rows differ", async () => {
+  it("what the brain is told matches the row that was written for it", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-oracle-"));
     const keys = testKeys();
     const services = createBodyServices({
@@ -335,15 +331,22 @@ describe("S5 A2 uniform brain answer", () => {
       );
       const otherText = other.content[0]?.text ?? "";
       const missingText = missing.content[0]?.text ?? "";
+      // The cross-tenant read is refused and says so; the missing id was allowed and
+      // simply found nothing. A brain that is told "denied" over an allow row cannot
+      // trust any answer, and the uniform wording did not close the oracle anyway:
+      // the brain owns both records and can read them apart through audit.explain.
       assert.match(otherText, /denied:tenant-mismatch:/);
-      assert.equal(brainPrefix(otherText), brainPrefix(missingText));
+      assert.equal(JSON.parse(missingText).error, "not-found");
       assert.equal(JSON.stringify(other).includes("alice-only"), false);
 
       const recs = await services.ledger.decisions();
       const getRows = recs.filter((d) => d.claims.subject === "memory.get");
-      const codes = new Set(getRows.map((d) => d.claims.reasonCode));
-      assert.equal(codes.has("tenant-mismatch"), true);
-      assert.equal(codes.size >= 2, true, `ledger codes=${[...codes].join(",")}`);
+      const refused = getRows.find((d) => d.claims.reasonCode === "tenant-mismatch");
+      const allowed = getRows.find((d) => d.claims.decision === "allow");
+      assert.ok(refused, `ledger codes=${getRows.map((d) => d.claims.reasonCode).join(",")}`);
+      assert.equal(refused.claims.decision, "deny");
+      assert.ok(allowed, "the missing id must still be an allow row");
+      assert.equal(allowed.claims.reasonCode, "allow");
     } finally {
       services.ledger.close();
     }

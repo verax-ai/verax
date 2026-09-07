@@ -83,7 +83,6 @@ export async function memoryGet(
   stateDir: string,
   now: () => number,
   principal: Principal,
-  ref?: string,
 ): Promise<ToolResult> {
   const id = call.arguments.id;
   if (typeof id !== "string" || id === "") {
@@ -109,11 +108,7 @@ export async function memoryGet(
     return jsonResult(item);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      const shown = typeof ref === "string" && ref !== "" ? ref : id;
-      return {
-        content: [{ type: "text", text: `denied:tenant-mismatch:${shown}` }],
-        isError: true,
-      };
+      return jsonResult({ error: "not-found", id }, true);
     }
     throw err;
   }

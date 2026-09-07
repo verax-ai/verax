@@ -59,7 +59,7 @@ export function createBodyServices(opts: {
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
-  registry.set("memory.get", (call, principal, ref) => memoryGet(call, opts.stateDir, now, principal, ref));
+  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal));
   registry.set("memory.put", (call, principal) => memoryPut(call, opts.stateDir, principal));
   const explainOpts = async (): Promise<ExplainOpts> => {
     const env = process.env.VERAX_RECORD_PUBKEY_PIN;
