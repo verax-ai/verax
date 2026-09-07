@@ -31,6 +31,9 @@ export function withTier(url, n) {
   const u = new URL(url);
   u.searchParams.set("tier", String(n));
   u.searchParams.set("tab", "anatomy");
+  // This harness measures frames, not the session: without `demo` the panel starts
+  // the code flow and navigates away from the page being measured.
+  u.searchParams.set("demo", "1");
   return u.href;
 }
 
