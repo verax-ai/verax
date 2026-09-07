@@ -52,7 +52,10 @@ const port = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
 const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
 const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
 const sub = process.env.VERAX_DEV_SUB ?? "dev-brain";
-const scope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory";
+// Development only: one token stands in for both a brain and the operator panel, so
+// it carries `verax:audit` as well. A real issuer grants that scope to an operator
+// session, never to a brain.
+const scope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory verax:audit";
 
 async function mintAccessToken() {
   return new SignJWT({ scope })

@@ -35,7 +35,7 @@ describe("P2-12 contest error classes", () => {
     });
     const port = (server.address() as { port: number }).port;
     try {
-      const token = await issuer.sign({ scope: "verax:read" });
+      const token = await issuer.sign({ scope: "verax:read verax:audit" });
       const before = unauthCount(stateDir);
       const res = await fetch(`http://127.0.0.1:${port}/api/contest/yok`, {
         method: "POST",

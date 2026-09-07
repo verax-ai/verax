@@ -31,7 +31,7 @@ async function rpc(
 }
 
 describe("ledger HTTP surfaces", () => {
-  it("GET /api/ledger and POST /api/contest/:ref require verax:read", async () => {
+  it("GET /api/ledger and POST /api/contest/:ref require verax:audit", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-api-"));
     const audience = "http://127.0.0.1/verax-test";
     const issuer = await startDevIssuer(0, audience);
@@ -57,7 +57,7 @@ describe("ledger HTTP surfaces", () => {
       });
       assert.equal(forbidden.status, 403);
 
-      const read = await issuer.sign({ scope: "verax:read" });
+      const read = await issuer.sign({ scope: "verax:read verax:audit" });
       const full = await issuer.sign({ scope: "verax:read verax:memory" });
       await rpc(`${base}/mcp`, full, "tools/call", {
         name: "memory.put",
@@ -97,6 +97,67 @@ describe("ledger HTTP surfaces", () => {
       assert.equal(typeof explained.reAuditedAt, "number");
       assert.ok("finding" in explained);
       assert.ok(readFileSync(join(stateDir, "decisions.jsonl"), "utf8").includes(ref));
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+
+  it("a brain token cannot open the audit doors and read another subject's rows", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-audit-scope-"));
+    const audience = "http://127.0.0.1/verax-audit-scope";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const port = (server.address() as { port: number }).port;
+    const base = `http://127.0.0.1:${port}`;
+    try {
+      const alice = await issuer.sign({ sub: "alice", scope: "verax:read verax:memory" });
+      await rpc(`${base}/mcp`, alice, "tools/call", {
+        name: "memory.put",
+        arguments: {
+          id: "n1",
+          body: { t: 1 },
+          source: { uri: "file://t", retrievedAtMs: 1 },
+          validUntilMs: Date.now() + 60_000,
+          _ref: "invoice-1",
+        },
+      });
+
+      // A second brain on the same body. Nothing about its token says "operator".
+      const bob = await issuer.sign({ sub: "bob", scope: "verax:read verax:memory" });
+      const ledger = await fetch(`${base}/api/ledger?from=0&to=9999999999999`, {
+        headers: { authorization: `Bearer ${bob}` },
+      });
+      assert.equal(ledger.status, 403, await ledger.clone().text());
+      assert.equal((await ledger.text()).includes("invoice-1"), false);
+
+      const ref = JSON.parse(
+        readFileSync(join(stateDir, "decisions.jsonl"), "utf8").split("\n").filter((l) => l !== "")[0]!,
+      ).claims.ref as string;
+      const contest = await fetch(`${base}/api/contest/${encodeURIComponent(ref)}`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${bob}` },
+      });
+      assert.equal(contest.status, 403);
+
+      // The operator's own session carries the audit scope and still reads everything.
+      const operator = await issuer.sign({ scope: "verax:read verax:audit" });
+      const opened = await fetch(`${base}/api/ledger?from=0&to=9999999999999`, {
+        headers: { authorization: `Bearer ${operator}` },
+      });
+      assert.equal(opened.status, 200);
+      assert.equal((await opened.text()).includes("invoice-1"), true);
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
@@ -166,7 +227,7 @@ describe("historical policy snapshots", () => {
 
     const second = await start(policyB);
     try {
-      const read = await issuer.sign({ scope: "verax:read" });
+      const read = await issuer.sign({ scope: "verax:read verax:audit" });
       const res = await fetch(`${second.base}/api/ledger?from=0&to=9999999999999`, {
         headers: { authorization: `Bearer ${read}` },
       });
