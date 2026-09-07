@@ -12,6 +12,34 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, "scripts", "dev-issuer.mjs");
 const LISTENING = /dev-issuer listening on http:\/\/127\.0\.0\.1:(\d+)\//;
 
+/**
+ * Waits for the issuer to say which port it bound. The old inline version gave up
+ * after 2 s and returned "", which built `http://127.0.0.1:` and hit port 80 on a
+ * loaded machine: a flake that read as ECONNREFUSED instead of "did not start".
+ * The wait stays under the tightest test timeout here (10 s) so the assertion
+ * below is what fails, with the issuer's own stderr in the message.
+ */
+function listeningPort(getStderr: () => string, ms = 8_000): Promise<string> {
+  return (async () => {
+    const until = Date.now() + ms;
+    while (Date.now() < until) {
+      const match = LISTENING.exec(getStderr());
+      if (match) return match[1] ?? "";
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    return "";
+  })();
+}
+
+function assertBound(port: string, stderr: string): void {
+  const n = Number(port);
+  assert.equal(
+    Number.isInteger(n) && n > 0,
+    true,
+    `issuer never printed a bound port within the wait: stderr=${stderr}`,
+  );
+}
+
 describe("6 dev-issuer.mjs", () => {
   it("serves JWKS on the bound VERAX_DEV_ISSUER_PORT and writes a token jose can verify", { timeout: 10000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-issuer-"));
@@ -32,14 +60,7 @@ describe("6 dev-issuer.mjs", () => {
     const closed = new Promise<number>((resolve) => {
       child.once("close", (code) => resolve(code ?? 1));
     });
-    const ready = (async () => {
-      for (let i = 0; i < 40; i += 1) {
-        const match = LISTENING.exec(stderr);
-        if (match) return match[1] ?? "";
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      return "";
-    })();
+    const ready = listeningPort(() => stderr);
     const outcome = await Promise.race([
       closed.then((code) => ({ kind: "closed" as const, code })),
       ready.then((port) => ({ kind: "ready" as const, port })),
@@ -100,14 +121,7 @@ describe("6 dev-issuer.mjs", () => {
     const closed = new Promise<number>((resolve) => {
       child.once("close", (code) => resolve(code ?? 1));
     });
-    const ready = (async () => {
-      for (let i = 0; i < 40; i += 1) {
-        const match = LISTENING.exec(stderr);
-        if (match) return match[1] ?? "";
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      return "";
-    })();
+    const ready = listeningPort(() => stderr);
     const outcome = await Promise.race([
       closed.then((code) => ({ kind: "closed" as const, code })),
       ready.then((port) => ({ kind: "ready" as const, port })),
@@ -116,6 +130,7 @@ describe("6 dev-issuer.mjs", () => {
       if (outcome.kind === "closed") {
         assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
       }
+      assertBound(outcome.port, stderr);
       const origin = `http://127.0.0.1:${outcome.port}`;
       const redirect = "http://127.0.0.1:5173/";
       const missing = await fetch(
@@ -226,14 +241,7 @@ describe("6 dev-issuer.mjs", () => {
     const closed = new Promise<number>((resolve) => {
       child.once("close", (code) => resolve(code ?? 1));
     });
-    const ready = (async () => {
-      for (let i = 0; i < 40; i += 1) {
-        const match = LISTENING.exec(stderr);
-        if (match) return match[1] ?? "";
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      return "";
-    })();
+    const ready = listeningPort(() => stderr);
     const outcome = await Promise.race([
       closed.then((code) => ({ kind: "closed" as const, code })),
       ready.then((port) => ({ kind: "ready" as const, port })),
@@ -242,6 +250,7 @@ describe("6 dev-issuer.mjs", () => {
       if (outcome.kind === "closed") {
         assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
       }
+      assertBound(outcome.port, stderr);
       const origin = `http://127.0.0.1:${outcome.port}`;
       const verifier = randomBytes(32).toString("base64url");
       const challenge = createHash("sha256").update(verifier).digest("base64url");
@@ -278,14 +287,7 @@ describe("6 dev-issuer.mjs", () => {
     const closed = new Promise<number>((resolve) => {
       child.once("close", (code) => resolve(code ?? 1));
     });
-    const ready = (async () => {
-      for (let i = 0; i < 40; i += 1) {
-        const match = LISTENING.exec(stderr);
-        if (match) return match[1] ?? "";
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      return "";
-    })();
+    const ready = listeningPort(() => stderr);
     const outcome = await Promise.race([
       closed.then((code) => ({ kind: "closed" as const, code })),
       ready.then((port) => ({ kind: "ready" as const, port })),
@@ -294,6 +296,7 @@ describe("6 dev-issuer.mjs", () => {
       if (outcome.kind === "closed") {
         assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
       }
+      assertBound(outcome.port, stderr);
       const origin = `http://127.0.0.1:${outcome.port}`;
       const redirect = "http://127.0.0.1:5173/";
       const verifier = randomBytes(32).toString("base64url");
