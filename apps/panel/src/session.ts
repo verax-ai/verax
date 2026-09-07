@@ -66,9 +66,11 @@ export async function beginSession(): Promise<"ok" | "redirect" | "demo"> {
   const code = params.get("code");
   if (code) {
     const verifier = sessionStorage.getItem(VERIFIER_KEY);
+    const expectedState = sessionStorage.getItem(STATE_KEY);
     sessionStorage.removeItem(VERIFIER_KEY);
     sessionStorage.removeItem(STATE_KEY);
-    if (!verifier) {
+    // A code that comes back without the state this tab sent is not ours.
+    if (!verifier || !expectedState || params.get("state") !== expectedState) {
       await startAuthorize();
       return "redirect";
     }

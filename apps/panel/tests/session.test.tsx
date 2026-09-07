@@ -69,8 +69,29 @@ describe("panel session", () => {
     expect(accessToken()).toBeNull();
   });
 
+  it("a returned state that does not match starts over instead of exchanging", async () => {
+    sessionStorage.setItem("verax-pkce-verifier", "verifier-1");
+    sessionStorage.setItem("verax-pkce-state", "mine");
+    const assign = vi.fn();
+    vi.stubGlobal("location", {
+      search: "?code=abc&state=theirs",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    });
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const phase = await beginSession();
+    expect(phase).toBe("redirect");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(assign).toHaveBeenCalledTimes(1);
+    expect(accessToken()).toBeNull();
+  });
+
   it("exchanges a code and stores the token only in memory", async () => {
     sessionStorage.setItem("verax-pkce-verifier", "verifier-1");
+    sessionStorage.setItem("verax-pkce-state", "st");
     const assign = vi.fn();
     const replaceState = vi.fn();
     vi.stubGlobal("location", {
