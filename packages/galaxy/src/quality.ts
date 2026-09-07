@@ -31,5 +31,20 @@ export function readForcedTier(search = ""): number | null {
   const raw = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("tier");
   if (!raw) return null;
   const n = Number(raw);
-  return (TIER_DUST as readonly number[]).includes(n) ? TIER_DUST.indexOf(n as (typeof TIER_DUST)[number]) : null;
+  if (!Number.isFinite(n)) return null;
+  const exact = (TIER_DUST as readonly number[]).indexOf(n as (typeof TIER_DUST)[number]);
+  if (exact !== -1) return exact;
+  // Harness still says 15000 (old presence count). Snap to the nearest
+  // dust knob; a tie prefers the smaller cloud so the budget is not ignored.
+  let best = 0;
+  let dist = Math.abs((TIER_DUST[0] ?? 0) - n);
+  for (let i = 1; i < TIER_DUST.length; i += 1) {
+    const dust = TIER_DUST[i] ?? 0;
+    const d = Math.abs(dust - n);
+    if (d < dist || (d === dist && dust < (TIER_DUST[best] ?? 0))) {
+      dist = d;
+      best = i;
+    }
+  }
+  return best;
 }

@@ -10,7 +10,7 @@ import {
   ZOOM_MIN,
 } from "../src/camera.ts";
 import { labelVisible } from "../src/labels.ts";
-import { BLOOM_FULL, galaxyTier, TIER_DUST } from "../src/quality.ts";
+import { BLOOM_FULL, galaxyTier, readForcedTier, TIER_DUST } from "../src/quality.ts";
 
 describe("orbit camera", () => {
   it("clamps zoom to 45–700", () => {
@@ -46,6 +46,14 @@ describe("quality ladder", () => {
     assert.deepEqual(galaxyTier(0).bloom, BLOOM_FULL);
     assert.ok(galaxyTier(2).bloom.strength < galaxyTier(0).bloom.strength);
     assert.equal(galaxyTier(2).dust, 5_000);
+  });
+
+  it("snaps an unknown harness tier to the nearest dust count", () => {
+    assert.equal(readForcedTier("?tier=20000"), 0);
+    assert.equal(readForcedTier("?tier=10000"), 1);
+    assert.equal(readForcedTier("?tier=5000"), 2);
+    assert.equal(readForcedTier("?tier=15000"), 1);
+    assert.equal(readForcedTier(""), null);
   });
 });
 
