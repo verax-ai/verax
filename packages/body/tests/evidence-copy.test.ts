@@ -101,4 +101,20 @@ describe("evidence copy and heartbeat", () => {
     assert.equal(bad?.level, "fail");
     assert.match(bad?.detail ?? "", /corrupt/);
   });
+
+  it("an effects copy that falls behind is visible too, not only decisions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-copy-effects-"));
+    await putOnce(dir, "copy-4");
+    // Half the evidence is the effect rows; a mirror that drops them silently is
+    // the same silence this section exists to break.
+    writeFileSync(join(dir, "evidence-copy", "effects.jsonl"), "", { encoding: "utf8" });
+    const lag = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "evidence-copy");
+    assert.equal(lag?.level, "fail", JSON.stringify(lag));
+    assert.match(lag?.detail ?? "", /effect/);
+
+    writeFileSync(join(dir, "evidence-copy", "effects.jsonl"), "{not-json\n", { encoding: "utf8" });
+    const bad2 = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "evidence-copy");
+    assert.equal(bad2?.level, "fail");
+    assert.match(bad2?.detail ?? "", /corrupt/);
+  });
 });

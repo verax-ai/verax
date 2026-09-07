@@ -301,13 +301,24 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       });
     }
   }
+  // Both halves of the evidence are mirrored, so both are compared: an effects
+  // copy that quietly drops rows is the same silence as a missing decision copy.
+  const srcEffects = countJsonl(join(stateDir, "effects.jsonl"));
   const copy = countJsonl(join(stateDir, "evidence-copy", "decisions.jsonl"));
-  if (src.lines > 0 || copy.lines > 0 || copy.corrupt) {
-    if (copy.corrupt) {
+  const copyEffects = countJsonl(join(stateDir, "evidence-copy", "effects.jsonl"));
+  const anything =
+    src.lines > 0 ||
+    srcEffects.lines > 0 ||
+    copy.lines > 0 ||
+    copyEffects.lines > 0 ||
+    copy.corrupt ||
+    copyEffects.corrupt;
+  if (anything) {
+    if (copy.corrupt || copyEffects.corrupt) {
       checks.push({
         id: "evidence-copy",
         level: "fail",
-        detail: "evidence-copy/decisions.jsonl is corrupt",
+        detail: `evidence-copy/${copy.corrupt ? "decisions" : "effects"}.jsonl is corrupt`,
       });
     } else if (copy.lines < src.lines) {
       checks.push({
@@ -315,11 +326,17 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
         level: "fail",
         detail: `evidence copy is stale: ${copy.lines} lines behind source ${src.lines}`,
       });
+    } else if (copyEffects.lines < srcEffects.lines) {
+      checks.push({
+        id: "evidence-copy",
+        level: "fail",
+        detail: `evidence copy is stale on effects: ${copyEffects.lines} effect line(s) behind source ${srcEffects.lines}`,
+      });
     } else {
       checks.push({
         id: "evidence-copy",
         level: "ok",
-        detail: `evidence copy has ${copy.lines} decision line(s)`,
+        detail: `evidence copy has ${copy.lines} decision line(s) and ${copyEffects.lines} effect line(s)`,
       });
     }
   }
