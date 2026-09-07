@@ -12,7 +12,18 @@ export async function auditExplain(
       isError: true,
     };
   }
-  const result = await explain(ledger, ref, opts);
+  let result;
+  try {
+    result = await explain(ledger, ref, opts);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("explain-unknown-ref:")) {
+      return {
+        content: [{ type: "text", text: `denied:tenant-mismatch:${ref}` }],
+        isError: true,
+      };
+    }
+    throw err;
+  }
   return {
     content: [
       {

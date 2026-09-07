@@ -130,7 +130,7 @@ export type ProxyDeps = {
   inner: (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
   inputsLog?: InputsLog;
   resolveInput?: (id: string, principal?: Principal) => Promise<ResolvedInput | null>;
-  /** True when memory.get names an id that lives under another tenant. */
+  /** True when the call names another tenant's memory id or decision ref. */
   checkTenantMismatch?: (call: ToolCall, principal: Principal) => Promise<boolean>;
 };
 

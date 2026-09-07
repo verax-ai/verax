@@ -189,4 +189,102 @@ describe("verax reconcile CLI", () => {
     assert.equal(ran.code, 78);
     assert.match(ran.err, /tz-offset-invalid/);
   });
+
+  it("card descriptors come from the newest policy snapshot and name it on the report", async () => {
+    const { loadPolicy } = await import("@verax-ai/proxy");
+    const { utimesSync, mkdirSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "verax-reconcile-desc-"));
+    mkdirSync(join(dir, "policies"), { recursive: true });
+    const oldDoc = {
+      version: 1,
+      default: "deny",
+      rules: [
+        {
+          id: "spend-true",
+          tool: "spend",
+          requires: ["verax:pay"],
+          mode: "approve",
+          text: "Spends need operator approval.",
+          spend: {
+            maxAmountMinor: 200_000,
+            currency: "TRY",
+            payees: ["ads-platform"],
+            descriptors: ["OLD.STAMP"],
+          },
+        },
+      ],
+    };
+    const newDoc = {
+      version: 1,
+      default: "deny",
+      rules: [
+        {
+          id: "spend-true",
+          tool: "spend",
+          requires: ["verax:pay"],
+          mode: "approve",
+          text: "Spends need operator approval.",
+          spend: {
+            maxAmountMinor: 200_000,
+            currency: "TRY",
+            payees: ["ads-platform"],
+            descriptors: ["NEW.STAMP"],
+          },
+        },
+      ],
+    };
+    const oldHash = loadPolicy(oldDoc).hash;
+    const newHash = loadPolicy(newDoc).hash;
+    writeFileSync(join(dir, "policies", `${oldHash}.json`), `${JSON.stringify(oldDoc)}\n`, "utf8");
+    writeFileSync(join(dir, "policies", `${newHash}.json`), `${JSON.stringify(newDoc)}\n`, "utf8");
+    utimesSync(join(dir, "policies", `${oldHash}.json`), 1_700_000_000, 1_700_000_000);
+    utimesSync(join(dir, "policies", `${newHash}.json`), 1_800_000_000, 1_800_000_000);
+    const csv = join(dir, "card.csv");
+    writeFileSync(csv, "Tarih;Açıklama;Tutar\n06.09.2026;NEW.STAMP ADS;-10,00\n", "utf8");
+    writeFileSync(
+      join(dir, "effects.jsonl"),
+      `${JSON.stringify({
+        row: {
+          ref: "a1",
+          effectHash: "11".repeat(32),
+          effectClass: "spend",
+          timestampMs: Date.UTC(2026, 8, 6, 12),
+        },
+        witnessClass: "self",
+      })}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(dir, "approvals.jsonl"),
+      `${JSON.stringify({
+        ref: "d1",
+        requestHash: "00".repeat(32),
+        subject: "spend",
+        args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+        ruleId: "spend-true",
+        ruleText: "Spends need operator approval.",
+        inputsSummary: { count: 0, ids: [] },
+        amount: 1_000,
+        payee: "ads-platform",
+        currency: "TRY",
+        createdAtMs: Date.UTC(2026, 8, 6, 11),
+        expiresAtMs: Date.UTC(2026, 8, 7, 11),
+        status: "approved",
+        brain: "brain-1",
+        allowRef: "a1",
+      })}\n`,
+      "utf8",
+    );
+    const out = join(dir, "report.json");
+    const ran = await spawnCli(["reconcile", dir, csv, "--channel", "card", "--currency", "TRY", "--out", out]);
+    assert.equal(ran.code, 0, ran.err);
+    const report = JSON.parse(readFileSync(out, "utf8")) as {
+      scope: { policyHash?: string };
+      matched: unknown[];
+      ghost: { reason?: string }[];
+    };
+    assert.equal(report.scope.policyHash, newHash);
+    assert.equal(report.matched.length, 1);
+    assert.equal(report.ghost.some((g) => g.reason === "descriptor-mismatch"), false);
+  });
 });

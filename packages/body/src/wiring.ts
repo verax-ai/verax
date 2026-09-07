@@ -12,6 +12,7 @@ import {
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
 import { persistPolicySnapshot } from "./policy-store.ts";
+import { inputsPrincipal } from "./inputs-read.ts";
 import { memoryBelongsToOtherTenant, memoryGet, memoryPut, readMemoryMeta } from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead, messageSend } from "./tools/message.ts";
@@ -58,7 +59,7 @@ export function createBodyServices(opts: {
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
-  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal));
+  registry.set("memory.get", (call, principal, ref) => memoryGet(call, opts.stateDir, now, principal, ref));
   registry.set("memory.put", (call, principal) => memoryPut(call, opts.stateDir, principal));
   const explainOpts = async (): Promise<ExplainOpts> => {
     const env = process.env.VERAX_RECORD_PUBKEY_PIN;
@@ -102,10 +103,21 @@ export function createBodyServices(opts: {
     inner,
     resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal),
     checkTenantMismatch: async (call, principal) => {
-      if (call.name !== "memory.get") return false;
-      const id = call.arguments.id;
-      if (typeof id !== "string") return false;
-      return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal));
+      if (call.name === "memory.get") {
+        const id = call.arguments.id;
+        if (typeof id !== "string") return false;
+        return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal));
+      }
+      if (call.name === "audit.explain") {
+        const ref = call.arguments.ref;
+        if (typeof ref !== "string" || ref === "") return false;
+        const decisions = await ledger.decisions();
+        if (!decisions.some((d) => d.claims.ref === ref)) return false;
+        const owner = await inputsPrincipal(opts.stateDir, ref);
+        if (owner === null) return true;
+        return tenantKey(owner) !== tenantKey(principal);
+      }
+      return false;
     },
   });
 

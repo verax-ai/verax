@@ -11,6 +11,23 @@ function operatorName(): string {
   }
 }
 
+export function resolveApproveRef(
+  pending: { ref: string; status?: string }[],
+  given: string,
+):
+  | { ok: true; ref: string }
+  | { ok: false; reason: "unknown-ref" | "ambiguous-ref"; candidates: string[] } {
+  const open = pending.filter((r) => r.status === "pending" || r.status === undefined);
+  const exact = open.find((r) => r.ref === given);
+  if (exact) return { ok: true, ref: exact.ref };
+  const suffix = `:${given}`;
+  const hits = open.filter((r) => r.ref.endsWith(suffix)).map((r) => r.ref);
+  const unique = [...new Set(hits)].sort();
+  if (unique.length === 1) return { ok: true, ref: unique[0]! };
+  if (unique.length > 1) return { ok: false, reason: "ambiguous-ref", candidates: unique };
+  return { ok: false, reason: "unknown-ref", candidates: [] };
+}
+
 export async function runApprove(
   argv: string[],
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
@@ -18,16 +35,21 @@ export async function runApprove(
 ): Promise<number> {
   const rest = argv.slice(1);
   const stateDir = rest[0];
-  const ref = rest[1];
-  if (!stateDir || !ref || rest.length !== 2) {
+  const given = rest[1];
+  if (!stateDir || !given || rest.length !== 2) {
     writeErr("verax approve <stateDir> <ref>\n");
     return 78;
   }
-  const pending = loadApprovalsFromDir(stateDir).find((r) => r.ref === ref);
-  if (!pending) {
+  const resolved = resolveApproveRef(loadApprovalsFromDir(stateDir), given);
+  if (!resolved.ok) {
+    if (resolved.reason === "ambiguous-ref") {
+      writeErr(`ambiguous-ref\n${resolved.candidates.join("\n")}\n`);
+      return 78;
+    }
     writeErr("approve-unknown-ref\n");
     return 78;
   }
+  const ref = resolved.ref;
   let ledger: FileLedger;
   try {
     ledger = new FileLedger(stateDir);

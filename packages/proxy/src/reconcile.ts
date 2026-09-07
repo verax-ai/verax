@@ -37,6 +37,8 @@ export type ReconcileReport = {
     windowEndMs: number;
     rowCount: number;
     skipped?: CardCsvSkip[];
+    /** Policy snapshot hash when card descriptors were read from one file. */
+    policyHash?: string;
   };
   matched: Array<{
     channel: ChannelRow;
