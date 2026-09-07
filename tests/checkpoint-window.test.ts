@@ -23,10 +23,17 @@ function testKeys() {
   };
 }
 
-async function waitFile(path: string, ms = 5000): Promise<void> {
+/**
+ * Waits for the witness to announce its socket. The bound is generous because
+ * this measures a process start, not a deadline: under a full test run the
+ * witness strips types on a busy CPU and took over 5 s twice. A witness that
+ * exits fails immediately, so a real failure is still caught at once.
+ */
+async function waitFile(path: string, child?: { exitCode: number | null }, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (existsSync(path)) return;
+    if (child && child.exitCode !== null) throw new Error(`witness-exited:${child.exitCode}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`listen-timeout:${path}`);
@@ -81,7 +88,7 @@ describe("durable checkpoint", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-cp-ok-"));
     const child = spawnWitness(dir);
     try {
-      await waitFile(join(dir, "witness.listen.json"));
+      await waitFile(join(dir, "witness.listen.json"), child);
       const services = await putNote(dir, "cover-1");
       try {
         const decisions = await services.ledger.decisions();
