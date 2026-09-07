@@ -12,7 +12,21 @@ export async function auditExplain(
       isError: true,
     };
   }
-  const result = await explain(ledger, ref, opts);
+  let result;
+  try {
+    result = await explain(ledger, ref, opts);
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("explain-unknown-ref:")) {
+      // No such record. Saying "denied" over a row the proxy allowed would make the
+      // answer disagree with the ledger; the refusal for another tenant's ref is a
+      // signed deny written by the proxy, not this string.
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: "unknown-ref" }) }],
+        isError: true,
+      };
+    }
+    throw err;
+  }
   return {
     content: [
       {

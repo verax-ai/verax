@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -74,6 +75,132 @@ describe("6 dev-issuer.mjs", () => {
       const revokedPath = join(stateDir, "revoked-jti.jsonl");
       assert.equal(existsSync(revokedPath), true);
       assert.match(readFileSync(revokedPath, "utf8"), new RegExp(`"jti":"${payload.jti}"`));
+    } finally {
+      child.kill("SIGTERM");
+      await closed;
+    }
+  });
+
+  it("authorize without code_challenge fails; plain is refused; S256 mints a one-use code", { timeout: 15000 }, async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-pkce-"));
+    const outPath = join(stateDir, "token");
+    const child = spawn(process.execPath, [script, "--out", outPath], {
+      env: {
+        ...process.env,
+        VERAX_STATE_DIR: stateDir,
+        NODE_ENV: "development",
+        VERAX_DEV_ISSUER_PORT: "0",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    const closed = new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    const ready = (async () => {
+      for (let i = 0; i < 40; i += 1) {
+        const match = LISTENING.exec(stderr);
+        if (match) return match[1] ?? "";
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      return "";
+    })();
+    const outcome = await Promise.race([
+      closed.then((code) => ({ kind: "closed" as const, code })),
+      ready.then((port) => ({ kind: "ready" as const, port })),
+    ]);
+    try {
+      if (outcome.kind === "closed") {
+        assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
+      }
+      const origin = `http://127.0.0.1:${outcome.port}`;
+      const redirect = "http://127.0.0.1/cb";
+      const missing = await fetch(
+        `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}`,
+        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+      );
+      assert.equal(missing.status >= 400 && missing.status < 500, true, `missing challenge status=${missing.status}`);
+      const missingLoc = missing.headers.get("location") ?? "";
+      assert.equal(missingLoc.includes("code="), false);
+
+      const plain = await fetch(
+        `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=abc&code_challenge_method=plain`,
+        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+      );
+      assert.equal(plain.status >= 400 && plain.status < 500, true, `plain status=${plain.status}`);
+      assert.equal((plain.headers.get("location") ?? "").includes("code="), false);
+
+      const verifier = randomBytes(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const auth = await fetch(
+        `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256&state=st1`,
+        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+      );
+      assert.equal(auth.status, 302);
+      const loc = new URL(auth.headers.get("location") ?? "", origin);
+      const code = loc.searchParams.get("code");
+      assert.equal(typeof code === "string" && code.length > 0, true);
+      assert.equal(loc.searchParams.get("state"), "st1");
+
+      const tokenRes = await fetch(`${origin}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: code!,
+          redirect_uri: redirect,
+          code_verifier: verifier,
+          client_id: "verax-panel",
+        }),
+        signal: AbortSignal.timeout(2000),
+      });
+      assert.equal(tokenRes.status, 200);
+      const body = (await tokenRes.json()) as { access_token?: string; token_type?: string };
+      assert.equal(typeof body.access_token, "string");
+      assert.equal((body.access_token as string).length > 0, true);
+      assert.equal(body.token_type, "Bearer");
+      const { payload } = await jwtVerify(body.access_token!, createRemoteJWKSet(new URL(`${origin}/.well-known/jwks.json`)), {
+        issuer: "http://127.0.0.1:8790",
+        audience: "http://127.0.0.1:8787",
+      });
+      assert.equal(payload.sub, "dev-brain");
+      assert.equal(stderr.includes(body.access_token!), false);
+
+      const replay = await fetch(`${origin}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: code!,
+          redirect_uri: redirect,
+          code_verifier: verifier,
+          client_id: "verax-panel",
+        }),
+        signal: AbortSignal.timeout(2000),
+      });
+      assert.equal(replay.status >= 400 && replay.status < 500, true);
+
+      const mismatch = await fetch(
+        `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+      );
+      const code2 = new URL(mismatch.headers.get("location") ?? "", origin).searchParams.get("code");
+      const wrongUri = await fetch(`${origin}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: code2 ?? "",
+          redirect_uri: "http://127.0.0.1/other",
+          code_verifier: verifier,
+          client_id: "verax-panel",
+        }),
+        signal: AbortSignal.timeout(2000),
+      });
+      assert.equal(wrongUri.status >= 400 && wrongUri.status < 500, true);
     } finally {
       child.kill("SIGTERM");
       await closed;

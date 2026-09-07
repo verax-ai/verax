@@ -35,3 +35,31 @@ export async function matchingInputs(
   }
   return out;
 }
+
+type InputsPrincipal = { brain?: unknown; iss?: unknown; tenant?: unknown; org?: unknown };
+
+export async function inputsPrincipal(
+  stateDir: string,
+  ref: string,
+): Promise<{ brain: string; iss?: string; tenant?: string; org?: string } | null> {
+  let text: string;
+  try {
+    text = await readFile(join(stateDir, "inputs.jsonl"), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  let found: InputsPrincipal | null = null;
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    const row = JSON.parse(line) as { ref?: string; inputs?: { principal?: InputsPrincipal } };
+    if (row.ref === ref) found = row.inputs?.principal ?? null;
+  }
+  if (!found || typeof found.brain !== "string") return null;
+  return {
+    brain: found.brain,
+    ...(typeof found.iss === "string" ? { iss: found.iss } : {}),
+    ...(typeof found.tenant === "string" ? { tenant: found.tenant } : {}),
+    ...(typeof found.org === "string" ? { org: found.org } : {}),
+  };
+}

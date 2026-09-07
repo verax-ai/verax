@@ -1,38 +1,61 @@
-import { readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadApprovalsFromDir, loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "@verax-ai/proxy";
+import { loadApprovalsFromDir, loadEffectsFromDir, loadPolicy, parseCardCsv, parseChannelJsonl, reconcile } from "@verax-ai/proxy";
 
-function loadDescriptorsFromDir(stateDir: string): Record<string, string[]> {
+const SNAPSHOT_NAME = /^[0-9a-f]{64}\.json$/;
+
+function descriptorsFromDoc(doc: {
+  rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
+}): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  if (!Array.isArray(doc.rules)) return out;
+  for (const rule of doc.rules) {
+    const spend = rule.spend;
+    if (!spend || !Array.isArray(spend.payees) || !Array.isArray(spend.descriptors)) continue;
+    const stamps = spend.descriptors.filter((d): d is string => typeof d === "string" && d !== "");
+    if (stamps.length === 0) continue;
+    for (const payee of spend.payees) {
+      if (typeof payee === "string" && payee !== "") out[payee] = stamps;
+    }
+  }
+  return out;
+}
+
+function loadDescriptorsFromDir(stateDir: string): {
+  descriptorsByPayee: Record<string, string[]>;
+  policyHash: string | null;
+} {
   const dir = join(stateDir, "policies");
   let names: string[];
   try {
     names = readdirSync(dir);
   } catch {
-    return {};
+    return { descriptorsByPayee: {}, policyHash: null };
   }
-  const out: Record<string, string[]> = {};
+  const candidates: { name: string; mtimeMs: number }[] = [];
   for (const name of names) {
-    if (!name.endsWith(".json")) continue;
+    if (!SNAPSHOT_NAME.test(name)) continue;
     try {
-      const doc = JSON.parse(readFileSync(join(dir, name), "utf8")) as {
-        rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
-      };
-      if (!Array.isArray(doc.rules)) continue;
-      for (const rule of doc.rules) {
-        const spend = rule.spend;
-        if (!spend || !Array.isArray(spend.payees) || !Array.isArray(spend.descriptors)) continue;
-        const stamps = spend.descriptors.filter((d): d is string => typeof d === "string" && d !== "");
-        if (stamps.length === 0) continue;
-        for (const payee of spend.payees) {
-          if (typeof payee === "string" && payee !== "") out[payee] = stamps;
-        }
-      }
+      const st = statSync(join(dir, name));
+      candidates.push({ name, mtimeMs: st.mtimeMs });
     } catch {
-      // A bad snapshot is skipped; reconcile still runs the weaker path.
+      // A missing snapshot is skipped.
     }
   }
-  return out;
+  if (candidates.length === 0) return { descriptorsByPayee: {}, policyHash: null };
+  candidates.sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
+  const chosen = candidates[candidates.length - 1]!;
+  const hash = chosen.name.slice(0, 64);
+  try {
+    const doc = JSON.parse(readFileSync(join(dir, chosen.name), "utf8")) as {
+      rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
+    };
+    if (loadPolicy(doc).hash !== hash) return { descriptorsByPayee: {}, policyHash: null };
+    return { descriptorsByPayee: descriptorsFromDoc(doc), policyHash: hash };
+  } catch {
+    return { descriptorsByPayee: {}, policyHash: null };
+  }
 }
 
 const CARD_TOLERANCE_MS = 3 * 86_400_000;
@@ -215,8 +238,9 @@ export function runReconcile(
         : undefined;
     const channel = card ?? parseChannelJsonl(raw);
     const effects = loadEffectsFromDir(parsed.stateDir);
-    const descriptorsByPayee =
+    const loaded =
       parsed.channel === "card" ? loadDescriptorsFromDir(parsed.stateDir) : undefined;
+    const descriptorsByPayee = loaded?.descriptorsByPayee;
     const report = reconcile(channel, effects, {
       toleranceMs: parsed.toleranceMs,
       window: parsed.window,
@@ -226,6 +250,7 @@ export function runReconcile(
         ? { descriptorsByPayee }
         : {}),
     });
+    if (loaded?.policyHash) report.scope.policyHash = loaded.policyHash;
     writeFileSync(parsed.outPath, `${JSON.stringify(report, null, 2)}\n`, { encoding: "utf8" });
     if (parsed.channel === "card") {
       const mismatch = report.ghost.filter((g) => g.reason === "amount-mismatch").length;

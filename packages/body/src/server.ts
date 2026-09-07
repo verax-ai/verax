@@ -232,7 +232,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         resource: config.audience,
         authorization_servers: [config.issuer],
         bearer_methods_supported: ["header"],
-        scopes_supported: ["verax:read", "verax:memory", "verax:act", "verax:pay"],
+        scopes_supported: ["verax:read", "verax:memory", "verax:act", "verax:pay", "verax:audit"],
       });
       return;
     }
@@ -264,7 +264,11 @@ export async function listen(config: BodyConfig): Promise<Server> {
     }
     try {
       if (apiLedger || contest) {
-        if (!verified.principal.scopes.has("verax:read")) {
+        // The audit doors hand out the whole ledger: every tenant's decisions, the
+        // inputs documents that name their principals, and the approval snapshots
+        // that carry spend arguments. `verax:read` is a brain scope, so it cannot be
+        // the key here; the operator session carries `verax:audit`.
+        if (!verified.principal.scopes.has("verax:audit")) {
           send(res, 403, { error: "scope-missing" });
           return;
         }

@@ -2,8 +2,9 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.tsx";
+import { rememberToken } from "../src/session.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import { Rail } from "../src/rail/Rail.tsx";
 import type { PolicyBundle } from "../src/rail/types.ts";
@@ -160,8 +161,13 @@ function stubLedgerFetch(handler: (url: string) => Response | Promise<Response>)
 
 describe("panel ledger fetch states", () => {
   afterEach(() => {
+    rememberToken(null);
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  beforeEach(() => {
+    rememberToken("test-session");
   });
 
   it("shows error and the HTTP status when the ledger returns 500", async () => {
@@ -194,7 +200,10 @@ describe("panel ledger fetch states", () => {
       .fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(ledgerBody), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
-    stubLedgerFetch(() => ledgerFetch());
+    stubLedgerFetch((url) => {
+      if (url.includes("/healthz")) return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      return ledgerFetch();
+    });
     render(<App />);
     fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
     await waitFor(() => {

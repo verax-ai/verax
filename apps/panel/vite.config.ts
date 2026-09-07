@@ -21,7 +21,9 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           configure: (proxy) => {
             proxy.on("proxyReq", (req) => {
-              if (token) req.setHeader("Authorization", `Bearer ${token}`);
+              if (token && !req.getHeader("Authorization")) {
+                req.setHeader("Authorization", `Bearer ${token}`);
+              }
             });
           },
         },
@@ -30,7 +32,9 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           configure: (proxy) => {
             proxy.on("proxyReq", (req) => {
-              if (token) req.setHeader("Authorization", `Bearer ${token}`);
+              if (token && !req.getHeader("Authorization")) {
+                req.setHeader("Authorization", `Bearer ${token}`);
+              }
             });
           },
         },
@@ -43,7 +47,9 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           configure: (proxy) => {
             proxy.on("proxyReq", (req) => {
-              if (token) req.setHeader("Authorization", `Bearer ${token}`);
+              if (token && !req.getHeader("Authorization")) {
+                req.setHeader("Authorization", `Bearer ${token}`);
+              }
             });
           },
         },
@@ -52,7 +58,9 @@ export default defineConfig(({ mode }) => {
           changeOrigin: true,
           configure: (proxy) => {
             proxy.on("proxyReq", (req) => {
-              if (token) req.setHeader("Authorization", `Bearer ${token}`);
+              if (token && !req.getHeader("Authorization")) {
+                req.setHeader("Authorization", `Bearer ${token}`);
+              }
             });
           },
         },

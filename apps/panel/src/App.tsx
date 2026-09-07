@@ -4,6 +4,7 @@ import { loadDemoActions } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
 import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
+import { authorizedFetch, beginSession } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
 
@@ -34,7 +35,7 @@ export function App() {
       setLastReadMs(Date.now());
     }
     try {
-      const r = await fetch("/api/ledger?from=0&to=9999999999999");
+      const r = await authorizedFetch("/api/ledger?from=0&to=9999999999999");
       if (!r.ok) {
         let detail = "";
         try {
@@ -92,17 +93,26 @@ export function App() {
   }, [actions.length]);
 
   useEffect(() => {
-    void load();
-    const id = setInterval(() => {
+    let cancelled = false;
+    let id: ReturnType<typeof setInterval> | undefined;
+    void (async () => {
+      const phase = await beginSession();
+      if (cancelled || phase === "redirect") return;
       void load();
-    }, REFRESH_MS);
-    return () => clearInterval(id);
+      id = setInterval(() => {
+        void load();
+      }, REFRESH_MS);
+    })();
+    return () => {
+      cancelled = true;
+      if (id) clearInterval(id);
+    };
   }, [load]);
 
   useEffect(() => {
     void (async () => {
       try {
-        const r = await fetch("/healthz");
+        const r = await authorizedFetch("/healthz");
         if (!r.ok) {
           setHealth(null);
           return;
@@ -161,7 +171,7 @@ export function App() {
           setDemo(true);
         }}
         onContest={async (ref) => {
-          const res = await fetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
+          const res = await authorizedFetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
           const body = (await res.json().catch(() => ({}))) as {
             reAuditedAt?: number;
             finding?: RailFinding;

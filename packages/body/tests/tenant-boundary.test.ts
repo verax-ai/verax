@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { tenantKey } from "@verax-ai/proxy";
+import { explain, tenantKey } from "@verax-ai/proxy";
 
 import { runDoctor } from "../src/doctor.ts";
 import { createBodyServices } from "../src/wiring.ts";
@@ -194,6 +194,159 @@ describe("S4 _ref namespace", () => {
       ) as { body: { who?: string } };
       assert.equal(aFile.body.who, "a");
       assert.equal(bFile.body.who, "b");
+    } finally {
+      services.ledger.close();
+    }
+  });
+});
+
+describe("S5 A1 audit.explain tenant close", () => {
+  it("another tenant's ref is deny tenant-mismatch, signed, no record body", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-explain-"));
+    const keys = testKeys();
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: keys,
+      effectSigner: keys,
+    });
+    try {
+      const put = await services.proxy.call(
+        { name: "memory.put", arguments: { ...putArgs, _ref: "invoice-1" } },
+        writerA,
+      );
+      assert.equal(put.isError, false, parse(put).error as string);
+      const aliceRef = `${tenantKey(writerA)}:invoice-1`;
+
+      const got = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: aliceRef } },
+        readerB,
+      );
+      assert.equal(got.isError, true);
+      assert.match(got.content[0]?.text ?? "", /denied:tenant-mismatch:/);
+      assert.equal(JSON.stringify(got).includes("\"record\""), false);
+      assert.equal(JSON.stringify(got).includes("effectHash"), false);
+
+      const recs = await services.ledger.decisions();
+      const mismatch = recs.filter((d) => d.claims.reasonCode === "tenant-mismatch");
+      assert.ok(mismatch.length >= 1);
+      const explainDeny = mismatch.find((d) => d.claims.subject === "audit.explain");
+      assert.ok(explainDeny);
+      assert.equal(explainDeny.claims.decision, "deny");
+      assert.equal(typeof explainDeny.coseHex, "string");
+      assert.equal(explainDeny.claims.effectHash, null);
+    } finally {
+      services.ledger.close();
+    }
+  });
+
+  it("nonce refs (no _ref prefix) still close via the inputs principal", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-nonce-"));
+    const keys = testKeys();
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: keys,
+      effectSigner: keys,
+      nonce: (() => {
+        const q = ["nonce-record-1"];
+        let n = 0;
+        return () => q.shift() ?? `n-${++n}`;
+      })(),
+    });
+    try {
+      const put = await services.proxy.call(
+        { name: "memory.put", arguments: putArgs },
+        writerA,
+      );
+      assert.equal(put.isError, false);
+      const recs = await services.ledger.decisions();
+      const aliceRef = recs[0]!.claims.ref;
+      assert.equal(aliceRef, "nonce-record-1");
+      assert.equal(aliceRef.includes(":"), false);
+
+      const cross = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: aliceRef } },
+        readerB,
+      );
+      assert.equal(cross.isError, true);
+      assert.match(cross.content[0]?.text ?? "", /denied:tenant-mismatch:/);
+
+      const own = await services.proxy.call(
+        { name: "audit.explain", arguments: { ref: aliceRef } },
+        writerA,
+      );
+      assert.equal(own.isError, false);
+      const body = parse(own);
+      assert.equal(typeof body.record, "object");
+    } finally {
+      services.ledger.close();
+    }
+  });
+
+  it("operator explain() still reads any ref (panel path is not the tool)", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-op-explain-"));
+    const keys = testKeys();
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: keys,
+      effectSigner: keys,
+    });
+    try {
+      await services.proxy.call(
+        { name: "memory.put", arguments: { ...putArgs, _ref: "invoice-1" } },
+        writerA,
+      );
+      const aliceRef = `${tenantKey(writerA)}:invoice-1`;
+      const result = await explain(services.ledger, aliceRef, await services.explainOpts());
+      assert.equal(result.record.claims.ref, aliceRef);
+      assert.equal(result.record.claims.decision, "allow");
+    } finally {
+      services.ledger.close();
+    }
+  });
+});
+
+describe("S5 A2 uniform brain answer", () => {
+  it("what the brain is told matches the row that was written for it", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-s5-oracle-"));
+    const keys = testKeys();
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: keys,
+      effectSigner: keys,
+    });
+    try {
+      await services.proxy.call({ name: "memory.put", arguments: putArgs }, writerA);
+
+      const other = await services.proxy.call(
+        { name: "memory.get", arguments: { id: "note-1" } },
+        readerB,
+      );
+      const missing = await services.proxy.call(
+        { name: "memory.get", arguments: { id: "note-404" } },
+        readerB,
+      );
+      const otherText = other.content[0]?.text ?? "";
+      const missingText = missing.content[0]?.text ?? "";
+      // The cross-tenant read is refused and says so; the missing id was allowed and
+      // simply found nothing. A brain that is told "denied" over an allow row cannot
+      // trust any answer, and the uniform wording did not close the oracle anyway:
+      // the brain owns both records and can read them apart through audit.explain.
+      assert.match(otherText, /denied:tenant-mismatch:/);
+      assert.equal(JSON.parse(missingText).error, "not-found");
+      assert.equal(JSON.stringify(other).includes("alice-only"), false);
+
+      const recs = await services.ledger.decisions();
+      const getRows = recs.filter((d) => d.claims.subject === "memory.get");
+      const refused = getRows.find((d) => d.claims.reasonCode === "tenant-mismatch");
+      const allowed = getRows.find((d) => d.claims.decision === "allow");
+      assert.ok(refused, `ledger codes=${getRows.map((d) => d.claims.reasonCode).join(",")}`);
+      assert.equal(refused.claims.decision, "deny");
+      assert.ok(allowed, "the missing id must still be an allow row");
+      assert.equal(allowed.claims.reasonCode, "allow");
     } finally {
       services.ledger.close();
     }
