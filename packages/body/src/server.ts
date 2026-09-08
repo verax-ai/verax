@@ -12,6 +12,7 @@ import { loadOrCreateSigners } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
+import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
 const TOOL_META = [
@@ -228,6 +229,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         lock: services.ledger.lockStatus(),
         heartbeat: readHeartbeat(config.stateDir),
         witness: readWitnessPulse(config.stateDir),
+        inventory: inventoryHealth(readInventoryFile(config.inventoryFile)),
       });
       return;
     }
@@ -241,8 +243,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
       return;
     }
     const apiLedger = req.method === "GET" && url.pathname === "/api/ledger";
+    const apiInventory = url.pathname === "/api/inventory";
     const contest = req.method === "POST" && url.pathname.startsWith("/api/contest/");
-    if (url.pathname !== "/mcp" && !apiLedger && !contest) {
+    if (url.pathname !== "/mcp" && !apiLedger && !apiInventory && !contest) {
       send(res, 404, { error: "not-found" });
       return;
     }
@@ -267,13 +270,21 @@ export async function listen(config: BodyConfig): Promise<Server> {
       return;
     }
     try {
-      if (apiLedger || contest) {
+      if (apiLedger || apiInventory || contest) {
         // The audit doors hand out the whole ledger: every tenant's decisions, the
         // inputs documents that name their principals, and the approval snapshots
         // that carry spend arguments. `verax:read` is a brain scope, so it cannot be
         // the key here; the operator session carries `verax:audit`.
         if (!verified.principal.scopes.has("verax:audit")) {
           send(res, 403, { error: "scope-missing" });
+          return;
+        }
+        if (apiInventory) {
+          if (req.method !== "GET") {
+            send(res, 405, { error: "method-not-allowed" });
+            return;
+          }
+          send(res, 200, readInventoryFile(config.inventoryFile));
           return;
         }
         if (apiLedger) {

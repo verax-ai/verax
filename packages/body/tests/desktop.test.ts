@@ -8,6 +8,12 @@ describe("verax desktop args", () => {
     const parsed = parseDesktopArgs(["desktop"]);
     assert.deepEqual(parsed, { error: "usage" });
   });
+
+  it("parseDesktopArgs accepts --inventory", () => {
+    const parsed = parseDesktopArgs(["desktop", "--state", "s", "--inventory", "roster.json"]);
+    assert.ok(!("error" in parsed));
+    if (!("error" in parsed)) assert.equal(parsed.inventoryFile, "roster.json");
+  });
 });
 
 describe("verax desktop wiring", () => {

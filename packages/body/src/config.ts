@@ -9,6 +9,8 @@ export type BodyConfig = {
   bindPort: number;
   policyFile: string;
   tlsTerminated: boolean;
+  /** Path to an inventory JSON file. Missing file is absence, not a fault. */
+  inventoryFile?: string | null;
 };
 
 export type ConfigResult =
@@ -61,6 +63,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   if (policyFile === "") {
     return { ok: false, code: EX_CONFIG, reason: "missing VERAX_POLICY_FILE" };
   }
+  const inventoryRaw = env.VERAX_INVENTORY_FILE?.trim() ?? "";
   return {
     ok: true,
     value: {
@@ -72,6 +75,18 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       bindPort: bind.port,
       policyFile,
       tlsTerminated,
+      inventoryFile: inventoryRaw === "" ? null : inventoryRaw,
     },
   };
+}
+
+/** `--inventory <file>` wins over VERAX_INVENTORY_FILE. */
+export function overlayInventoryArg(env: NodeJS.ProcessEnv, argv: readonly string[]): NodeJS.ProcessEnv | { error: string } {
+  const i = argv.indexOf("--inventory");
+  if (i === -1) return env;
+  const path = argv[i + 1];
+  if (!path || path.startsWith("-")) {
+    return { error: "missing --inventory path" };
+  }
+  return { ...env, VERAX_INVENTORY_FILE: path };
 }

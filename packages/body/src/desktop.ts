@@ -13,6 +13,7 @@ export type DesktopOpts = {
   issuerPort: number;
   bodyPort: number;
   browser?: string;
+  inventoryFile?: string;
 };
 
 /** Newest modification time under a file or directory, ignoring build output. */
@@ -60,6 +61,7 @@ export function parseDesktopArgs(argv: string[]): DesktopOpts | { error: string 
   let issuerPort = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
   let bodyPort = 8787;
   let browser: string | undefined;
+  let inventoryFile: string | undefined;
   for (let i = 0; i < rest.length; i += 1) {
     const a = rest[i]!;
     if (a === "--state") {
@@ -82,13 +84,17 @@ export function parseDesktopArgs(argv: string[]): DesktopOpts | { error: string 
       browser = rest[++i];
       continue;
     }
+    if (a === "--inventory") {
+      inventoryFile = rest[++i];
+      continue;
+    }
     if (a.startsWith("-")) return { error: `flag-unknown:${a}` };
   }
   if (!stateDir) return { error: "usage" };
   if (![panelPort, issuerPort, bodyPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) {
     return { error: "port-invalid" };
   }
-  return { stateDir, panelPort, issuerPort, bodyPort, browser };
+  return { stateDir, panelPort, issuerPort, bodyPort, browser, inventoryFile };
 }
 
 export function portOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
@@ -243,6 +249,7 @@ export async function runDesktop(
         VERAX_AUDIENCE: audience,
         VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
         VERAX_POLICY_FILE: policy,
+        ...(opts.inventoryFile ? { VERAX_INVENTORY_FILE: opts.inventoryFile } : {}),
       },
       repoRoot,
     );
@@ -361,7 +368,7 @@ export async function runDesktop(
 export async function desktopMain(argv: string[]): Promise<number> {
   const parsed = parseDesktopArgs(argv);
   if ("error" in parsed) {
-    process.stderr.write("verax desktop [--state <dir>] [--port 5173] [--browser <cmd>]\n");
+    process.stderr.write("verax desktop [--state <dir>] [--port 5173] [--browser <cmd>] [--inventory <file>]\n");
     return 78;
   }
   return runDesktop(parsed);
