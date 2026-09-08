@@ -142,7 +142,11 @@ export function Observatory({
   }, []);
   const [tab, setTab] = useState<TabId>(initialTab);
   const [selected, setSelected] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
-  const [focusId, setFocusId] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    const q = new URLSearchParams(window.location.search).get("focus");
+    return q && q.length > 0 ? q : null;
+  });
   const [audits, setAudits] = useState<
     Record<
       string,

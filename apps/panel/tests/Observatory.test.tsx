@@ -96,6 +96,11 @@ describe("observatory", () => {
     expect(tr["galaxy.focus.leave"].length).toBeGreaterThan(0);
   });
 
+  it("reads ?focus= so a group seat can open from the address", () => {
+    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
+    expect(src).toMatch(/window\.location\.search\)\.get\("focus"\)/);
+  });
+
   it("lets the inventory rail pick a group without calling it measured", () => {
     render(
       <Observatory
