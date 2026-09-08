@@ -12,7 +12,7 @@ export {
   readOpenQuery,
   stepOpen,
 } from "./open.ts";
-export { labelVisible } from "./labels.ts";
+export { labelBudget, labelVisible } from "./labels.ts";
 export { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
 export { BLOOM_FULL, galaxyTier, TIER_DUST } from "./quality.ts";
 export {

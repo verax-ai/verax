@@ -11,6 +11,47 @@ export function labelVisible(kind: LabelKind, cameraDistance: number, sceneRadiu
   return u < 6;
 }
 
+/**
+ * Screen-space height of an agent name (NDC; 2 is the whole viewport).
+ * Matches the sprite scale in Galaxy.tsx. A short English name is about
+ * four times wider than it is tall, so one glyph box is this times four.
+ */
+export const AGENT_LABEL_NDC_HEIGHT = 0.036;
+
+/** Canvas fov in Galaxy.tsx. Used only to turn world distance into NDC. */
+export const LABEL_FOV_DEG = 46;
+
+/**
+ * One name needs a neighbour-sized gap or two labels fuse into a white
+ * smear: the defect measured on a 500-agent inventory at opening
+ * distance 85, scene radius 48, fov 46°: the GPU was fine (p95 5.9 on
+ * hardware); the names were not readable. Area, not a head-count cap:
+ * showing 8 of 500 would leak a count through which names remain.
+ */
+const LABEL_BOX_NDC = AGENT_LABEL_NDC_HEIGHT * AGENT_LABEL_NDC_HEIGHT * 4;
+const NEIGHBOUR_CLEARANCE = 4;
+const MIN_MEAN_NDC_AREA = LABEL_BOX_NDC * NEIGHBOUR_CLEARANCE;
+const FOV_HALF_TAN = Math.tan((LABEL_FOV_DEG * Math.PI) / 360);
+
+/**
+ * How many names stay readable at this distance. The set is shown as a
+ * whole or not at all: a half-shown crowd is the smear again. Callers
+ * apply this on top of labelVisible and give planets the first claim on
+ * the budget (evaluate planets on their own count, agents on both).
+ */
+export function labelBudget(
+  count: number,
+  cameraDistance: number,
+  sceneRadius: number,
+): { show: boolean; hidden: number } {
+  if (!(count > 0)) return { show: true, hidden: 0 };
+  if (!(sceneRadius > 0) || !(cameraDistance > 0)) return { show: false, hidden: count };
+  const projectedR = sceneRadius / cameraDistance / FOV_HALF_TAN;
+  const meanArea = (Math.PI * projectedR * projectedR) / count;
+  if (meanArea >= MIN_MEAN_NDC_AREA) return { show: true, hidden: 0 };
+  return { show: false, hidden: count };
+}
+
 /** The text a label may show, or null when the record carries no name. */
 export function labelText(name: string | undefined): string | null {
   const text = (name ?? "").trim();
