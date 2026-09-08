@@ -159,17 +159,26 @@ function cleanEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+/**
+ * `windowsHide` is right for the servers: it keeps a console window off the
+ * screen. It is wrong for the browser. On Windows the flag becomes SW_HIDE in
+ * the child's STARTUPINFO, and Chrome and Edge honour it for their first
+ * window: the process starts, renderers run, the panel answers on its port,
+ * and the app window is created hidden. That is the desktop app opening to
+ * nothing. The browser must be spawned with the flag off.
+ */
 function spawnLogged(
   cmd: string,
   args: string[],
   env: NodeJS.ProcessEnv,
   cwd: string,
+  hideWindow = true,
 ): ChildProcess {
   return spawn(cmd, args, {
     cwd,
     env,
     stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
+    windowsHide: hideWindow,
     detached: process.platform !== "win32",
   });
 }
@@ -319,7 +328,7 @@ export async function runDesktop(
           `--app=${url}`,
           "--window-size=1360,880",
         ];
-    const browser = spawnLogged(browserBin, browserArgv, cleanEnv(), repoRoot);
+    const browser = spawnLogged(browserBin, browserArgv, cleanEnv(), repoRoot, false);
     kids.push(browser);
     collectOutput(browser, log);
     if (log.text.includes(token)) {
