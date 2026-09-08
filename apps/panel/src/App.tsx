@@ -28,11 +28,18 @@ export function App() {
   const [pending, setPending] = useState<PendingApproval[]>([]);
 
   const load = useCallback(async () => {
-    if (wantDemo() && actions.length === 0) {
-      setActions(loadDemoActions());
-      setDemo(true);
-      setStatus("ok");
-      setLastReadMs(Date.now());
+    if (wantDemo()) {
+      // The sample scenario stands on its own flag, not on a failing request.
+      // It used to survive only because an unauthorised /api/ledger took the
+      // early return below; once the session worked, an empty real ledger
+      // overwrote the sample and demo=1 showed nothing.
+      if (actions.length === 0) {
+        setActions(loadDemoActions());
+        setDemo(true);
+        setStatus("ok");
+        setLastReadMs(Date.now());
+      }
+      return;
     }
     try {
       const r = await authorizedFetch("/api/ledger?from=0&to=9999999999999");
