@@ -4,6 +4,7 @@ import { hashPoint } from "../src/address.ts";
 import {
   CLOSED_RADIUS,
   REDUCED_OPEN_MS,
+  defaultOpen,
   easeOpen,
   mix3,
   openDurationMs,
@@ -47,3 +48,19 @@ describe("opening", () => {
     assert.equal(readOpenQuery(""), null);
   });
 });
+
+describe("what the scene shows before anyone clicks", () => {
+  it("opens itself when nobody asked for it to stay closed", () => {
+    assert.equal(defaultOpen(undefined, null), 1);
+  });
+
+  it("stays closed when the URL asks for closed", () => {
+    assert.equal(defaultOpen(undefined, 0), 0);
+  });
+
+  it("lets the caller override the URL", () => {
+    assert.equal(defaultOpen(0, 1), 0);
+    assert.equal(defaultOpen(1, 0), 1);
+  });
+});
+

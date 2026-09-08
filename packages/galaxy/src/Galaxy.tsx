@@ -7,7 +7,7 @@ import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
 import { labelAspect, labelText, labelVisible, paintLabel } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
-import { easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
+import { defaultOpen, easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
 import { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
 import type { Point3 } from "./address.ts";
 import { galaxyTier, readForcedTier } from "./quality.ts";
@@ -275,7 +275,7 @@ function StarPoints({
               onSelect?.({ kind: "star", id: s.id });
             }}
           >
-            <sphereGeometry args={[0.18, 8, 8]} />
+            <sphereGeometry args={[STAR_RADIUS, 8, 8]} />
             <meshBasicMaterial
               color={s.flag ? new Color(s.flag.r, s.flag.g, s.flag.b) : new Color(0.75, 0.8, 0.95)}
               transparent
@@ -311,7 +311,7 @@ function AgentMeshes({
               onSelect?.({ kind: "agent", id: a.id });
             }}
           >
-            <octahedronGeometry args={[0.62, 0]} />
+            <octahedronGeometry args={[AGENT_RADIUS, 0]} />
             <meshBasicMaterial color={rgb(a.look)} wireframe transparent opacity={a.look.unmeasured ? 0.4 : 0.95} />
           </mesh>
           {a.witness === "same-org" ? (
@@ -404,6 +404,16 @@ function usePaintedLabels(items: readonly { id: string; label: string; at: Point
 // Screen-space heights (NDC, so 2 is the whole viewport). A label scaled in
 // world units shrinks with distance until it is a smudge, which reads as a
 // name without being one; these hold a readable size at every zoom.
+/**
+ * A record is a body in the sky, so it has to be visible as one. At the opening
+ * distance the old 0.18 radius covered about one pixel: the scene drew every
+ * record faithfully and the viewer saw an empty rectangle.
+ */
+const STAR_RADIUS = 0.55;
+const AGENT_RADIUS = 0.95;
+/** Opening distance. Far enough for the whole sky, near enough to read it. */
+export const OPENING_DISTANCE = 85;
+
 const PLANET_LABEL_HEIGHT = 0.05;
 const AGENT_LABEL_HEIGHT = 0.036;
 
@@ -530,12 +540,12 @@ function SceneBody({
 
 export function Galaxy({ model, reducedMotion, onSelect, open, ready = true }: GalaxyProps) {
   const reduce = reducedMotion ?? readReduced();
-  const orbit = useMemo(() => createOrbit(120), []);
+  const orbit = useMemo(() => createOrbit(OPENING_DISTANCE), []);
   const dragging = useRef(false);
   const moved = useRef(false);
   const last = useRef({ x: 0, y: 0 });
   const queryOpen = typeof window !== "undefined" ? readOpenQuery(window.location.search) : null;
-  const [want, setWant] = useState(open ?? queryOpen ?? 0);
+  const [want, setWant] = useState(defaultOpen(open, queryOpen));
   const target = ready ? (open ?? want) : 0;
 
   const toggle = useCallback(() => {

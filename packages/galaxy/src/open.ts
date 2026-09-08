@@ -51,3 +51,13 @@ export function readOpenQuery(search: string): number | null {
   if (q === "0" || q === "false") return 0;
   return null;
 }
+
+/**
+ * What the scene shows before anyone clicks. A galaxy that has records and
+ * draws a closed sphere is hiding them: nothing on screen says a click would
+ * open it, so the page reads as empty. Closed is now something the caller or
+ * the URL asks for, not the default.
+ */
+export function defaultOpen(open: number | undefined, queryOpen: number | null): number {
+  return open ?? queryOpen ?? 1;
+}
