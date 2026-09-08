@@ -88,6 +88,26 @@ describe("panel session", () => {
     expect(accessToken()).toBeNull();
   });
 
+  it("a second beginSession shares the first boot and does not start authorize twice", async () => {
+    const assign = vi.fn();
+    vi.stubGlobal("location", {
+      search: "",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => (isPrm(input) ? prmResponse() : new Response("{}", { status: 404 }))),
+    );
+    const first = beginSession();
+    const second = beginSession();
+    expect(await first).toBe("redirect");
+    expect(await second).toBe("redirect");
+    expect(assign).toHaveBeenCalledTimes(1);
+  });
+
   it("a returned state that does not match starts over instead of exchanging", async () => {
     sessionStorage.setItem("verax-pkce-verifier", "verifier-1");
     sessionStorage.setItem("verax-pkce-state", "mine");
