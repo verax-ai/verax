@@ -107,6 +107,22 @@ body {
 .muted {
   color: #8aa0b5;
 }
+.rail-ledger {
+  list-style: disc;
+  padding-left: 1.1rem;
+  margin: 0 0 0.6rem;
+}
+.rail-inventory {
+  list-style: none;
+  margin: 0 0 0.6rem;
+  padding: 0.15rem 0 0.15rem 0.65rem;
+  border-left: 2px dashed #5a6a7a;
+}
+.rail-inventory li {
+  color: #8aa0b5;
+  font-style: italic;
+  padding: 0.1rem 0;
+}
 .galaxy-empty,
 .galaxy-coverage {
   margin: 0 0 0.4rem;
