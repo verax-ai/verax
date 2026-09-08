@@ -11,6 +11,7 @@ import { isRevokedJti } from "./revoke.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
+import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
 const TOOL_META = [
@@ -225,6 +226,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
         effects: effects.length,
         lastDecisionMs: last ? last.claims.timestampMs : null,
         lock: services.ledger.lockStatus(),
+        heartbeat: readHeartbeat(config.stateDir),
+        witness: readWitnessPulse(config.stateDir),
       });
       return;
     }

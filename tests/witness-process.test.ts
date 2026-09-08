@@ -33,10 +33,17 @@ function lastStatus(dir: string): { result?: string; reason?: string } {
   return JSON.parse(lines[lines.length - 1] ?? "{}") as { result?: string; reason?: string };
 }
 
-async function waitFile(path: string, ms = 5000): Promise<void> {
+/**
+ * Waits for the witness to announce its socket. The bound is generous because
+ * this measures a process start, not a deadline: under a full test run the
+ * witness strips types on a busy CPU and took over 5 s twice. A witness that
+ * exits fails immediately, so a real failure is still caught at once.
+ */
+async function waitFile(path: string, child?: { exitCode: number | null }, ms = 30_000): Promise<void> {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
     if (existsSync(path)) return;
+    if (child && child.exitCode !== null) throw new Error(`witness-exited:${child.exitCode}`);
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`listen-timeout:${path}`);
@@ -56,7 +63,7 @@ describe("independent witness process", () => {
     const child = spawnWitness(dir);
     const listenPath = join(dir, "witness.listen.json");
     try {
-      await waitFile(listenPath);
+      await waitFile(listenPath, child);
       const listen = JSON.parse(readFileSync(listenPath, "utf8")) as { publicKeyPem?: string; pid?: number };
       assert.equal(typeof listen.publicKeyPem, "string");
       assert.notEqual(listen.publicKeyPem, body.publicKeyPem);

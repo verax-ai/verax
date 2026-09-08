@@ -9,8 +9,8 @@ import { parseLedger } from "../src/rail/parse.ts";
 import { Rail } from "../src/rail/Rail.tsx";
 import type { PolicyBundle } from "../src/rail/types.ts";
 
-vi.mock("@verax-ai/presence", () => ({
-  Stage: () => <div data-testid="stage" />,
+vi.mock("@verax-ai/galaxy/react", () => ({
+  Galaxy: () => <div data-testid="galaxy-stage" />,
 }));
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -205,7 +205,7 @@ describe("panel ledger fetch states", () => {
       return ledgerFetch();
     });
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: "İşlem geçmişi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
     });

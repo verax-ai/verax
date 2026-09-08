@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -123,6 +123,60 @@ describe("healthz counts", () => {
       assert.equal(panelBody.effects, 0);
       assert.equal(panelBody.lastDecisionMs, null);
       assert.equal(panelBody.lock, "held");
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+
+  it("audit healthz names heartbeat and witness; a scopeless token still sees ok only", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-healthz-pulse-"));
+    writeFileSync(
+      join(stateDir, "heartbeat.json"),
+      `${JSON.stringify({ atMs: 1_700_000_000_000, lastDecisionN: 4, lastEffectN: 3 })}\n`,
+      "utf8",
+    );
+    writeFileSync(
+      join(stateDir, "witness-status.jsonl"),
+      `${JSON.stringify({ atMs: 1_700_000_000_100, result: "signed" })}\n`,
+      "utf8",
+    );
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const bodyPort = (server.address() as { port: number }).port;
+    try {
+      const none = await issuer.sign({ scope: "" });
+      const noneRes = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${none}` },
+      });
+      assert.equal(noneRes.status, 200);
+      assert.deepEqual(await noneRes.json(), { ok: true });
+
+      const panel = await issuer.sign({ scope: "verax:read verax:audit" });
+      const panelRes = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${panel}` },
+      });
+      assert.equal(panelRes.status, 200);
+      const body = (await panelRes.json()) as {
+        ok?: boolean;
+        heartbeat?: { atMs: number; lastDecisionN: number; lastEffectN: number } | null;
+        witness?: { class: string; atMs: number } | null;
+      };
+      assert.equal(body.ok, true);
+      assert.deepEqual(body.heartbeat, { atMs: 1_700_000_000_000, lastDecisionN: 4, lastEffectN: 3 });
+      assert.deepEqual(body.witness, { class: "same-org", atMs: 1_700_000_000_100 });
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));

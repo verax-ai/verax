@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { Stage } from "@verax-ai/presence";
+import { Galaxy } from "@verax-ai/galaxy/react";
+import { ledgerToGalaxy } from "../galaxy/adapter.ts";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
 import { Rail, type RailContestResult } from "../rail/Rail.tsx";
@@ -13,17 +14,18 @@ export type Healthz = {
   effects?: number;
   lastDecisionMs?: number | null;
   lock?: { held: boolean; pid?: number } | string | null;
+  heartbeat?: { atMs: number; lastDecisionN?: number; lastEffectN?: number } | null;
+  witness?: { class: string; atMs: number } | null;
 } | null;
 
 export type ObservatoryStatus = "loading" | "ok" | "error" | "empty";
 
-const TAB_IDS = ["status", "map", "history", "anatomy"] as const;
+const TAB_IDS = ["status", "galaxy", "history"] as const;
 type TabId = (typeof TAB_IDS)[number];
-const TAB_COPY: Record<TabId, "tab.status" | "tab.map" | "tab.history" | "tab.anatomy"> = {
+const TAB_COPY: Record<TabId, "tab.status" | "tab.galaxy" | "tab.history"> = {
   status: "tab.status",
-  map: "tab.map",
+  galaxy: "tab.galaxy",
   history: "tab.history",
-  anatomy: "tab.anatomy",
 };
 
 const ANATOMY = [
@@ -80,9 +82,9 @@ export function Observatory({
   onContest?: (ref: string) => Promise<RailContestResult | void>;
 }) {
   const initialTab = useMemo<TabId>(() => {
-    if (typeof window === "undefined") return "status";
+    if (typeof window === "undefined") return "galaxy";
     const q = new URLSearchParams(window.location.search).get("tab");
-    return TAB_IDS.includes(q as TabId) ? (q as TabId) : "status";
+    return TAB_IDS.includes(q as TabId) ? (q as TabId) : "galaxy";
   }, []);
   const [tab, setTab] = useState<TabId>(initialTab);
   const [selected, setSelected] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
@@ -238,30 +240,21 @@ export function Observatory({
             pending={pending}
           />
         ) : null}
-        {tab === "map" ? <SystemMap actions={actions} /> : null}
+        {tab === "galaxy" ? (
+          <Galaxy
+            model={ledgerToGalaxy(actions, health, reconcile)}
+            ready={status !== "loading"}
+            onSelect={(hit) => {
+              if (hit.kind === "star") setSelected(hit.id);
+            }}
+          />
+        ) : null}
         {tab === "history" ? (
           <Rail
             actions={actions}
             onContest={contest}
             onSelect={(ref) => setSelected(ref)}
           />
-        ) : null}
-        {tab === "anatomy" ? (
-          <div className="anatomy">
-            <Stage particles={false} rain={false} breath="procedural" />
-            <ul className="anatomy-labels">
-              {ANATOMY.map((a) => (
-                <li
-                  key={a.key}
-                  data-anchor={a.key}
-                  style={{ left: a.left, top: a.top }}
-                  title={copy["anatomy.approx"]}
-                >
-                  {a.tr} / {a.en} · {a.prod}
-                </li>
-              ))}
-            </ul>
-          </div>
         ) : null}
       </section>
       <aside className="obs-detail" aria-label="İşlem ayrıntısı">
@@ -343,94 +336,25 @@ function StatusView({
         )}
       </section>
       <ReconcileCard report={reconcile} />
+      <AnatomyDocument />
     </div>
   );
 }
 
-const MAP_N = 12;
-const BODY_X = 220;
-const BODY_Y = 80;
-
-function SystemMap({ actions }: { actions: RailAction[] }) {
+function AnatomyDocument() {
   const copy = panelCopy();
-  const recent = actions.slice(0, MAP_N);
-  const pairs = new Map<string, { brain: string; subject: string; count: number }>();
-  for (const a of recent) {
-    const brain = a.inputs?.principal.brain ?? "unknown";
-    const subject = a.record.claims.subject;
-    const key = `${brain}\t${subject}`;
-    const prev = pairs.get(key);
-    pairs.set(key, { brain, subject, count: (prev?.count ?? 0) + 1 });
-  }
-  const brains = [...new Set([...pairs.values()].map((p) => p.brain))];
-  const subjects = [...new Set([...pairs.values()].map((p) => p.subject))];
-  const newest = recent[0];
-  const newestKey = newest
-    ? `${newest.inputs?.principal.brain ?? "unknown"}\t${newest.record.claims.subject}`
-    : "";
-  const [flash, setFlash] = useState(newestKey);
-  useEffect(() => {
-    if (reducedMotion() || newestKey === "") {
-      setFlash("");
-      return;
-    }
-    setFlash(newestKey);
-    const id = window.setTimeout(() => setFlash(""), 400);
-    return () => window.clearTimeout(id);
-  }, [newestKey]);
-
-  const max = Math.max(1, ...[...pairs.values()].map((p) => p.count));
   return (
-    <svg className="system-map" viewBox="0 0 640 320" role="img" aria-label={copy["tab.map"]}>
-      {brains.map((b, i) => (
-        <text key={b} x={80} y={40 + i * 36} fill="#EAF2F8" textAnchor="middle">
-          {b}
-        </text>
-      ))}
-      <text x={BODY_X} y={BODY_Y} fill="#EAF2F8" textAnchor="middle">
-        {copy["map.body"]}
-      </text>
-      {subjects.map((s, i) => (
-        <text key={s} x={400} y={40 + i * 28} fill="#EAF2F8">
-          {s}
-        </text>
-      ))}
-      {[...pairs.values()].map((p) => {
-        const bi = brains.indexOf(p.brain);
-        const si = subjects.indexOf(p.subject);
-        const x1 = 80;
-        const y1 = 40 + bi * 36;
-        const x2 = 400;
-        const y2 = 40 + si * 28;
-        const thick = 1 + (2.5 * p.count) / max;
-        const op = 0.25 + (0.55 * p.count) / max;
-        const on = flash === `${p.brain}\t${p.subject}`;
-        return (
-          <g key={`${p.brain}-${p.subject}`}>
-            <line
-              data-edge={`${p.brain}|${p.subject}`}
-              x1={x1}
-              y1={y1}
-              x2={x2}
-              y2={y2}
-              stroke="#5CE1FF"
-              strokeWidth={thick}
-              strokeOpacity={on ? 1 : op}
-              className={on ? "edge-flash" : undefined}
-            />
-            <line
-              x1={x1}
-              y1={y1}
-              x2={BODY_X}
-              y2={BODY_Y}
-              stroke="#5CE1FF"
-              strokeWidth={1}
-              strokeOpacity={0.2}
-            />
-          </g>
-        );
-      })}
-    </svg>
+    <section className="anatomy-document" data-testid="anatomy-document">
+      <h3>{copy["tab.anatomy"]}</h3>
+      <p className="muted">{copy["anatomy.approx"]}</p>
+      <ul>
+        {ANATOMY.map((a) => (
+          <li key={a.key} data-anchor={a.key}>
+            {a.tr} / {a.en} · {a.prod}
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 

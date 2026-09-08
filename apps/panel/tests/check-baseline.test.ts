@@ -38,4 +38,22 @@ describe("panel-perf check-baseline", () => {
     assert.equal(ran.status, 1, ran.stderr);
     assert.match(ran.stderr, /panel-perf: no frames/);
   });
+
+  it("fails a dead run even when the key has no baseline", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-dead-"));
+    const last = join(dir, "last.json");
+    const baseline = join(dir, "baseline.json");
+    writeFileSync(last, `${JSON.stringify({ key: "unknown/key", frames: 0, p95: 0 })}\n`, {
+      encoding: "utf8",
+    });
+    writeFileSync(baseline, "{}\n", { encoding: "utf8" });
+    const ran = spawnSync(process.execPath, [script], {
+      cwd: root,
+      env: { ...process.env, VERAX_PERF_LAST: last, VERAX_PERF_BASELINE: baseline },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(ran.status, 1, "a scene that rendered nothing must not pass as not compared");
+    assert.match(ran.stderr, /panel-perf: no frames/);
+  });
 });

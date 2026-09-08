@@ -63,7 +63,7 @@ describe("panel-perf", () => {
     assert.equal(typeof record.p95, "number");
   });
 
-  it("check-baseline records and passes when the key is missing", async () => {
+  it("says a missing key was not compared, and writes nothing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-perf-none-"));
     const last = join(dir, "last.json");
     const baseline = join(dir, "baseline.json");
@@ -79,7 +79,65 @@ describe("panel-perf", () => {
       GITHUB_ACTIONS: "",
     });
     assert.equal(result.code, 0);
-    assert.match(result.stdout, /no baseline for .*; recorded/);
+    assert.match(result.stdout, /no baseline for .*; not compared/);
+    assert.doesNotMatch(result.stdout, /recorded/);
+    assert.equal(readFileSync(baseline, "utf8"), "{}\n");
+  });
+
+  it("records a missing key only when asked, and keeps the other entries", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-record-"));
+    const last = join(dir, "last.json");
+    const baseline = join(dir, "baseline.json");
+    const key = "win32/swiftshader/local/galaxy@5000";
+    writeFileSync(
+      last,
+      `${JSON.stringify({ key, p95: 51, frames: 300, gl: "swiftshader" })}\n`,
+      { encoding: "utf8" },
+    );
+    writeFileSync(
+      baseline,
+      `${JSON.stringify({ "linux/swiftshader/gha-Linux": { p95: 1043.5, frames: 10, at: "2026-09-05T00:00:00.000Z" } })}\n`,
+      { encoding: "utf8" },
+    );
+    const result = await spawnScript(check, {
+      VERAX_PERF_LAST: last,
+      VERAX_PERF_BASELINE: baseline,
+      VERAX_PERF_RECORD: "1",
+      GITHUB_ACTIONS: "",
+    });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /recorded win32\/swiftshader\/local\/galaxy@5000/);
+    const written = JSON.parse(readFileSync(baseline, "utf8")) as Record<
+      string,
+      { p95?: number; frames?: number }
+    >;
+    assert.equal(written[key]?.p95, 51);
+    assert.equal(written[key]?.frames, 300);
+    assert.equal(written["linux/swiftshader/gha-Linux"]?.p95, 1043.5);
+  });
+
+  it("refuses to record over an entry that already exists", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-perf-keep-"));
+    const last = join(dir, "last.json");
+    const baseline = join(dir, "baseline.json");
+    const key = "win32/swiftshader/local/galaxy@5000";
+    writeFileSync(last, `${JSON.stringify({ key, p95: 400, frames: 300 })}\n`, {
+      encoding: "utf8",
+    });
+    writeFileSync(
+      baseline,
+      `${JSON.stringify({ [key]: { p95: 51, frames: 300, at: "2026-09-08T00:00:00.000Z" } })}\n`,
+      { encoding: "utf8" },
+    );
+    const result = await spawnScript(check, {
+      VERAX_PERF_LAST: last,
+      VERAX_PERF_BASELINE: baseline,
+      VERAX_PERF_RECORD: "1",
+      GITHUB_ACTIONS: "",
+    });
+    assert.equal(result.code, 1, "a slow run must not overwrite the baseline it failed against");
+    const written = JSON.parse(readFileSync(baseline, "utf8")) as Record<string, { p95?: number }>;
+    assert.equal(written[key]?.p95, 51);
   });
 
   it("check-baseline fails when p95 exceeds baseline x 1.3", async () => {
@@ -208,20 +266,14 @@ describe("panel-perf", () => {
 });
 
 describe("preview readiness", () => {
-  it("withTier adds bloom=1 only when VERAX_PERF_BLOOM is 1", async () => {
+  it("withTier asks for the tier on the opened galaxy tab", async () => {
     // @ts-expect-error measure.mjs is an untyped script
     const { withTier } = await import("../apps/panel/perf/measure.mjs");
-    const prev = process.env.VERAX_PERF_BLOOM;
-    delete process.env.VERAX_PERF_BLOOM;
-    try {
-      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("bloom"), null);
-      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("tier"), "60000");
-      process.env.VERAX_PERF_BLOOM = "1";
-      assert.equal(new URL(withTier("http://127.0.0.1:4173/", 60000)).searchParams.get("bloom"), "1");
-    } finally {
-      if (prev === undefined) delete process.env.VERAX_PERF_BLOOM;
-      else process.env.VERAX_PERF_BLOOM = prev;
-    }
+    const u = new URL(withTier("http://127.0.0.1:4173/", 5000));
+    assert.equal(u.searchParams.get("tier"), "5000");
+    assert.equal(u.searchParams.get("tab"), "galaxy");
+    assert.equal(u.searchParams.get("open"), "1");
+    assert.equal(u.searchParams.get("demo"), "1");
   });
 
   it("parses the Local: URL even when vite colours it", async () => {

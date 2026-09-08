@@ -1,6 +1,6 @@
 {
   "tab.status": "Status",
-  "tab.map": "System map",
+  "tab.galaxy": "Galaxy",
   "tab.history": "History",
   "tab.anatomy": "Anatomy",
   "rail.q1": "What did you do",
@@ -30,7 +30,6 @@
   "records": "Records",
   "refresh": "Refresh",
   "showDemo": "Show sample scenario",
-  "map.body": "body",
   "anatomy.approx": "approximate",
   "pending.title": "Pending approval",
   "pending.empty": "none"
