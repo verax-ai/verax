@@ -66,11 +66,15 @@ function GalaxyTab({
   ready,
   onSelect,
   coverageText,
+  focusId,
+  onFocus,
 }: {
   model: GalaxyModel;
   ready: boolean;
   onSelect: (hit: GalaxySelect) => void;
   coverageText: string;
+  focusId: string | null;
+  onFocus: (id: string | null) => void;
 }) {
   const copy = panelCopy();
   const empty =
@@ -91,6 +95,10 @@ function GalaxyTab({
         onSelect={onSelect}
         hiddenLabelsText={copy["galaxy.labels.hidden"]}
         crowdedLabelsText={copy["galaxy.labels.hidden.crowd"]}
+        focusId={focusId}
+        onFocus={onFocus}
+        focusText={copy["galaxy.focus"]}
+        leaveFocusText={copy["galaxy.focus.leave"]}
       />
     </>
   );
@@ -134,6 +142,7 @@ export function Observatory({
   }, []);
   const [tab, setTab] = useState<TabId>(initialTab);
   const [selected, setSelected] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
+  const [focusId, setFocusId] = useState<string | null>(null);
   const [audits, setAudits] = useState<
     Record<
       string,
@@ -280,7 +289,11 @@ export function Observatory({
             ) : (
               <ul className="rail-inventory" data-testid="rail-inventory-groups">
                 {inventory.groups.map((g) => (
-                  <li key={g.id}>{g.label}</li>
+                  <li key={g.id}>
+                    <button type="button" className="focusable" onClick={() => { setFocusId(g.id); setTab("galaxy"); }}>
+                      {g.label}
+                    </button>
+                  </li>
                 ))}
               </ul>
             )}
@@ -290,7 +303,20 @@ export function Observatory({
             ) : (
               <ul className="rail-inventory" data-testid="rail-inventory-agents">
                 {inventory.agents.map((a) => (
-                  <li key={a.id}>{a.label}</li>
+                  <li key={a.id}>
+                    <button
+                      type="button"
+                      className="focusable"
+                      onClick={() => {
+                        if (a.groupId) {
+                          setFocusId(a.groupId);
+                          setTab("galaxy");
+                        }
+                      }}
+                    >
+                      {a.label}
+                    </button>
+                  </li>
                 ))}
               </ul>
             )}
@@ -326,8 +352,11 @@ export function Observatory({
             model={scene}
             ready={status !== "loading"}
             coverageText={cover.text}
+            focusId={focusId}
+            onFocus={setFocusId}
             onSelect={(hit) => {
               if (hit.kind === "star") setSelected(hit.id);
+              if (hit.kind === "planet") setFocusId(hit.id);
             }}
           />
         ) : null}

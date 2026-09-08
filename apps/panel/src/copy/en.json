@@ -39,6 +39,8 @@
   "galaxy.empty": "no records yet - the body has not decided anything",
   "galaxy.labels.hidden": "{n} names hidden at this distance. Move closer to read them",
   "galaxy.labels.hidden.crowd": "{n} names hidden: this neighborhood is too crowded to read",
+  "galaxy.focus": "Viewing {name}",
+  "galaxy.focus.leave": "Leave",
   "galaxy.inventory.unbound": "inventory not bound",
   "galaxy.inventory.sample": "the sample scenario shows no inventory",
   "galaxy.coverage": "{accountable} / {total} agents can account for themselves · inventory {source}, taken {ago}",
