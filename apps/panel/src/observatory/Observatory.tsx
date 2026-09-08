@@ -85,7 +85,12 @@ function GalaxyTab({
           {copy["galaxy.empty"]}
         </p>
       ) : null}
-      <Galaxy model={model} ready={ready} onSelect={onSelect} />
+      <Galaxy
+        model={model}
+        ready={ready}
+        onSelect={onSelect}
+        hiddenLabelsText={copy["galaxy.labels.hidden"]}
+      />
     </>
   );
 }

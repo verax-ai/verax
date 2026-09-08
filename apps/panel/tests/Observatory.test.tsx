@@ -70,6 +70,14 @@ describe("observatory", () => {
     expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/\d+\s*\/\s*\d+/);
   });
 
+  it("passes the hidden-names line from copy into the sky", () => {
+    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
+    expect(src).toMatch(/hiddenLabelsText=\{copy\["galaxy\.labels\.hidden"\]\}/);
+    const en = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "en.json"), "utf8")) as Record<string, string>;
+    expect(en["galaxy.labels.hidden"]).toMatch(/\{n\}/);
+    expect(en["galaxy.labels.hidden"]).toMatch(/hidden at this distance/i);
+  });
+
   it("fills the sky from inventory and names coverage without a percentage", () => {
     render(
       <Observatory

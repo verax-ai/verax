@@ -119,6 +119,18 @@ body {
   height: min(70vh, 42rem);
   width: 100%;
 }
+.galaxy-labels-hidden {
+  position: absolute;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 2;
+  margin: 0;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.8rem;
+  color: #eaf2f8;
+  background: rgba(2, 6, 15, 0.72);
+  pointer-events: none;
+}
 .galaxy-stage canvas {
   display: block;
   width: 100%;

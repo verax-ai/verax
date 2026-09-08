@@ -100,6 +100,8 @@ describe("label budget", () => {
     assert.match(labels, /export function labelBudget/);
     const scene = readFileSync(join(src, "Galaxy.tsx"), "utf8");
     assert.match(scene, /labelVisible\(/);
+    assert.match(scene, /labelBudget\(/);
+    assert.match(scene, /data-testid="galaxy-labels-hidden"/);
   });
 });
 

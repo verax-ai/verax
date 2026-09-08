@@ -5,7 +5,15 @@ import { CanvasTexture, Color, DoubleSide, Group, InstancedMesh, NoToneMapping, 
 import { cameraPosition, createOrbit, nudgeOrbit, stepOrbit, zoomOrbit, type Orbit } from "./camera.ts";
 import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
-import { labelAspect, labelText, labelVisible, paintLabel } from "./labels.ts";
+import {
+  AGENT_LABEL_NDC_HEIGHT,
+  LABEL_FOV_DEG,
+  labelAspect,
+  labelBudget,
+  labelText,
+  labelVisible,
+  paintLabel,
+} from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
 import { defaultOpen, easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
 import { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
@@ -22,6 +30,8 @@ export type GalaxyProps = {
   open?: number;
   /** Data arrived. Until then the closed sphere spins and ignores click. */
   ready?: boolean;
+  /** Template with `{n}`. Shown only when names are hidden. */
+  hiddenLabelsText?: string;
 };
 
 function readReduced(): boolean {
@@ -415,28 +425,57 @@ const AGENT_RADIUS = 0.95;
 export const OPENING_DISTANCE = 85;
 
 const PLANET_LABEL_HEIGHT = 0.05;
-const AGENT_LABEL_HEIGHT = 0.036;
+
+function fillHidden(template: string, n: number): string {
+  return template.replace(/\{n\}/g, String(n));
+}
+
+function namesShown(
+  kind: "planet" | "agent",
+  count: number,
+  distance: number,
+): boolean {
+  return labelVisible(kind, distance, SCENE_RADIUS) && labelBudget(count, distance, SCENE_RADIUS).show;
+}
 
 function LabelSprites({
   placed,
-  distance,
+  orbit,
   openRef,
   reducedMotion,
+  onHidden,
 }: {
   placed: PlacedScene;
-  distance: number;
+  orbit: Orbit;
   openRef: { current: number };
   reducedMotion: boolean;
+  onHidden: (hidden: number) => void;
 }) {
   const g = useRef<Group>(null);
-  useFrame(() => {
-    if (!g.current) return;
-    g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
-  });
   const planetLabels = usePaintedLabels(placed.planets);
   const agentLabels = usePaintedLabels(placed.agents);
-  const showPlanet = labelVisible("planet", distance, SCENE_RADIUS);
-  const showAgent = labelVisible("agent", distance, SCENE_RADIUS);
+  const planetCount = planetLabels.length;
+  const agentCount = agentLabels.length;
+  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetCount, orbit.distance));
+  const [showAgent, setShowAgent] = useState(() =>
+    namesShown("agent", agentCount + planetCount, orbit.distance),
+  );
+  const lastHidden = useRef(-1);
+  useFrame(() => {
+    if (g.current) g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
+    const d = orbit.distance;
+    // Planets keep the first claim on the budget: their count stands alone.
+    // Agents add the planet count, so a crowd drops agent names first.
+    const nextPlanet = namesShown("planet", planetCount, d);
+    const nextAgent = namesShown("agent", agentCount + planetCount, d);
+    if (nextPlanet !== showPlanet) setShowPlanet(nextPlanet);
+    if (nextAgent !== showAgent) setShowAgent(nextAgent);
+    const hidden = (nextPlanet ? 0 : planetCount) + (nextAgent ? 0 : agentCount);
+    if (hidden !== lastHidden.current) {
+      lastHidden.current = hidden;
+      onHidden(hidden);
+    }
+  });
   return (
     <group ref={g}>
       {showPlanet
@@ -459,7 +498,7 @@ function LabelSprites({
               key={`l-a-${l.id}`}
               position={[l.at.x, l.at.y, l.at.z]}
               center={[0.5, 1.35]}
-              scale={[AGENT_LABEL_HEIGHT * l.aspect, AGENT_LABEL_HEIGHT, 1]}
+              scale={[AGENT_LABEL_NDC_HEIGHT * l.aspect, AGENT_LABEL_NDC_HEIGHT, 1]}
             >
               <spriteMaterial map={l.map} transparent opacity={0.78} depthWrite={false} sizeAttenuation={false} />
             </sprite>
@@ -476,6 +515,7 @@ function SceneBody({
   onSelect,
   target,
   onCoreToggle,
+  onHiddenLabels,
 }: {
   model: GalaxyModel;
   reducedMotion: boolean;
@@ -483,6 +523,7 @@ function SceneBody({
   onSelect?: (hit: GalaxySelect) => void;
   target: number;
   onCoreToggle: () => void;
+  onHiddenLabels: (hidden: number) => void;
 }) {
   const placed = useMemo(() => placeScene(model), [model]);
   const search = typeof window !== "undefined" ? window.location.search : "";
@@ -523,7 +564,13 @@ function SceneBody({
       <StarPoints placed={placed.stars} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
       <AgentMeshes placed={placed.agents} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
       <EdgeArcs edges={placed.edges} openRef={openRef} reducedMotion={reducedMotion} />
-      <LabelSprites placed={placed} distance={orbit.distance} openRef={openRef} reducedMotion={reducedMotion} />
+      <LabelSprites
+        placed={placed}
+        orbit={orbit}
+        openRef={openRef}
+        reducedMotion={reducedMotion}
+        onHidden={onHiddenLabels}
+      />
       {quality.bloom.strength > 0 ? (
         <EffectComposer>
           <Bloom
@@ -538,7 +585,14 @@ function SceneBody({
   );
 }
 
-export function Galaxy({ model, reducedMotion, onSelect, open, ready = true }: GalaxyProps) {
+export function Galaxy({
+  model,
+  reducedMotion,
+  onSelect,
+  open,
+  ready = true,
+  hiddenLabelsText,
+}: GalaxyProps) {
   const reduce = reducedMotion ?? readReduced();
   const orbit = useMemo(() => createOrbit(OPENING_DISTANCE), []);
   const dragging = useRef(false);
@@ -546,6 +600,7 @@ export function Galaxy({ model, reducedMotion, onSelect, open, ready = true }: G
   const last = useRef({ x: 0, y: 0 });
   const queryOpen = typeof window !== "undefined" ? readOpenQuery(window.location.search) : null;
   const [want, setWant] = useState(defaultOpen(open, queryOpen));
+  const [hiddenLabels, setHiddenLabels] = useState(0);
   const target = ready ? (open ?? want) : 0;
 
   const toggle = useCallback(() => {
@@ -589,8 +644,13 @@ export function Galaxy({ model, reducedMotion, onSelect, open, ready = true }: G
       onPointerMove={onPointerMove}
       onWheel={onWheel}
     >
+      {hiddenLabels > 0 && hiddenLabelsText ? (
+        <p className="galaxy-labels-hidden" data-testid="galaxy-labels-hidden">
+          {fillHidden(hiddenLabelsText, hiddenLabels)}
+        </p>
+      ) : null}
       <Canvas
-        camera={{ position: [0, 40, 110], fov: 46, near: 0.1, far: 2000 }}
+        camera={{ position: [0, 40, 110], fov: LABEL_FOV_DEG, near: 0.1, far: 2000 }}
         gl={{ antialias: true, toneMapping: NoToneMapping }}
         onCreated={({ gl }) => {
           gl.setClearColor(0x000000, 1);
@@ -607,6 +667,7 @@ export function Galaxy({ model, reducedMotion, onSelect, open, ready = true }: G
           onSelect={onSelect}
           target={target}
           onCoreToggle={toggle}
+          onHiddenLabels={(n) => setHiddenLabels((prev) => (prev === n ? prev : n))}
         />
       </Canvas>
     </div>
