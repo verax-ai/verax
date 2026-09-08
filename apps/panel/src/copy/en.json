@@ -32,5 +32,6 @@
   "showDemo": "Show sample scenario",
   "anatomy.approx": "approximate",
   "pending.title": "Pending approval",
+  "galaxy.empty": "no records yet - the body has not decided anything",
   "pending.empty": "none"
 }

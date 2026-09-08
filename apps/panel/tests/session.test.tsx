@@ -192,6 +192,35 @@ describe("panel session", () => {
     expect(sessionIssueError()).toMatch(/8790/);
   });
 
+  it("a token exchange the browser blocks is a visible error, not a silent loading screen", async () => {
+    const assign = vi.fn();
+    sessionStorage.setItem("verax-pkce-verifier", "verifier-1");
+    sessionStorage.setItem("verax-pkce-state", "state-1");
+    vi.stubGlobal("location", {
+      search: "?code=abc&state=state-1",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    });
+    vi.stubGlobal("history", { replaceState: vi.fn() });
+    // What a blocked cross-origin token request looks like to the page: fetch
+    // rejects. Left unhandled it threw past the caller and the panel sat on
+    // "loading" with nothing on screen to say why.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (isPrm(input)) return prmResponse();
+        throw new TypeError("Failed to fetch");
+      }),
+    );
+    const phase = await beginSession();
+    expect(phase).toBe("error");
+    expect(accessToken()).toBeNull();
+    expect(assign).not.toHaveBeenCalled();
+    expect(sessionIssueError()).toMatch(/token/i);
+  });
+
   it("authorizedFetch sends the memory token and does not read VERAX_DEV_TOKEN", async () => {
     rememberToken("mem-token-2");
     const fetchMock = vi.fn(async () => new Response("{}", { status: 200 }));
