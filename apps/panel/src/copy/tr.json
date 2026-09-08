@@ -34,6 +34,7 @@
   "pending.title": "Onay bekleyen",
   "galaxy.empty": "kayıt yok - gövde henüz karar üretmedi",
   "galaxy.inventory.unbound": "envanter bağlı değil",
+  "galaxy.inventory.sample": "örnek senaryoda envanter gösterilmez",
   "galaxy.coverage": "{accountable} / {total} ajan hesap veriyor · envanter {source}, {ago} önce alındı",
   "galaxy.coverage.stale": "{accountable} / {total} ajan hesap veriyor · envanter {source}, {ago} önce alındı · bayat",
   "time.secondsAgo": "{n} sn",

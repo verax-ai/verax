@@ -42,4 +42,15 @@ describe("coverageLine", () => {
     assert.equal(stale.stale, true);
     assert.match(stale.text, /stale/);
   });
+
+  it("does not claim the inventory is unbound while the sample scenario is on screen", () => {
+    // The panel does not read the inventory in demo mode. Saying "not bound"
+    // there is a claim about the body, and it can be false: the body may be
+    // serving a full roster while the sample scenario is displayed.
+    const line = coverageLine(null, emptyGalaxy(), Date.now(), en, true);
+    assert.equal(line.bound, false);
+    assert.notEqual(line.text, en["galaxy.inventory.unbound"]);
+    assert.equal(line.text, en["galaxy.inventory.sample"]);
+  });
+
 });

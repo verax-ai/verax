@@ -27,7 +27,14 @@ export function coverageLine(
   ledger: GalaxyModel,
   nowMs: number,
   copy: Copy,
+  demo = false,
 ): { text: string; stale: boolean; bound: boolean } {
+  if (demo) {
+    // Demo mode never reads /api/inventory, so "not bound" would be a claim
+    // about the body that the panel did not check - and one that is false
+    // whenever the body is serving a roster.
+    return { text: copy["galaxy.inventory.sample"], stale: false, bound: false };
+  }
   if (!inventory) {
     return { text: copy["galaxy.inventory.unbound"], stale: false, bound: false };
   }

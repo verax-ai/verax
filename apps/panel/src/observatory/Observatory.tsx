@@ -207,7 +207,7 @@ export function Observatory({
     if (!inventory) return ledgerModel;
     return mergeGalaxy(ledgerModel, inventoryToGalaxy(inventory));
   }, [ledgerModel, inventory]);
-  const cover = coverageLine(inventory, ledgerModel, nowMs, copy);
+  const cover = coverageLine(inventory, ledgerModel, nowMs, copy, demo);
   const lastMs = health?.lastDecisionMs ?? actions[0]?.record.claims.timestampMs ?? null;
   const witnessCounts = actions.reduce<Record<string, number>>((acc, a) => {
     const w = a.witnessClass ?? a.effect?.witnessClass ?? "none";
