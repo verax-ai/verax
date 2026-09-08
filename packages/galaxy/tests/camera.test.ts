@@ -13,16 +13,17 @@ import { labelVisible } from "../src/labels.ts";
 import { BLOOM_FULL, galaxyTier, readForcedTier, TIER_DUST } from "../src/quality.ts";
 
 describe("orbit camera", () => {
-  it("clamps zoom to 45–700", () => {
-    assert.equal(ZOOM_MIN, 45);
+  it("clamps zoom to 6–700, inside the sky", () => {
+    assert.equal(ZOOM_MIN, 6);
     assert.equal(ZOOM_MAX, 700);
-    assert.equal(clampZoom(10), 45);
+    assert.ok(ZOOM_MIN < 48, "the old floor (45) sat outside the sky (48)");
+    assert.equal(clampZoom(1), 6);
     assert.equal(clampZoom(900), 700);
     const o = createOrbit(120);
     zoomOrbit(o, 10_000);
     assert.equal(o.targetDistance, 700);
     zoomOrbit(o, -10_000);
-    assert.equal(o.targetDistance, 45);
+    assert.equal(o.targetDistance, 6);
   });
 
   it("reduced motion freezes inertia and still looks at the core", () => {
