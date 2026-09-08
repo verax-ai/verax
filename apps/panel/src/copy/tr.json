@@ -32,5 +32,6 @@
   "showDemo": "Örnek senaryoyu göster",
   "anatomy.approx": "yaklaşık",
   "pending.title": "Onay bekleyen",
+  "galaxy.empty": "kayıt yok - gövde henüz karar üretmedi",
   "pending.empty": "yok"
 }

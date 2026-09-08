@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
-import { Galaxy } from "@verax-ai/galaxy/react";
+import { Galaxy, type GalaxySelect } from "@verax-ai/galaxy/react";
+import type { GalaxyModel } from "@verax-ai/galaxy";
 import { ledgerToGalaxy } from "../galaxy/adapter.ts";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
@@ -52,6 +53,35 @@ function pinLabel(source: "env" | "own-key" | null | undefined): string {
 function shortHash(h: string | null | undefined): string {
   if (!h) return "—";
   return h.length > 12 ? `${h.slice(0, 8)}…` : h;
+}
+
+/**
+ * An empty ledger draws an empty sky, which reads as a broken page rather than
+ * as "nothing has been decided yet". The scene stays - the core still says
+ * whether the body has a heartbeat - and a line says why it is empty.
+ */
+function GalaxyTab({
+  model,
+  ready,
+  onSelect,
+}: {
+  model: GalaxyModel;
+  ready: boolean;
+  onSelect: (hit: GalaxySelect) => void;
+}) {
+  const copy = panelCopy();
+  const empty =
+    model.stars.length === 0 && model.planets.length === 0 && model.agents.length === 0;
+  return (
+    <>
+      {empty ? (
+        <p className="galaxy-empty" data-testid="galaxy-empty">
+          {copy["galaxy.empty"]}
+        </p>
+      ) : null}
+      <Galaxy model={model} ready={ready} onSelect={onSelect} />
+    </>
+  );
 }
 
 export function Observatory({
@@ -241,7 +271,7 @@ export function Observatory({
           />
         ) : null}
         {tab === "galaxy" ? (
-          <Galaxy
+          <GalaxyTab
             model={ledgerToGalaxy(actions, health, reconcile)}
             ready={status !== "loading"}
             onSelect={(hit) => {

@@ -100,17 +100,28 @@ export async function beginSession(): Promise<"ok" | "redirect" | "demo" | "erro
       await startAuthorize(issuer);
       return "redirect";
     }
-    const res = await fetch(`${issuer}/token`, {
-      method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "authorization_code",
-        code,
-        redirect_uri: redirectUri(),
-        code_verifier: verifier,
-        client_id: "verax-panel",
-      }),
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${issuer}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirectUri(),
+          code_verifier: verifier,
+          client_id: "verax-panel",
+        }),
+      });
+    } catch (err) {
+      // A request the browser refuses to complete - a blocked cross-origin
+      // response, a closed issuer - rejects here. Retrying authorize would
+      // loop, and saying nothing leaves the panel on "loading" with no reason
+      // on screen for what it cannot reach.
+      const why = err instanceof Error ? err.message : String(err);
+      sessionError = `token exchange unreachable at ${issuer}/token: ${why}`;
+      return "error";
+    }
     if (!res.ok) {
       await startAuthorize(issuer);
       return "redirect";

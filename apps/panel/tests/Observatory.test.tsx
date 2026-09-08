@@ -56,6 +56,16 @@ describe("observatory", () => {
     expect(screen.queryByTestId("stage")).toBeNull();
   });
 
+  it("says the ledger is empty instead of showing an unexplained black stage", () => {
+    render(<Observatory actions={[]} status="ok" demo={false} />);
+    expect(screen.getByTestId("galaxy-empty").textContent).toMatch(/kayıt yok/i);
+  });
+
+  it("says nothing about emptiness once there are records", () => {
+    render(<Observatory actions={actions} status="ok" demo={false} />);
+    expect(screen.queryByTestId("galaxy-empty")).toBeNull();
+  });
+
   it("shows evidence scope with guarantee and pin:", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
     fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));

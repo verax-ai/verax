@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -14,6 +14,44 @@ export type DesktopOpts = {
   bodyPort: number;
   browser?: string;
 };
+
+/** Newest modification time under a file or directory, ignoring build output. */
+function newestUnder(path: string, since: number): boolean {
+  let entry;
+  try {
+    entry = statSync(path);
+  } catch {
+    return false;
+  }
+  if (!entry.isDirectory()) return entry.mtimeMs > since;
+  let names;
+  try {
+    names = readdirSync(path, { withFileTypes: true });
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    if (name.name === "node_modules" || name.name === "dist" || name.name.startsWith(".")) continue;
+    if (newestUnder(join(path, name.name), since)) return true;
+  }
+  return false;
+}
+
+/**
+ * True when the panel has no build, or when a watched source is newer than the
+ * one it has. The launcher used to skip the build whenever `dist/index.html`
+ * existed, so a session served whatever had been built once: editing the panel
+ * and reopening it showed the previous app, with no sign that it was stale.
+ */
+export function panelBuildNeeded(distIndex: string, sourceRoots: readonly string[]): boolean {
+  let builtAt: number;
+  try {
+    builtAt = statSync(distIndex).mtimeMs;
+  } catch {
+    return true;
+  }
+  return sourceRoots.some((root) => newestUnder(root, builtAt));
+}
 
 export function parseDesktopArgs(argv: string[]): DesktopOpts | { error: string } {
   const rest = argv.slice(1);
@@ -216,7 +254,13 @@ export async function runDesktop(
       return 1;
     }
 
-    if (!existsSync(join(panelDir, "dist", "index.html"))) {
+    const panelSources = [
+      join(panelDir, "src"),
+      join(panelDir, "index.html"),
+      join(panelDir, "vite.config.ts"),
+      join(repoRoot, "packages"),
+    ];
+    if (panelBuildNeeded(join(panelDir, "dist", "index.html"), panelSources)) {
       const built = spawnSync(process.execPath, [viteJs, "build"], {
         cwd: panelDir,
         env: { ...cleanEnv(), VERAX_BODY_URL: audience },

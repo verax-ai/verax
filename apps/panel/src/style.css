@@ -107,6 +107,11 @@ body {
 .muted {
   color: #8aa0b5;
 }
+.galaxy-empty {
+  margin: 0 0 0.4rem;
+  color: #c5d0dc;
+  font-size: 0.85rem;
+}
 .galaxy-stage {
   position: relative;
   min-height: 28rem;
