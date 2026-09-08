@@ -110,6 +110,25 @@ function redirectAllowed(uri) {
   });
 }
 
+/**
+ * The panel is served from its own port, so the browser only hands it the token
+ * response when that response says the panel's origin may read it. The set of
+ * origins is exactly the registered redirect URIs - the same list `/authorize`
+ * already trusts - so this opens nothing `/authorize` had not already opened.
+ */
+function corsOrigin(req) {
+  const origin = req.headers.origin;
+  if (typeof origin !== "string" || origin === "") return null;
+  for (const allowed of redirectAllowList()) {
+    try {
+      if (new URL(allowed).origin === origin) return origin;
+    } catch {
+      // an unparsable entry in the list is not an invitation
+    }
+  }
+  return null;
+}
+
 function pruneCodes(now = Date.now()) {
   for (const [code, row] of codes) {
     if (now > row.expiresAtMs) codes.delete(code);
@@ -168,6 +187,25 @@ function parseForm(text) {
 const server = createServer((req, res) => {
   void (async () => {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
+    const allowOrigin = corsOrigin(req);
+    if (allowOrigin) {
+      res.setHeader("access-control-allow-origin", allowOrigin);
+      res.setHeader("vary", "origin");
+    }
+    if (req.method === "OPTIONS") {
+      if (!allowOrigin) {
+        res.writeHead(403);
+        res.end();
+        return;
+      }
+      res.writeHead(204, {
+        "access-control-allow-methods": "POST, OPTIONS",
+        "access-control-allow-headers": "content-type",
+        "access-control-max-age": "600",
+      });
+      res.end();
+      return;
+    }
     if (url.pathname === "/.well-known/jwks.json") {
       const body = JSON.stringify({ keys: [jwk] });
       res.writeHead(200, { "content-type": "application/json" });

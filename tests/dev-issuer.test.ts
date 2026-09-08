@@ -336,4 +336,130 @@ describe("6 dev-issuer.mjs", () => {
       await closed;
     }
   });
+
+  it("lets a registered redirect origin read the token response", { timeout: 15000 }, async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-cors-"));
+    const outPath = join(stateDir, "token");
+    const panel = "http://127.0.0.1:5173";
+    const redirect = `${panel}/`;
+    const child = spawn(process.execPath, [script, "--out", outPath], {
+      env: {
+        ...process.env,
+        VERAX_STATE_DIR: stateDir,
+        NODE_ENV: "development",
+        VERAX_DEV_ISSUER_PORT: "0",
+        VERAX_DEV_REDIRECT_URIS: redirect,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    const closed = new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    const ready = listeningPort(() => stderr);
+    const outcome = await Promise.race([
+      closed.then((code) => ({ kind: "closed" as const, code })),
+      ready.then((port) => ({ kind: "ready" as const, port })),
+    ]);
+    try {
+      if (outcome.kind === "closed") {
+        assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
+      }
+      assertBound(outcome.port, stderr);
+      const origin = `http://127.0.0.1:${outcome.port}`;
+
+      // The panel is served from another port, so the browser refuses to hand
+      // the token to it unless the response says that origin may read it.
+      const verifier = randomBytes(32).toString("base64url");
+      const challenge = createHash("sha256").update(verifier).digest("base64url");
+      const authorized = await fetch(
+        `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+      );
+      const location = authorized.headers.get("location") ?? "";
+      const code = new URL(location).searchParams.get("code") ?? "";
+      assert.notEqual(code, "", `no code in ${location}`);
+
+      const preflight = await fetch(`${origin}/token`, {
+        method: "OPTIONS",
+        headers: {
+          origin: panel,
+          "access-control-request-method": "POST",
+          "access-control-request-headers": "content-type",
+        },
+        signal: AbortSignal.timeout(2000),
+      });
+      assert.equal(preflight.status < 300, true, `preflight status=${preflight.status}`);
+      assert.equal(preflight.headers.get("access-control-allow-origin"), panel);
+
+      const token = await fetch(`${origin}/token`, {
+        method: "POST",
+        headers: { "content-type": "application/x-www-form-urlencoded", origin: panel },
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: redirect,
+          code_verifier: verifier,
+          client_id: "verax-panel",
+        }),
+        signal: AbortSignal.timeout(2000),
+      });
+      assert.equal(token.status, 200, `token status=${token.status}`);
+      assert.equal(
+        token.headers.get("access-control-allow-origin"),
+        panel,
+        "without this header the browser drops the token and the panel stays on loading",
+      );
+    } finally {
+      child.kill();
+    }
+  });
+
+  it("does not invite an origin it never registered", { timeout: 15000 }, async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-cors-no-"));
+    const outPath = join(stateDir, "token");
+    const child = spawn(process.execPath, [script, "--out", outPath], {
+      env: {
+        ...process.env,
+        VERAX_STATE_DIR: stateDir,
+        NODE_ENV: "development",
+        VERAX_DEV_ISSUER_PORT: "0",
+        VERAX_DEV_REDIRECT_URIS: "http://127.0.0.1:5173/",
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += String(chunk);
+    });
+    const closed = new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    const ready = listeningPort(() => stderr);
+    const outcome = await Promise.race([
+      closed.then((code) => ({ kind: "closed" as const, code })),
+      ready.then((port) => ({ kind: "ready" as const, port })),
+    ]);
+    try {
+      if (outcome.kind === "closed") {
+        assert.fail(`issuer exited ${outcome.code}: ${stderr}`);
+      }
+      assertBound(outcome.port, stderr);
+      const origin = `http://127.0.0.1:${outcome.port}`;
+      const preflight = await fetch(`${origin}/token`, {
+        method: "OPTIONS",
+        headers: {
+          origin: "http://evil.test",
+          "access-control-request-method": "POST",
+        },
+        signal: AbortSignal.timeout(2000),
+      });
+      assert.equal(preflight.headers.get("access-control-allow-origin"), null);
+    } finally {
+      child.kill();
+    }
+  });
 });
