@@ -6,6 +6,13 @@ import { cameraPosition, createOrbit, nudgeOrbit, stepOrbit, zoomOrbit, type Orb
 import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
 import {
+  bodyClusters,
+  clusterLabelText,
+  clusterMarkScale,
+  paintClusterMark,
+  type BodyCluster,
+} from "./crowd.ts";
+import {
   AGENT_LABEL_NDC_HEIGHT,
   LABEL_FOV_DEG,
   labelAspect,
@@ -301,6 +308,48 @@ function StarPoints({
   );
 }
 
+function ClusterMarks({ clusters }: { clusters: readonly BodyCluster[] }) {
+  const painted = usePaintedLabels(
+    clusters.map((c) => ({ id: c.id, label: clusterLabelText(c.count, c.source), at: c.at })),
+  );
+  const markMap = useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const canvas = document.createElement("canvas");
+    if (!paintClusterMark(canvas)) return null;
+    return new CanvasTexture(canvas);
+  }, []);
+  useEffect(() => {
+    return () => {
+      markMap?.dispose();
+    };
+  }, [markMap]);
+  const mark = clusterMarkScale(0);
+  if (!markMap) return null;
+  return (
+    <group>
+      {clusters.map((c) => (
+        <sprite
+          key={`c-m-${c.id}`}
+          position={[c.at.x, c.at.y, c.at.z]}
+          scale={[mark, mark, 1]}
+        >
+          <spriteMaterial map={markMap} transparent opacity={0.85} depthWrite={false} sizeAttenuation={false} />
+        </sprite>
+      ))}
+      {painted.map((l) => (
+        <sprite
+          key={`c-t-${l.id}`}
+          position={[l.at.x, l.at.y, l.at.z]}
+          center={[0.5, 1.15]}
+          scale={[AGENT_LABEL_NDC_HEIGHT * l.aspect, AGENT_LABEL_NDC_HEIGHT, 1]}
+        >
+          <spriteMaterial map={l.map} transparent opacity={0.92} depthWrite={false} sizeAttenuation={false} />
+        </sprite>
+      ))}
+    </group>
+  );
+}
+
 function AgentMeshes({
   placed,
   reducedMotion,
@@ -525,6 +574,7 @@ function SceneBody({
   target,
   onCoreToggle,
   onHiddenLabels,
+  onClusters,
 }: {
   model: GalaxyModel;
   reducedMotion: boolean;
@@ -533,6 +583,7 @@ function SceneBody({
   target: number;
   onCoreToggle: () => void;
   onHiddenLabels: (state: { hidden: number; reason: LabelHideReason | null }) => void;
+  onClusters: (clusters: readonly BodyCluster[]) => void;
 }) {
   const placed = useMemo(() => placeScene(model), [model]);
   const search = typeof window !== "undefined" ? window.location.search : "";
@@ -540,6 +591,9 @@ function SceneBody({
   const [tierIndex, setTierIndex] = useState(forced ?? 0);
   const quality = galaxyTier(tierIndex);
   const openRef = useRef(target);
+  const [singles, setSingles] = useState(placed.agents);
+  const [clusters, setClusters] = useState<readonly BodyCluster[]>([]);
+  const lastCrowd = useRef("");
 
   useEffect(() => {
     const w = window as Window & { __veraxPushFrame?: (ms: number) => void; __veraxTier?: number };
@@ -554,6 +608,36 @@ function SceneBody({
       w.__veraxPushFrame = prev;
     };
   }, [forced, quality.dust, tierIndex]);
+
+  useEffect(() => {
+    lastCrowd.current = "";
+    setSingles(placed.agents);
+    setClusters([]);
+  }, [placed]);
+
+  useFrame(() => {
+    const open = easeOpen(openRef.current, reducedMotion) > 0.88;
+    if (!open) {
+      if (lastCrowd.current !== "closed") {
+        lastCrowd.current = "closed";
+        setSingles(placed.agents);
+        setClusters([]);
+        onClusters([]);
+      }
+      return;
+    }
+    const next = bodyClusters(
+      placed.agents.map((a) => ({ id: a.id, at: a.at, source: a.source })),
+      { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG },
+    );
+    const key = `${next.clusters.map((c) => `${c.count}:${c.source}:${c.ids.join(",")}`).join("|")}/${next.singles.map((s) => s.id).join(",")}`;
+    if (key === lastCrowd.current) return;
+    lastCrowd.current = key;
+    const singleIds = new Set(next.singles.map((s) => s.id));
+    setSingles(placed.agents.filter((a) => singleIds.has(a.id)));
+    setClusters(next.clusters);
+    onClusters(next.clusters);
+  });
 
   return (
     <group>
@@ -571,7 +655,8 @@ function SceneBody({
       />
       <PlanetMeshes placed={placed.planets} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
       <StarPoints placed={placed.stars} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
-      <AgentMeshes placed={placed.agents} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      <AgentMeshes placed={singles} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      {clusters.length > 0 ? <ClusterMarks clusters={clusters} /> : null}
       <EdgeArcs edges={placed.edges} openRef={openRef} reducedMotion={reducedMotion} />
       <LabelSprites
         placed={placed}
@@ -612,6 +697,7 @@ export function Galaxy({
   const [want, setWant] = useState(defaultOpen(open, queryOpen));
   const [hiddenLabels, setHiddenLabels] = useState(0);
   const [hideReason, setHideReason] = useState<LabelHideReason | null>(null);
+  const [clusters, setClusters] = useState<readonly BodyCluster[]>([]);
   const target = ready ? (open ?? want) : 0;
   const hiddenLine =
     hideReason === "crowd" ? (crowdedLabelsText ?? hiddenLabelsText) : hiddenLabelsText;
@@ -662,6 +748,15 @@ export function Galaxy({
           {fillHidden(hiddenLine, hiddenLabels)}
         </p>
       ) : null}
+      {clusters.length > 0 ? (
+        <p className="galaxy-clusters" data-testid="galaxy-clusters">
+          {clusters.map((c) => (
+            <span key={c.id} data-count={String(c.count)} data-source={c.source}>
+              {clusterLabelText(c.count, c.source)}
+            </span>
+          ))}
+        </p>
+      ) : null}
       <Canvas
         camera={{ position: [0, 40, 110], fov: LABEL_FOV_DEG, near: 0.1, far: 2000 }}
         gl={{ antialias: true, toneMapping: NoToneMapping }}
@@ -684,6 +779,7 @@ export function Galaxy({
             setHiddenLabels((prev) => (prev === state.hidden ? prev : state.hidden));
             setHideReason((prev) => (prev === state.reason ? prev : state.reason));
           }}
+          onClusters={(next) => setClusters((prev) => (prev === next ? prev : next))}
         />
       </Canvas>
     </div>

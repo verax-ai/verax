@@ -1,4 +1,5 @@
 import { hashPoint, type Point3 } from "./address.ts";
+import { isMeasured } from "./measured.ts";
 import {
   agentAppearance,
   coreAppearance,
@@ -33,6 +34,8 @@ export type PlacedAgent = {
   at: Point3;
   look: Appearance;
   witness: "self" | "same-org" | undefined;
+  /** Where the record's measured fields came from, or why they did not. */
+  source: string;
 };
 
 export type PlacedEdge = {
@@ -86,6 +89,7 @@ export function placeScene(model: GalaxyModel): PlacedScene {
       at,
       look: agentAppearance(a),
       witness: a.witness,
+      source: isMeasured(a.lastActMs) ? a.lastActMs.source : a.lastActMs.why,
     };
   });
 
