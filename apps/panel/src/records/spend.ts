@@ -1,4 +1,6 @@
 import type { Copy } from "../copy.ts";
+import { readLang, type Lang } from "../lang.ts";
+import { formatMinor } from "./money.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
 
@@ -37,15 +39,15 @@ export function spendFields(
   action: RailAction,
   approvals: readonly PendingApproval[],
   reconcile: ReconcileCardReport | null,
+  lang: Lang = readLang(),
 ): SpendFields | null {
   if (action.record.claims.subject !== "spend") return null;
   const snap = approvalFor(action, approvals);
+  // Minor units in, a spendable amount out. When either side is unreadable
+  // the field says so; it never shows the raw stored number.
+  const money = snap ? formatMinor(snap.amount, snap.currency, lang) : null;
   const amount =
-    snap && snap.amount !== undefined && snap.currency !== undefined
-      ? copy["spend.amount"]
-          .replace("{amount}", String(snap.amount))
-          .replace("{currency}", String(snap.currency))
-      : copy["spend.amount.unmeasured"];
+    money !== null ? copy["spend.amount"].replace("{amount}", money) : copy["spend.amount.unmeasured"];
   const payee =
     snap && snap.payee !== undefined
       ? copy["spend.payee"].replace("{payee}", String(snap.payee))

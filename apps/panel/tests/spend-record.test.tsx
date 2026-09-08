@@ -53,7 +53,7 @@ const allow: RailAction = {
       effectClass: "spend",
       effectHash: "ed26dba0e503304a4d14c045f0ddd54f53fd04c20222603659c4c935fcbefe0a",
       timestampMs: 1788714791359,
-      actor: "emek.dogru",
+      actor: "operator-1",
     },
     witnessClass: "self",
     receipt: { present: true },
@@ -64,7 +64,7 @@ const allow: RailAction = {
   inputs: {
     principal: { brain: "dev-brain", scopes: ["verax:pay"] },
     inputs: [],
-    approver: { id: "emek.dogru", via: "cli", resolves: "kart-test-2" },
+    approver: { id: "operator-1", via: "cli", resolves: "kart-test-2" },
   },
   inputsBound: true,
   witnessClass: "self",
@@ -106,10 +106,12 @@ describe("10 TRY spend record", () => {
       />,
     );
     const spend = screen.getByTestId("spend-fields").textContent ?? "";
-    expect(spend).toMatch(/1000 TRY/);
-    expect(spend).toMatch(/amountMinor/);
+    // The ledger stores 1000 minor units. The screen must say ten lira, not a thousand.
+    expect(spend).toMatch(/10[.,]00/);
+    expect(spend).not.toMatch(/(^|[^.,\d])1000([^.,\d]|$)/);
+    expect(spend).not.toMatch(/amountMinor/);
     expect(spend).toMatch(/meta-ads/);
-    expect(spend).toMatch(/emek\.dogru/);
+    expect(spend).toMatch(/operator-1/);
     expect(spend).toMatch(/eşleşti|matched/i);
     expect(screen.getByTestId("scope-witness").textContent).toMatch(/self/);
     expect(screen.getByTestId("scope-external").textContent).toMatch(/eşleşti|matched/i);

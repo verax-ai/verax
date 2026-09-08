@@ -78,7 +78,7 @@
   "scope.external.unbound": "External: statement not bound",
   "scope.external.notSpend": "External: not measured — this record is not a spend effect",
   "scope.external.absent": "External: not measured — this spend is not in the statement report",
-  "spend.amount": "Amount: {amount} {currency} (amountMinor)",
+  "spend.amount": "Amount: {amount}",
   "spend.amount.unmeasured": "Amount: not measured",
   "spend.payee": "Payee: {payee}",
   "spend.payee.unmeasured": "Payee: not measured",

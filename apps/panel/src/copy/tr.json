@@ -78,7 +78,7 @@
   "scope.external.unbound": "Dış: ekstre bağlı değil",
   "scope.external.notSpend": "Dış: ölçülemedi — bu kayıt bir spend etkisi değil",
   "scope.external.absent": "Dış: ölçülemedi — bu spend ekstre raporunda yok",
-  "spend.amount": "Tutar: {amount} {currency} (amountMinor)",
+  "spend.amount": "Tutar: {amount}",
   "spend.amount.unmeasured": "Tutar: ölçülemedi",
   "spend.payee": "Alıcı: {payee}",
   "spend.payee.unmeasured": "Alıcı: ölçülemedi",

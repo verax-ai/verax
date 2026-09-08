@@ -32,7 +32,7 @@ function row(opts: {
       ? {
           principal: { brain: "dev-brain", scopes: ["verax:pay"] },
           inputs: [],
-          approver: { id: "emek.dogru", via: "cli", resolves: opts.resolves },
+          approver: { id: "operator-1", via: "cli", resolves: opts.resolves },
         }
       : undefined,
   };

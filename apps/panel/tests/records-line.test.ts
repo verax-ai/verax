@@ -51,11 +51,13 @@ describe("record line", () => {
         allowRef: "398befdf-78f6-4780-833b-aa7c7ee5ef5d",
       },
     ];
-    const line = recordLine(en, action, approvals);
-    assert.equal(line.asked, "spend 1000 TRY → meta-ads");
+    const line = recordLine(en, action, approvals, "en");
+    // 1000 is the stored minor amount. The line must spend-read it: ten, not a thousand.
+    assert.match(line.asked, /^spend .*10\.00.* → meta-ads$/);
+    assert.equal(/(^|[^.\d])1000([^.\d]|$)/.test(line.asked), false, line.asked);
     assert.match(line.rule, /Meta ads/);
     assert.equal(line.outcome, "allow approved-by-operator");
     assert.equal(line.label.includes("398befdf"), false);
-    assert.match(line.label, /spend 1000 TRY → meta-ads/);
+    assert.match(line.label, / → meta-ads/);
   });
 });
