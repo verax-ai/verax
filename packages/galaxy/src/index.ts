@@ -12,8 +12,28 @@ export {
   readOpenQuery,
   stepOpen,
 } from "./open.ts";
-export { labelBudget, labelVisible } from "./labels.ts";
+export {
+  densestNeighborhood,
+  labelBudget,
+  labelCrowd,
+  labelVisible,
+  projectNdc,
+  type CameraEye,
+  type LabelCrowd,
+  type LabelHideReason,
+  type Ndc,
+} from "./labels.ts";
 export { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
+export {
+  BODY_CLUSTER_MIN,
+  BODY_MERGE_NDC,
+  bodyClusters,
+  clusterLabelText,
+  clusterMarkScale,
+  type BodyCluster,
+  type BodyCrowd,
+  type CrowdBody,
+} from "./crowd.ts";
 export { BLOOM_FULL, galaxyTier, TIER_DUST } from "./quality.ts";
 export {
   agentAppearance,

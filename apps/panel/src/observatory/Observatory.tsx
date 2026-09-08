@@ -90,6 +90,7 @@ function GalaxyTab({
         ready={ready}
         onSelect={onSelect}
         hiddenLabelsText={copy["galaxy.labels.hidden"]}
+        crowdedLabelsText={copy["galaxy.labels.hidden.crowd"]}
       />
     </>
   );

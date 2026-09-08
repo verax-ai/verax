@@ -73,9 +73,15 @@ describe("observatory", () => {
   it("passes the hidden-names line from copy into the sky", () => {
     const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
     expect(src).toMatch(/hiddenLabelsText=\{copy\["galaxy\.labels\.hidden"\]\}/);
+    expect(src).toMatch(/crowdedLabelsText=\{copy\["galaxy\.labels\.hidden\.crowd"\]\}/);
     const en = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "en.json"), "utf8")) as Record<string, string>;
+    const tr = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "tr.json"), "utf8")) as Record<string, string>;
     expect(en["galaxy.labels.hidden"]).toMatch(/\{n\}/);
     expect(en["galaxy.labels.hidden"]).toMatch(/hidden at this distance/i);
+    expect(en["galaxy.labels.hidden.crowd"]).toMatch(/\{n\}/);
+    expect(en["galaxy.labels.hidden.crowd"]).toMatch(/crowded/i);
+    expect(tr["galaxy.labels.hidden.crowd"]).toMatch(/\{n\}/);
+    expect(tr["galaxy.labels.hidden.crowd"]).toMatch(/yığın/);
   });
 
   it("keeps inventory names off the ledger rail and does not say not-bound for them", () => {

@@ -6,13 +6,21 @@ import { cameraPosition, createOrbit, nudgeOrbit, stepOrbit, zoomOrbit, type Orb
 import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
 import {
+  bodyClusters,
+  clusterLabelText,
+  clusterMarkScale,
+  paintClusterMark,
+  type BodyCluster,
+} from "./crowd.ts";
+import {
   AGENT_LABEL_NDC_HEIGHT,
   LABEL_FOV_DEG,
   labelAspect,
-  labelBudget,
+  labelCrowd,
   labelText,
-  labelVisible,
   paintLabel,
+  projectNdc,
+  type LabelHideReason,
 } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
 import { defaultOpen, easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
@@ -30,8 +38,10 @@ export type GalaxyProps = {
   open?: number;
   /** Data arrived. Until then the closed sphere spins and ignores click. */
   ready?: boolean;
-  /** Template with `{n}`. Shown only when names are hidden. */
+  /** Template with `{n}`. Shown when names are hidden by distance. */
   hiddenLabelsText?: string;
+  /** Template with `{n}`. Shown when names are hidden by a dense neighborhood. */
+  crowdedLabelsText?: string;
 };
 
 function readReduced(): boolean {
@@ -298,6 +308,48 @@ function StarPoints({
   );
 }
 
+function ClusterMarks({ clusters }: { clusters: readonly BodyCluster[] }) {
+  const painted = usePaintedLabels(
+    clusters.map((c) => ({ id: c.id, label: clusterLabelText(c.count, c.source), at: c.at })),
+  );
+  const markMap = useMemo(() => {
+    if (typeof document === "undefined") return null;
+    const canvas = document.createElement("canvas");
+    if (!paintClusterMark(canvas)) return null;
+    return new CanvasTexture(canvas);
+  }, []);
+  useEffect(() => {
+    return () => {
+      markMap?.dispose();
+    };
+  }, [markMap]);
+  const mark = clusterMarkScale(0);
+  if (!markMap) return null;
+  return (
+    <group>
+      {clusters.map((c) => (
+        <sprite
+          key={`c-m-${c.id}`}
+          position={[c.at.x, c.at.y, c.at.z]}
+          scale={[mark, mark, 1]}
+        >
+          <spriteMaterial map={markMap} transparent opacity={0.85} depthWrite={false} sizeAttenuation={false} />
+        </sprite>
+      ))}
+      {painted.map((l) => (
+        <sprite
+          key={`c-t-${l.id}`}
+          position={[l.at.x, l.at.y, l.at.z]}
+          center={[0.5, 1.15]}
+          scale={[AGENT_LABEL_NDC_HEIGHT * l.aspect, AGENT_LABEL_NDC_HEIGHT, 1]}
+        >
+          <spriteMaterial map={l.map} transparent opacity={0.92} depthWrite={false} sizeAttenuation={false} />
+        </sprite>
+      ))}
+    </group>
+  );
+}
+
 function AgentMeshes({
   placed,
   reducedMotion,
@@ -432,10 +484,16 @@ function fillHidden(template: string, n: number): string {
 
 function namesShown(
   kind: "planet" | "agent",
-  count: number,
-  distance: number,
-): boolean {
-  return labelVisible(kind, distance, SCENE_RADIUS) && labelBudget(count, distance, SCENE_RADIUS).show;
+  items: readonly { at: { x: number; y: number; z: number } }[],
+  orbit: Orbit,
+): { show: boolean; hidden: number; reason: LabelHideReason | null } {
+  const eye = { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG };
+  const ndc = [];
+  for (const item of items) {
+    const p = projectNdc(item.at, eye);
+    if (p) ndc.push(p);
+  }
+  return labelCrowd(ndc, kind, orbit.distance, SCENE_RADIUS);
 }
 
 function LabelSprites({
@@ -449,31 +507,31 @@ function LabelSprites({
   orbit: Orbit;
   openRef: { current: number };
   reducedMotion: boolean;
-  onHidden: (hidden: number) => void;
+  onHidden: (state: { hidden: number; reason: LabelHideReason | null }) => void;
 }) {
   const g = useRef<Group>(null);
   const planetLabels = usePaintedLabels(placed.planets);
   const agentLabels = usePaintedLabels(placed.agents);
   const planetCount = planetLabels.length;
   const agentCount = agentLabels.length;
-  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetCount, orbit.distance));
-  const [showAgent, setShowAgent] = useState(() =>
-    namesShown("agent", agentCount + planetCount, orbit.distance),
-  );
-  const lastHidden = useRef(-1);
+  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetLabels, orbit).show);
+  const [showAgent, setShowAgent] = useState(() => namesShown("agent", agentLabels, orbit).show);
+  const lastHidden = useRef("");
   useFrame(() => {
     if (g.current) g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
-    const d = orbit.distance;
-    // Planets keep the first claim on the budget: their count stands alone.
-    // Agents add the planet count, so a crowd drops agent names first.
-    const nextPlanet = namesShown("planet", planetCount, d);
-    const nextAgent = namesShown("agent", agentCount + planetCount, d);
-    if (nextPlanet !== showPlanet) setShowPlanet(nextPlanet);
-    if (nextAgent !== showAgent) setShowAgent(nextAgent);
-    const hidden = (nextPlanet ? 0 : planetCount) + (nextAgent ? 0 : agentCount);
-    if (hidden !== lastHidden.current) {
-      lastHidden.current = hidden;
-      onHidden(hidden);
+    // Each kind is judged on its own screen neighborhood. A crowd of
+    // agents does not hide a readable planet name, and the other way.
+    const nextPlanet = namesShown("planet", planetLabels, orbit);
+    const nextAgent = namesShown("agent", agentLabels, orbit);
+    if (nextPlanet.show !== showPlanet) setShowPlanet(nextPlanet.show);
+    if (nextAgent.show !== showAgent) setShowAgent(nextAgent.show);
+    const hidden = (nextPlanet.show ? 0 : planetCount) + (nextAgent.show ? 0 : agentCount);
+    const reason: LabelHideReason | null =
+      hidden === 0 ? null : nextAgent.reason === "crowd" || nextPlanet.reason === "crowd" ? "crowd" : "distance";
+    const key = `${hidden}:${reason ?? ""}`;
+    if (key !== lastHidden.current) {
+      lastHidden.current = key;
+      onHidden({ hidden, reason });
     }
   });
   return (
@@ -516,6 +574,7 @@ function SceneBody({
   target,
   onCoreToggle,
   onHiddenLabels,
+  onClusters,
 }: {
   model: GalaxyModel;
   reducedMotion: boolean;
@@ -523,7 +582,8 @@ function SceneBody({
   onSelect?: (hit: GalaxySelect) => void;
   target: number;
   onCoreToggle: () => void;
-  onHiddenLabels: (hidden: number) => void;
+  onHiddenLabels: (state: { hidden: number; reason: LabelHideReason | null }) => void;
+  onClusters: (clusters: readonly BodyCluster[]) => void;
 }) {
   const placed = useMemo(() => placeScene(model), [model]);
   const search = typeof window !== "undefined" ? window.location.search : "";
@@ -531,6 +591,9 @@ function SceneBody({
   const [tierIndex, setTierIndex] = useState(forced ?? 0);
   const quality = galaxyTier(tierIndex);
   const openRef = useRef(target);
+  const [singles, setSingles] = useState(placed.agents);
+  const [clusters, setClusters] = useState<readonly BodyCluster[]>([]);
+  const lastCrowd = useRef("");
 
   useEffect(() => {
     const w = window as Window & { __veraxPushFrame?: (ms: number) => void; __veraxTier?: number };
@@ -545,6 +608,36 @@ function SceneBody({
       w.__veraxPushFrame = prev;
     };
   }, [forced, quality.dust, tierIndex]);
+
+  useEffect(() => {
+    lastCrowd.current = "";
+    setSingles(placed.agents);
+    setClusters([]);
+  }, [placed]);
+
+  useFrame(() => {
+    const open = easeOpen(openRef.current, reducedMotion) > 0.88;
+    if (!open) {
+      if (lastCrowd.current !== "closed") {
+        lastCrowd.current = "closed";
+        setSingles(placed.agents);
+        setClusters([]);
+        onClusters([]);
+      }
+      return;
+    }
+    const next = bodyClusters(
+      placed.agents.map((a) => ({ id: a.id, at: a.at, source: a.source })),
+      { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG },
+    );
+    const key = `${next.clusters.map((c) => `${c.count}:${c.source}:${c.ids.join(",")}`).join("|")}/${next.singles.map((s) => s.id).join(",")}`;
+    if (key === lastCrowd.current) return;
+    lastCrowd.current = key;
+    const singleIds = new Set(next.singles.map((s) => s.id));
+    setSingles(placed.agents.filter((a) => singleIds.has(a.id)));
+    setClusters(next.clusters);
+    onClusters(next.clusters);
+  });
 
   return (
     <group>
@@ -562,7 +655,8 @@ function SceneBody({
       />
       <PlanetMeshes placed={placed.planets} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
       <StarPoints placed={placed.stars} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
-      <AgentMeshes placed={placed.agents} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      <AgentMeshes placed={singles} reducedMotion={reducedMotion} openRef={openRef} onSelect={onSelect} />
+      {clusters.length > 0 ? <ClusterMarks clusters={clusters} /> : null}
       <EdgeArcs edges={placed.edges} openRef={openRef} reducedMotion={reducedMotion} />
       <LabelSprites
         placed={placed}
@@ -592,6 +686,7 @@ export function Galaxy({
   open,
   ready = true,
   hiddenLabelsText,
+  crowdedLabelsText,
 }: GalaxyProps) {
   const reduce = reducedMotion ?? readReduced();
   const orbit = useMemo(() => createOrbit(OPENING_DISTANCE), []);
@@ -601,7 +696,11 @@ export function Galaxy({
   const queryOpen = typeof window !== "undefined" ? readOpenQuery(window.location.search) : null;
   const [want, setWant] = useState(defaultOpen(open, queryOpen));
   const [hiddenLabels, setHiddenLabels] = useState(0);
+  const [hideReason, setHideReason] = useState<LabelHideReason | null>(null);
+  const [clusters, setClusters] = useState<readonly BodyCluster[]>([]);
   const target = ready ? (open ?? want) : 0;
+  const hiddenLine =
+    hideReason === "crowd" ? (crowdedLabelsText ?? hiddenLabelsText) : hiddenLabelsText;
 
   const toggle = useCallback(() => {
     if (!ready || open !== undefined) return;
@@ -644,9 +743,18 @@ export function Galaxy({
       onPointerMove={onPointerMove}
       onWheel={onWheel}
     >
-      {hiddenLabels > 0 && hiddenLabelsText ? (
-        <p className="galaxy-labels-hidden" data-testid="galaxy-labels-hidden">
-          {fillHidden(hiddenLabelsText, hiddenLabels)}
+      {hiddenLabels > 0 && hiddenLine ? (
+        <p className="galaxy-labels-hidden" data-testid="galaxy-labels-hidden" data-reason={hideReason ?? ""}>
+          {fillHidden(hiddenLine, hiddenLabels)}
+        </p>
+      ) : null}
+      {clusters.length > 0 ? (
+        <p className="galaxy-clusters" data-testid="galaxy-clusters">
+          {clusters.map((c) => (
+            <span key={c.id} data-count={String(c.count)} data-source={c.source}>
+              {clusterLabelText(c.count, c.source)}
+            </span>
+          ))}
         </p>
       ) : null}
       <Canvas
@@ -667,7 +775,11 @@ export function Galaxy({
           onSelect={onSelect}
           target={target}
           onCoreToggle={toggle}
-          onHiddenLabels={(n) => setHiddenLabels((prev) => (prev === n ? prev : n))}
+          onHiddenLabels={(state) => {
+            setHiddenLabels((prev) => (prev === state.hidden ? prev : state.hidden));
+            setHideReason((prev) => (prev === state.reason ? prev : state.reason));
+          }}
+          onClusters={(next) => setClusters((prev) => (prev === next ? prev : next))}
         />
       </Canvas>
     </div>
