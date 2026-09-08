@@ -31,8 +31,10 @@ export type GalaxyProps = {
   open?: number;
   /** Data arrived. Until then the closed sphere spins and ignores click. */
   ready?: boolean;
-  /** Template with `{n}`. Shown only when names are hidden. */
+  /** Template with `{n}`. Shown when names are hidden by distance. */
   hiddenLabelsText?: string;
+  /** Template with `{n}`. Shown when names are hidden by a dense neighborhood. */
+  crowdedLabelsText?: string;
 };
 
 function readReduced(): boolean {
@@ -456,7 +458,7 @@ function LabelSprites({
   orbit: Orbit;
   openRef: { current: number };
   reducedMotion: boolean;
-  onHidden: (hidden: number) => void;
+  onHidden: (state: { hidden: number; reason: LabelHideReason | null }) => void;
 }) {
   const g = useRef<Group>(null);
   const planetLabels = usePaintedLabels(placed.planets);
@@ -465,7 +467,7 @@ function LabelSprites({
   const agentCount = agentLabels.length;
   const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetLabels, orbit).show);
   const [showAgent, setShowAgent] = useState(() => namesShown("agent", agentLabels, orbit).show);
-  const lastHidden = useRef(-1);
+  const lastHidden = useRef("");
   useFrame(() => {
     if (g.current) g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
     // Each kind is judged on its own screen neighborhood. A crowd of
@@ -475,9 +477,12 @@ function LabelSprites({
     if (nextPlanet.show !== showPlanet) setShowPlanet(nextPlanet.show);
     if (nextAgent.show !== showAgent) setShowAgent(nextAgent.show);
     const hidden = (nextPlanet.show ? 0 : planetCount) + (nextAgent.show ? 0 : agentCount);
-    if (hidden !== lastHidden.current) {
-      lastHidden.current = hidden;
-      onHidden(hidden);
+    const reason: LabelHideReason | null =
+      hidden === 0 ? null : nextAgent.reason === "crowd" || nextPlanet.reason === "crowd" ? "crowd" : "distance";
+    const key = `${hidden}:${reason ?? ""}`;
+    if (key !== lastHidden.current) {
+      lastHidden.current = key;
+      onHidden({ hidden, reason });
     }
   });
   return (
@@ -527,7 +532,7 @@ function SceneBody({
   onSelect?: (hit: GalaxySelect) => void;
   target: number;
   onCoreToggle: () => void;
-  onHiddenLabels: (hidden: number) => void;
+  onHiddenLabels: (state: { hidden: number; reason: LabelHideReason | null }) => void;
 }) {
   const placed = useMemo(() => placeScene(model), [model]);
   const search = typeof window !== "undefined" ? window.location.search : "";
@@ -596,6 +601,7 @@ export function Galaxy({
   open,
   ready = true,
   hiddenLabelsText,
+  crowdedLabelsText,
 }: GalaxyProps) {
   const reduce = reducedMotion ?? readReduced();
   const orbit = useMemo(() => createOrbit(OPENING_DISTANCE), []);
@@ -605,7 +611,10 @@ export function Galaxy({
   const queryOpen = typeof window !== "undefined" ? readOpenQuery(window.location.search) : null;
   const [want, setWant] = useState(defaultOpen(open, queryOpen));
   const [hiddenLabels, setHiddenLabels] = useState(0);
+  const [hideReason, setHideReason] = useState<LabelHideReason | null>(null);
   const target = ready ? (open ?? want) : 0;
+  const hiddenLine =
+    hideReason === "crowd" ? (crowdedLabelsText ?? hiddenLabelsText) : hiddenLabelsText;
 
   const toggle = useCallback(() => {
     if (!ready || open !== undefined) return;
@@ -648,9 +657,9 @@ export function Galaxy({
       onPointerMove={onPointerMove}
       onWheel={onWheel}
     >
-      {hiddenLabels > 0 && hiddenLabelsText ? (
-        <p className="galaxy-labels-hidden" data-testid="galaxy-labels-hidden">
-          {fillHidden(hiddenLabelsText, hiddenLabels)}
+      {hiddenLabels > 0 && hiddenLine ? (
+        <p className="galaxy-labels-hidden" data-testid="galaxy-labels-hidden" data-reason={hideReason ?? ""}>
+          {fillHidden(hiddenLine, hiddenLabels)}
         </p>
       ) : null}
       <Canvas
@@ -671,7 +680,10 @@ export function Galaxy({
           onSelect={onSelect}
           target={target}
           onCoreToggle={toggle}
-          onHiddenLabels={(n) => setHiddenLabels((prev) => (prev === n ? prev : n))}
+          onHiddenLabels={(state) => {
+            setHiddenLabels((prev) => (prev === state.hidden ? prev : state.hidden));
+            setHideReason((prev) => (prev === state.reason ? prev : state.reason));
+          }}
         />
       </Canvas>
     </div>

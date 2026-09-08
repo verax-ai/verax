@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cameraPosition, createOrbit, ZOOM_MIN } from "../src/camera.ts";
+import { cameraPosition, createOrbit, ZOOM_MAX, ZOOM_MIN } from "../src/camera.ts";
 import {
   LABEL_FOV_DEG,
   densestNeighborhood,
@@ -114,6 +114,9 @@ describe("label budget", () => {
     const scene = readFileSync(join(src, "Galaxy.tsx"), "utf8");
     assert.match(scene, /labelCrowd\(/);
     assert.match(scene, /data-testid="galaxy-labels-hidden"/);
+    assert.match(scene, /crowdedLabelsText/);
+    assert.match(scene, /data-reason=/);
+    assert.match(scene, /hiddenLabels > 0 && hiddenLine/);
   });
 });
 
@@ -203,6 +206,20 @@ describe("label crowd (neighborhood, not scene average)", () => {
     assert.equal(clustered.show, false);
     assert.equal(clustered.hidden, 500);
     assert.equal(clustered.reason, "crowd");
+  });
+
+  it("keeps a hidden count at near zoom on a clustered 500 so the confession line stays", () => {
+    const cam = eyeAt(ZOOM_MIN);
+    const clustered = labelCrowd(projectAgents(crowdModel(500, 12), cam), "agent", ZOOM_MIN, SCENE_RADIUS);
+    assert.ok(clustered.hidden > 0);
+    assert.equal(clustered.reason, "crowd");
+  });
+
+  it("names a far handful as distance, not crowd", () => {
+    const cam = eyeAt(ZOOM_MAX);
+    const out = labelCrowd(projectAgents(crowdModel(3, 2), cam), "agent", ZOOM_MAX, SCENE_RADIUS);
+    assert.equal(out.show, false);
+    assert.equal(out.reason, "distance");
   });
 
   it("returns scattered names at near zoom once each neighborhood holds one name", () => {
