@@ -20,7 +20,11 @@ permissions:
 jobs:
   suite:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Same hang-to-red reason as windows-full. Green posix-full runs on
+    # 8 Sep 2026 finished in 1m26s–2m36s (1m44s on e9173e7). 8 minutes
+    # is about 3× the slowest green. Do not skip tests or set
+    # continue-on-error.
+    timeout-minutes: 8
     permissions:
       contents: read
     steps:

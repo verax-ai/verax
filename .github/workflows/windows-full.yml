@@ -24,7 +24,14 @@ permissions:
 jobs:
   suite:
     runs-on: windows-latest
-    timeout-minutes: 40
+    # Green hosted runs on 8 Sep 2026 finished in 2m35s–3m14s (3m0s on
+    # e9173e7, 3m10s on 523f2d7). A hung `npm test` previously sat until
+    # this job's 40-minute cap (cancelled at 40m11s on the #11 merge) and
+    # can sit until GitHub's 6-hour cap if the job has no timeout. 12
+    # minutes is about 3× the slowest green: a stuck suite goes red
+    # instead of masking a later failure. Do not skip tests or set
+    # continue-on-error.
+    timeout-minutes: 12
     permissions:
       contents: read
     steps:
