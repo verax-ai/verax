@@ -7,10 +7,19 @@ export type GalaxyHealth = {
   lastDecisionMs?: number | null;
 } | null;
 
-/** Same material as `tenantKey`: iss + sub (brain). Hex digest stays on the body. */
+/**
+ * Same material as `tenantKey`: iss + sub (brain). Hex digest stays on the body.
+ *
+ * A token with no `iss` names no tenant. Grouping those records by brain would
+ * draw a planet for something nobody measured - and give it the brain's own
+ * name, so one word labelled two different bodies on one screen. With no
+ * issuer there is no planet: the records sit in the unassigned cloud and the
+ * agent is still there to be seen.
+ */
 export function tenantGroup(principal: { brain?: string; iss?: string } | null | undefined): string | null {
   if (!principal || typeof principal.brain !== "string" || principal.brain === "") return null;
-  return `${principal.iss ?? ""}\u001f${principal.brain}`;
+  if (typeof principal.iss !== "string" || principal.iss === "") return null;
+  return `${principal.iss}\u001f${principal.brain}`;
 }
 
 function ghostRefs(report: ReconcileCardReport | null): Set<string> {
