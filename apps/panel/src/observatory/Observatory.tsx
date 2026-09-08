@@ -5,8 +5,15 @@ import { ledgerToGalaxy } from "../galaxy/adapter.ts";
 import { coverageLine } from "../galaxy/coverage-line.ts";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
-import { Rail, type RailContestResult } from "../rail/Rail.tsx";
+import { type RailContestResult } from "../rail/Rail.tsx";
 import type { PendingApproval, RailAction, RailFinding, RailWarning } from "../rail/types.ts";
+import { RecordList } from "../records/RecordList.tsx";
+import { pairFromLedger } from "../records/pair.ts";
+import { recordLine } from "../records/line.ts";
+import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
+import { spendFields } from "../records/spend.ts";
+import { Timeline } from "../records/Timeline.tsx";
+import { formatStamp } from "../records/timeline.ts";
 import bodyEn from "../../../body-map/src/copy/en.json";
 import bodyTr from "../../../body-map/src/copy/tr.json";
 
@@ -22,33 +29,34 @@ export type Healthz = {
 
 export type ObservatoryStatus = "loading" | "ok" | "error" | "empty";
 
-const TAB_IDS = ["status", "galaxy", "history"] as const;
+const TAB_IDS = ["records", "galaxy", "status"] as const;
 type TabId = (typeof TAB_IDS)[number];
-const TAB_COPY: Record<TabId, "tab.status" | "tab.galaxy" | "tab.history"> = {
-  status: "tab.status",
+const TAB_COPY: Record<TabId, "tab.records" | "tab.galaxy" | "tab.status"> = {
+  records: "tab.records",
   galaxy: "tab.galaxy",
-  history: "tab.history",
+  status: "tab.status",
 };
 
+function readTab(): TabId {
+  if (typeof window === "undefined") return "records";
+  const q = new URLSearchParams(window.location.search).get("tab");
+  if (q === "history") return "records";
+  return TAB_IDS.includes(q as TabId) ? (q as TabId) : "records";
+}
+
 const ANATOMY = [
-  { key: "head", tr: bodyTr["head.part"], en: bodyEn["head.part"], prod: bodyTr["head.prod"], left: "50.8%", top: "5.5%" },
-  { key: "face", tr: bodyTr["face.part"], en: bodyEn["face.part"], prod: bodyTr["face.prod"], left: "50.8%", top: "10.6%" },
-  { key: "core", tr: bodyTr["core.part"], en: bodyEn["core.part"], prod: bodyTr["core.prod"], left: "45.5%", top: "23.7%" },
-  { key: "hands", tr: bodyTr["hands.part"], en: bodyEn["hands.part"], prod: bodyTr["hands.prod"], left: "50.8%", top: "43.6%" },
-  { key: "torso", tr: bodyTr["torso.part"], en: bodyEn["torso.part"], prod: bodyTr["torso.prod"], left: "51.5%", top: "48%" },
-  { key: "ground", tr: bodyTr["ground.part"], en: bodyEn["ground.part"], prod: bodyTr["ground.prod"], left: "60.6%", top: "91.8%" },
-  { key: "whole", tr: bodyTr["whole.part"], en: bodyEn["whole.part"], prod: bodyTr["whole.prod"], left: "50%", top: "70%" },
+  { key: "head", tr: bodyTr["head.part"], en: bodyEn["head.part"] },
+  { key: "face", tr: bodyTr["face.part"], en: bodyEn["face.part"] },
+  { key: "core", tr: bodyTr["core.part"], en: bodyEn["core.part"] },
+  { key: "hands", tr: bodyTr["hands.part"], en: bodyEn["hands.part"] },
+  { key: "torso", tr: bodyTr["torso.part"], en: bodyEn["torso.part"] },
+  { key: "ground", tr: bodyTr["ground.part"], en: bodyEn["ground.part"] },
+  { key: "whole", tr: bodyTr["whole.part"], en: bodyEn["whole.part"] },
 ] as const;
 
 function reducedMotion(): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
   return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
-function pinLabel(source: "env" | "own-key" | null | undefined): string {
-  if (source === "env") return "pin: env";
-  if (source === "own-key") return "pin: own key";
-  return "pin: none";
 }
 
 function shortHash(h: string | null | undefined): string {
@@ -135,11 +143,7 @@ export function Observatory({
   onShowDemo?: () => void;
   onContest?: (ref: string) => Promise<RailContestResult | void>;
 }) {
-  const initialTab = useMemo<TabId>(() => {
-    if (typeof window === "undefined") return "galaxy";
-    const q = new URLSearchParams(window.location.search).get("tab");
-    return TAB_IDS.includes(q as TabId) ? (q as TabId) : "galaxy";
-  }, []);
+  const initialTab = useMemo<TabId>(() => readTab(), []);
   const [tab, setTab] = useState<TabId>(initialTab);
   const [selected, setSelected] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
   const [focusId, setFocusId] = useState<string | null>(() => {
@@ -327,28 +331,40 @@ export function Observatory({
           </>
         ) : null}
         <h2>{copy.records}</h2>
-        <ul>
-          {actions.map((a) => {
-            const ref = a.record.claims.ref ?? "unknown";
-            return (
-              <li key={ref}>
-                <button type="button" className="focusable" onClick={() => { setSelected(ref); setTab("history"); }}>
-                  {ref}
-                </button>
-              </li>
-            );
-          })}
-        </ul>
+        {actions.length === 0 ? (
+          <p className="muted">{copy["summary.empty"]}</p>
+        ) : (
+          <ul className="rail-records" data-testid="rail-records">
+            {actions.map((a) => {
+              const ref = a.record.claims.ref ?? "unknown";
+              const line = recordLine(copy, a, pending);
+              return (
+                <li key={ref}>
+                  <button
+                    type="button"
+                    className="focusable"
+                    onClick={() => {
+                      setSelected(ref);
+                      setTab("records");
+                    }}
+                  >
+                    {line.label}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </aside>
       <section className="obs-main" id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
-        {tab === "status" ? (
-          <StatusView
+        {tab === "records" ? (
+          <RecordList
             actions={actions}
-            health={health}
-            lastMs={lastMs}
-            witnessCounts={witnessCounts}
-            reconcile={reconcile}
+            status={status}
             pending={pending}
+            reconcile={reconcile}
+            selected={action?.record.claims.ref ?? selected}
+            onSelect={(ref) => setSelected(ref)}
           />
         ) : null}
         {tab === "galaxy" ? (
@@ -364,17 +380,23 @@ export function Observatory({
             }}
           />
         ) : null}
-        {tab === "history" ? (
-          <Rail
+        {tab === "status" ? (
+          <StatusView
             actions={actions}
-            onContest={contest}
-            onSelect={(ref) => setSelected(ref)}
+            health={health}
+            lastMs={lastMs}
+            witnessCounts={witnessCounts}
+            reconcile={reconcile}
+            pending={pending}
           />
         ) : null}
       </section>
       <aside className="obs-detail" aria-label="İşlem ayrıntısı">
         <DetailPane
           action={action}
+          actions={actions}
+          pending={pending}
+          reconcile={reconcile}
           guarantee={guarantee}
           pin={pin}
           summary={summary}
@@ -382,27 +404,20 @@ export function Observatory({
           warnings={audit?.warnings ?? action?.warnings ?? []}
           witness={audit?.witnessClass ?? action?.witnessClass ?? action?.effect?.witnessClass ?? null}
           pair={audit?.pair}
+          inspected={Boolean(action?.record.claims.ref && audits[action.record.claims.ref])}
+          issuerMatches={audit?.trustRoot?.issuerMatches ?? action?.trustRoot?.issuerMatches ?? null}
+          pinSource={audit?.trustRoot?.source ?? action?.trustRoot?.source ?? null}
           onInspect={action?.record.claims.ref ? () => void contest(action.record.claims.ref as string) : undefined}
         />
       </aside>
-      <footer className="obs-timeline" aria-label="Zaman çizgisi">
-        <ol>
-          {actions.map((a) => (
-            <li key={a.record.claims.ref ?? a.record.claims.timestampMs}>
-              <button
-                type="button"
-                className="focusable"
-                onClick={() => {
-                  if (a.record.claims.ref) setSelected(a.record.claims.ref);
-                  setTab("history");
-                }}
-              >
-                {a.record.claims.timestampMs} {a.record.claims.subject} {a.record.claims.decision}
-              </button>
-            </li>
-          ))}
-        </ol>
-      </footer>
+      <Timeline
+        actions={actions}
+        selected={action?.record.claims.ref ?? selected}
+        onSelect={(ref) => {
+          setSelected(ref);
+          setTab("records");
+        }}
+      />
     </div>
   );
 }
@@ -465,7 +480,7 @@ function AnatomyDocument() {
       <ul>
         {ANATOMY.map((a) => (
           <li key={a.key} data-anchor={a.key}>
-            {a.tr} / {a.en} · {a.prod}
+            {a.tr} / {a.en}
           </li>
         ))}
       </ul>
@@ -473,8 +488,24 @@ function AnatomyDocument() {
   );
 }
 
+function chainLine(
+  copy: ReturnType<typeof panelCopy>,
+  key: "chain.defer" | "chain.resolve",
+  action: RailAction,
+): string {
+  return copy[key]
+    .replace("{decision}", action.record.claims.decision)
+    .replace("{reason}", action.record.claims.reasonCode)
+    .replace("{ref}", action.record.claims.ref ?? copy.unmeasured)
+    .replace("{when}", formatStamp(action.record.claims.timestampMs))
+    .replace("{decider}", action.record.claims.decider);
+}
+
 function DetailPane({
   action,
+  actions,
+  pending,
+  reconcile,
   guarantee,
   pin,
   summary,
@@ -483,8 +514,14 @@ function DetailPane({
   witness,
   onInspect,
   pair,
+  inspected,
+  issuerMatches,
+  pinSource,
 }: {
   action: RailAction | null;
+  actions: RailAction[];
+  pending: PendingApproval[];
+  reconcile: ReconcileCardReport | null;
   guarantee?: "unconditional" | "conditional";
   pin: string;
   summary: string;
@@ -493,20 +530,42 @@ function DetailPane({
   witness: string | null;
   onInspect?: () => void;
   pair?: { defer: { decision: string; reasonCode: string } | null; resolution: { decision: string; reasonCode: string } | null };
+  inspected: boolean;
+  issuerMatches: boolean | null;
+  pinSource: "env" | "own-key" | null;
 }) {
   const copy = panelCopy();
   const missing = action?.rule && "missing" in action.rule ? action.rule.missing : null;
   const matched = action?.rule && !("missing" in action.rule) ? action.rule : null;
   const inputs = action?.inputs;
+  const ledgerPair = pairFromLedger(actions, action, pending);
+  const scope = evidenceScope(copy, {
+    action,
+    inspected,
+    issuerMatches,
+    pinSource,
+    reconcile,
+  });
+  const spend = action ? spendFields(copy, action, pending, reconcile) : null;
   return (
     <div className="detail-pane">
       <h2>{copy["detail.title"]}</h2>
-      {!action ? <p className="muted">{copy.disconnected}</p> : (
+      {!action ? (
+        <p className="muted">{copy["records.empty"]}</p>
+      ) : (
         <>
           <h3>{copy["detail.request"]}</h3>
           <p>
             {action.record.claims.subject} · {shortHash(action.record.claims.ref)}
           </p>
+          {spend ? (
+            <section className="spend-fields" data-testid="spend-fields">
+              <p>{spend.amount}</p>
+              <p>{spend.payee}</p>
+              <p>{spend.approver}</p>
+              <p>{spend.statement}</p>
+            </section>
+          ) : null}
           <h3>{copy["detail.inputs"]}</h3>
           {identityMissing ? (
             <p className="rule-missing">identity hash on the record; inputs document unavailable</p>
@@ -519,7 +578,9 @@ function DetailPane({
             <p className="muted">{copy.disconnected}</p>
           )}
           <h3>{copy["detail.policy"]}</h3>
-          {missing ? <p className="rule-missing">{missing}</p> : (
+          {missing ? (
+            <p className="rule-missing">{missing}</p>
+          ) : (
             <p>
               {shortHash(action.record.claims.policyHash)} {matched?.text ?? "no matching rule"}
             </p>
@@ -528,7 +589,12 @@ function DetailPane({
           <p>
             {action.record.claims.decision} {action.record.claims.reasonCode}
           </p>
-          {pair?.defer && pair.resolution ? (
+          {ledgerPair.defer && ledgerPair.resolution ? (
+            <div data-testid="explain-pair" className="decision-chain">
+              <p>{chainLine(copy, "chain.defer", ledgerPair.defer)}</p>
+              <p>{chainLine(copy, "chain.resolve", ledgerPair.resolution)}</p>
+            </div>
+          ) : pair?.defer && pair.resolution ? (
             <p data-testid="explain-pair">
               {pair.defer.decision} {pair.defer.reasonCode} → {pair.resolution.decision} {pair.resolution.reasonCode}
             </p>
@@ -541,11 +607,16 @@ function DetailPane({
             · tanık {witness ?? "none"}
           </p>
           <h3>{copy["detail.scope"]}</h3>
-          <p data-testid="evidence-scope">
-            guarantee {guarantee ?? copy.disconnected} {pin}
-            {warnings.length > 0 ? ` ${warnings.map((w) => w.code).join(" ")}` : ""}
-            {summary && !/^balanced$/i.test(summary.trim()) ? ` ${summary}` : ""}
-          </p>
+          <ul data-testid="evidence-scope" className="evidence-scope">
+            <li data-testid="scope-signature">{scope.signature}</li>
+            <li data-testid="scope-witness">{scope.witness}</li>
+            <li data-testid="scope-external">{scope.external}</li>
+            <li>
+              guarantee {guarantee ?? copy.disconnected} {pin}
+              {warnings.length > 0 ? ` ${warningCodes(warnings)}` : ""}
+              {summary && !/^balanced$/i.test(summary.trim()) ? ` ${summary}` : ""}
+            </li>
+          </ul>
           {onInspect ? (
             <button type="button" className="contest focusable" onClick={onInspect}>
               {copy.inspect}

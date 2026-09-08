@@ -54,17 +54,19 @@ afterEach(() => {
 });
 
 describe("observatory", () => {
-  it("renders three tabs and defaults to galaxy", () => {
+  it("renders three tabs and defaults to records", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Genel durum", "Galaksi", "Geçmiş"]);
-    expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
-    expect(screen.getByTestId("galaxy-stage")).toBeTruthy();
+    expect(tabs.map((t) => t.textContent)).toEqual(["Kayıtlar", "Galaksi", "Genel durum"]);
+    expect(screen.getByRole("tab", { name: "Kayıtlar" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByTestId("records-summary")).toBeTruthy();
+    expect(screen.queryByTestId("galaxy-stage")).toBeNull();
     expect(screen.queryByTestId("stage")).toBeNull();
   });
 
   it("says the ledger is empty instead of showing an unexplained black stage", () => {
     render(<Observatory actions={[]} status="ok" demo={false} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     expect(screen.getByTestId("galaxy-empty").textContent).toMatch(/kayıt yok/i);
     expect(screen.getByTestId("galaxy-coverage").textContent).toBe("envanter bağlı değil");
     expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/\d+\s*\/\s*\d+/);
@@ -163,6 +165,7 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 5_000}
       />,
     );
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     expect(screen.queryByTestId("galaxy-empty")).toBeNull();
     expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/0 \/ 3 ajan hesap veriyor/);
     expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/fixture-source/);
@@ -179,6 +182,7 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 25 * 60 * 60 * 1000}
       />,
     );
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/bayat/);
   });
 
@@ -189,7 +193,6 @@ describe("observatory", () => {
 
   it("shows evidence scope with guarantee and pin:", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     expect(screen.getByTestId("evidence-scope").textContent).toMatch(/guarantee/);
     expect(screen.getByTestId("evidence-scope").textContent).toMatch(/pin:/);
   });
@@ -207,7 +210,6 @@ describe("observatory", () => {
       },
     ];
     render(<Observatory actions={missing} status="ok" demo={false} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     const line = document.querySelector(".detail-pane .rule-missing");
     expect(line?.textContent).toBe("identity hash on the record; inputs document unavailable");
     expect(line?.className).toMatch(/rule-missing/);
@@ -245,7 +247,6 @@ describe("observatory", () => {
 
   it("demo data has no rule-missing rows", () => {
     render(<Observatory actions={loadDemoActions()} status="ok" demo={true} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     expect(document.querySelectorAll(".rule-missing").length).toBe(0);
   });
 
@@ -260,7 +261,7 @@ describe("observatory", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const list = screen.getByRole("tablist");
     fireEvent.keyDown(list, { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "Geçmiş" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("does not add an animation class when reduced motion is set", () => {
@@ -281,5 +282,43 @@ describe("observatory", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     expect(document.querySelector(".is-animating")).toBeNull();
     vi.unstubAllGlobals();
+  });
+
+  it("opens with a measured sentence and a readable list, not naked refs", () => {
+    render(<Observatory actions={actions} status="ok" demo={false} />);
+    const sentence = screen.getByTestId("records-summary").textContent ?? "";
+    expect(sentence).toMatch(/6 karar/);
+    expect(sentence).toMatch(/ekstre bağlı değil/);
+    const labels = [...document.querySelectorAll(".record-asked")].map((n) => n.textContent ?? "");
+    expect(labels.length).toBe(6);
+    expect(labels.every((t) => t !== "" && !/^n\d+$/.test(t))).toBe(true);
+    const rail = screen.getByTestId("rail-records").textContent ?? "";
+    expect(rail).not.toMatch(/^n1$/);
+    expect(rail).toMatch(/memory\.|spend|audit\./);
+  });
+
+  it("writes what an empty ledger is, instead of looking broken", () => {
+    render(<Observatory actions={[]} status="empty" demo={false} />);
+    expect(screen.getByTestId("records-summary").textContent).toBe("Henüz karar üretilmedi.");
+    expect(screen.getByTestId("records-empty").textContent).toMatch(/bozuk bir ekran değil/);
+    expect(screen.queryByTestId("record-list")).toBeNull();
+  });
+
+  it("splits evidence scope into signature, witness and external lines", () => {
+    render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
+    expect(screen.getByTestId("scope-signature").textContent).toMatch(/ölçülemedi|not measured|doğrulandı|verified/i);
+    expect(screen.getByTestId("scope-witness").textContent).toMatch(/self/);
+    expect(screen.getByTestId("scope-external").textContent).toMatch(/bağlı değil|not bound/);
+    expect(screen.getByTestId("evidence-scope").textContent).toMatch(/guarantee/);
+    expect(screen.getByTestId("evidence-scope").textContent).toMatch(/pin:/);
+  });
+
+  it("does not draw unbound product names", () => {
+    render(<Observatory actions={actions} status="ok" demo={false} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    const body = document.body.textContent ?? "";
+    expect(body).not.toMatch(/Conarium/);
+    expect(body).not.toMatch(/Tuğra|Tugra/);
+    expect(body).not.toMatch(/Cedulon/);
   });
 });

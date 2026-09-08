@@ -1,3 +1,7 @@
+export type ReconcileMatch = {
+  effect?: { ref?: string };
+};
+
 export type ReconcileCardReport = {
   scope: {
     channel: string;
@@ -6,6 +10,8 @@ export type ReconcileCardReport = {
     rowCount: number;
   };
   ghost: unknown[];
+  matched?: ReconcileMatch[];
+  authorizedUnpaid?: { ref?: string }[];
 };
 
 export function ReconcileCard({ report }: { report: ReconcileCardReport | null }) {

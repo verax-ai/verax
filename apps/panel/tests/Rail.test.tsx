@@ -208,14 +208,13 @@ describe("panel ledger fetch states", () => {
       return ledgerFetch();
     });
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: "Geçmiş" }));
     await waitFor(() => {
-      expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
+      expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
     });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await waitFor(() => {
       expect(screen.getByText("error")).toBeTruthy();
-      expect(document.querySelectorAll(".row").length).toBeGreaterThan(0);
+      expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
     });
   });
 

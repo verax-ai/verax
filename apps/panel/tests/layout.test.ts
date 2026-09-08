@@ -16,8 +16,8 @@ const VIEWS = [
   { name: "390", width: 390, height: 844 },
 ] as const;
 
-const TABS = ["Genel durum", "Galaksi", "Geçmiş"] as const;
-const TAB_FILES = ["status", "galaxy", "history"] as const;
+const TABS = ["Kayıtlar", "Galaksi", "Genel durum"] as const;
+const TAB_FILES = ["records", "galaxy", "status"] as const;
 
 describe("observatory layout", () => {
   it("keeps three tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {

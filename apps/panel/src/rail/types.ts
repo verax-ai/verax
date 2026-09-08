@@ -6,6 +6,7 @@ export type RailDecision = {
     timestampMs: number;
     decider: string;
     ref: string | null;
+    requestHash?: string | null;
     policyHash: string;
     effectHash: string | null;
     inputsHash?: string | null;
@@ -15,6 +16,7 @@ export type RailDecision = {
 export type RailInputs = {
   principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: { id: string; versionHash: string; validFromMs: number; validUntilMs: number }[];
+  approver?: { id: string; via?: string; resolves?: string };
 };
 
 export type RailEffect = {
@@ -76,6 +78,7 @@ export type PendingApproval = {
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;
+  allowRef?: string;
 };
 
 export type RailAction = {
