@@ -102,3 +102,28 @@ describe("ledgerToGalaxy", () => {
     assert.equal(bare.agents[0]?.witness, undefined);
   });
 });
+
+describe("a tenant needs an issuer", () => {
+  it("draws no planet when the token carries no iss", () => {
+    const model = ledgerToGalaxy([action({ ref: "r1", brain: "alice" })], { heartbeat: { atMs: 9 } });
+    assert.equal(tenantGroup({ brain: "alice" }), null);
+    assert.equal(model.planets.length, 0, "an unmeasured tenant must not become a planet");
+    assert.equal(model.stars[0]?.planetId, null, "its records belong to the unassigned cloud");
+    assert.equal(model.agents[0]?.id, "alice", "the agent itself is still on the scene");
+    assert.equal(model.agents[0]?.planetId, null);
+  });
+
+  it("does not give a planet the name of the brain inside it", () => {
+    const model = ledgerToGalaxy(
+      [action({ ref: "r1", brain: "alice", iss: "https://a.example" })],
+      { heartbeat: { atMs: 9 } },
+    );
+    assert.equal(model.planets.length, 1);
+    assert.notEqual(
+      model.planets[0]?.label,
+      model.agents[0]?.label,
+      "two different things on one screen must not answer to one name",
+    );
+  });
+});
+
