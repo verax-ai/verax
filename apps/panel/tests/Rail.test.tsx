@@ -154,6 +154,9 @@ function stubLedgerFetch(handler: (url: string) => Response | Promise<Response>)
       if (url.includes("reconcile-report")) {
         return new Response("missing", { status: 404 });
       }
+      if (url.includes("/api/inventory")) {
+        return new Response(JSON.stringify({ inventory: null }), { status: 200 });
+      }
       return handler(url);
     }),
   );

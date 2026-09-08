@@ -1,0 +1,37 @@
+{
+  "takenAtMs": 1700000000000,
+  "source": "fixture-source",
+  "groups": [
+    { "id": "team-a", "label": "Team A" },
+    { "id": "team-b", "label": "Team B" }
+  ],
+  "agents": [
+    {
+      "id": "agent-1",
+      "label": "Agent 1",
+      "groupId": "team-a",
+      "kind": "worker",
+      "lastRunMs": 1700000001000,
+      "state": "live"
+    },
+    {
+      "id": "agent-2",
+      "label": "Agent 2",
+      "groupId": "team-a",
+      "kind": "worker",
+      "lastRunMs": 1690000000000,
+      "state": "unmonitored"
+    },
+    {
+      "id": "agent-3",
+      "label": "Agent 3",
+      "groupId": "team-b",
+      "kind": "watcher",
+      "lastRunMs": null,
+      "state": "unknown"
+    }
+  ],
+  "orphans": [
+    { "id": "pulse-1", "lastRunMs": 1700000000500, "why": "not on roster" }
+  ]
+}

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { parseInventory, type Inventory } from "@verax-ai/galaxy";
 import { Observatory, type Healthz } from "./observatory/Observatory.tsx";
 import { loadDemoActions } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
@@ -26,6 +27,22 @@ export function App() {
   const [reconcileReport, setReconcileReport] = useState<ReconcileCardReport | null>(null);
   const [health, setHealth] = useState<Healthz>(null);
   const [pending, setPending] = useState<PendingApproval[]>([]);
+  const [inventory, setInventory] = useState<Inventory | null>(null);
+
+  const loadInventory = useCallback(async () => {
+    try {
+      const invRes = await authorizedFetch("/api/inventory");
+      if (!invRes.ok) {
+        setInventory(null);
+        return;
+      }
+      const invBody = (await invRes.json()) as { inventory?: unknown };
+      const parsed = invBody.inventory == null ? null : parseInventory(invBody.inventory);
+      setInventory(parsed && parsed.ok ? parsed.value : null);
+    } catch {
+      setInventory(null);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     if (wantDemo()) {
@@ -41,6 +58,7 @@ export function App() {
       }
       return;
     }
+    await loadInventory();
     try {
       const r = await authorizedFetch("/api/ledger?from=0&to=9999999999999");
       if (!r.ok) {
@@ -97,7 +115,7 @@ export function App() {
       setStatus("error");
       setErrorText("ledger unreachable: network");
     }
-  }, [actions.length]);
+  }, [actions.length, loadInventory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -177,6 +195,8 @@ export function App() {
         stale={stale}
         ageMs={ageMs}
         pending={pending}
+        inventory={inventory}
+        nowMs={nowMs}
         onRefresh={() => void load()}
         onShowDemo={() => {
           setActions(loadDemoActions());

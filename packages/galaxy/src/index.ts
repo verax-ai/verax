@@ -33,6 +33,20 @@ export {
 } from "./draw.ts";
 export { isMeasured, measured, unmeasured, type Measured } from "./measured.ts";
 export {
+  coverage,
+  emptyGalaxy,
+  inventoryToGalaxy,
+  mergeGalaxy,
+  parseInventory,
+  type Coverage,
+  type Inventory,
+  type InventoryAgent,
+  type InventoryGroup,
+  type InventoryOrphan,
+  type InventoryParse,
+  type InventoryState,
+} from "./inventory.ts";
+export {
   UNASSIGNED_CLOUD_ID,
   type GalaxyAgent,
   type GalaxyEdge,

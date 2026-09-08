@@ -33,5 +33,13 @@
   "anatomy.approx": "approximate",
   "pending.title": "Pending approval",
   "galaxy.empty": "no records yet - the body has not decided anything",
+  "galaxy.inventory.unbound": "inventory not bound",
+  "galaxy.inventory.sample": "the sample scenario shows no inventory",
+  "galaxy.coverage": "{accountable} / {total} agents can account for themselves · inventory {source}, taken {ago}",
+  "galaxy.coverage.stale": "{accountable} / {total} agents can account for themselves · inventory {source}, taken {ago} · stale",
+  "time.secondsAgo": "{n}s ago",
+  "time.minutesAgo": "{n}m ago",
+  "time.hoursAgo": "{n}h ago",
+  "time.daysAgo": "{n}d ago",
   "pending.empty": "none"
 }
