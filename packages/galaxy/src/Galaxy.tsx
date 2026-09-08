@@ -9,10 +9,11 @@ import {
   AGENT_LABEL_NDC_HEIGHT,
   LABEL_FOV_DEG,
   labelAspect,
-  labelBudget,
+  labelCrowd,
   labelText,
-  labelVisible,
   paintLabel,
+  projectNdc,
+  type LabelHideReason,
 } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
 import { defaultOpen, easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
@@ -432,10 +433,16 @@ function fillHidden(template: string, n: number): string {
 
 function namesShown(
   kind: "planet" | "agent",
-  count: number,
-  distance: number,
-): boolean {
-  return labelVisible(kind, distance, SCENE_RADIUS) && labelBudget(count, distance, SCENE_RADIUS).show;
+  items: readonly { at: { x: number; y: number; z: number } }[],
+  orbit: Orbit,
+): { show: boolean; hidden: number; reason: LabelHideReason | null } {
+  const eye = { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG };
+  const ndc = [];
+  for (const item of items) {
+    const p = projectNdc(item.at, eye);
+    if (p) ndc.push(p);
+  }
+  return labelCrowd(ndc, kind, orbit.distance, SCENE_RADIUS);
 }
 
 function LabelSprites({
@@ -456,21 +463,18 @@ function LabelSprites({
   const agentLabels = usePaintedLabels(placed.agents);
   const planetCount = planetLabels.length;
   const agentCount = agentLabels.length;
-  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetCount, orbit.distance));
-  const [showAgent, setShowAgent] = useState(() =>
-    namesShown("agent", agentCount + planetCount, orbit.distance),
-  );
+  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetLabels, orbit).show);
+  const [showAgent, setShowAgent] = useState(() => namesShown("agent", agentLabels, orbit).show);
   const lastHidden = useRef(-1);
   useFrame(() => {
     if (g.current) g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
-    const d = orbit.distance;
-    // Planets keep the first claim on the budget: their count stands alone.
-    // Agents add the planet count, so a crowd drops agent names first.
-    const nextPlanet = namesShown("planet", planetCount, d);
-    const nextAgent = namesShown("agent", agentCount + planetCount, d);
-    if (nextPlanet !== showPlanet) setShowPlanet(nextPlanet);
-    if (nextAgent !== showAgent) setShowAgent(nextAgent);
-    const hidden = (nextPlanet ? 0 : planetCount) + (nextAgent ? 0 : agentCount);
+    // Each kind is judged on its own screen neighborhood. A crowd of
+    // agents does not hide a readable planet name, and the other way.
+    const nextPlanet = namesShown("planet", planetLabels, orbit);
+    const nextAgent = namesShown("agent", agentLabels, orbit);
+    if (nextPlanet.show !== showPlanet) setShowPlanet(nextPlanet.show);
+    if (nextAgent.show !== showAgent) setShowAgent(nextAgent.show);
+    const hidden = (nextPlanet.show ? 0 : planetCount) + (nextAgent.show ? 0 : agentCount);
     if (hidden !== lastHidden.current) {
       lastHidden.current = hidden;
       onHidden(hidden);
