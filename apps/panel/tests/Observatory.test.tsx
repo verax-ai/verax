@@ -3,6 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { parseInventory, type Inventory } from "@verax-ai/galaxy";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
@@ -17,6 +18,12 @@ const golden = join(root, "packages", "proxy", "tests", "fixtures", "ledger-gold
 const policy = JSON.parse(
   readFileSync(join(root, "packages", "proxy", "policy", "default.json"), "utf8"),
 ) as PolicyBundle["document"];
+
+const sampleParsed = parseInventory(
+  JSON.parse(readFileSync(join(root, "packages", "galaxy", "tests", "fixtures", "inventory-sample.json"), "utf8")),
+);
+if (!sampleParsed.ok) throw new Error(sampleParsed.reason);
+const sampleInventory: Inventory = sampleParsed.value;
 
 const actions = parseLedger(
   readFileSync(join(golden, "decisions.jsonl"), "utf8"),
@@ -59,6 +66,37 @@ describe("observatory", () => {
   it("says the ledger is empty instead of showing an unexplained black stage", () => {
     render(<Observatory actions={[]} status="ok" demo={false} />);
     expect(screen.getByTestId("galaxy-empty").textContent).toMatch(/kayıt yok/i);
+    expect(screen.getByTestId("galaxy-coverage").textContent).toBe("envanter bağlı değil");
+    expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/\d+\s*\/\s*\d+/);
+  });
+
+  it("fills the sky from inventory and names coverage without a percentage", () => {
+    render(
+      <Observatory
+        actions={[]}
+        status="ok"
+        demo={false}
+        inventory={sampleInventory}
+        nowMs={sampleInventory.takenAtMs + 5_000}
+      />,
+    );
+    expect(screen.queryByTestId("galaxy-empty")).toBeNull();
+    expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/0 \/ 3 ajan hesap veriyor/);
+    expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/fixture-source/);
+    expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/%/);
+  });
+
+  it("says the inventory snapshot is stale instead of hiding it", () => {
+    render(
+      <Observatory
+        actions={[]}
+        status="ok"
+        demo={false}
+        inventory={sampleInventory}
+        nowMs={sampleInventory.takenAtMs + 25 * 60 * 60 * 1000}
+      />,
+    );
+    expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/bayat/);
   });
 
   it("says nothing about emptiness once there are records", () => {

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { Galaxy, type GalaxySelect } from "@verax-ai/galaxy/react";
-import type { GalaxyModel } from "@verax-ai/galaxy";
+import { inventoryToGalaxy, mergeGalaxy, type GalaxyModel, type Inventory } from "@verax-ai/galaxy";
 import { ledgerToGalaxy } from "../galaxy/adapter.ts";
+import { coverageLine } from "../galaxy/coverage-line.ts";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
 import { Rail, type RailContestResult } from "../rail/Rail.tsx";
@@ -64,16 +65,21 @@ function GalaxyTab({
   model,
   ready,
   onSelect,
+  coverageText,
 }: {
   model: GalaxyModel;
   ready: boolean;
   onSelect: (hit: GalaxySelect) => void;
+  coverageText: string;
 }) {
   const copy = panelCopy();
   const empty =
     model.stars.length === 0 && model.planets.length === 0 && model.agents.length === 0;
   return (
     <>
+      <p className="galaxy-coverage" data-testid="galaxy-coverage">
+        {coverageText}
+      </p>
       {empty ? (
         <p className="galaxy-empty" data-testid="galaxy-empty">
           {copy["galaxy.empty"]}
@@ -97,6 +103,8 @@ export function Observatory({
   onShowDemo,
   onContest,
   pending = [],
+  inventory = null,
+  nowMs = Date.now(),
 }: {
   actions: RailAction[];
   status: ObservatoryStatus;
@@ -107,6 +115,8 @@ export function Observatory({
   errorText?: string | null;
   stale?: boolean;
   ageMs?: number | null;
+  inventory?: Inventory | null;
+  nowMs?: number;
   onRefresh?: () => void;
   onShowDemo?: () => void;
   onContest?: (ref: string) => Promise<RailContestResult | void>;
@@ -189,6 +199,15 @@ export function Observatory({
   };
 
   const copy = panelCopy();
+  const ledgerModel = useMemo(
+    () => ledgerToGalaxy(actions, health, reconcile),
+    [actions, health, reconcile],
+  );
+  const scene = useMemo(() => {
+    if (!inventory) return ledgerModel;
+    return mergeGalaxy(ledgerModel, inventoryToGalaxy(inventory));
+  }, [ledgerModel, inventory]);
+  const cover = coverageLine(inventory, ledgerModel, nowMs, copy);
   const lastMs = health?.lastDecisionMs ?? actions[0]?.record.claims.timestampMs ?? null;
   const witnessCounts = actions.reduce<Record<string, number>>((acc, a) => {
     const w = a.witnessClass ?? a.effect?.witnessClass ?? "none";
@@ -272,8 +291,9 @@ export function Observatory({
         ) : null}
         {tab === "galaxy" ? (
           <GalaxyTab
-            model={ledgerToGalaxy(actions, health, reconcile)}
+            model={scene}
             ready={status !== "loading"}
+            coverageText={cover.text}
             onSelect={(hit) => {
               if (hit.kind === "star") setSelected(hit.id);
             }}

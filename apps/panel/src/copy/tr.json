@@ -33,5 +33,12 @@
   "anatomy.approx": "yaklaşık",
   "pending.title": "Onay bekleyen",
   "galaxy.empty": "kayıt yok - gövde henüz karar üretmedi",
+  "galaxy.inventory.unbound": "envanter bağlı değil",
+  "galaxy.coverage": "{accountable} / {total} ajan hesap veriyor · envanter {source}, {ago} önce alındı",
+  "galaxy.coverage.stale": "{accountable} / {total} ajan hesap veriyor · envanter {source}, {ago} önce alındı · bayat",
+  "time.secondsAgo": "{n} sn",
+  "time.minutesAgo": "{n} dk",
+  "time.hoursAgo": "{n} sa",
+  "time.daysAgo": "{n} gün",
   "pending.empty": "yok"
 }
