@@ -70,6 +70,48 @@ describe("observatory", () => {
     expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/\d+\s*\/\s*\d+/);
   });
 
+  it("passes the hidden-names line from copy into the sky", () => {
+    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
+    expect(src).toMatch(/hiddenLabelsText=\{copy\["galaxy\.labels\.hidden"\]\}/);
+    const en = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "en.json"), "utf8")) as Record<string, string>;
+    expect(en["galaxy.labels.hidden"]).toMatch(/\{n\}/);
+    expect(en["galaxy.labels.hidden"]).toMatch(/hidden at this distance/i);
+  });
+
+  it("keeps inventory names off the ledger rail and does not say not-bound for them", () => {
+    render(
+      <Observatory
+        actions={[]}
+        status="ok"
+        demo={false}
+        inventory={sampleInventory}
+        nowMs={sampleInventory.takenAtMs + 5_000}
+      />,
+    );
+    expect(screen.getByText("Projeler (defter)")).toBeTruthy();
+    expect(screen.getByText("Ajanlar (defter)")).toBeTruthy();
+    expect(screen.getByText("Gruplar (envanter, ölçülemedi)")).toBeTruthy();
+    expect(screen.getByText("Ajanlar (envanter, ölçülemedi)")).toBeTruthy();
+    expect(screen.getByTestId("rail-inventory-groups").textContent).toMatch(/Team A/);
+    expect(screen.getByTestId("rail-inventory-groups").textContent).toMatch(/Team B/);
+    expect(screen.getByTestId("rail-inventory-agents").textContent).toMatch(/Agent 1/);
+    expect(screen.queryByTestId("rail-ledger-agents")).toBeNull();
+    const inventoryBlock = screen.getByTestId("rail-inventory-agents");
+    expect(inventoryBlock.className).toMatch(/rail-inventory/);
+    expect(inventoryBlock.className).not.toMatch(/rail-ledger/);
+    const disconnected = [...document.querySelectorAll(".obs-left .muted")].map((n) => n.textContent);
+    expect(disconnected.length).toBeGreaterThan(0);
+    expect(inventoryBlock.textContent).not.toMatch(/bağlı değil/);
+  });
+
+  it("omits the inventory rail when the roster is not bound", () => {
+    render(<Observatory actions={[]} status="ok" demo={false} />);
+    expect(screen.queryByTestId("rail-inventory-groups")).toBeNull();
+    expect(screen.queryByTestId("rail-inventory-agents")).toBeNull();
+    expect(screen.getByText("Projeler (defter)")).toBeTruthy();
+    expect(screen.getAllByText("bağlı değil").length).toBeGreaterThan(0);
+  });
+
   it("fills the sky from inventory and names coverage without a percentage", () => {
     render(
       <Observatory

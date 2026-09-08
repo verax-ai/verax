@@ -85,7 +85,12 @@ function GalaxyTab({
           {copy["galaxy.empty"]}
         </p>
       ) : null}
-      <Galaxy model={model} ready={ready} onSelect={onSelect} />
+      <Galaxy
+        model={model}
+        ready={ready}
+        onSelect={onSelect}
+        hiddenLabelsText={copy["galaxy.labels.hidden"]}
+      />
     </>
   );
 }
@@ -258,12 +263,38 @@ export function Observatory({
         ) : null}
       </div>
       <aside className="obs-left" aria-label="Kayıt grupları">
-        <h2>{copy.projects}</h2>
+        <h2>{copy["rail.ledger.projects"]}</h2>
         <p className="muted">{copy.disconnected}</p>
-        <h2>{copy.agents}</h2>
+        <h2>{copy["rail.ledger.agents"]}</h2>
         {brains.length === 0 ? <p className="muted">{copy.disconnected}</p> : (
-          <ul>{brains.map((b) => <li key={b}>{b}</li>)}</ul>
+          <ul className="rail-ledger" data-testid="rail-ledger-agents">
+            {brains.map((b) => <li key={b}>{b}</li>)}
+          </ul>
         )}
+        {inventory ? (
+          <>
+            <h2>{copy["rail.inventory.groups"]}</h2>
+            {inventory.groups.length === 0 ? (
+              <p className="muted">{copy.disconnected}</p>
+            ) : (
+              <ul className="rail-inventory" data-testid="rail-inventory-groups">
+                {inventory.groups.map((g) => (
+                  <li key={g.id}>{g.label}</li>
+                ))}
+              </ul>
+            )}
+            <h2>{copy["rail.inventory.agents"]}</h2>
+            {inventory.agents.length === 0 ? (
+              <p className="muted">{copy.disconnected}</p>
+            ) : (
+              <ul className="rail-inventory" data-testid="rail-inventory-agents">
+                {inventory.agents.map((a) => (
+                  <li key={a.id}>{a.label}</li>
+                ))}
+              </ul>
+            )}
+          </>
+        ) : null}
         <h2>{copy.records}</h2>
         <ul>
           {actions.map((a) => {
