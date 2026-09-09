@@ -98,6 +98,10 @@ describe("observatory layout", () => {
               time: box(time),
               paneBottom: paneBox ? paneBox.bottom : null,
               questions,
+              spendText: document.querySelector("[data-testid=spend-fields]")?.textContent ?? null,
+              pairText: document.querySelector("[data-testid=explain-pair]")?.textContent ?? null,
+              detailScroll: detail?.scrollHeight ?? null,
+              detailClient: detail?.clientHeight ?? null,
             };
           });
           if (metrics.scrollWidth > metrics.clientWidth + 1) {
@@ -128,6 +132,23 @@ describe("observatory layout", () => {
                 fails.push(
                   `${view.name}: "${q.text}" sits below the pane (${Math.round(q.bottom)} > ${Math.round(metrics.paneBottom)})`,
                 );
+              }
+            }
+            // 1360x880 is the product window. Presence alone is not the load:
+            // a spend subject still renders the section when approvals are
+            // empty, with "not measured" in every field. The gate has to see
+            // the amount and the payee or it is measuring the thin pane again.
+            if (view.name === "1360") {
+              process.stdout.write(
+                `layout-f9: .obs-detail scrollHeight=${metrics.detailScroll} clientHeight=${metrics.detailClient}\n`,
+              );
+              if (!metrics.spendText) {
+                fails.push(`${view.name}: spend-fields missing`);
+              } else if (!/10[.,]00/.test(metrics.spendText) || !/example-payee/.test(metrics.spendText)) {
+                fails.push(`${view.name}: spend-fields thin (${metrics.spendText.slice(0, 80)})`);
+              }
+              if (!metrics.pairText) {
+                fails.push(`${view.name}: explain-pair missing`);
               }
             }
           }
