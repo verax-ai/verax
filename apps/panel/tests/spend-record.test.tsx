@@ -125,3 +125,31 @@ describe("10 TRY spend record", () => {
     expect(document.body.textContent).not.toMatch(/Conarium|Tugra|Tuğra|Cedulon/);
   });
 });
+
+describe("a resolved defer on the screen", () => {
+  it("says the same thing in the status column, the outcome column, the rail and the detail pane", () => {
+    // kart-test-2 is the measured defer the operator answered. Four places on
+    // the screen render its ending. They read one ledger, so they have to
+    // land on one sentence; the screen contradicting itself is the fault
+    // this record was picked to prove it cannot have.
+    render(
+      <Observatory
+        actions={[defer, allow]}
+        status="ok"
+        demo={false}
+        pending={approvals}
+        reconcile={reconcile}
+      />,
+    );
+    const row = document.querySelector(".record-row") as HTMLElement;
+    const status = (row.querySelector(".record-status")?.textContent ?? "").trim();
+    const outcome = (row.querySelector(".record-outcome")?.textContent ?? "").trim();
+    expect(status.length).toBeGreaterThan(0);
+    // The raw claim stays readable, but it is no longer the last word.
+    expect(outcome).toMatch(/defer approval-required/);
+    expect(outcome).not.toBe("defer approval-required");
+    expect(outcome.endsWith(status)).toBe(true);
+    expect((screen.getByTestId("detail-result").textContent ?? "").trim()).toBe(outcome);
+    expect(screen.getByTestId("rail-records").textContent ?? "").toContain(outcome);
+  });
+});
