@@ -93,3 +93,18 @@ export type RailAction = {
   inputsBound?: boolean;
   trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
 };
+
+/** What a re-audit hands back to the screen that asked for one. */
+export type RailContestResult = {
+  reAuditedAt?: number;
+  finding?: RailFinding;
+  guarantee?: "unconditional" | "conditional";
+  warnings?: RailWarning[];
+  witnessClass?: string | null;
+  trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
+  pair?: {
+    defer: { decision: string; reasonCode: string } | null;
+    resolution: { decision: string; reasonCode: string } | null;
+  };
+  error?: string;
+};

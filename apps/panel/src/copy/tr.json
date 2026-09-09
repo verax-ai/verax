@@ -25,6 +25,8 @@
   "attestation.yes": "attestation var",
   "attestation.no": "attestation yok",
   "effect.none": "etki yok",
+  "detail.identityMissing": "kayıtta kimlik özeti var; girdi belgesi okunamıyor",
+  "inspect.failed": "İnceleme tamamlanmadı: {error}",
   "inspect": "Kaydı incele",
   "projects": "Projeler",
   "agents": "Ajanlar",

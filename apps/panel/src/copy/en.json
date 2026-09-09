@@ -25,6 +25,8 @@
   "attestation.yes": "attestation yes",
   "attestation.no": "attestation no",
   "effect.none": "no effect",
+  "detail.identityMissing": "identity hash on the record; inputs document unavailable",
+  "inspect.failed": "The re-audit did not complete: {error}",
   "inspect": "Inspect record",
   "projects": "Projects",
   "agents": "Agents",
