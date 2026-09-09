@@ -474,7 +474,10 @@ function StatusView({
       <p>etki {health?.effects ?? effects}</p>
       <p>son karar {lastMs ?? "bağlı değil"}</p>
       <p>kilit {lock}</p>
-      <p>tanık {Object.entries(witnessCounts).map(([k, n]) => `${k} ${n}`).join(" · ") || "bağlı değil"}</p>
+      <p>
+        {copy["witness.label"]}{" "}
+        {Object.entries(witnessCounts).map(([k, n]) => `${k} ${n}`).join(" · ") || copy.disconnected}
+      </p>
       <p>pin kaynağı {pinSource ?? "denetlenmedi"}</p>
       <section data-testid="pending-approvals" className="pending-approvals">
         <h3>{copy["pending.title"]}</h3>
@@ -582,7 +585,11 @@ function DetailPane({
         <p className="muted">{copy["records.empty"]}</p>
       ) : (
         <>
-          <h3>{copy["detail.request"]}</h3>
+          {/* The pane answers the five questions the product is built on, in
+              their own words. A question it cannot answer yet is written down
+              and marked, not dropped: a list that quietly omits what it cannot
+              show is the thing this screen exists to replace. */}
+          <h3>{copy["question.did"]}</h3>
           <p>
             {action.record.claims.subject} · {shortHash(action.record.claims.ref)}
           </p>
@@ -594,7 +601,35 @@ function DetailPane({
               <p>{spend.statement}</p>
             </section>
           ) : null}
-          <h3>{copy["detail.inputs"]}</h3>
+          <p data-testid="detail-result">{outcomeText(copy, action, pending)}</p>
+          {ledgerPair.defer && ledgerPair.resolution ? (
+            <div data-testid="explain-pair" className="decision-chain">
+              <p>{chainLine(copy, "chain.defer", ledgerPair.defer)}</p>
+              <p>{chainLine(copy, "chain.resolve", ledgerPair.resolution)}</p>
+            </div>
+          ) : pair?.defer && pair.resolution ? (
+            <p data-testid="explain-pair">
+              {pair.defer.decision} {pair.defer.reasonCode} → {pair.resolution.decision} {pair.resolution.reasonCode}
+            </p>
+          ) : null}
+          <h3>{copy["question.counterpart"]}</h3>
+          <p>
+            {action.effect
+              ? `${action.effect.row.effectClass} ${action.effect.receipt ? copy["receipt.yes"] : copy["receipt.no"]} · ${action.effect.attestation ? copy["attestation.yes"] : copy["attestation.no"]}`
+              : copy["effect.none"]}{" "}
+            · {copy["witness.label"]} {witness ?? copy.disconnected}
+          </p>
+          <ul data-testid="evidence-scope" className="evidence-scope">
+            <li data-testid="scope-signature">{scope.signature}</li>
+            <li data-testid="scope-witness">{scope.witness}</li>
+            <li data-testid="scope-external">{scope.external}</li>
+            <li>
+              guarantee {guarantee ?? copy.disconnected} {pin}
+              {warnings.length > 0 ? ` ${warningCodes(warnings)}` : ""}
+              {summary && !/^balanced$/i.test(summary.trim()) ? ` ${summary}` : ""}
+            </li>
+          </ul>
+          <h3>{copy["question.current"]}</h3>
           {identityMissing ? (
             <p className="rule-missing" data-testid="detail-identity">
               {copy["detail.identityMissing"]}
@@ -607,7 +642,9 @@ function DetailPane({
           ) : (
             <p className="muted">{copy.disconnected}</p>
           )}
-          <h3>{copy["detail.policy"]}</h3>
+          <h3>{copy["question.impact"]}</h3>
+          <p className="muted" data-testid="question-impact">{copy["question.impact.empty"]}</p>
+          <h3>{copy["question.rules"]}</h3>
           {missing ? (
             <p className="rule-missing" data-testid="detail-policy">{copy["line.rule.missing"]}</p>
           ) : (
@@ -615,36 +652,6 @@ function DetailPane({
               {shortHash(action.record.claims.policyHash)} {matched?.text ?? copy["line.rule.none"]}
             </p>
           )}
-          <h3>{copy["detail.result"]}</h3>
-          <p data-testid="detail-result">{outcomeText(copy, action, pending)}</p>
-          {ledgerPair.defer && ledgerPair.resolution ? (
-            <div data-testid="explain-pair" className="decision-chain">
-              <p>{chainLine(copy, "chain.defer", ledgerPair.defer)}</p>
-              <p>{chainLine(copy, "chain.resolve", ledgerPair.resolution)}</p>
-            </div>
-          ) : pair?.defer && pair.resolution ? (
-            <p data-testid="explain-pair">
-              {pair.defer.decision} {pair.defer.reasonCode} → {pair.resolution.decision} {pair.resolution.reasonCode}
-            </p>
-          ) : null}
-          <h3>{copy["detail.evidence"]}</h3>
-          <p>
-            {action.effect
-              ? `${action.effect.row.effectClass} ${action.effect.receipt ? copy["receipt.yes"] : copy["receipt.no"]} · ${action.effect.attestation ? copy["attestation.yes"] : copy["attestation.no"]}`
-              : copy["effect.none"]}{" "}
-            · tanık {witness ?? "none"}
-          </p>
-          <h3>{copy["detail.scope"]}</h3>
-          <ul data-testid="evidence-scope" className="evidence-scope">
-            <li data-testid="scope-signature">{scope.signature}</li>
-            <li data-testid="scope-witness">{scope.witness}</li>
-            <li data-testid="scope-external">{scope.external}</li>
-            <li>
-              guarantee {guarantee ?? copy.disconnected} {pin}
-              {warnings.length > 0 ? ` ${warningCodes(warnings)}` : ""}
-              {summary && !/^balanced$/i.test(summary.trim()) ? ` ${summary}` : ""}
-            </li>
-          </ul>
           {onInspect ? (
             <button type="button" className="contest focusable" onClick={onInspect}>
               {copy.inspect}
