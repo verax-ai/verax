@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { parseInventory, type Inventory } from "@verax-ai/galaxy";
 import { Observatory, type Healthz } from "./observatory/Observatory.tsx";
-import { loadDemoActions } from "./observatory/demo.ts";
+import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
 import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
@@ -52,6 +52,8 @@ export function App() {
       // overwrote the sample and demo=1 showed nothing.
       if (actions.length === 0) {
         setActions(loadDemoActions());
+        setPending(loadDemoApprovals());
+        setReconcileReport(loadDemoReconcile());
         setDemo(true);
         setStatus("ok");
         setLastReadMs(Date.now());
@@ -156,6 +158,7 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (wantDemo()) return;
     void (async () => {
       try {
         const r = await fetch("/reconcile-report.json");
@@ -200,6 +203,8 @@ export function App() {
         onRefresh={() => void load()}
         onShowDemo={() => {
           setActions(loadDemoActions());
+          setPending(loadDemoApprovals());
+          setReconcileReport(loadDemoReconcile());
           setDemo(true);
         }}
         onContest={async (ref) => {
