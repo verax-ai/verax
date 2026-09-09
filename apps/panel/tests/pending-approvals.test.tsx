@@ -66,7 +66,13 @@ describe("pending approvals", () => {
     );
     fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     const list = screen.getByTestId("pending-approvals");
-    expect(list.textContent).toMatch(/125050 TRY → true-ads/);
+    // 125050 is the stored minor amount. This screen used to print it beside
+    // the currency, which states a sum a hundred times too large, and this
+    // test froze that. The record screen was fixed in 3fafdcb; the status tab
+    // kept the fault because each file was consistent with itself.
+    expect(list.textContent).toMatch(/1[.,]250[.,]50/);
+    expect(/(^|[^.,\d])125050([^.,\d]|$)/.test(list.textContent ?? "")).toBe(false);
+    expect(list.textContent).toMatch(/true-ads/);
     expect(list.textContent).toMatch(/Spends need operator approval/);
     expect(document.querySelector("button[data-approve]")).toBeNull();
   });

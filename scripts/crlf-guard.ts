@@ -4,6 +4,12 @@
 // core.autocrlf=true has already bitten the fence parser; this guard
 // checks the object store, not the working tree.
 //
+// They must not carry a stray control character either. A source line written
+// through a tool that mishandles escapes can land a real backspace where the
+// author meant a regex boundary: the pattern then matches nothing, the test
+// that uses it measures nothing, and it stays green. That happened here. The
+// same slip in the other direction leaves a replacement character behind.
+//
 // This script never writes.
 
 import { execFileSync } from "node:child_process";
@@ -110,15 +116,59 @@ export function findCarriageReturns(
   return hits;
 }
 
+export type ControlHit = {
+  file: string;
+  codePoints: string[];
+};
+
+/**
+ * Control characters that have no business in tracked text: everything below
+ * space except newline and tab (CR is the check above), and the replacement
+ * character, which means the bytes were not the encoding they claimed.
+ */
+export function findStrayControls(
+  base = root,
+  extra: Array<{ file: string; bytes: Buffer }> = [],
+): ControlHit[] {
+  const decoder = new TextDecoder("utf8");
+  const hits: ControlHit[] = [];
+  const check = (file: string, bytes: Buffer) => {
+    if (isBinaryPath(file) || looksBinary(bytes)) return;
+    const seen = new Set<string>();
+    for (const ch of decoder.decode(bytes)) {
+      const code = ch.codePointAt(0) ?? 0;
+      const stray =
+        (code < 0x20 && code !== 0x0a && code !== 0x09 && code !== 0x0d) || code === 0xfffd;
+      if (stray) seen.add(`0x${code.toString(16)}`);
+    }
+    if (seen.size > 0) hits.push({ file, codePoints: [...seen] });
+  };
+  const files = trackedFiles(base);
+  const blobs = blobsOf(files, base);
+  for (const file of files) {
+    const bytes = blobs.get(file);
+    if (!bytes) throw new Error(`crlf-guard: no blob for ${file}`);
+    check(file, bytes);
+  }
+  for (const item of extra) {
+    check(item.file.split(String.fromCharCode(92)).join("/"), item.bytes);
+  }
+  return hits;
+}
+
 const invoked =
   Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (invoked) {
   const hits = findCarriageReturns();
-  if (hits.length > 0) {
+  const strays = findStrayControls();
+  if (hits.length > 0 || strays.length > 0) {
     for (const hit of hits) {
       console.error(`crlf-guard: ${hit.file} has ${hit.count} CR byte(s)`);
     }
+    for (const stray of strays) {
+      console.error(`crlf-guard: ${stray.file} carries ${stray.codePoints.join(", ")}`);
+    }
     process.exit(1);
   }
-  console.log("crlf-guard: no CR in tracked text blobs");
+  console.log("crlf-guard: no CR and no stray control byte in tracked text blobs");
 }
