@@ -31,8 +31,13 @@ body {
     "left main detail"
     "time time time";
   grid-template-columns: 15rem minmax(0, 1fr) minmax(24rem, 32rem);
-  grid-template-rows: auto 1fr auto;
+  /* height, not only min-height: with an indefinite height the middle 1fr
+     row resolves to its content, so the three panes pushed the timeline off
+     the bottom of the window instead of scrolling inside themselves. The
+     window is the frame; minmax(0, ...) then lets the row shrink into it. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 100vh;
+  height: 100vh;
   background: var(--paper);
   color: var(--ink);
 }
@@ -262,6 +267,9 @@ body {
       "time";
     grid-template-columns: 1fr;
     grid-template-rows: auto;
+    /* Stacked, the page is meant to scroll; pinning it to the window would
+       hide four of the five bands instead of one. */
+    height: auto;
   }
   .obs-left,
   .obs-detail {

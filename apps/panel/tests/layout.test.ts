@@ -10,7 +10,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
 const shotDir = join(homedir(), "Desktop", "Work", "VERAX_GOZLEMEVI_20260906");
 
+// 1360x880 is the window `verax desktop` opens. A gate that never runs the
+// product's own size measured everything except what the operator sees.
 const VIEWS = [
+  { name: "1360", width: 1360, height: 880 },
   { name: "1440", width: 1440, height: 900 },
   { name: "1920", width: 1920, height: 1080 },
   { name: "390", width: 390, height: 844 },
@@ -79,6 +82,8 @@ describe("observatory layout", () => {
             return {
               scrollWidth: rootEl.scrollWidth,
               clientWidth: rootEl.clientWidth,
+              scrollHeight: rootEl.scrollHeight,
+              clientHeight: rootEl.clientHeight,
               detail: box(detail),
               time: box(time),
             };
@@ -86,12 +91,22 @@ describe("observatory layout", () => {
           if (metrics.scrollWidth > metrics.clientWidth + 1) {
             fails.push(`${view.name}: overflow ${metrics.scrollWidth} > ${metrics.clientWidth}`);
           }
-          if (view.width >= 1440) {
+          if (view.width > 800) {
             if (!metrics.detail || metrics.detail.top > view.height) {
               fails.push(`${view.name}: detail not on first screen`);
             }
-            if (!metrics.time || metrics.time.top > view.height) {
-              fails.push(`${view.name}: timeline not on first screen`);
+            // The strip has to be readable, not merely started: a timeline
+            // whose top is on screen and whose bottom is not is a strip the
+            // operator has to scroll for, which is what "on screen" meant.
+            if (!metrics.time || metrics.time.bottom > view.height + 1) {
+              fails.push(
+                `${view.name}: timeline bottom ${metrics.time?.bottom ?? "none"} past ${view.height}`,
+              );
+            }
+            if (metrics.scrollHeight > metrics.clientHeight + 1) {
+              fails.push(
+                `${view.name}: page scrolls ${metrics.scrollHeight} > ${metrics.clientHeight}`,
+              );
             }
           }
           if (pageErrors.length) fails.push(`${view.name}: pageerror ${pageErrors.join(" | ")}`);
