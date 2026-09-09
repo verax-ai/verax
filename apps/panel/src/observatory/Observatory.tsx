@@ -8,6 +8,7 @@ import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
 import { type RailContestResult } from "../rail/Rail.tsx";
 import type { PendingApproval, RailAction, RailFinding, RailWarning } from "../rail/types.ts";
 import { RecordList } from "../records/RecordList.tsx";
+import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
 import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
@@ -145,7 +146,7 @@ export function Observatory({
 }) {
   const initialTab = useMemo<TabId>(() => readTab(), []);
   const [tab, setTab] = useState<TabId>(initialTab);
-  const [selected, setSelected] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
+  const [selected, setSelected] = useState<string | null>(exhibitRef(actions));
   const [focusId, setFocusId] = useState<string | null>(() => {
     if (typeof window === "undefined") return null;
     const q = new URLSearchParams(window.location.search).get("focus");
@@ -166,7 +167,7 @@ export function Observatory({
     >
   >({});
 
-  const action = actions.find((a) => a.record.claims.ref === selected) ?? actions[0] ?? null;
+  const action = actions.find((a) => a.record.claims.ref === selected) ?? exhibitAction(actions);
   const audit = action?.record.claims.ref ? audits[action.record.claims.ref] : undefined;
   const guarantee = audit?.guarantee ?? action?.guarantee;
   const pin = pinLabel(audit?.trustRoot?.source ?? action?.trustRoot?.source ?? null);
@@ -184,8 +185,9 @@ export function Observatory({
   }, [actions]);
 
   useEffect(() => {
-    if (actions[0]?.record.claims.ref && selected === null) {
-      setSelected(actions[0].record.claims.ref);
+    const first = exhibitRef(actions);
+    if (first !== null && selected === null) {
+      setSelected(first);
     }
   }, [actions, selected]);
 
@@ -579,10 +581,10 @@ function DetailPane({
           )}
           <h3>{copy["detail.policy"]}</h3>
           {missing ? (
-            <p className="rule-missing">{missing}</p>
+            <p className="rule-missing">{copy["line.rule.missing"]}</p>
           ) : (
             <p>
-              {shortHash(action.record.claims.policyHash)} {matched?.text ?? "no matching rule"}
+              {shortHash(action.record.claims.policyHash)} {matched?.text ?? copy["line.rule.none"]}
             </p>
           )}
           <h3>{copy["detail.result"]}</h3>

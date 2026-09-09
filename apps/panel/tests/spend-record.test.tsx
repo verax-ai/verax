@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval, RailAction } from "../src/rail/types.ts";
@@ -126,6 +126,44 @@ describe("10 TRY spend record", () => {
   });
 });
 
+const auditRead: RailAction = {
+  record: {
+    claims: {
+      subject: "audit.explain",
+      decision: "allow",
+      reasonCode: "allow",
+      timestampMs: 1788714999999,
+      decider: "verax-proxy",
+      ref: "audit-explain-1",
+      policyHash: "f7963a24b19e982a3e9826feab098bbbdced10b7b036d4426966d309417e452f",
+      effectHash: null,
+    },
+  },
+  effect: null,
+  rule: null,
+  finding: null,
+};
+
+describe("which record the exhibit opens on", () => {
+  it("opens on the spend, not on the panel reading its own ledger", () => {
+    // The newest record is the explain call the panel just made. A visitor
+    // who lands on it is shown the screen inspecting itself, not an account.
+    render(
+      <Observatory
+        actions={[auditRead, allow, defer]}
+        status="ok"
+        demo={false}
+        pending={approvals}
+        reconcile={reconcile}
+      />,
+    );
+    const detail = document.querySelector(".detail-pane")?.textContent ?? "";
+    expect(detail).toMatch(/398befdf/);
+    expect(detail).not.toMatch(/audit-explain-1/);
+    expect(document.querySelector(".record-row.is-selected")?.textContent ?? "").toMatch(/meta-ads/);
+  });
+});
+
 describe("a resolved defer on the screen", () => {
   it("says the same thing in the status column, the outcome column, the rail and the detail pane", () => {
     // kart-test-2 is the measured defer the operator answered. Four places on
@@ -142,6 +180,9 @@ describe("a resolved defer on the screen", () => {
       />,
     );
     const row = document.querySelector(".record-row") as HTMLElement;
+    // The screen opens on the spend that has an effect; this row is the defer
+    // behind it, so ask for it before reading the detail pane.
+    fireEvent.click(row);
     const status = (row.querySelector(".record-status")?.textContent ?? "").trim();
     const outcome = (row.querySelector(".record-outcome")?.textContent ?? "").trim();
     expect(status.length).toBeGreaterThan(0);
