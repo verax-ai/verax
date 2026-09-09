@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseInventory, type Inventory } from "@verax-ai/galaxy";
+import { panelCopy } from "../src/copy.ts";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
@@ -191,6 +192,60 @@ describe("observatory", () => {
     expect(screen.queryByTestId("galaxy-empty")).toBeNull();
   });
 
+  it("does not repeat the record list in the rail on the records tab", () => {
+    render(<Observatory actions={actions} status="ok" demo={false} />);
+    expect(screen.queryByTestId("rail-records")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    // From the other tabs the rail is the only way back into a record, so it
+    // has to still be there.
+    expect(screen.getByTestId("rail-records").textContent ?? "").toMatch(/memory\.|spend|audit\./);
+  });
+
+  it("offers the inspect button on a record that has a ref", () => {
+    render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
+    expect(screen.getByRole("button", { name: panelCopy().inspect })).toBeTruthy();
+  });
+
+  it("says the historical policy is unreadable in red, in the reader's language", () => {
+    const noPolicy: RailAction[] = [
+      { ...actions[0]!, rule: { text: null, missing: "historical policy unavailable" } },
+    ];
+    render(<Observatory actions={noPolicy} status="ok" demo={false} />);
+    const line = screen.getByTestId("detail-policy");
+    expect(line.textContent).toBe(panelCopy()["line.rule.missing"]);
+    expect(line.className).toMatch(/rule-missing/);
+  });
+
+  it("names the warning codes next to the guarantee", () => {
+    const warned: RailAction[] = [
+      {
+        ...actions[0]!,
+        guarantee: "conditional",
+        warnings: [{ id: "w1", code: "issuer-unpinned" }],
+        trustRoot: { pinned: true, issuerMatches: null, source: "own-key" },
+      },
+    ];
+    render(<Observatory actions={warned} status="ok" demo={false} />);
+    const scope = screen.getByTestId("evidence-scope").textContent ?? "";
+    expect(scope).toMatch(/issuer-unpinned/);
+    expect(scope).toMatch(/pin: own key/);
+  });
+
+  it("says so when an inspect does not complete, instead of going quiet", async () => {
+    // The dead rail reported a failed re-audit; the live screen stored the
+    // result only when there was no error and printed nothing otherwise, so a
+    // 401 looked exactly like a click that did nothing.
+    const onContest = vi.fn(async () => ({ error: "re-audit failed (401)" }));
+    render(
+      <Observatory actions={withContest(actions)} status="ok" demo={false} onContest={onContest} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: panelCopy().inspect }));
+    await waitFor(() => {
+      expect(onContest).toHaveBeenCalled();
+      expect(screen.getByTestId("inspect-failed").textContent).toMatch(/401/);
+    });
+  });
+
   it("shows evidence scope with guarantee and pin:", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
     expect(screen.getByTestId("evidence-scope").textContent).toMatch(/guarantee/);
@@ -210,9 +265,9 @@ describe("observatory", () => {
       },
     ];
     render(<Observatory actions={missing} status="ok" demo={false} />);
-    const line = document.querySelector(".detail-pane .rule-missing");
-    expect(line?.textContent).toBe("identity hash on the record; inputs document unavailable");
-    expect(line?.className).toMatch(/rule-missing/);
+    const line = screen.getByTestId("detail-identity");
+    expect(line.textContent).toBe(panelCopy()["detail.identityMissing"]);
+    expect(line.className).toMatch(/rule-missing/);
   });
 
   it("says receipt yok when an effect has no receipt", () => {
@@ -292,6 +347,7 @@ describe("observatory", () => {
     const labels = [...document.querySelectorAll(".record-asked")].map((n) => n.textContent ?? "");
     expect(labels.length).toBe(6);
     expect(labels.every((t) => t !== "" && !/^n\d+$/.test(t))).toBe(true);
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     const rail = screen.getByTestId("rail-records").textContent ?? "";
     expect(rail).not.toMatch(/^n1$/);
     expect(rail).toMatch(/memory\.|spend|audit\./);

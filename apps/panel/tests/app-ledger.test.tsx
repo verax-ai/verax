@@ -1,3 +1,7 @@
+// What the panel does with the ledger it fetches, and which policy document a
+// decision is read against. The rendering assertions that used to live here
+// belonged to a rail component the app never mounted; they were moved onto the
+// screen the operator can actually open before that component was deleted.
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../src/App.tsx";
 import { rememberToken } from "../src/session.ts";
 import { parseLedger } from "../src/rail/parse.ts";
-import { Rail } from "../src/rail/Rail.tsx";
 import type { PolicyBundle } from "../src/rail/types.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
@@ -28,46 +31,6 @@ const actions = parseLedger(
 afterEach(() => {
   cleanup();
 });
-
-describe("account-for rail", () => {
-  it("renders six actions from the golden ledger", () => {
-    render(<Rail actions={actions} />);
-    expect(document.querySelectorAll(".row").length).toBe(6);
-  });
-
-  it("shows Contest on a deny row", () => {
-    render(<Rail actions={actions} />);
-    fireEvent.click(screen.getByRole("button", { name: /spend deny/i }));
-    expect(screen.getByRole("button", { name: "Contest" })).toBeTruthy();
-  });
-
-  it("keeps questions 3 and 4 visible", () => {
-    render(<Rail actions={actions} />);
-    expect(screen.getByText("henüz izlenmiyor")).toBeTruthy();
-    expect(screen.getByText("bağlı değil")).toBeTruthy();
-  });
-
-  it("P2-11: a 401 contest shows re-audit failed, not re-audited at", async () => {
-    const onContest = vi.fn(async () => ({ error: "re-audit failed (401)" }));
-    render(<Rail actions={actions} onContest={onContest} />);
-    fireEvent.click(screen.getByRole("button", { name: "Contest" }));
-    await waitFor(() => {
-      expect(screen.getByText("re-audit failed (401)")).toBeTruthy();
-    });
-    expect(screen.queryByText(/re-audited at/)).toBeNull();
-  });
-
-  it("POSTs contest with the open ref", async () => {
-    const onContest = vi.fn(async () => ({ reAuditedAt: 123 }));
-    render(<Rail actions={actions} onContest={onContest} />);
-    fireEvent.click(screen.getByRole("button", { name: "Contest" }));
-    expect(onContest).toHaveBeenCalled();
-    const ref = onContest.mock.calls[0]?.[0];
-    expect(typeof ref).toBe("string");
-    expect((ref as string).length).toBeGreaterThan(0);
-  });
-});
-
 const histDecision = {
   claims: {
     subject: "memory.put",
@@ -81,35 +44,6 @@ const histDecision = {
   },
 };
 
-describe("guarantee strip", () => {
-  it("5: shows a general issuer warning on the rail", () => {
-    const parsed = parseLedger(JSON.stringify(histDecision), "", {
-      aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] },
-    });
-    parsed[0] = {
-      ...parsed[0]!,
-      guarantee: "conditional",
-      warnings: [{ id: "issuer", code: "unauthenticated-issuer", detail: "issuer unpinned" }],
-      witnessClass: null,
-    };
-    render(<Rail actions={parsed} />);
-    expect(screen.getByText(/unauthenticated-issuer/)).toBeTruthy();
-    expect(screen.getByText(/guarantee/i)).toBeTruthy();
-  });
-
-  it("shows pin: own key on the guarantee strip", () => {
-    const parsed = parseLedger(JSON.stringify(histDecision), "", {
-      aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] },
-    });
-    parsed[0] = {
-      ...parsed[0]!,
-      guarantee: "conditional",
-      trustRoot: { pinned: true, issuerMatches: true, source: "own-key" },
-    };
-    render(<Rail actions={parsed} />);
-    expect(screen.getByText(/pin: own key/)).toBeTruthy();
-  });
-});
 
 describe("historical policy sentence", () => {
   it("uses the decision policyHash document, not a later live policy", () => {
@@ -122,27 +56,6 @@ describe("historical policy sentence", () => {
       },
     );
     expect(parsed[0]?.rule && "text" in parsed[0].rule ? parsed[0].rule.text : null).toBe("Sentence A");
-  });
-
-  it("shows historical policy unavailable in red when the snapshot is missing", () => {
-    const parsed = parseLedger(JSON.stringify(histDecision), "", {});
-    render(<Rail actions={parsed} />);
-    const line = screen.getByText("historical policy unavailable");
-    expect(line.className).toMatch(/rule-missing/);
-  });
-
-  it("shows a red identity line when the hash is on the record but the document is not", () => {
-    const parsed = parseLedger(
-      JSON.stringify({
-        claims: { ...histDecision.claims, inputsHash: "aa".repeat(32) },
-      }),
-      "",
-      { aaa: { rules: [{ id: "memory-put", tool: "memory.put", text: "Sentence A" }] } },
-    );
-    parsed[0] = { ...parsed[0]!, inputs: undefined, inputsBound: false };
-    render(<Rail actions={parsed} />);
-    const line = screen.getByText("identity hash on the record; inputs document unavailable");
-    expect(line.className).toMatch(/rule-missing/);
   });
 });
 

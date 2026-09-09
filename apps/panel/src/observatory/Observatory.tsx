@@ -5,8 +5,13 @@ import { ledgerToGalaxy } from "../galaxy/adapter.ts";
 import { coverageLine } from "../galaxy/coverage-line.ts";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
-import { type RailContestResult } from "../rail/Rail.tsx";
-import type { PendingApproval, RailAction, RailFinding, RailWarning } from "../rail/types.ts";
+import type {
+  PendingApproval,
+  RailAction,
+  RailContestResult,
+  RailFinding,
+  RailWarning,
+} from "../rail/types.ts";
 import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { pairFromLedger } from "../records/pair.ts";
@@ -152,6 +157,7 @@ export function Observatory({
     const q = new URLSearchParams(window.location.search).get("focus");
     return q && q.length > 0 ? q : null;
   });
+  const [inspectFailed, setInspectFailed] = useState<Record<string, string>>({});
   const [audits, setAudits] = useState<
     Record<
       string,
@@ -206,6 +212,16 @@ export function Observatory({
   const contest = async (ref: string) => {
     if (!onContest) return;
     const out = await onContest(ref);
+    // A re-audit that did not complete has to say so. Storing only the good
+    // case left a failed inspect looking exactly like a click that did
+    // nothing, which is the one thing an account-for screen may not do.
+    const failure = out && typeof out.error === "string" ? out.error : null;
+    setInspectFailed((s) => {
+      const next = { ...s };
+      if (failure === null) delete next[ref];
+      else next[ref] = failure;
+      return next;
+    });
     if (out && !out.error) {
       setAudits((s) => ({
         ...s,
@@ -332,6 +348,11 @@ export function Observatory({
             )}
           </>
         ) : null}
+        {/* The middle pane already is this list on the records tab. Printing it
+            again in a narrower column is the screen saying one thing twice,
+            and the rail is only a way in from the other two tabs. */}
+        {tab === "records" ? null : (
+          <>
         <h2>{copy.records}</h2>
         {actions.length === 0 ? (
           <p className="muted">{copy["summary.empty"]}</p>
@@ -356,6 +377,8 @@ export function Observatory({
               );
             })}
           </ul>
+        )}
+          </>
         )}
       </aside>
       <section className="obs-main" id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
@@ -407,6 +430,7 @@ export function Observatory({
           witness={audit?.witnessClass ?? action?.witnessClass ?? action?.effect?.witnessClass ?? null}
           pair={audit?.pair}
           inspected={Boolean(action?.record.claims.ref && audits[action.record.claims.ref])}
+          inspectFailed={action?.record.claims.ref ? inspectFailed[action.record.claims.ref] ?? null : null}
           issuerMatches={audit?.trustRoot?.issuerMatches ?? action?.trustRoot?.issuerMatches ?? null}
           pinSource={audit?.trustRoot?.source ?? action?.trustRoot?.source ?? null}
           onInspect={action?.record.claims.ref ? () => void contest(action.record.claims.ref as string) : undefined}
@@ -517,6 +541,7 @@ function DetailPane({
   onInspect,
   pair,
   inspected,
+  inspectFailed,
   issuerMatches,
   pinSource,
 }: {
@@ -533,6 +558,7 @@ function DetailPane({
   onInspect?: () => void;
   pair?: { defer: { decision: string; reasonCode: string } | null; resolution: { decision: string; reasonCode: string } | null };
   inspected: boolean;
+  inspectFailed: string | null;
   issuerMatches: boolean | null;
   pinSource: "env" | "own-key" | null;
 }) {
@@ -570,7 +596,9 @@ function DetailPane({
           ) : null}
           <h3>{copy["detail.inputs"]}</h3>
           {identityMissing ? (
-            <p className="rule-missing">identity hash on the record; inputs document unavailable</p>
+            <p className="rule-missing" data-testid="detail-identity">
+              {copy["detail.identityMissing"]}
+            </p>
           ) : inputs ? (
             <p>
               {inputs.principal.brain} · {inputs.principal.scopes.join(", ")} ·{" "}
@@ -581,9 +609,9 @@ function DetailPane({
           )}
           <h3>{copy["detail.policy"]}</h3>
           {missing ? (
-            <p className="rule-missing">{copy["line.rule.missing"]}</p>
+            <p className="rule-missing" data-testid="detail-policy">{copy["line.rule.missing"]}</p>
           ) : (
-            <p>
+            <p data-testid="detail-policy">
               {shortHash(action.record.claims.policyHash)} {matched?.text ?? copy["line.rule.none"]}
             </p>
           )}
@@ -621,6 +649,11 @@ function DetailPane({
             <button type="button" className="contest focusable" onClick={onInspect}>
               {copy.inspect}
             </button>
+          ) : null}
+          {inspectFailed ? (
+            <p className="rule-missing" data-testid="inspect-failed">
+              {copy["inspect.failed"].replace("{error}", inspectFailed)}
+            </p>
           ) : null}
         </>
       )}
