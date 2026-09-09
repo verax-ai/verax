@@ -89,5 +89,7 @@
   "chain.defer": "Deferred: {decision} {reason} · {ref} · {when} · {decider}",
   "chain.resolve": "Resolved: {decision} {reason} · {ref} · {when} · {decider}",
   "timeline.label": "Timeline",
-  "timeline.empty": "No timestamps yet. The strip stays empty until a decision exists."
+  "timeline.empty": "No timestamps yet. The strip stays empty until a decision exists.",
+  "timeline.span": "observed {from} → {to}",
+  "timeline.group": "{n} records"
 }

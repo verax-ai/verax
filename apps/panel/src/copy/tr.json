@@ -89,5 +89,7 @@
   "chain.defer": "Ertelendi: {decision} {reason} · {ref} · {when} · {decider}",
   "chain.resolve": "Çözüldü: {decision} {reason} · {ref} · {when} · {decider}",
   "timeline.label": "Zaman şeridi",
-  "timeline.empty": "Damga yok. Karar üretilene kadar şerit boş kalır."
+  "timeline.empty": "Damga yok. Karar üretilene kadar şerit boş kalır.",
+  "timeline.span": "gözlenen {from} → {to}",
+  "timeline.group": "{n} kayıt"
 }
