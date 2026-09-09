@@ -22,6 +22,24 @@ export function statusWord(copy: Copy, kind: RecordKind): string {
   return copy["status.threw"];
 }
 
+/**
+ * What happened, as the ledger has it now. The record's own claim stays in
+ * the sentence: a defer that was later answered reads "defer
+ * approval-required -> allowed", never one word in place of the other. The
+ * word after the arrow comes from kindOf, the same source as the status
+ * column, so the two cannot end up voting differently.
+ */
+export function outcomeText(
+  copy: Copy,
+  action: RailAction,
+  approvals: readonly PendingApproval[] = [],
+): string {
+  const claim = `${action.record.claims.decision} ${action.record.claims.reasonCode}`;
+  const resolution = resolutionOf(action, approvals);
+  if (resolution === "not-deferred" || resolution === "waiting") return claim;
+  return `${claim} → ${statusWord(copy, kindOf(action, approvals))}`;
+}
+
 function ruleText(copy: Copy, action: RailAction): string {
   if (action.rule && "missing" in action.rule) return copy["line.rule.missing"];
   if (action.rule && !("missing" in action.rule) && action.rule.text) return action.rule.text;
@@ -51,7 +69,7 @@ export function recordLine(
   const kind = kindOf(action, approvals);
   const askedText = asked(action, approvals, lang);
   const rule = ruleText(copy, action);
-  const outcome = `${action.record.claims.decision} ${action.record.claims.reasonCode}`;
+  const outcome = outcomeText(copy, action, approvals);
   return {
     asked: askedText,
     rule,

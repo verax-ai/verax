@@ -9,7 +9,7 @@ import { type RailContestResult } from "../rail/Rail.tsx";
 import type { PendingApproval, RailAction, RailFinding, RailWarning } from "../rail/types.ts";
 import { RecordList } from "../records/RecordList.tsx";
 import { pairFromLedger } from "../records/pair.ts";
-import { recordLine } from "../records/line.ts";
+import { outcomeText, recordLine } from "../records/line.ts";
 import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
 import { spendFields } from "../records/spend.ts";
 import { Timeline } from "../records/Timeline.tsx";
@@ -586,9 +586,7 @@ function DetailPane({
             </p>
           )}
           <h3>{copy["detail.result"]}</h3>
-          <p>
-            {action.record.claims.decision} {action.record.claims.reasonCode}
-          </p>
+          <p data-testid="detail-result">{outcomeText(copy, action, pending)}</p>
           {ledgerPair.defer && ledgerPair.resolution ? (
             <div data-testid="explain-pair" className="decision-chain">
               <p>{chainLine(copy, "chain.defer", ledgerPair.defer)}</p>
