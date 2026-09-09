@@ -62,6 +62,7 @@
   "status.deny": "denied",
   "status.defer": "waiting",
   "status.threw": "threw",
+  "status.expired": "expired",
   "line.rule.missing": "historical policy unavailable",
   "line.rule.none": "no matching rule",
   "scope.signature.verified": "Signature: verified against the pin",

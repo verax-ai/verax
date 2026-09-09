@@ -62,6 +62,7 @@
   "status.deny": "reddedildi",
   "status.defer": "bekliyor",
   "status.threw": "hata",
+  "status.expired": "süresi doldu",
   "line.rule.missing": "historical policy unavailable",
   "line.rule.none": "no matching rule",
   "scope.signature.verified": "İmza: pine karşı doğrulandı",
