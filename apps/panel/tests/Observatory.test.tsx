@@ -201,6 +201,23 @@ describe("observatory", () => {
     expect(screen.getByTestId("rail-records").textContent ?? "").toMatch(/memory\.|spend|audit\./);
   });
 
+  it("asks all five questions on the record, including the one it cannot answer", () => {
+    // The questions are the product. A screen that drops the one it has no
+    // answer for is back to reporting only what flatters it, so the empty
+    // question stays on the page and says it is not connected.
+    render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
+    const copy = panelCopy();
+    const heads = [...document.querySelectorAll(".detail-pane h3")].map((n) => n.textContent);
+    expect(heads).toEqual([
+      copy["question.did"],
+      copy["question.counterpart"],
+      copy["question.current"],
+      copy["question.impact"],
+      copy["question.rules"],
+    ]);
+    expect(screen.getByTestId("question-impact").textContent).toBe(copy["question.impact.empty"]);
+  });
+
   it("offers the inspect button on a record that has a ref", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
     expect(screen.getByRole("button", { name: panelCopy().inspect })).toBeTruthy();
