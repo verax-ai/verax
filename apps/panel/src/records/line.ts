@@ -34,7 +34,9 @@ export function outcomeText(
   action: RailAction,
   approvals: readonly PendingApproval[] = [],
 ): string {
-  const claim = `${action.record.claims.decision} ${action.record.claims.reasonCode}`;
+  const { decision, reasonCode } = action.record.claims;
+  // "allow allow" is the ledger repeating itself, not two facts.
+  const claim = reasonCode === decision ? decision : `${decision} ${reasonCode}`;
   const resolution = resolutionOf(action, approvals);
   if (resolution === "not-deferred" || resolution === "waiting") return claim;
   return `${claim} → ${statusWord(copy, kindOf(action, approvals))}`;

@@ -211,7 +211,7 @@ describe("panel ledger fetch states", () => {
     await waitFor(() => {
       expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
     });
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Yenile" }));
     await waitFor(() => {
       expect(screen.getByText("error")).toBeTruthy();
       expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);

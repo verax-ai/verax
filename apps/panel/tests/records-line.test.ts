@@ -120,6 +120,14 @@ describe("record line", () => {
     assert.notEqual(line.kind, "allow");
   });
 
+  it("does not stutter when the reason repeats the decision", () => {
+    const stutter = defer("audit-1");
+    stutter.record.claims.decision = "allow";
+    stutter.record.claims.reasonCode = "allow";
+    const line = recordLine(en, stutter, [], "en");
+    assert.equal(line.outcome, "allow");
+  });
+
   it("keeps a defer waiting when the approval ledger has no row for it", () => {
     const line = recordLine(en, defer("kart-test-1"), [], "en");
     assert.equal(line.kind, "defer");
