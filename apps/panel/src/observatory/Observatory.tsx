@@ -16,7 +16,7 @@ import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
-import { readLang } from "../lang.ts";
+import { LANGS, readLang, writeLang, type Lang } from "../lang.ts";
 import { formatMinor } from "../records/money.ts";
 import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
 import { spendFields } from "../records/spend.ts";
@@ -159,6 +159,10 @@ export function Observatory({
     const q = new URLSearchParams(window.location.search).get("focus");
     return q && q.length > 0 ? q : null;
   });
+  // panelCopy() is read during render all the way down, so a language
+  // change only needs this subtree to render again.
+  const [langNonce, setLangNonce] = useState(0);
+  const lang = readLang();
   const [inspectFailed, setInspectFailed] = useState<Record<string, string>>({});
   const [audits, setAudits] = useState<
     Record<
@@ -191,6 +195,10 @@ export function Observatory({
     }
     return [...set];
   }, [actions]);
+
+  useEffect(() => {
+    if (typeof document !== "undefined") document.documentElement.lang = lang;
+  }, [lang, langNonce]);
 
   useEffect(() => {
     const first = exhibitRef(actions);
@@ -262,7 +270,7 @@ export function Observatory({
     <div className={`observatory${reducedMotion() ? "" : ""}`}>
       {demo ? <p className="demo-badge">{copy["badge.demo"]}</p> : null}
       <div className="obs-top">
-        <div role="tablist" aria-label="Gözlemevi" onKeyDown={onKeyTabs}>
+        <div role="tablist" aria-label={copy["aria.observatory"]} onKeyDown={onKeyTabs}>
           {TAB_IDS.map((id) => (
             <button
               key={id}
@@ -276,6 +284,24 @@ export function Observatory({
               onClick={() => setTab(id)}
             >
               {copy[TAB_COPY[id]]}
+            </button>
+          ))}
+        </div>
+        <div className="lang-switch" role="group" aria-label={copy["lang.label"]}>
+          {LANGS.map((code: Lang) => (
+            <button
+              key={code}
+              type="button"
+              className="focusable"
+              aria-pressed={lang === code}
+              onClick={() => {
+                writeLang(code);
+                setLangNonce((n) => n + 1);
+              }}
+            >
+              {/* The code names itself in every language; only the group
+                  label is copy. */}
+              {code.toUpperCase()}
             </button>
           ))}
         </div>
@@ -300,7 +326,7 @@ export function Observatory({
           </button>
         ) : null}
       </div>
-      <aside className="obs-left" aria-label="Kayıt grupları">
+      <aside className="obs-left" aria-label={copy["aria.rail"]}>
         <h2>{copy["rail.ledger.projects"]}</h2>
         <p className="muted">{copy.disconnected}</p>
         <h2>{copy["rail.ledger.agents"]}</h2>
@@ -418,7 +444,7 @@ export function Observatory({
           />
         ) : null}
       </section>
-      <aside className="obs-detail" aria-label="İşlem ayrıntısı">
+      <aside className="obs-detail" aria-label={copy["aria.detail"]}>
         <DetailPane
           action={action}
           actions={actions}
@@ -467,20 +493,20 @@ function StatusView({
 }) {
   const copy = panelCopy();
   const effects = actions.filter((a) => a.effect).length;
-  const lock = health && "lock" in health && health.lock != null ? String(typeof health.lock === "string" ? health.lock : health.lock.held ? "held" : "open") : "bağlı değil";
+  const lock = health && "lock" in health && health.lock != null ? String(typeof health.lock === "string" ? health.lock : health.lock.held ? "held" : "open") : copy.disconnected;
   const pinSource = actions.find((a) => a.trustRoot)?.trustRoot?.source;
   const open = pending.filter((p) => p.status === "pending");
   return (
     <div className="status-view">
-      <p>karar {health?.decisions ?? actions.length}</p>
-      <p>etki {health?.effects ?? effects}</p>
-      <p>son karar {lastMs ?? "bağlı değil"}</p>
-      <p>kilit {lock}</p>
+      <p>{copy["status.decisions"]} {health?.decisions ?? actions.length}</p>
+      <p>{copy["status.effects"]} {health?.effects ?? effects}</p>
+      <p>{copy["status.lastDecision"]} {lastMs ?? copy.disconnected}</p>
+      <p>{copy["status.lock"]} {lock}</p>
       <p>
         {copy["witness.label"]}{" "}
         {Object.entries(witnessCounts).map(([k, n]) => `${k} ${n}`).join(" · ") || copy.disconnected}
       </p>
-      <p>pin kaynağı {pinSource ?? "denetlenmedi"}</p>
+      <p>{copy["status.pinSource"]} {pinSource ?? copy["status.pinSource.unaudited"]}</p>
       <section data-testid="pending-approvals" className="pending-approvals">
         <h3>{copy["pending.title"]}</h3>
         {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (

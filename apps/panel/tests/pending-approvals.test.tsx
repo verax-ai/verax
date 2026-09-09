@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval } from "../src/rail/types.ts";
+import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
@@ -23,6 +24,10 @@ const row: PendingApproval = {
   status: "pending",
   brain: "brain-1",
 };
+
+beforeEach(() => {
+  setLang("tr");
+});
 
 describe("pending approvals", () => {
   it("lists pending rows with rule text and has no approve-all control", () => {

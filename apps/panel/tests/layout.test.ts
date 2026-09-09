@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -19,7 +19,27 @@ const VIEWS = [
   { name: "390", width: 390, height: 844 },
 ] as const;
 
-const TABS = ["Kayıtlar", "Galaksi", "Genel durum"] as const;
+// The panel opens in English, so the gate opens it that way. A gate that
+// asked for another language would be measuring a screen no one gets by
+// default -- the same fault as measuring a window size the product never
+// opens at.
+const TABS = ["Records", "Galaxy", "Status"] as const;
+
+/**
+ * Turkish strings that are not also the English ones. A Turkish word made
+ * only of letters English shares -- kilit, karar, etki -- is invisible to a
+ * character check, so the gate compares against the table itself. Anything
+ * shorter than four characters is dropped: a two-letter value collides with
+ * ordinary English text and would report a leftover that is not there.
+ */
+const copyDir = join(dirname(fileURLToPath(import.meta.url)), "..", "src", "copy");
+const enCopy = JSON.parse(readFileSync(join(copyDir, "en.json"), "utf8")) as Record<string, string>;
+const trCopy = JSON.parse(readFileSync(join(copyDir, "tr.json"), "utf8")) as Record<string, string>;
+const TURKISH_ONLY = Object.keys(trCopy)
+  .filter((k) => trCopy[k] !== enCopy[k])
+  .map((k) => trCopy[k] as string)
+  .filter((v) => v.length >= 4 && !v.includes("{"));
+
 const TAB_FILES = ["records", "galaxy", "status"] as const;
 
 describe("observatory layout", () => {
@@ -63,7 +83,7 @@ describe("observatory layout", () => {
             consoleErrors.push(`${url} ${text}`.trim());
           });
           await page.goto(ready, { waitUntil: "domcontentloaded" });
-          await page.getByRole("tab", { name: "Genel durum" }).waitFor({ state: "visible", timeout: 30_000 });
+          await page.getByRole("tab", { name: TABS[2] }).waitFor({ state: "visible", timeout: 30_000 });
           await page.locator(".obs-detail").waitFor({ state: "visible", timeout: 30_000 });
           await page.locator(".obs-timeline").waitFor({ state: "visible", timeout: 30_000 });
           const labels = await page.locator("[role=tab]").allTextContents();
@@ -192,6 +212,24 @@ describe("observatory layout", () => {
           for (let t = 0; t < TABS.length; t += 1) {
             await page.getByRole("tab", { name: TABS[t] }).click();
             await page.waitForTimeout(200);
+            // Every tab, not just the one the panel opens on: the first
+            // version of this check read the records tab alone and missed a
+            // Turkish word sitting on the status tab.
+            const leftover = await page.evaluate((needles: string[]) => {
+              // The anatomy document is a glossary: it names each part in
+              // both languages on purpose, and a test pins that. It is the
+              // one place two languages belong on one screen.
+              const clone = document.body.cloneNode(true) as HTMLElement;
+              clone.querySelector("[data-testid=anatomy-document]")?.remove();
+              const text = clone.innerText ?? clone.textContent ?? "";
+              const hit = needles.find((n) => text.includes(n));
+              return hit === undefined ? "" : hit.slice(0, 60);
+            }, TURKISH_ONLY);
+            if (leftover !== "") {
+              fails.push(
+                `${view.name}/${TAB_FILES[t]}: Turkish on the English screen: "${leftover}"`,
+              );
+            }
             await page.screenshot({
               path: join(shotDir, `${view.name}-${TAB_FILES[t]}.png`),
               fullPage: false,

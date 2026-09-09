@@ -2,13 +2,14 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseInventory, type Inventory } from "@verax-ai/galaxy";
 import { panelCopy } from "../src/copy.ts";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle, RailAction } from "../src/rail/types.ts";
+import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
@@ -52,6 +53,10 @@ function withContest(list: RailAction[]): RailAction[] {
 
 afterEach(() => {
   cleanup();
+});
+
+beforeEach(() => {
+  setLang("tr");
 });
 
 describe("observatory", () => {
@@ -199,6 +204,19 @@ describe("observatory", () => {
     // From the other tabs the rail is the only way back into a record, so it
     // has to still be there.
     expect(screen.getByTestId("rail-records").textContent ?? "").toMatch(/memory\.|spend|audit\./);
+  });
+
+  it("opens in English and hands the reader the other language", () => {
+    setLang("en");
+    render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
+    expect(screen.getByRole("tab", { name: "Records" })).toBeTruthy();
+    const tr = screen.getByRole("button", { name: "TR" });
+    expect(tr.getAttribute("aria-pressed")).toBe("false");
+    fireEvent.click(tr);
+    expect(screen.getByRole("tab", { name: "Kayıtlar" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "TR" }).getAttribute("aria-pressed")).toBe("true");
+    // The choice is in the address, so the screen can be handed on as it reads.
+    expect(window.location.search).toMatch(/lang=tr/);
   });
 
   it("asks all five questions on the record, including the one it cannot answer", () => {

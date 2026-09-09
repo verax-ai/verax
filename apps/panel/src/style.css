@@ -97,6 +97,24 @@ body {
   padding: 0.35rem 0.5rem;
   cursor: pointer;
 }
+.lang-switch {
+  display: flex;
+  gap: 0.25rem;
+}
+.lang-switch button {
+  background: transparent;
+  color: var(--mute);
+  border: 1px solid var(--line);
+  padding: 0.2rem 0.45rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-meta);
+  letter-spacing: 0.04em;
+}
+.lang-switch button[aria-pressed="true"] {
+  color: var(--accent);
+  border-color: var(--accent);
+}
 [role="tablist"] {
   display: flex;
   gap: 0.25rem;

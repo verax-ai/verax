@@ -8,6 +8,7 @@ import {
   rememberToken,
   sessionIssueError,
 } from "../src/session.ts";
+import { setLang } from "./with-lang.ts";
 
 function prmResponse(issuer = "http://127.0.0.1:8790"): Response {
   return new Response(
@@ -35,6 +36,10 @@ beforeEach(() => {
   rememberToken(null);
   localStorage.clear();
   sessionStorage.clear();
+});
+
+beforeEach(() => {
+  setLang("tr");
 });
 
 describe("panel session", () => {

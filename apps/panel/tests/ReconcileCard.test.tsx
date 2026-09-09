@@ -1,9 +1,14 @@
 import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ReconcileCard } from "../src/ReconcileCard.tsx";
+import { setLang } from "./with-lang.ts";
 
 afterEach(() => {
   cleanup();
+});
+
+beforeEach(() => {
+  setLang("tr");
 });
 
 describe("external-source card", () => {
