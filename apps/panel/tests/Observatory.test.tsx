@@ -192,6 +192,15 @@ describe("observatory", () => {
     expect(screen.queryByTestId("galaxy-empty")).toBeNull();
   });
 
+  it("does not repeat the record list in the rail on the records tab", () => {
+    render(<Observatory actions={actions} status="ok" demo={false} />);
+    expect(screen.queryByTestId("rail-records")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    // From the other tabs the rail is the only way back into a record, so it
+    // has to still be there.
+    expect(screen.getByTestId("rail-records").textContent ?? "").toMatch(/memory\.|spend|audit\./);
+  });
+
   it("offers the inspect button on a record that has a ref", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
     expect(screen.getByRole("button", { name: panelCopy().inspect })).toBeTruthy();
@@ -338,6 +347,7 @@ describe("observatory", () => {
     const labels = [...document.querySelectorAll(".record-asked")].map((n) => n.textContent ?? "");
     expect(labels.length).toBe(6);
     expect(labels.every((t) => t !== "" && !/^n\d+$/.test(t))).toBe(true);
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     const rail = screen.getByTestId("rail-records").textContent ?? "";
     expect(rail).not.toMatch(/^n1$/);
     expect(rail).toMatch(/memory\.|spend|audit\./);

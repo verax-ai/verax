@@ -348,6 +348,11 @@ export function Observatory({
             )}
           </>
         ) : null}
+        {/* The middle pane already is this list on the records tab. Printing it
+            again in a narrower column is the screen saying one thing twice,
+            and the rail is only a way in from the other two tabs. */}
+        {tab === "records" ? null : (
+          <>
         <h2>{copy.records}</h2>
         {actions.length === 0 ? (
           <p className="muted">{copy["summary.empty"]}</p>
@@ -372,6 +377,8 @@ export function Observatory({
               );
             })}
           </ul>
+        )}
+          </>
         )}
       </aside>
       <section className="obs-main" id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>

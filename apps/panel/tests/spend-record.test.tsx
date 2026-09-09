@@ -200,6 +200,9 @@ describe("a resolved defer on the screen", () => {
     expect(outcome).not.toBe("defer approval-required");
     expect(outcome.endsWith(status)).toBe(true);
     expect((screen.getByTestId("detail-result").textContent ?? "").trim()).toBe(outcome);
+    // The rail stops repeating the list on the records tab, so ask it where it
+    // still speaks: the same sentence has to hold there too.
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     expect(screen.getByTestId("rail-records").textContent ?? "").toContain(outcome);
   });
 });
