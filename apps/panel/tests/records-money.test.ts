@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { globSync, readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, it } from "node:test";
 import { formatMinor } from "../src/records/money.ts";
 
@@ -27,5 +30,27 @@ describe("money read from the ledger", () => {
     assert.equal(formatMinor(Number.NaN, "TRY", "en"), null);
     assert.equal(formatMinor("1000", "TRY", "en"), null);
     assert.equal(formatMinor(1000, "not-a-currency", "en"), null);
+  });
+});
+
+/**
+ * The hundred-times fault has now been found twice: on the record screen,
+ * where three tests had frozen it, and on the status tab, where one had. Both
+ * times a file was consistent with itself. This compares the files instead:
+ * a panel source that reads an amount off a row has to read it through the
+ * one function that knows the ledger stores minor units.
+ */
+describe("no screen prints a stored amount raw", () => {
+  it("routes every amount a panel source reads through formatMinor", () => {
+    const src = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
+    const offenders: string[] = [];
+    for (const file of globSync(join(src, "**", "*.{ts,tsx}"))) {
+      const path = file.split(String.fromCharCode(92)).join("/");
+      if (path.endsWith("records/money.ts")) continue;
+      const text = readFileSync(file, "utf8");
+      if (!text.includes(".amount")) continue;
+      if (!text.includes("formatMinor")) offenders.push(file);
+    }
+    assert.deepEqual(offenders, []);
   });
 });

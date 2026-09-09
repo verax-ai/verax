@@ -16,6 +16,8 @@ import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
+import { readLang } from "../lang.ts";
+import { formatMinor } from "../records/money.ts";
 import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
 import { spendFields } from "../records/spend.ts";
 import { Timeline } from "../records/Timeline.tsx";
@@ -486,9 +488,7 @@ function StatusView({
             {open.map((p) => (
               <li key={p.ref}>
                 {p.ref} · {p.subject} · {p.ruleText ?? ""} · {p.brain}
-                {p.subject === "spend" && p.amount !== undefined && p.payee !== undefined
-                  ? ` · ${String(p.amount)} ${p.currency !== undefined ? String(p.currency) : ""} → ${String(p.payee)}`.replace("  ", " ")
-                  : `${p.payee !== undefined ? ` · ${String(p.payee)}` : ""}${p.amount !== undefined ? ` · ${String(p.amount)}` : ""}`}
+                {pendingMoney(copy, p)}
               </li>
             ))}
           </ul>
@@ -498,6 +498,25 @@ function StatusView({
       <AnatomyDocument />
     </div>
   );
+}
+
+/**
+ * The ledger holds money in minor units. The record screen was taught to read
+ * them in 3fafdcb; this list kept printing the stored number beside the
+ * currency, which states a sum a hundred times too large, and its test froze
+ * that. An amount that cannot be read is left out rather than shown raw.
+ */
+function pendingMoney(copy: ReturnType<typeof panelCopy>, row: PendingApproval): string {
+  const payee = row.payee === undefined ? null : String(row.payee);
+  const money = formatMinor(row.amount, row.currency, readLang());
+  if (row.subject === "spend" && payee !== null) {
+    return money !== null ? ` · ${money} → ${payee}` : ` · ${copy["spend.amount.unmeasured"]} → ${payee}`;
+  }
+  const parts: string[] = [];
+  if (payee !== null) parts.push(payee);
+  if (money !== null) parts.push(money);
+  else if (row.amount !== undefined) parts.push(copy["spend.amount.unmeasured"]);
+  return parts.length === 0 ? "" : ` · ${parts.join(" · ")}`;
 }
 
 function AnatomyDocument() {
