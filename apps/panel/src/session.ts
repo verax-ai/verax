@@ -4,6 +4,7 @@ const PRM_PATH = "/.well-known/oauth-protected-resource";
 
 let token: string | null = null;
 let sessionError: string | null = null;
+let boot: Promise<"ok" | "redirect" | "demo" | "error"> | null = null;
 
 export function accessToken(): string | null {
   return token;
@@ -11,6 +12,7 @@ export function accessToken(): string | null {
 
 export function rememberToken(next: string | null): void {
   token = next;
+  if (next === null) boot = null;
 }
 
 export function sessionIssueError(): string | null {
@@ -79,6 +81,13 @@ function wantDemo(): boolean {
 }
 
 export async function beginSession(): Promise<"ok" | "redirect" | "demo" | "error"> {
+  // Strict Mode mounts twice. A second authorize overwrites the PKCE verifier,
+  // the exchange fails, and the tab loops. One boot per page load.
+  if (!boot) boot = beginSessionOnce();
+  return boot;
+}
+
+async function beginSessionOnce(): Promise<"ok" | "redirect" | "demo" | "error"> {
   if (wantDemo()) return "demo";
   if (token) return "ok";
   const issuer = await issuerFromPrm();

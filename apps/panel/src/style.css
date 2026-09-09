@@ -1,8 +1,19 @@
 :root {
-  color: #eaf2f8;
-  background: #02060f;
-  font-family: ui-sans-serif, system-ui, sans-serif;
-  font-size: 18px;
+  --type-sentence: 1.35rem;
+  --type-title: 1.05rem;
+  --type-body: 0.95rem;
+  --type-meta: 0.75rem;
+  --ink: #e8eef4;
+  --paper: #07090d;
+  --accent: #d4a017;
+  --line: #243044;
+  --mute: #8b9aab;
+  --ok: #5ca36a;
+  --no: #c45c5c;
+  color: var(--ink);
+  background: var(--paper);
+  font-family: "Palatino Linotype", Palatino, "Iowan Old Style", Georgia, serif;
+  font-size: 17px;
 }
 body {
   margin: 0;
@@ -19,11 +30,16 @@ body {
     "top top top"
     "left main detail"
     "time time time";
-  grid-template-columns: 13rem 1fr 22rem;
-  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 15rem minmax(0, 1fr) minmax(24rem, 32rem);
+  /* height, not only min-height: with an indefinite height the middle 1fr
+     row resolves to its content, so the three panes pushed the timeline off
+     the bottom of the window instead of scrolling inside themselves. The
+     window is the frame; minmax(0, ...) then lets the row shrink into it. */
+  grid-template-rows: auto minmax(0, 1fr) auto;
   min-height: 100vh;
-  background: #02060f;
-  color: #eaf2f8;
+  height: 100vh;
+  background: var(--paper);
+  color: var(--ink);
 }
 .obs-top {
   grid-area: top;
@@ -31,8 +47,8 @@ body {
   flex-wrap: wrap;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid #1a2a40;
+  padding: 1rem 1.5rem;
+  border-bottom: 1px solid var(--line);
 }
 .pending-approvals {
   margin: 1rem 0;
@@ -42,26 +58,29 @@ body {
 }
 .obs-left {
   grid-area: left;
-  padding: 1rem;
-  border-right: 1px solid #1a2a40;
+  padding: 1.25rem 1.35rem;
+  border-right: 1px solid var(--line);
   overflow: auto;
+  font-size: var(--type-meta);
 }
 .obs-main {
   grid-area: main;
   min-width: 0;
   overflow: auto;
-  padding: 0.5rem;
+  padding: 1.5rem 1.75rem;
 }
 .obs-detail {
   grid-area: detail;
-  padding: 1rem;
-  border-left: 1px solid #1a2a40;
+  padding: 1.75rem 2rem 2.25rem;
+  border-left: 1px solid var(--line);
   overflow: auto;
 }
 .obs-timeline {
   grid-area: time;
-  border-top: 1px solid #1a2a40;
-  overflow-x: auto;
+  border-top: 1px solid var(--line);
+  overflow-x: hidden;
+  padding: 1rem 1.5rem 1.35rem;
+  min-height: 4.75rem;
 }
 .obs-timeline ol {
   display: flex;
@@ -91,7 +110,7 @@ body {
   min-height: 44px;
 }
 [role="tab"][aria-selected="true"] {
-  border-color: #5ce1ff;
+  border-color: var(--accent);
 }
 .demo-badge {
   position: absolute;
@@ -105,7 +124,7 @@ body {
   letter-spacing: 0.04em;
 }
 .muted {
-  color: #8aa0b5;
+  color: var(--mute);
 }
 .rail-ledger {
   list-style: disc;
@@ -229,8 +248,14 @@ body {
 }
 .observatory h2,
 .observatory h3 {
-  font-size: 1rem;
-  margin: 0.8rem 0 0.3rem;
+  font-size: var(--type-title);
+  font-weight: 600;
+  margin: 1.35rem 0 0.45rem;
+  letter-spacing: 0.01em;
+}
+.observatory h2:first-child,
+.detail-pane h2:first-child {
+  margin-top: 0;
 }
 @media (max-width: 800px) {
   .observatory {
@@ -242,6 +267,9 @@ body {
       "time";
     grid-template-columns: 1fr;
     grid-template-rows: auto;
+    /* Stacked, the page is meant to scroll; pinning it to the window would
+       hide four of the five bands instead of one. */
+    height: auto;
   }
   .obs-left,
   .obs-detail {
@@ -365,5 +393,149 @@ aside {
   color: #d4a017;
 }
 .witness {
-  font-size: 0.85rem;
+  font-size: var(--type-meta);
+}
+.records-summary {
+  margin: 0 0 1.5rem;
+  font-size: var(--type-sentence);
+  line-height: 1.45;
+  max-width: 42rem;
+}
+.records-empty p {
+  font-size: var(--type-body);
+  line-height: 1.6;
+  max-width: 36rem;
+}
+.record-list,
+.rail-records {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.record-list li + li {
+  margin-top: 0.65rem;
+}
+.record-row {
+  display: grid;
+  grid-template-columns: 6.5rem 1fr;
+  grid-template-areas:
+    "status asked"
+    "status rule"
+    "status outcome";
+  gap: 0.15rem 1rem;
+  width: 100%;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--line);
+  padding: 0.85rem 1rem;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-body);
+}
+.record-row.is-selected {
+  border-color: var(--accent);
+}
+.record-status {
+  grid-area: status;
+  align-self: start;
+  font-size: var(--type-meta);
+  letter-spacing: 0.04em;
+  text-transform: lowercase;
+  padding-top: 0.2rem;
+}
+.record-status.allow,
+.record-row.allow .record-status {
+  color: var(--ok);
+}
+.record-status.deny,
+.record-row.deny .record-status {
+  color: var(--no);
+}
+.record-status.defer,
+.record-row.defer .record-status,
+.record-status.threw,
+.record-row.threw .record-status {
+  color: var(--accent);
+}
+.record-asked {
+  grid-area: asked;
+}
+.record-rule {
+  grid-area: rule;
+  color: var(--mute);
+  font-size: var(--type-meta);
+}
+.record-outcome {
+  grid-area: outcome;
+  font-size: var(--type-meta);
+}
+.rail-records button {
+  display: block;
+  width: 100%;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  padding: 0.35rem 0;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-meta);
+}
+.detail-pane p,
+.evidence-scope,
+.spend-fields,
+.decision-chain {
+  font-size: var(--type-body);
+  line-height: 1.55;
+}
+.evidence-scope,
+.spend-fields,
+.decision-chain {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 0;
+}
+.evidence-scope li + li,
+.spend-fields p + p,
+.decision-chain p + p {
+  margin-top: 0.45rem;
+}
+.timeline-empty {
+  margin: 0;
+  font-size: var(--type-meta);
+}
+.timeline-track {
+  position: relative;
+  height: 2px;
+  margin: 1.7rem 0 0.4rem;
+  background: var(--line);
+}
+.timeline-mark {
+  position: absolute;
+  top: -0.45rem;
+  transform: translateX(-50%);
+  background: var(--paper);
+  color: inherit;
+  border: 1px solid var(--line);
+  padding: 0.15rem 0.4rem;
+  cursor: pointer;
+  font: inherit;
+  font-size: var(--type-meta);
+  white-space: nowrap;
+}
+.timeline-mark.is-selected {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.obs-timeline.is-static .timeline-mark,
+.obs-timeline.is-static .timeline-track {
+  transition: none;
+}
+[role="tab"],
+.refresh,
+.contest,
+.record-row,
+.timeline-mark {
+  font-family: ui-sans-serif, system-ui, sans-serif;
 }

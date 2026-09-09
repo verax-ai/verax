@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { panelCopy } from "../copy.ts";
-import type { RailAction, RailFinding, RailWarning } from "./types.ts";
+import { kindOf, type RecordKind } from "../records/line.ts";
+import type { PendingApproval, RailAction, RailFinding, RailWarning } from "./types.ts";
 
 export type RailContestResult = {
   reAuditedAt?: number;
@@ -18,24 +19,20 @@ export type RailContestResult = {
 
 export type RailProps = {
   actions: RailAction[];
+  approvals?: readonly PendingApproval[];
   onContest?: (ref: string) => Promise<RailContestResult | void>;
   onSelect?: (ref: string) => void;
 };
 
-function kindOf(action: RailAction): "allow" | "deny" | "threw" | "defer" {
-  if (action.effect?.row.effectClass.endsWith(":threw")) return "threw";
-  if (action.record.claims.decision === "defer") return "defer";
-  return action.record.claims.decision === "deny" ? "deny" : "allow";
-}
-
-function iconOf(kind: "allow" | "deny" | "threw" | "defer"): string {
+function iconOf(kind: RecordKind): string {
   if (kind === "allow") return "+";
   if (kind === "deny") return "x";
   if (kind === "defer") return "?";
+  if (kind === "expired") return "~";
   return "!";
 }
 
-export function Rail({ actions, onContest, onSelect }: RailProps) {
+export function Rail({ actions, approvals = [], onContest, onSelect }: RailProps) {
   const copy = panelCopy();
   const [open, setOpen] = useState<string | null>(actions[0]?.record.claims.ref ?? null);
   const [stamp, setStamp] = useState<Record<string, string>>({});
@@ -57,7 +54,7 @@ export function Rail({ actions, onContest, onSelect }: RailProps) {
       <ol>
         {actions.map((action) => {
           const ref = action.record.claims.ref ?? "unknown";
-          const kind = kindOf(action);
+          const kind = kindOf(action, approvals);
           const expanded = open === ref;
           const finding = findings[ref] ?? action.finding;
           const audit = audits[ref];
