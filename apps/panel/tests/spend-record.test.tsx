@@ -139,7 +139,16 @@ const auditRead: RailAction = {
       effectHash: null,
     },
   },
-  effect: null,
+  effect: {
+    row: {
+      ref: "audit-explain-1",
+      effectClass: "audit.explain",
+      effectHash: "ae",
+      timestampMs: 1788714999999,
+    },
+    receipt: { present: true },
+    attestation: { present: true },
+  },
   rule: null,
   finding: null,
 };

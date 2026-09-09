@@ -27,21 +27,29 @@ function row(partial: { ref: string; subject: string; withEffect: boolean }): Ra
 
 describe("which record the screen opens on", () => {
   it("does not open on the panel's own read when a record did something", () => {
-    // Newest first, and the newest is the audit call the panel just made.
+    // The measured ledger, newest first: the panel's explain call is the
+    // newest record AND it carries an effect row with a receipt, so "has an
+    // effect" alone does not tell the exhibit from the screen reading itself.
     const actions = [
-      row({ ref: "audit-1", subject: "audit.explain", withEffect: false }),
+      row({ ref: "8e6fc6f8", subject: "audit.explain", withEffect: true }),
       row({ ref: "398befdf", subject: "spend", withEffect: true }),
       row({ ref: "kart-test-2", subject: "spend", withEffect: false }),
+      row({ ref: "kart-test-1", subject: "spend", withEffect: false }),
     ];
     assert.equal(exhibitRef(actions), "398befdf");
   });
 
-  it("keeps the newest record when nothing in the ledger has an effect", () => {
+  it("prefers a record with evidence over a newer one without", () => {
     const actions = [
-      row({ ref: "audit-1", subject: "audit.explain", withEffect: false }),
-      row({ ref: "kart-test-1", subject: "spend", withEffect: false }),
+      row({ ref: "kart-test-2", subject: "spend", withEffect: false }),
+      row({ ref: "398befdf", subject: "spend", withEffect: true }),
     ];
-    assert.equal(exhibitRef(actions), "audit-1");
+    assert.equal(exhibitRef(actions), "398befdf");
+  });
+
+  it("opens on the newest read rather than nothing when every record is one", () => {
+    const actions = [row({ ref: "8e6fc6f8", subject: "audit.explain", withEffect: true })];
+    assert.equal(exhibitRef(actions), "8e6fc6f8");
   });
 
   it("has nothing to open on an empty ledger", () => {
