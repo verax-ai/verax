@@ -2,6 +2,7 @@ import { fillCopy } from "../galaxy/coverage-line.ts";
 import type { Copy } from "../copy.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
+import { lastApprovalByRef } from "./approval-state.ts";
 
 export type RecordCounts = {
   decisions: number;
@@ -9,12 +10,6 @@ export type RecordCounts = {
   pending: number;
   unmatched: number | null;
 };
-
-function lastApprovalByRef(rows: readonly PendingApproval[]): Map<string, PendingApproval> {
-  const map = new Map<string, PendingApproval>();
-  for (const row of rows) map.set(row.ref, row);
-  return map;
-}
 
 function matchedRefs(report: ReconcileCardReport): Set<string> {
   const out = new Set<string>();
