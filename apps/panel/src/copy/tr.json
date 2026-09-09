@@ -39,6 +39,8 @@
   "galaxy.empty": "kayıt yok - gövde henüz karar üretmedi",
   "galaxy.labels.hidden": "{n} ad bu uzaklıkta gizli. Okumak için yaklaş",
   "galaxy.labels.hidden.crowd": "{n} ad gizli: bu komşuluk okunamayacak kadar yığın",
+  "galaxy.focus": "{name} grubundasın",
+  "galaxy.focus.leave": "Çık",
   "galaxy.inventory.unbound": "envanter bağlı değil",
   "galaxy.inventory.sample": "örnek senaryoda envanter gösterilmez",
   "galaxy.coverage": "{accountable} / {total} ajan hesap veriyor · envanter {source}, {ago} önce alındı",

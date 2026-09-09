@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { cameraPosition, createOrbit, ZOOM_MIN } from "../src/camera.ts";
+import { aimOrbit, cameraPosition, createOrbit, focusOrbit } from "../src/camera.ts";
 import {
   BODY_CLUSTER_MIN,
   bodyClusters,
@@ -14,7 +14,7 @@ import {
 import { LABEL_FOV_DEG } from "../src/labels.ts";
 import { measured, unmeasured } from "../src/measured.ts";
 import type { GalaxyModel } from "../src/model.ts";
-import { placeScene } from "../src/place.ts";
+import { groupRadius, placeScene } from "../src/place.ts";
 
 const src = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const opening = 85;
@@ -93,14 +93,23 @@ describe("body clusters", () => {
   });
 
   it("dissolves clusters when the same bodies have room on screen", () => {
-    const bodies = bodiesOf(crowdModel(500, 12));
+    const model = crowdModel(500, 12);
+    const placed = placeScene(model);
+    const planet = placed.planets[0]!;
+    const focusedIds = new Set(placed.agents.filter((a) => a.planetId === planet.id).map((a) => a.id));
+    const bodies = bodiesOf(model);
     const far = bodyClusters(bodies, eyeAt(opening));
-    const near = bodyClusters(bodies, eyeAt(ZOOM_MIN));
+    const seat = focusOrbit(planet.at, groupRadius(placed, planet.id));
+    const orbit = createOrbit(seat.distance);
+    aimOrbit(orbit, seat, true);
+    const near = bodyClusters(bodies, { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG });
     assert.equal(accounted(far), 500);
     assert.equal(accounted(near), 500);
+    const farFocusedSingles = far.singles.filter((s) => focusedIds.has(s.id)).length;
+    const nearFocusedSingles = near.singles.filter((s) => focusedIds.has(s.id)).length;
     assert.ok(
-      near.singles.length > far.singles.length || near.clusters.length < far.clusters.length,
-      `far singles=${far.singles.length} clusters=${far.clusters.length}; near singles=${near.singles.length} clusters=${near.clusters.length}`,
+      nearFocusedSingles > farFocusedSingles,
+      `focused singles far=${farFocusedSingles} near=${nearFocusedSingles}`,
     );
   });
 

@@ -189,10 +189,12 @@ function scatterNdc(count: number, cam: CameraEye, radius = 40): Ndc[] {
 describe("label crowd (neighborhood, not scene average)", () => {
   it("gives a clustered 500 and a scattered 500 different answers at the same count", () => {
     const cam = eyeAt(ZOOM_MIN);
-    const clustered = labelCrowd(projectAgents(crowdModel(500, 12), cam), "agent", ZOOM_MIN, SCENE_RADIUS);
+    const clusteredNdc = projectAgents(crowdModel(500, 12), cam);
+    const clustered = labelCrowd(clusteredNdc, "agent", ZOOM_MIN, SCENE_RADIUS);
     const scattered = labelCrowd(scatterNdc(500, cam), "agent", ZOOM_MIN, SCENE_RADIUS);
     assert.equal(clustered.show, false);
-    assert.equal(clustered.hidden, 500);
+    assert.equal(clustered.hidden, clusteredNdc.length);
+    assert.ok(clustered.hidden > 0);
     assert.equal(clustered.reason, "crowd");
     assert.ok(clustered.densest > scattered.densest, `densest clustered=${clustered.densest} scattered=${scattered.densest}`);
     assert.equal(scattered.show, true);
@@ -202,9 +204,11 @@ describe("label crowd (neighborhood, not scene average)", () => {
 
   it("does not return clustered names at near zoom when the knot is still dense", () => {
     const cam = eyeAt(ZOOM_MIN);
-    const clustered = labelCrowd(projectAgents(crowdModel(500, 12), cam), "agent", ZOOM_MIN, SCENE_RADIUS);
+    const clusteredNdc = projectAgents(crowdModel(500, 12), cam);
+    const clustered = labelCrowd(clusteredNdc, "agent", ZOOM_MIN, SCENE_RADIUS);
     assert.equal(clustered.show, false);
-    assert.equal(clustered.hidden, 500);
+    assert.equal(clustered.hidden, clusteredNdc.length);
+    assert.ok(clustered.hidden > 0);
     assert.equal(clustered.reason, "crowd");
   });
 

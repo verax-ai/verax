@@ -84,6 +84,41 @@ describe("observatory", () => {
     expect(tr["galaxy.labels.hidden.crowd"]).toMatch(/yığın/);
   });
 
+  it("passes the focus line from copy into the sky and names how to leave", () => {
+    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
+    expect(src).toMatch(/focusText=\{copy\["galaxy\.focus"\]\}/);
+    expect(src).toMatch(/leaveFocusText=\{copy\["galaxy\.focus\.leave"\]\}/);
+    const en = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "en.json"), "utf8")) as Record<string, string>;
+    const tr = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "tr.json"), "utf8")) as Record<string, string>;
+    expect(en["galaxy.focus"]).toMatch(/\{name\}/);
+    expect(en["galaxy.focus.leave"]).toMatch(/leave/i);
+    expect(tr["galaxy.focus"]).toMatch(/\{name\}/);
+    expect(tr["galaxy.focus.leave"].length).toBeGreaterThan(0);
+  });
+
+  it("reads ?focus= so a group seat can open from the address", () => {
+    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
+    expect(src).toMatch(/window\.location\.search\)\.get\("focus"\)/);
+  });
+
+  it("lets the inventory rail pick a group without calling it measured", () => {
+    render(
+      <Observatory
+        actions={[]}
+        status="ok"
+        demo={false}
+        inventory={sampleInventory}
+        nowMs={sampleInventory.takenAtMs + 5_000}
+      />,
+    );
+    const groups = screen.getByTestId("rail-inventory-groups");
+    const button = groups.querySelector("button");
+    expect(button?.textContent).toMatch(/Team A/);
+    expect(screen.getByText("Gruplar (envanter, ölçülemedi)")).toBeTruthy();
+    fireEvent.click(button!);
+    expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
+  });
+
   it("keeps inventory names off the ledger rail and does not say not-bound for them", () => {
     render(
       <Observatory

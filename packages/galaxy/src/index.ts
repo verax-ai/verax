@@ -1,4 +1,18 @@
-export { cameraPosition, clampZoom, createOrbit, ZOOM_MAX, ZOOM_MIN, type Orbit } from "./camera.ts";
+export {
+  aimOrbit,
+  cameraPosition,
+  CAMERA_NEAR,
+  clampLookAt,
+  clampZoom,
+  createOrbit,
+  focusOrbit,
+  LOOK_BOUND,
+  orbitLook,
+  ZOOM_MAX,
+  ZOOM_MIN,
+  type FocusSeat,
+  type Orbit,
+} from "./camera.ts";
 export { dustCount, dustPositions } from "./dust.ts";
 export { hash01, hashPoint, type Point3 } from "./address.ts";
 export {
@@ -23,7 +37,13 @@ export {
   type LabelHideReason,
   type Ndc,
 } from "./labels.ts";
-export { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
+export {
+  groupRadius,
+  GROUP_RADIUS,
+  placeScene,
+  SCENE_RADIUS,
+  type PlacedScene,
+} from "./place.ts";
 export {
   BODY_CLUSTER_MIN,
   BODY_MERGE_NDC,

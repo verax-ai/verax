@@ -2,7 +2,17 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { Bloom, EffectComposer } from "@react-three/postprocessing";
 import { CanvasTexture, Color, DoubleSide, Group, InstancedMesh, NoToneMapping, Object3D, type Mesh } from "three";
-import { cameraPosition, createOrbit, nudgeOrbit, stepOrbit, zoomOrbit, type Orbit } from "./camera.ts";
+import {
+  aimOrbit,
+  CAMERA_NEAR,
+  cameraPosition,
+  createOrbit,
+  focusOrbit,
+  nudgeOrbit,
+  stepOrbit,
+  zoomOrbit,
+  type Orbit,
+} from "./camera.ts";
 import { UNMEASURED_RGB, type Appearance } from "./draw.ts";
 import { dustPositions } from "./dust.ts";
 import {
@@ -24,7 +34,7 @@ import {
 } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
 import { defaultOpen, easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
-import { placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
+import { groupRadius, placeScene, SCENE_RADIUS, type PlacedScene } from "./place.ts";
 import type { Point3 } from "./address.ts";
 import { galaxyTier, readForcedTier } from "./quality.ts";
 
@@ -42,6 +52,12 @@ export type GalaxyProps = {
   hiddenLabelsText?: string;
   /** Template with `{n}`. Shown when names are hidden by a dense neighborhood. */
   crowdedLabelsText?: string;
+  /** Controlled focus. A planet id, or null to sit with the whole sky. */
+  focusId?: string | null;
+  onFocus?: (id: string | null) => void;
+  /** Template with `{name}`. Shown while a group is in focus. */
+  focusText?: string;
+  leaveFocusText?: string;
 };
 
 function readReduced(): boolean {
@@ -482,14 +498,26 @@ function fillHidden(template: string, n: number): string {
   return template.replace(/\{n\}/g, String(n));
 }
 
+function inNeighborhood(
+  at: { x: number; y: number; z: number },
+  look: { x: number; y: number; z: number },
+  radius: number | null,
+): boolean {
+  if (radius === null) return true;
+  return Math.hypot(at.x - look.x, at.y - look.y, at.z - look.z) <= radius;
+}
+
 function namesShown(
   kind: "planet" | "agent",
   items: readonly { at: { x: number; y: number; z: number } }[],
   orbit: Orbit,
+  neighborhoodRadius: number | null,
 ): { show: boolean; hidden: number; reason: LabelHideReason | null } {
+  const look = { x: orbit.lookX, y: orbit.lookY, z: orbit.lookZ };
   const eye = { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG };
   const ndc = [];
   for (const item of items) {
+    if (!inNeighborhood(item.at, look, neighborhoodRadius)) continue;
     const p = projectNdc(item.at, eye);
     if (p) ndc.push(p);
   }
@@ -501,28 +529,42 @@ function LabelSprites({
   orbit,
   openRef,
   reducedMotion,
+  focusId,
+  neighborhoodRadius,
   onHidden,
 }: {
   placed: PlacedScene;
   orbit: Orbit;
   openRef: { current: number };
   reducedMotion: boolean;
+  focusId: string | null;
+  neighborhoodRadius: number | null;
   onHidden: (state: { hidden: number; reason: LabelHideReason | null }) => void;
 }) {
   const g = useRef<Group>(null);
-  const planetLabels = usePaintedLabels(placed.planets);
-  const agentLabels = usePaintedLabels(placed.agents);
+  const planetItems = useMemo(
+    () => (focusId ? placed.planets.filter((p) => p.id === focusId) : placed.planets),
+    [placed, focusId],
+  );
+  const agentItems = useMemo(
+    () => (focusId ? placed.agents.filter((a) => a.planetId === focusId) : placed.agents),
+    [placed, focusId],
+  );
+  const planetLabels = usePaintedLabels(planetItems);
+  const agentLabels = usePaintedLabels(agentItems);
   const planetCount = planetLabels.length;
   const agentCount = agentLabels.length;
-  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetLabels, orbit).show);
-  const [showAgent, setShowAgent] = useState(() => namesShown("agent", agentLabels, orbit).show);
+  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetLabels, orbit, neighborhoodRadius).show);
+  const [showAgent, setShowAgent] = useState(() => namesShown("agent", agentLabels, orbit, neighborhoodRadius).show);
   const lastHidden = useRef("");
   useFrame(() => {
     if (g.current) g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
     // Each kind is judged on its own screen neighborhood. A crowd of
     // agents does not hide a readable planet name, and the other way.
-    const nextPlanet = namesShown("planet", planetLabels, orbit);
-    const nextAgent = namesShown("agent", agentLabels, orbit);
+    // Focused: only the group in front of the camera. Distant knots do
+    // not veto names that this neighborhood can already read.
+    const nextPlanet = namesShown("planet", planetLabels, orbit, neighborhoodRadius);
+    const nextAgent = namesShown("agent", agentLabels, orbit, neighborhoodRadius);
     if (nextPlanet.show !== showPlanet) setShowPlanet(nextPlanet.show);
     if (nextAgent.show !== showAgent) setShowAgent(nextAgent.show);
     const hidden = (nextPlanet.show ? 0 : planetCount) + (nextAgent.show ? 0 : agentCount);
@@ -572,6 +614,8 @@ function SceneBody({
   orbit,
   onSelect,
   target,
+  focusId,
+  neighborhoodRadius,
   onCoreToggle,
   onHiddenLabels,
   onClusters,
@@ -581,6 +625,8 @@ function SceneBody({
   orbit: Orbit;
   onSelect?: (hit: GalaxySelect) => void;
   target: number;
+  focusId: string | null;
+  neighborhoodRadius: number | null;
   onCoreToggle: () => void;
   onHiddenLabels: (state: { hidden: number; reason: LabelHideReason | null }) => void;
   onClusters: (clusters: readonly BodyCluster[]) => void;
@@ -663,6 +709,8 @@ function SceneBody({
         orbit={orbit}
         openRef={openRef}
         reducedMotion={reducedMotion}
+        focusId={focusId}
+        neighborhoodRadius={neighborhoodRadius}
         onHidden={onHiddenLabels}
       />
       {quality.bloom.strength > 0 ? (
@@ -679,6 +727,15 @@ function SceneBody({
   );
 }
 
+function readFocusQuery(search: string): string | null {
+  const q = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search).get("focus");
+  return q && q.length > 0 ? q : null;
+}
+
+function fillName(template: string, name: string): string {
+  return template.replace(/\{name\}/g, name);
+}
+
 export function Galaxy({
   model,
   reducedMotion,
@@ -687,20 +744,74 @@ export function Galaxy({
   ready = true,
   hiddenLabelsText,
   crowdedLabelsText,
+  focusId,
+  onFocus,
+  focusText,
+  leaveFocusText,
 }: GalaxyProps) {
   const reduce = reducedMotion ?? readReduced();
   const orbit = useMemo(() => createOrbit(OPENING_DISTANCE), []);
   const dragging = useRef(false);
   const moved = useRef(false);
   const last = useRef({ x: 0, y: 0 });
+  const homeSeat = useRef<{ lookX: number; lookY: number; lookZ: number; distance: number } | null>(null);
   const queryOpen = typeof window !== "undefined" ? readOpenQuery(window.location.search) : null;
+  const queryFocus = typeof window !== "undefined" ? readFocusQuery(window.location.search) : null;
   const [want, setWant] = useState(defaultOpen(open, queryOpen));
+  const [internalFocus, setInternalFocus] = useState<string | null>(queryFocus);
   const [hiddenLabels, setHiddenLabels] = useState(0);
   const [hideReason, setHideReason] = useState<LabelHideReason | null>(null);
   const [clusters, setClusters] = useState<readonly BodyCluster[]>([]);
   const target = ready ? (open ?? want) : 0;
   const hiddenLine =
     hideReason === "crowd" ? (crowdedLabelsText ?? hiddenLabelsText) : hiddenLabelsText;
+  const focus = focusId !== undefined ? focusId : internalFocus;
+  const placed = useMemo(() => placeScene(model), [model]);
+  const focusPlanet = focus ? (placed.planets.find((p) => p.id === focus) ?? null) : null;
+  const neighborhoodRadius = focusPlanet ? groupRadius(placed, focusPlanet.id) * 1.15 : null;
+
+  const setFocus = useCallback(
+    (id: string | null) => {
+      if (focusId === undefined) setInternalFocus(id);
+      onFocus?.(id);
+    },
+    [focusId, onFocus],
+  );
+
+  useEffect(() => {
+    if (!focusPlanet) {
+      const home = homeSeat.current;
+      if (home) {
+        aimOrbit(orbit, { target: { x: home.lookX, y: home.lookY, z: home.lookZ }, distance: home.distance }, reduce);
+        homeSeat.current = null;
+      }
+      return;
+    }
+    if (!homeSeat.current) {
+      homeSeat.current = {
+        lookX: orbit.targetLookX,
+        lookY: orbit.targetLookY,
+        lookZ: orbit.targetLookZ,
+        distance: orbit.targetDistance,
+      };
+    }
+    const seat = focusOrbit(focusPlanet.at, groupRadius(placed, focusPlanet.id));
+    aimOrbit(orbit, seat, reduce);
+  }, [focusPlanet, orbit, placed, reduce]);
+
+  const handleSelect = useCallback(
+    (hit: GalaxySelect) => {
+      if (hit.kind === "planet") setFocus(hit.id);
+      else if (hit.kind === "agent") {
+        const agent = placed.agents.find((a) => a.id === hit.id);
+        if (agent?.planetId) setFocus(agent.planetId);
+      } else if (hit.kind === "core") {
+        setFocus(null);
+      }
+      onSelect?.(hit);
+    },
+    [onSelect, placed, setFocus],
+  );
 
   const toggle = useCallback(() => {
     if (!ready || open !== undefined) return;
@@ -737,6 +848,7 @@ export function Galaxy({
       data-testid="galaxy-stage"
       data-ready={ready ? "1" : "0"}
       data-target={String(target)}
+      data-focus={focus ?? ""}
       onPointerDown={onPointerDown}
       onPointerUp={onPointerUp}
       onPointerLeave={onPointerUp}
@@ -746,6 +858,21 @@ export function Galaxy({
       {hiddenLabels > 0 && hiddenLine ? (
         <p className="galaxy-labels-hidden" data-testid="galaxy-labels-hidden" data-reason={hideReason ?? ""}>
           {fillHidden(hiddenLine, hiddenLabels)}
+        </p>
+      ) : null}
+      {focusPlanet && focusText ? (
+        <p className="galaxy-focus" data-testid="galaxy-focus">
+          <span>{fillName(focusText, focusPlanet.label)}</span>
+          {leaveFocusText ? (
+            <button
+              type="button"
+              className="galaxy-focus-leave"
+              data-testid="galaxy-focus-leave"
+              onClick={() => setFocus(null)}
+            >
+              {leaveFocusText}
+            </button>
+          ) : null}
         </p>
       ) : null}
       {clusters.length > 0 ? (
@@ -758,7 +885,7 @@ export function Galaxy({
         </p>
       ) : null}
       <Canvas
-        camera={{ position: [0, 40, 110], fov: LABEL_FOV_DEG, near: 0.1, far: 2000 }}
+        camera={{ position: [0, 40, 110], fov: LABEL_FOV_DEG, near: CAMERA_NEAR, far: 2000 }}
         gl={{ antialias: true, toneMapping: NoToneMapping }}
         onCreated={({ gl }) => {
           gl.setClearColor(0x000000, 1);
@@ -772,8 +899,10 @@ export function Galaxy({
           model={model}
           reducedMotion={reduce}
           orbit={orbit}
-          onSelect={onSelect}
+          onSelect={handleSelect}
           target={target}
+          focusId={focus}
+          neighborhoodRadius={neighborhoodRadius}
           onCoreToggle={toggle}
           onHiddenLabels={(state) => {
             setHiddenLabels((prev) => (prev === state.hidden ? prev : state.hidden));

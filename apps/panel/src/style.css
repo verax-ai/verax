@@ -123,6 +123,15 @@ body {
   font-style: italic;
   padding: 0.1rem 0;
 }
+.rail-inventory button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
 .galaxy-empty,
 .galaxy-coverage {
   margin: 0 0 0.4rem;
@@ -146,6 +155,29 @@ body {
   color: #eaf2f8;
   background: rgba(2, 6, 15, 0.72);
   pointer-events: none;
+}
+.galaxy-focus {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  margin: 0;
+  padding: 0.25rem 0.55rem;
+  font-size: 0.8rem;
+  color: #eaf2f8;
+  background: rgba(2, 6, 15, 0.72);
+}
+.galaxy-focus-leave {
+  margin: 0;
+  padding: 0.1rem 0.45rem;
+  font: inherit;
+  color: #eaf2f8;
+  background: transparent;
+  border: 1px solid rgba(234, 242, 248, 0.45);
+  cursor: pointer;
 }
 .galaxy-clusters {
   position: absolute;

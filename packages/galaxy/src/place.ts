@@ -12,6 +12,12 @@ import {
 import { UNASSIGNED_CLOUD_ID, type GalaxyModel } from "./model.ts";
 
 export const SCENE_RADIUS = 48;
+/** Hash radius for an agent offset. Kept as the existing placement scale. */
+export const AGENT_HASH_RADIUS = SCENE_RADIUS * 0.78;
+/** How much of that hash offset sits around a home planet. */
+export const AGENT_ORBIT = 0.12;
+/** World radius of a typical planet neighborhood (~4.5). */
+export const GROUP_RADIUS = AGENT_HASH_RADIUS * AGENT_ORBIT;
 
 export type PlacedPlanet = {
   id: string;
@@ -31,6 +37,7 @@ export type PlacedStar = {
 export type PlacedAgent = {
   id: string;
   label: string;
+  planetId: string | null;
   at: Point3;
   look: Appearance;
   witness: "self" | "same-org" | undefined;
@@ -79,13 +86,14 @@ export function placeScene(model: GalaxyModel): PlacedScene {
 
   const agents = model.agents.map((a) => {
     const home = a.planetId ? planetAt.get(a.planetId) : undefined;
-    const off = hashPoint(`agent:${a.id}`, SCENE_RADIUS * 0.78);
+    const off = hashPoint(`agent:${a.id}`, AGENT_HASH_RADIUS);
     const at = home
-      ? { x: home.x + off.x * 0.12, y: home.y + 1.2, z: home.z + off.z * 0.12 }
+      ? { x: home.x + off.x * AGENT_ORBIT, y: home.y + 1.2, z: home.z + off.z * AGENT_ORBIT }
       : off;
     return {
       id: a.id,
       label: a.label,
+      planetId: a.planetId,
       at,
       look: agentAppearance(a),
       witness: a.witness,
@@ -115,4 +123,17 @@ export function placeScene(model: GalaxyModel): PlacedScene {
     agents,
     edges,
   };
+}
+
+/** World radius of the agents that sit with this planet, or the placement scale. */
+export function groupRadius(placed: PlacedScene, planetId: string): number {
+  const planet = placed.planets.find((p) => p.id === planetId);
+  if (!planet) return GROUP_RADIUS;
+  let max = GROUP_RADIUS;
+  for (const agent of placed.agents) {
+    if (agent.planetId !== planetId) continue;
+    const d = Math.hypot(agent.at.x - planet.at.x, agent.at.y - planet.at.y, agent.at.z - planet.at.z);
+    if (d > max) max = d;
+  }
+  return max;
 }

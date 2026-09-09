@@ -37,6 +37,16 @@ describe("placeScene", () => {
     assert.deepEqual(placed.stars[0]?.at, hashPoint("orphan", SCENE_RADIUS * 0.32));
   });
 
+  it("keeps an agent's planet id so a focus can sit with that group", () => {
+    const model: GalaxyModel = {
+      ...empty,
+      planets: [{ id: "acme", label: "acme", size: measured(1, "n"), freshness: measured(1, "now") }],
+      agents: [{ id: "worker-1", label: "worker-1", planetId: "acme", lastActMs: measured(1, "n") }],
+    };
+    const placed = placeScene(model);
+    assert.equal(placed.agents[0]?.planetId, "acme");
+  });
+
   it("an unmeasured core is the purple mark, not a default pulse", () => {
     const placed = placeScene(empty);
     assert.equal(placed.core.unmeasured, true);
