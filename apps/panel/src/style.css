@@ -253,6 +253,14 @@ body {
   margin: 1.35rem 0 0.45rem;
   letter-spacing: 0.01em;
 }
+/* A question is not the pane's title. It was set at the same size as the
+   heading above it, which left five of them competing with the one thing
+   that names the pane. */
+.detail-pane h3 {
+  font-size: var(--type-body);
+  margin: 0.9rem 0 0.2rem;
+  color: var(--accent);
+}
 .observatory h2:first-child,
 .detail-pane h2:first-child {
   margin-top: 0;
@@ -483,23 +491,42 @@ aside {
   font-size: var(--type-meta);
 }
 .detail-pane p,
-.evidence-scope,
-.spend-fields,
-.decision-chain {
+.spend-fields {
   font-size: var(--type-body);
-  line-height: 1.55;
+  line-height: 1.45;
+}
+/* The pane asks five questions and every one of them has to be on screen at
+   the window the desktop command opens, so the vertical rhythm is tight and
+   the supporting detail sits a size down from the answer it supports. The
+   refs in the chain stay whole: they are what makes the pair followable. */
+.detail-pane p {
+  margin: 0.3rem 0;
+}
+.evidence-scope,
+.decision-chain {
+  font-size: var(--type-meta);
+  line-height: 1.5;
 }
 .evidence-scope,
 .spend-fields,
 .decision-chain {
   list-style: none;
-  margin: 0.4rem 0 0;
+  margin: 0.25rem 0 0;
   padding: 0;
 }
-.evidence-scope li + li,
-.spend-fields p + p,
-.decision-chain p + p {
-  margin-top: 0.45rem;
+.decision-chain p {
+  margin: 0.15rem 0;
+}
+.spend-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.2rem 1rem;
+}
+.spend-fields p {
+  margin: 0;
+}
+.evidence-scope li + li {
+  margin-top: 0.2rem;
 }
 .timeline-empty {
   margin: 0;

@@ -79,6 +79,16 @@ describe("observatory layout", () => {
               const r = el.getBoundingClientRect();
               return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
             };
+            // Every question the pane asks has to be inside the pane the
+            // operator sees. A question found only by scrolling is a question
+            // the reader does not know was asked, and the one with no answer
+            // yet is on the page precisely to be seen.
+            const paneBox = detail?.getBoundingClientRect() ?? null;
+            const questions = [...document.querySelectorAll(".detail-pane h3")].map((h) => ({
+              text: (h.textContent ?? "").slice(0, 40),
+              top: h.getBoundingClientRect().top,
+              bottom: h.getBoundingClientRect().bottom,
+            }));
             return {
               scrollWidth: rootEl.scrollWidth,
               clientWidth: rootEl.clientWidth,
@@ -86,6 +96,8 @@ describe("observatory layout", () => {
               clientHeight: rootEl.clientHeight,
               detail: box(detail),
               time: box(time),
+              paneBottom: paneBox ? paneBox.bottom : null,
+              questions,
             };
           });
           if (metrics.scrollWidth > metrics.clientWidth + 1) {
@@ -107,6 +119,16 @@ describe("observatory layout", () => {
               fails.push(
                 `${view.name}: page scrolls ${metrics.scrollHeight} > ${metrics.clientHeight}`,
               );
+            }
+            if (metrics.questions.length === 0) {
+              fails.push(`${view.name}: the detail pane asks nothing`);
+            }
+            for (const q of metrics.questions) {
+              if (metrics.paneBottom !== null && q.bottom > metrics.paneBottom + 1) {
+                fails.push(
+                  `${view.name}: "${q.text}" sits below the pane (${Math.round(q.bottom)} > ${Math.round(metrics.paneBottom)})`,
+                );
+              }
             }
           }
           if (pageErrors.length) fails.push(`${view.name}: pageerror ${pageErrors.join(" | ")}`);
