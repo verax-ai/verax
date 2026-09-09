@@ -528,6 +528,19 @@ aside {
 .evidence-scope li + li {
   margin-top: 0.2rem;
 }
+.timeline-span {
+  margin: 0 0 0.35rem;
+  font-size: var(--type-meta);
+  color: var(--mute);
+}
+/* A fold stands for more than one record, so it reads as a count, not as a
+   stamp that happens to be short. */
+.timeline-mark.is-fold {
+  border-color: var(--accent);
+  color: var(--accent);
+  min-width: 1.9rem;
+  text-align: center;
+}
 .timeline-empty {
   margin: 0;
   font-size: var(--type-meta);

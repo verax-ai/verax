@@ -121,7 +121,10 @@ describe("10 TRY spend record", () => {
     expect(chain).toMatch(/approval-required/);
     expect(chain).toMatch(/approved-by-operator/);
     const selected = document.querySelector(".timeline-mark.is-selected");
-    expect(selected?.textContent).toMatch(/2026-09-06T17:13:11Z/);
+    // The strip prints the time of day when every record falls on one UTC
+    // day; the whole stamp is still on the mark, one hover away.
+    expect(selected?.textContent).toMatch(/^17:13:11Z$/);
+    expect(selected?.getAttribute("title")).toMatch(/2026-09-06T17:13:11Z/);
     expect(document.body.textContent).not.toMatch(/Conarium|Tugra|Tuğra|Cedulon/);
   });
 });

@@ -98,6 +98,27 @@ describe("observatory layout", () => {
               time: box(time),
               paneBottom: paneBox ? paneBox.bottom : null,
               questions,
+              // The strip is measured the way the galaxy crowd rule is: by the
+              // boxes, not by the dots. Two stamps that print on top of each
+              // other, or a stamp clipped by the track, hide a record on a
+              // screen whose whole claim is that it hides nothing.
+              timeline: (() => {
+                const track = document.querySelector(".timeline-track");
+                if (!track) return null;
+                const t = track.getBoundingClientRect();
+                const marks = [...track.querySelectorAll(".timeline-mark")]
+                  .map((m) => {
+                    const r = m.getBoundingClientRect();
+                    return { text: (m.textContent ?? "").trim().slice(0, 24), left: r.left, right: r.right };
+                  })
+                  .sort((a, b) => a.left - b.left);
+                let overlaps = 0;
+                for (let i = 1; i < marks.length; i += 1) {
+                  if (marks[i].left < marks[i - 1].right - 0.5) overlaps += 1;
+                }
+                const clipped = marks.filter((m) => m.left < t.left - 0.5 || m.right > t.right + 0.5).length;
+                return { count: marks.length, overlaps, clipped };
+              })(),
               spendText: document.querySelector("[data-testid=spend-fields]")?.textContent ?? null,
               pairText: document.querySelector("[data-testid=explain-pair]")?.textContent ?? null,
               detailScroll: detail?.scrollHeight ?? null,
@@ -123,6 +144,20 @@ describe("observatory layout", () => {
               fails.push(
                 `${view.name}: page scrolls ${metrics.scrollHeight} > ${metrics.clientHeight}`,
               );
+            }
+            if (metrics.timeline === null) {
+              fails.push(`${view.name}: no timeline track`);
+            } else {
+              if (metrics.timeline.overlaps > 0) {
+                fails.push(
+                  `${view.name}: ${metrics.timeline.overlaps} timeline stamps print on top of another (of ${metrics.timeline.count})`,
+                );
+              }
+              if (metrics.timeline.clipped > 0) {
+                fails.push(
+                  `${view.name}: ${metrics.timeline.clipped} timeline stamps hang outside the track`,
+                );
+              }
             }
             if (metrics.questions.length === 0) {
               fails.push(`${view.name}: the detail pane asks nothing`);
