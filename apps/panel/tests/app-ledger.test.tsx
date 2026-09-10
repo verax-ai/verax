@@ -95,10 +95,10 @@ describe("panel ledger fetch states", () => {
     stubLedgerFetch(() => new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText("deftere erişilemiyor")).toBeTruthy();
       expect(screen.getByText(/500/)).toBeTruthy();
     });
-    expect(screen.queryByText("empty")).toBeNull();
+    expect(screen.queryByText("defter boş")).toBeNull();
     expect(document.querySelectorAll(".row").length).toBe(0);
   });
 
@@ -106,9 +106,9 @@ describe("panel ledger fetch states", () => {
     stubLedgerFetch(() => new Response(JSON.stringify({ decisions: [], effects: [] }), { status: 200 }));
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByText("empty")).toBeTruthy();
+      expect(screen.getByText("defter boş")).toBeTruthy();
     });
-    expect(screen.queryByText("error")).toBeNull();
+    expect(screen.queryByText("deftere erişilemiyor")).toBeNull();
   });
 
   it("keeps the last good rail when a later poll returns 500", async () => {
@@ -131,7 +131,7 @@ describe("panel ledger fetch states", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Yenile" }));
     await waitFor(() => {
-      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText("deftere erişilemiyor")).toBeTruthy();
       expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
     });
   });
@@ -150,9 +150,9 @@ describe("panel ledger fetch states", () => {
     stubLedgerFetch(() => new Response("not-json {", { status: 200 }));
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText("deftere erişilemiyor")).toBeTruthy();
     });
-    expect(screen.queryByText("empty")).toBeNull();
+    expect(screen.queryByText("defter boş")).toBeNull();
     expect(document.querySelectorAll(".row").length).toBe(0);
   });
 });
