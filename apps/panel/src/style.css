@@ -41,6 +41,16 @@ body {
   background: var(--paper);
   color: var(--ink);
 }
+/* The records tab draws no rail, so the row is two panes. The width the rail
+   held goes to the detail pane first: that is where the five questions are,
+   and at 1360x880 they did not fit in 32rem without the pane scrolling. */
+.observatory.no-rail {
+  grid-template-areas:
+    "top top"
+    "main detail"
+    "time time";
+  grid-template-columns: minmax(0, 1fr) minmax(26rem, 40rem);
+}
 .obs-top {
   grid-area: top;
   display: flex;
@@ -71,7 +81,9 @@ body {
 }
 .obs-detail {
   grid-area: detail;
-  padding: 1.75rem 2rem 2.25rem;
+  /* The bottom inset used to be the largest of the four; it was padding under
+     the last question, and the question was what had to fit. */
+  padding: 1.5rem 2rem 1.5rem;
   border-left: 1px solid var(--line);
   overflow: auto;
 }
@@ -276,7 +288,7 @@ body {
    that names the pane. */
 .detail-pane h3 {
   font-size: var(--type-body);
-  margin: 0.9rem 0 0.2rem;
+  margin: 0.75rem 0 0.2rem;
   color: var(--accent);
 }
 .observatory h2:first-child,
@@ -284,7 +296,10 @@ body {
   margin-top: 0;
 }
 @media (max-width: 800px) {
-  .observatory {
+  /* .no-rail is the more specific selector, so a narrow screen has to name it
+     too or the two-column rule would follow the phone down and overflow it. */
+  .observatory,
+  .observatory.no-rail {
     grid-template-areas:
       "top"
       "main"
@@ -422,8 +437,16 @@ aside {
   font-size: var(--type-meta);
 }
 .records-summary {
-  margin: 0 0 1.5rem;
+  margin: 0 0 0.5rem;
   font-size: var(--type-sentence);
+  line-height: 1.45;
+  max-width: 42rem;
+}
+/* Where the list came from, under the sentence about what is in it. Smaller
+   than the sentence on purpose: it is the source, not the finding. */
+.records-source {
+  margin: 0 0 1.5rem;
+  font-size: var(--type-meta);
   line-height: 1.45;
   max-width: 42rem;
 }
@@ -518,7 +541,7 @@ aside {
    the supporting detail sits a size down from the answer it supports. The
    refs in the chain stay whole: they are what makes the pair followable. */
 .detail-pane p {
-  margin: 0.3rem 0;
+  margin: 0.25rem 0;
 }
 .evidence-scope,
 .decision-chain {
@@ -545,6 +568,19 @@ aside {
 }
 .evidence-scope li + li {
   margin-top: 0.2rem;
+}
+/* Only where the rail is not drawn, because only there is the pane wide
+   enough: the supporting blocks stand in two columns so the five questions
+   above them stay on one screen. Nothing is dropped or shortened -- the same
+   lines are set side by side instead of one under the other. */
+.no-rail .decision-chain,
+.no-rail .evidence-scope {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.15rem 1.25rem;
+}
+.no-rail .evidence-scope li + li {
+  margin-top: 0;
 }
 .timeline-span {
   margin: 0 0 0.35rem;

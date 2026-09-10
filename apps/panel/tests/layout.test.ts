@@ -193,9 +193,23 @@ describe("observatory layout", () => {
             // a spend subject still renders the section when approvals are
             // empty, with "not measured" in every field. The gate has to see
             // the amount and the payee or it is measuring the thin pane again.
+            // A question inside the pane but below its fold is still a
+            // question the reader has to go looking for. The pane is only
+            // honest about asking five things if all five fit in it at the
+            // size the product opens at.
+            if (
+              metrics.detailScroll !== null &&
+              metrics.detailClient !== null &&
+              metrics.detailScroll > metrics.detailClient + 1
+            ) {
+              fails.push(
+                `${view.name}: detail pane scrolls inside itself (${metrics.detailScroll} > ${metrics.detailClient})`,
+              );
+            }
             if (view.name === "1360") {
               process.stdout.write(
-                `layout-f9: .obs-detail scrollHeight=${metrics.detailScroll} clientHeight=${metrics.detailClient}\n`,
+                `layout-f9: .obs-detail scrollHeight=${metrics.detailScroll} clientHeight=${metrics.detailClient}` +
+                  ` width=${metrics.detail ? Math.round(metrics.detail.right - metrics.detail.left) : "none"}\n`,
               );
               if (!metrics.spendText) {
                 fails.push(`${view.name}: spend-fields missing`);
@@ -229,6 +243,16 @@ describe("observatory layout", () => {
               fails.push(
                 `${view.name}/${TAB_FILES[t]}: Turkish on the English screen: "${leftover}"`,
               );
+            }
+            // The rail is a way into a record from the two tabs that have no
+            // list of their own. On the records tab it is neither that nor a
+            // full column of anything else, so it is not drawn there at all.
+            const rail = await page.evaluate(() => document.querySelector(".obs-left") !== null);
+            if (TAB_FILES[t] === "records" && rail) {
+              fails.push(`${view.name}/${TAB_FILES[t]}: the rail is drawn on the records tab`);
+            }
+            if (TAB_FILES[t] !== "records" && !rail) {
+              fails.push(`${view.name}/${TAB_FILES[t]}: no rail, and no other way into a record`);
             }
             await page.screenshot({
               path: join(shotDir, `${view.name}-${TAB_FILES[t]}.png`),
