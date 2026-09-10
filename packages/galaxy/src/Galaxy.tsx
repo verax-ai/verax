@@ -23,14 +23,17 @@ import {
   type BodyCluster,
 } from "./crowd.ts";
 import {
-  AGENT_LABEL_NDC_HEIGHT,
+  AGENT_LABEL_SPRITE_SCALE,
   LABEL_FOV_DEG,
   labelAspect,
   labelCrowd,
   labelText,
   paintLabel,
+  PLANET_LABEL_SPRITE_SCALE,
   projectNdc,
   type LabelHideReason,
+  type LabelPoint,
+  type TakenLabel,
 } from "./labels.ts";
 import type { GalaxyModel } from "./model.ts";
 import { defaultOpen, easeOpen, mix3, parkPoint, readOpenQuery, stepOpen } from "./open.ts";
@@ -357,7 +360,7 @@ function ClusterMarks({ clusters }: { clusters: readonly BodyCluster[] }) {
           key={`c-t-${l.id}`}
           position={[l.at.x, l.at.y, l.at.z]}
           center={[0.5, 1.15]}
-          scale={[AGENT_LABEL_NDC_HEIGHT * l.aspect, AGENT_LABEL_NDC_HEIGHT, 1]}
+          scale={[AGENT_LABEL_SPRITE_SCALE * l.aspect, AGENT_LABEL_SPRITE_SCALE, 1]}
         >
           <spriteMaterial map={l.map} transparent opacity={0.92} depthWrite={false} sizeAttenuation={false} />
         </sprite>
@@ -492,7 +495,7 @@ const AGENT_RADIUS = 0.95;
 /** Opening distance. Far enough for the whole sky, near enough to read it. */
 export const OPENING_DISTANCE = 85;
 
-const PLANET_LABEL_HEIGHT = 0.05;
+const PLANET_LABEL_HEIGHT = PLANET_LABEL_SPRITE_SCALE;
 
 function fillHidden(template: string, n: number): string {
   return template.replace(/\{n\}/g, String(n));
@@ -507,21 +510,40 @@ function inNeighborhood(
   return Math.hypot(at.x - look.x, at.y - look.y, at.z - look.z) <= radius;
 }
 
+/**
+ * Which of these names the sky may print, by id. A name outside the
+ * neighborhood the camera is looking at is not judged at all; one that is
+ * judged carries the painted texture's own width, so the rule measures the
+ * box actually drawn rather than an average name.
+ */
 function namesShown(
   kind: "planet" | "agent",
-  items: readonly { at: { x: number; y: number; z: number } }[],
+  items: readonly { id: string; at: { x: number; y: number; z: number }; aspect: number }[],
   orbit: Orbit,
   neighborhoodRadius: number | null,
-): { show: boolean; hidden: number; reason: LabelHideReason | null } {
+  viewportAspect: number,
+  taken: readonly TakenLabel[] = [],
+): { shown: Set<string>; hidden: number; reason: LabelHideReason | null; taken: TakenLabel[] } {
   const look = { x: orbit.lookX, y: orbit.lookY, z: orbit.lookZ };
-  const eye = { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG };
-  const ndc = [];
+  const eye = { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG, viewportAspect };
+  const points: LabelPoint[] = [];
+  const ids: string[] = [];
   for (const item of items) {
     if (!inNeighborhood(item.at, look, neighborhoodRadius)) continue;
     const p = projectNdc(item.at, eye);
-    if (p) ndc.push(p);
+    if (!p) continue;
+    points.push({ x: p.x, y: p.y, aspect: item.aspect });
+    ids.push(item.id);
   }
-  return labelCrowd(ndc, kind, orbit.distance, SCENE_RADIUS);
+  const crowd = labelCrowd(points, kind, orbit.distance, SCENE_RADIUS, viewportAspect, taken);
+  const shown = new Set<string>();
+  const placed: TakenLabel[] = [];
+  for (let i = 0; i < ids.length; i += 1) {
+    if (!crowd.keep[i]) continue;
+    shown.add(ids[i]!);
+    placed.push({ at: points[i]!, box: crowd.box });
+  }
+  return { shown, hidden: crowd.hidden, reason: crowd.reason, taken: placed };
 }
 
 function LabelSprites({
@@ -542,6 +564,10 @@ function LabelSprites({
   onHidden: (state: { hidden: number; reason: LabelHideReason | null }) => void;
 }) {
   const g = useRef<Group>(null);
+  // The canvas, not the window: the sky sits in one pane of a three-pane
+  // screen, and the camera divides x by this canvas's own aspect.
+  const { size } = useThree();
+  const viewportAspect = size.height > 0 ? size.width / size.height : 1;
   const planetItems = useMemo(
     () => (focusId ? placed.planets.filter((p) => p.id === focusId) : placed.planets),
     [placed, focusId],
@@ -552,10 +578,13 @@ function LabelSprites({
   );
   const planetLabels = usePaintedLabels(planetItems);
   const agentLabels = usePaintedLabels(agentItems);
-  const planetCount = planetLabels.length;
-  const agentCount = agentLabels.length;
-  const [showPlanet, setShowPlanet] = useState(() => namesShown("planet", planetLabels, orbit, neighborhoodRadius).show);
-  const [showAgent, setShowAgent] = useState(() => namesShown("agent", agentLabels, orbit, neighborhoodRadius).show);
+  const [shownPlanet, setShownPlanet] = useState(
+    () => namesShown("planet", planetLabels, orbit, neighborhoodRadius, viewportAspect).shown,
+  );
+  const [shownAgent, setShownAgent] = useState(
+    () => namesShown("agent", agentLabels, orbit, neighborhoodRadius, viewportAspect).shown,
+  );
+  const lastShown = useRef("");
   const lastHidden = useRef("");
   useFrame(() => {
     if (g.current) g.current.visible = easeOpen(openRef.current, reducedMotion) > 0.88;
@@ -563,23 +592,37 @@ function LabelSprites({
     // agents does not hide a readable planet name, and the other way.
     // Focused: only the group in front of the camera. Distant knots do
     // not veto names that this neighborhood can already read.
-    const nextPlanet = namesShown("planet", planetLabels, orbit, neighborhoodRadius);
-    const nextAgent = namesShown("agent", agentLabels, orbit, neighborhoodRadius);
-    if (nextPlanet.show !== showPlanet) setShowPlanet(nextPlanet.show);
-    if (nextAgent.show !== showAgent) setShowAgent(nextAgent.show);
-    const hidden = (nextPlanet.show ? 0 : planetCount) + (nextAgent.show ? 0 : agentCount);
+    const nextPlanet = namesShown("planet", planetLabels, orbit, neighborhoodRadius, viewportAspect);
+    const nextAgent = namesShown(
+      "agent",
+      agentLabels,
+      orbit,
+      neighborhoodRadius,
+      viewportAspect,
+      nextPlanet.taken,
+    );
+    // Compared as sorted keys, because the set is rebuilt every frame and
+    // an identity check would re-render the sky sixty times a second.
+    const key = `${[...nextPlanet.shown].sort().join(",")}|${[...nextAgent.shown].sort().join(",")}`;
+    if (key !== lastShown.current) {
+      lastShown.current = key;
+      setShownPlanet(nextPlanet.shown);
+      setShownAgent(nextAgent.shown);
+    }
+    const hidden = nextPlanet.hidden + nextAgent.hidden;
     const reason: LabelHideReason | null =
       hidden === 0 ? null : nextAgent.reason === "crowd" || nextPlanet.reason === "crowd" ? "crowd" : "distance";
-    const key = `${hidden}:${reason ?? ""}`;
-    if (key !== lastHidden.current) {
-      lastHidden.current = key;
+    const hiddenKey = `${hidden}:${reason ?? ""}`;
+    if (hiddenKey !== lastHidden.current) {
+      lastHidden.current = hiddenKey;
       onHidden({ hidden, reason });
     }
   });
   return (
     <group ref={g}>
-      {showPlanet
-        ? planetLabels.map((l) => (
+      {planetLabels
+        .filter((l) => shownPlanet.has(l.id))
+        .map((l) => (
             <sprite
               key={`l-p-${l.id}`}
               position={[l.at.x, l.at.y, l.at.z]}
@@ -590,20 +633,19 @@ function LabelSprites({
             >
               <spriteMaterial map={l.map} transparent opacity={0.92} depthWrite={false} sizeAttenuation={false} />
             </sprite>
-          ))
-        : null}
-      {showAgent
-        ? agentLabels.map((l) => (
+        ))}
+      {agentLabels
+        .filter((l) => shownAgent.has(l.id))
+        .map((l) => (
             <sprite
               key={`l-a-${l.id}`}
               position={[l.at.x, l.at.y, l.at.z]}
               center={[0.5, 1.35]}
-              scale={[AGENT_LABEL_NDC_HEIGHT * l.aspect, AGENT_LABEL_NDC_HEIGHT, 1]}
+              scale={[AGENT_LABEL_SPRITE_SCALE * l.aspect, AGENT_LABEL_SPRITE_SCALE, 1]}
             >
               <spriteMaterial map={l.map} transparent opacity={0.78} depthWrite={false} sizeAttenuation={false} />
             </sprite>
-          ))
-        : null}
+        ))}
     </group>
   );
 }
@@ -632,6 +674,10 @@ function SceneBody({
   onClusters: (clusters: readonly BodyCluster[]) => void;
 }) {
   const placed = useMemo(() => placeScene(model), [model]);
+  // Same canvas aspect the label rule uses: folding bodies into a cluster is
+  // the same screen-space question as folding names.
+  const { size } = useThree();
+  const viewportAspect = size.height > 0 ? size.width / size.height : 1;
   const search = typeof window !== "undefined" ? window.location.search : "";
   const forced = readForcedTier(search);
   const [tierIndex, setTierIndex] = useState(forced ?? 0);
@@ -674,7 +720,7 @@ function SceneBody({
     }
     const next = bodyClusters(
       placed.agents.map((a) => ({ id: a.id, at: a.at, source: a.source })),
-      { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG },
+      { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG, viewportAspect },
     );
     const key = `${next.clusters.map((c) => `${c.count}:${c.source}:${c.ids.join(",")}`).join("|")}/${next.singles.map((s) => s.id).join(",")}`;
     if (key === lastCrowd.current) return;

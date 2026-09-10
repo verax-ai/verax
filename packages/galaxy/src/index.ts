@@ -27,14 +27,17 @@ export {
   stepOpen,
 } from "./open.ts";
 export {
-  densestNeighborhood,
+  densestOverlap,
   labelBudget,
   labelCrowd,
+  labelsOverlap,
   labelVisible,
   projectNdc,
+  readableLabels,
   type CameraEye,
   type LabelCrowd,
   type LabelHideReason,
+  type LabelPoint,
   type Ndc,
 } from "./labels.ts";
 export {

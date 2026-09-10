@@ -12,14 +12,30 @@ export function labelVisible(kind: LabelKind, cameraDistance: number, sceneRadiu
 }
 
 /**
- * Screen-space height of an agent name (NDC; 2 is the whole viewport).
- * Matches the sprite scale in Galaxy.tsx. A short English name is about
- * four times wider than it is tall, so one glyph box is this times four.
+ * The sprite scale an agent name is drawn at, straight from Galaxy.tsx.
+ *
+ * This is NOT the height it covers on screen. With sizeAttenuation off,
+ * three.js multiplies the scale by the view-space depth and then projects
+ * it, so the box that lands on screen is `scale / tan(fov/2)` tall -- at
+ * fov 46 that is 2.36x this number. Reading it as NDC directly is how the
+ * crowd rule came to allow names that print on top of each other:
+ * measured 8 Sep and still on screen 10 Sep, after the disk became a box.
  */
-export const AGENT_LABEL_NDC_HEIGHT = 0.036;
+export const AGENT_LABEL_SPRITE_SCALE = 0.036;
 
 /** Canvas fov in Galaxy.tsx. Used only to turn world distance into NDC. */
 export const LABEL_FOV_DEG = 46;
+
+/** The sprite scale a group name is drawn at. Same reading as above. */
+export const PLANET_LABEL_SPRITE_SCALE = 0.05;
+
+/**
+ * Width of a name when the painted texture has not been measured: a short
+ * English name is about four times wider than it is tall. A caller that
+ * knows the real aspect passes it, and the wider of the two is what gets
+ * measured -- guessing narrow would report a clearance that is not there.
+ */
+export const LABEL_ASPECT_FALLBACK = 4;
 
 /**
  * One name needs a neighbour-sized gap or two labels fuse into a white
@@ -28,26 +44,19 @@ export const LABEL_FOV_DEG = 46;
  * hardware); the names were not readable. Area, not a head-count cap:
  * showing 8 of 500 would leak a count through which names remain.
  */
-const LABEL_BOX_NDC = AGENT_LABEL_NDC_HEIGHT * AGENT_LABEL_NDC_HEIGHT * 4;
+const LABEL_BOX_NDC = AGENT_LABEL_SPRITE_SCALE * AGENT_LABEL_SPRITE_SCALE * LABEL_ASPECT_FALLBACK;
 const NEIGHBOUR_CLEARANCE = 4;
 const MIN_MEAN_NDC_AREA = LABEL_BOX_NDC * NEIGHBOUR_CLEARANCE;
 const FOV_HALF_TAN = Math.tan((LABEL_FOV_DEG * Math.PI) / 360);
 
-/**
- * Personal space of one name in NDC. Chosen so π r² equals the same
- * readable area labelBudget used as a scene mean: a second name inside
- * this disk is the smear, measured on the 500-agent inventory.
- */
-export const LABEL_NEIGHBORHOOD_NDC = Math.sqrt(MIN_MEAN_NDC_AREA / Math.PI);
-
-/**
- * A handful of names in one disk is still readable (the three-agent
- * fixture puts two on one planet). Five or more in that disk is the
- * smear measured on a 12-group, 500-agent inventory.
- */
-export const LABEL_READABLE_NEIGHBORS = 4;
-
 export type Ndc = { readonly x: number; readonly y: number };
+
+/**
+ * A projected name. `aspect` is the painted texture's width over its
+ * height; a caller that has not painted yet leaves it out and the
+ * fallback width is used.
+ */
+export type LabelPoint = { readonly x: number; readonly y: number; readonly aspect?: number };
 
 export type CameraEye = {
   readonly x: number;
@@ -57,14 +66,27 @@ export type CameraEye = {
   readonly lookY: number;
   readonly lookZ: number;
   readonly fovDeg: number;
+  /**
+   * Width over height of the canvas the sky is drawn on -- not the window,
+   * the canvas. A perspective camera divides x by this, so a rule that
+   * leaves it out reads a wide screen as if it were square and reports a
+   * horizontal gap that is not there.
+   */
+  readonly viewportAspect: number;
 };
 
 export type LabelHideReason = "distance" | "crowd";
 
 export type LabelCrowd = {
+  /** The box each of these names covers, for the kind judged after them. */
+  box: LabelBox;
+  /** True only when every name is printed; a partial crowd is not "shown". */
   show: boolean;
+  /** Per name, in the order given: printed, or stood down for a neighbour. */
+  keep: boolean[];
   hidden: number;
   reason: LabelHideReason | null;
+  /** Names sharing the most crowded box, itself counted. 1 = nothing touches. */
   densest: number;
 };
 
@@ -108,32 +130,101 @@ export function projectNdc(world: { x: number; y: number; z: number }, cam: Came
   const camY = dx * upX + dy * upY + dz * upZ;
   const tan = Math.tan((cam.fovDeg * Math.PI) / 360);
   if (!(tan > 0)) return null;
-  return { x: camX / camZ / tan, y: camY / camZ / tan };
+  const aspect = cam.viewportAspect > 0 ? cam.viewportAspect : 1;
+  return { x: camX / camZ / (tan * aspect), y: camY / camZ / tan };
 }
 
 /**
- * How many names sit in the densest personal-space disk. The scene
- * average does not enter: a tight knot in an otherwise empty sky is
- * still unreadable.
+ * A name is a box, not a dot, so crowding is a box question. The disk this
+ * replaces asked whether two centres were far apart; two names can clear
+ * each other's disk and still print on top of one another, because a name
+ * is about three times wider than that disk is across. Measured 8 Sep on
+ * the 123-agent focus seat: seven overlapping pairs while the rule
+ * reported none hidden.
  */
-export function densestNeighborhood(ndc: readonly Ndc[], radius = LABEL_NEIGHBORHOOD_NDC): number {
-  if (!(ndc.length > 0)) return 0;
-  if (!(radius > 0)) return ndc.length;
-  const r2 = radius * radius;
+export function labelsOverlap(
+  a: LabelPoint,
+  b: LabelPoint,
+  box: LabelBox,
+  boxB: LabelBox = box,
+): boolean {
+  const halfW = (labelNdcWidth(a, box) + labelNdcWidth(b, boxB)) / 2;
+  const halfH = (labelNdcHeight(box) + labelNdcHeight(boxB)) / 2;
+  return Math.abs(a.x - b.x) < halfW && Math.abs(a.y - b.y) < halfH;
+}
+
+/**
+ * What a sprite of this scale actually covers, in the same NDC the points
+ * are projected into: `scale / tan(fov/2)` tall, and that over the canvas
+ * aspect wide. Both halves come from the three.js sprite shader, which
+ * multiplies the scale by depth and lets the projection divide it back out.
+ */
+export type LabelBox = {
+  readonly spriteScale: number;
+  readonly fovDeg: number;
+  readonly viewportAspect: number;
+};
+
+export function labelNdcHeight(box: LabelBox): number {
+  const tan = Math.tan((box.fovDeg * Math.PI) / 360);
+  return tan > 0 ? box.spriteScale / tan : box.spriteScale;
+}
+
+function labelNdcWidth(p: LabelPoint, box: LabelBox): number {
+  const aspect = p.aspect !== undefined && p.aspect > 0 ? p.aspect : LABEL_ASPECT_FALLBACK;
+  const wide = box.viewportAspect > 0 ? box.viewportAspect : 1;
+  return (labelNdcHeight(box) * aspect) / wide;
+}
+
+/**
+ * How many names the most crowded box shares its space with, itself
+ * counted. One means nothing overlaps it.
+ */
+export function densestOverlap(points: readonly LabelPoint[], box: LabelBox): number {
   let max = 0;
-  for (let i = 0; i < ndc.length; i += 1) {
-    const a = ndc[i]!;
-    let n = 0;
-    for (let j = 0; j < ndc.length; j += 1) {
-      const b = ndc[j]!;
-      const dx = a.x - b.x;
-      const dy = a.y - b.y;
-      if (dx * dx + dy * dy <= r2) n += 1;
+  for (let i = 0; i < points.length; i += 1) {
+    let n = 1;
+    for (let j = 0; j < points.length; j += 1) {
+      if (i !== j && labelsOverlap(points[i]!, points[j]!, box)) n += 1;
     }
     if (n > max) max = n;
   }
   return max;
 }
+
+/**
+ * Which names can be printed without any two of them touching. Taken in
+ * the order the caller gives -- the ledger's order, so the same sky always
+ * keeps the same names -- and a name is dropped only when it would land on
+ * one already kept. The dropped ones are counted, never silently lost:
+ * an unreadable name and an uncounted one are the same defect.
+ */
+export function readableLabels(
+  points: readonly LabelPoint[],
+  box: LabelBox,
+  taken: readonly TakenLabel[] = [],
+): { keep: boolean[]; hidden: number } {
+  const keep: boolean[] = [];
+  const kept: LabelPoint[] = [];
+  let hidden = 0;
+  for (const p of points) {
+    const clearOfTaken = taken.every((t) => !labelsOverlap(p, t.at, box, t.box));
+    const clear = clearOfTaken && kept.every((k) => !labelsOverlap(p, k, box));
+    keep.push(clear);
+    if (clear) kept.push(p);
+    else hidden += 1;
+  }
+  return { keep, hidden };
+}
+
+/**
+ * A name already on the screen, with the box it covers. Group names are
+ * placed first and agent names have to clear them: judging each kind only
+ * against its own left a group name and an agent name printed on the same
+ * spot, which is the same smear seen from a different angle (measured on
+ * the overview, 10 Sep).
+ */
+export type TakenLabel = { readonly at: LabelPoint; readonly box: LabelBox };
 
 /**
  * How many names stay readable at this distance. The set is shown as a
@@ -155,25 +246,49 @@ export function labelBudget(
 }
 
 /**
- * Whether names stay readable in their own neighborhood. Distance LOD
- * still hides a far set (reason "distance"). A close set whose densest
- * disk holds more than one name is a crowd (reason "crowd"). The set
- * is shown as a whole or not at all.
+ * Which names stay readable where they land. Distance LOD still hides a
+ * far set as a whole (reason "distance"): at that range no arrangement is
+ * readable. Closer in, the set is thinned name by name instead of dropped
+ * whole -- hiding fourteen readable names because two of them touch was
+ * the old rule's other half of the same mistake.
  */
 export function labelCrowd(
-  ndc: readonly Ndc[],
+  points: readonly LabelPoint[],
   kind: LabelKind,
   cameraDistance: number,
   sceneRadius: number,
+  viewportAspect: number,
+  taken: readonly TakenLabel[] = [],
 ): LabelCrowd {
-  const count = ndc.length;
-  if (!(count > 0)) return { show: true, hidden: 0, reason: null, densest: 0 };
-  if (!labelVisible(kind, cameraDistance, sceneRadius)) {
-    return { show: false, hidden: count, reason: "distance", densest: densestNeighborhood(ndc) };
+  const count = points.length;
+  if (!(count > 0)) {
+    return {
+      box: { spriteScale: AGENT_LABEL_SPRITE_SCALE, fovDeg: LABEL_FOV_DEG, viewportAspect },
+      show: true,
+      keep: [],
+      hidden: 0,
+      reason: null,
+      densest: 0,
+    };
   }
-  const densest = densestNeighborhood(ndc);
-  if (densest <= LABEL_READABLE_NEIGHBORS) return { show: true, hidden: 0, reason: null, densest };
-  return { show: false, hidden: count, reason: "crowd", densest };
+  const box: LabelBox = {
+    spriteScale: kind === "planet" ? PLANET_LABEL_SPRITE_SCALE : AGENT_LABEL_SPRITE_SCALE,
+    fovDeg: LABEL_FOV_DEG,
+    viewportAspect,
+  };
+  const densest = densestOverlap(points, box);
+  if (!labelVisible(kind, cameraDistance, sceneRadius)) {
+    return { box, show: false, keep: points.map(() => false), hidden: count, reason: "distance", densest };
+  }
+  const { keep, hidden } = readableLabels(points, box, taken);
+  return {
+    box,
+    show: hidden === 0,
+    keep,
+    hidden,
+    reason: hidden === 0 ? null : "crowd",
+    densest,
+  };
 }
 
 /** The text a label may show, or null when the record carries no name. */
