@@ -230,12 +230,11 @@ describe("observatory layout", () => {
             // version of this check read the records tab alone and missed a
             // Turkish word sitting on the status tab.
             const leftover = await page.evaluate((needles: string[]) => {
-              // The anatomy document is a glossary: it names each part in
-              // both languages on purpose, and a test pins that. It is the
-              // one place two languages belong on one screen.
-              const clone = document.body.cloneNode(true) as HTMLElement;
-              clone.querySelector("[data-testid=anatomy-document]")?.remove();
-              const text = clone.innerText ?? clone.textContent ?? "";
+              // No exemptions any more. The one screen that carried two
+              // languages on purpose was a glossary of body-part names that
+              // measured nothing, and it is gone; an English screen now has
+              // to be English all the way down.
+              const text = document.body.innerText ?? document.body.textContent ?? "";
               const hit = needles.find((n) => text.includes(n));
               return hit === undefined ? "" : hit.slice(0, 60);
             }, TURKISH_ONLY);

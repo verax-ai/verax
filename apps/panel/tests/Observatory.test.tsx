@@ -355,12 +355,15 @@ describe("observatory", () => {
     expect(document.body.textContent).not.toMatch(/receipt var/);
   });
 
-  it("keeps anatomy copy on the status document, not as a presence stage", () => {
+  it("prints no glossary the ledger did not produce", () => {
+    // Seven body-part names in two languages sat on the status tab under the
+    // word "approximate". Nothing on this screen is approximate: every line
+    // is a thing the ledger says, or it does not belong here. The names live
+    // in the pitch, which is where an explanation belongs.
     render(<Observatory actions={actions} status="ok" demo={false} />);
     fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
-    const doc = screen.getByTestId("anatomy-document");
-    expect(doc.textContent).toMatch(/Anatomi/);
-    expect(doc.textContent).toMatch(/head\.part|Kafa|Head/i);
+    expect(screen.queryByTestId("anatomy-document")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Anatomi|yaklaşık/);
     expect(screen.queryByTestId("stage")).toBeNull();
   });
 
