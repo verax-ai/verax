@@ -1,4 +1,5 @@
 import { panelCopy } from "./copy.ts";
+import { formatStamp } from "./records/timeline.ts";
 export type ReconcileMatch = {
   effect?: { ref?: string };
 };
@@ -29,8 +30,8 @@ export function ReconcileCard({ report }: { report: ReconcileCardReport | null }
       <p>
         {copy["reconcile.scope"]
           .replace("{channel}", report.scope.channel)
-          .replace("{from}", String(report.scope.windowStartMs))
-          .replace("{to}", String(report.scope.windowEndMs))
+          .replace("{from}", formatStamp(report.scope.windowStartMs))
+          .replace("{to}", formatStamp(report.scope.windowEndMs))
           .replace("{ghosts}", String(report.ghost.length))}
       </p>
     </section>

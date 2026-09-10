@@ -95,10 +95,10 @@ describe("panel ledger fetch states", () => {
     stubLedgerFetch(() => new Response(JSON.stringify({ error: "fault" }), { status: 500 }));
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText("deftere erişilemiyor")).toBeTruthy();
       expect(screen.getByText(/500/)).toBeTruthy();
     });
-    expect(screen.queryByText("empty")).toBeNull();
+    expect(screen.queryByText("defter boş")).toBeNull();
     expect(document.querySelectorAll(".row").length).toBe(0);
   });
 
@@ -106,9 +106,9 @@ describe("panel ledger fetch states", () => {
     stubLedgerFetch(() => new Response(JSON.stringify({ decisions: [], effects: [] }), { status: 200 }));
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByText("empty")).toBeTruthy();
+      expect(screen.getByText("defter boş")).toBeTruthy();
     });
-    expect(screen.queryByText("error")).toBeNull();
+    expect(screen.queryByText("deftere erişilemiyor")).toBeNull();
   });
 
   it("keeps the last good rail when a later poll returns 500", async () => {
@@ -131,8 +131,32 @@ describe("panel ledger fetch states", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Yenile" }));
     await waitFor(() => {
-      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText("deftere erişilemiyor")).toBeTruthy();
       expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
+    });
+  });
+
+  it("re-reads /healthz with the ledger, so the status tab counts one moment", async () => {
+    // The status tab reads its totals from /healthz and its witness split
+    // from the rows. /healthz was fetched once at mount and the rows every
+    // five seconds, so one screen could print an old total beside a fresh
+    // split. A refresh has to move both.
+    let healthReads = 0;
+    const ledgerBody = { decisions: [histDecision], effects: [], policies: {} };
+    stubLedgerFetch((url) => {
+      if (url.includes("/healthz")) {
+        healthReads += 1;
+        return new Response(JSON.stringify({ decisions: healthReads, effects: 0 }), { status: 200 });
+      }
+      return new Response(JSON.stringify(ledgerBody), { status: 200 });
+    });
+    render(<App />);
+    await waitFor(() => {
+      expect(healthReads).toBe(1);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Yenile" }));
+    await waitFor(() => {
+      expect(healthReads).toBe(2);
     });
   });
 
@@ -150,9 +174,9 @@ describe("panel ledger fetch states", () => {
     stubLedgerFetch(() => new Response("not-json {", { status: 200 }));
     render(<App />);
     await waitFor(() => {
-      expect(screen.getByText("error")).toBeTruthy();
+      expect(screen.getByText("deftere erişilemiyor")).toBeTruthy();
     });
-    expect(screen.queryByText("empty")).toBeNull();
+    expect(screen.queryByText("defter boş")).toBeNull();
     expect(document.querySelectorAll(".row").length).toBe(0);
   });
 });

@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
+import { englishInterfaceLeftovers } from "./turkish-screen.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
@@ -260,6 +261,62 @@ describe("observatory layout", () => {
           }
           await page.screenshot({ path: join(shotDir, `${view.name}.png`), fullPage: false });
           await page.close();
+        }
+      } finally {
+        await browser.close();
+      }
+    } finally {
+      child.kill();
+    }
+    if (fails.length) assert.fail(fails.join("\n"));
+  });
+
+  it("keeps the Turkish screen free of English interface words the copy table did not supply", { timeout: 120_000 }, async () => {
+    const shotTr = join(homedir(), "Desktop", "Work", "VERAX_EKRAN_DILI_20260910");
+    mkdirSync(shotTr, { recursive: true });
+    const child = spawn(process.execPath, [viteJs, "--host", "127.0.0.1", "--port", "4190", "--strictPort"], {
+      cwd: root,
+      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const fails: string[] = [];
+    try {
+      const ready = await new Promise<string>((resolve, reject) => {
+        let buf = "";
+        const timer = setTimeout(() => reject(new Error(`preview-timeout:${buf.slice(-400)}`)), 90_000);
+        const onData = (chunk: Buffer) => {
+          buf += String(chunk);
+          if (buf.includes("http://127.0.0.1:4190/")) {
+            clearTimeout(timer);
+            resolve("http://127.0.0.1:4190/?demo=1&lang=tr");
+          }
+        };
+        child.stdout.on("data", onData);
+        child.stderr.on("data", onData);
+        child.on("exit", (code) => reject(new Error(`preview-exit:${code}:${buf.slice(-400)}`)));
+      });
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
+      try {
+        const page = await browser.newPage({ viewport: { width: 1360, height: 880 } });
+        await page.goto(ready, { waitUntil: "domcontentloaded" });
+        await page.getByRole("tab", { name: "Genel durum" }).waitFor({ state: "visible", timeout: 30_000 });
+        const trTabs = ["Kayıtlar", "Galaksi", "Genel durum"] as const;
+        const tabFiles = ["records", "galaxy", "status"] as const;
+        for (let t = 0; t < trTabs.length; t += 1) {
+          await page.getByRole("tab", { name: trTabs[t] }).click();
+          await page.waitForTimeout(200);
+          const text = await page.evaluate(() => document.body.innerText ?? document.body.textContent ?? "");
+          const leftover = englishInterfaceLeftovers(text);
+          if (leftover.length > 0) {
+            fails.push(`${tabFiles[t]}: English interface leftover: ${leftover.join(", ")}`);
+          }
+          if (tabFiles[t] === "status") {
+            await page.screenshot({
+              path: join(shotTr, "1360-status-tr.png"),
+              fullPage: false,
+            });
+          }
         }
       } finally {
         await browser.close();

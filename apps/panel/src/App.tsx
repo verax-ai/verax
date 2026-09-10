@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { parseInventory, type Inventory } from "@verax-ai/galaxy";
-import { Observatory, type Healthz } from "./observatory/Observatory.tsx";
+import { Observatory, type Healthz, type LedgerError } from "./observatory/Observatory.tsx";
 import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";
 import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
@@ -21,7 +21,7 @@ export function App() {
   const [status, setStatus] = useState<RailStatus>("loading");
   const [actions, setActions] = useState<RailAction[]>([]);
   const [demo, setDemo] = useState(false);
-  const [errorText, setErrorText] = useState<string | null>(null);
+  const [error, setError] = useState<LedgerError | null>(null);
   const [lastReadMs, setLastReadMs] = useState<number | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [reconcileReport, setReconcileReport] = useState<ReconcileCardReport | null>(null);
@@ -44,6 +44,20 @@ export function App() {
     }
   }, []);
 
+  const loadHealth = useCallback(async () => {
+    try {
+      const r = await authorizedFetch("/healthz");
+      if (!r.ok) {
+        setHealth(null);
+        return;
+      }
+      const body = (await r.json()) as Healthz;
+      setHealth(body && typeof body === "object" ? body : null);
+    } catch {
+      setHealth(null);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     if (wantDemo()) {
       // The sample scenario stands on its own flag, not on a failing request.
@@ -61,6 +75,11 @@ export function App() {
       return;
     }
     await loadInventory();
+    // The status tab counts decisions out of /healthz and witnesses out of
+    // the rows it has. Read once at mount, those two disagreed the moment a
+    // decision landed: the sentence said eight while the list showed nine.
+    // They are read together now, so the tab is one reading of one ledger.
+    await loadHealth();
     try {
       const r = await authorizedFetch("/api/ledger?from=0&to=9999999999999");
       if (!r.ok) {
@@ -75,7 +94,7 @@ export function App() {
           return;
         }
         setStatus("error");
-        setErrorText(`ledger unreachable: ${r.status}${detail ? ` ${detail}` : ""}`);
+        setError({ code: "http", status: r.status, detail: detail || null });
         return;
       }
       let body: {
@@ -90,7 +109,7 @@ export function App() {
         body = (await r.json()) as typeof body;
       } catch {
         setStatus("error");
-        setErrorText("ledger unreachable: invalid-json");
+        setError({ code: "invalid-json", detail: null });
         return;
       }
       const decisions = Array.isArray(body.decisions) ? body.decisions : [];
@@ -102,7 +121,7 @@ export function App() {
         body.inputs ?? null,
       );
       setLastReadMs(Date.now());
-      setErrorText(null);
+      setError(null);
       setDemo(false);
       if (parsed.length === 0) {
         setActions([]);
@@ -115,9 +134,9 @@ export function App() {
       setStatus("ok");
     } catch {
       setStatus("error");
-      setErrorText("ledger unreachable: network");
+      setError({ code: "network", detail: null });
     }
-  }, [actions.length, loadInventory]);
+  }, [actions.length, loadHealth, loadInventory]);
 
   useEffect(() => {
     let cancelled = false;
@@ -127,7 +146,9 @@ export function App() {
       if (cancelled || phase === "redirect") return;
       if (phase === "error") {
         setStatus("error");
-        setErrorText(sessionIssueError() ?? "resource metadata unreachable");
+        // sessionIssueError() is the machine's own words; the sentence
+        // around them comes from the copy table, like every other line.
+        setError({ code: "session", detail: sessionIssueError() });
         return;
       }
       void load();
@@ -140,22 +161,6 @@ export function App() {
       if (id) clearInterval(id);
     };
   }, [load]);
-
-  useEffect(() => {
-    void (async () => {
-      try {
-        const r = await authorizedFetch("/healthz");
-        if (!r.ok) {
-          setHealth(null);
-          return;
-        }
-        const body = (await r.json()) as Healthz;
-        setHealth(body && typeof body === "object" ? body : null);
-      } catch {
-        setHealth(null);
-      }
-    })();
-  }, []);
 
   useEffect(() => {
     if (wantDemo()) return;
@@ -194,7 +199,7 @@ export function App() {
         demo={demo}
         health={health}
         reconcile={reconcileReport}
-        errorText={errorText}
+        error={error}
         stale={stale}
         ageMs={ageMs}
         pending={pending}

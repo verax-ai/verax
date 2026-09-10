@@ -292,7 +292,41 @@ describe("observatory", () => {
     render(<Observatory actions={warned} status="ok" demo={false} />);
     const scope = screen.getByTestId("evidence-scope").textContent ?? "";
     expect(scope).toMatch(/issuer-unpinned/);
-    expect(scope).toMatch(/pin: own key/);
+    // This line read /pin: own key/ while the suite ran in Turkish, which is
+    // how an English label sat on the Turkish screen with a green test on it.
+    expect(scope).toContain(panelCopy()["pin.ownKey"]);
+    expect(scope).toContain(panelCopy()["guarantee.conditional"]);
+    expect(scope).not.toMatch(/pin: own key|guarantee /);
+  });
+
+  it("says why the ledger could not be read, in the reader's language, once", () => {
+    render(
+      <Observatory
+        actions={[]}
+        status="error"
+        demo={false}
+        error={{ code: "http", status: 500, detail: "policy-store locked" }}
+      />,
+    );
+    const line = document.querySelector("[data-status=error]")?.textContent ?? "";
+    expect(line).toContain(panelCopy()["status.error"]);
+    expect(line).toContain("sunucu 500 yanıtı verdi");
+    // The machine's own words ride along; the sentence around them does not
+    // arrive from App.tsx pre-written in English, and does not print twice.
+    expect(line).toContain("policy-store locked");
+    expect(line).not.toMatch(/ledger unreachable/);
+  });
+
+  it("names every reason the ledger can fail to load", () => {
+    for (const [error, needle] of [
+      [{ code: "invalid-json" }, panelCopy()["error.invalidJson"]],
+      [{ code: "network" }, panelCopy()["error.network"]],
+      [{ code: "session" }, panelCopy()["error.session"]],
+    ] as const) {
+      cleanup();
+      render(<Observatory actions={[]} status="error" demo={false} error={error} />);
+      expect(document.querySelector("[data-status=error]")?.textContent ?? "").toContain(needle);
+    }
   });
 
   it("says so when an inspect does not complete, instead of going quiet", async () => {
@@ -310,10 +344,13 @@ describe("observatory", () => {
     });
   });
 
-  it("shows evidence scope with guarantee and pin:", () => {
+  it("shows evidence scope with a guarantee line and a trust root", () => {
     render(<Observatory actions={withContest(actions)} status="ok" demo={false} />);
-    expect(screen.getByTestId("evidence-scope").textContent).toMatch(/guarantee/);
-    expect(screen.getByTestId("evidence-scope").textContent).toMatch(/pin:/);
+    const scope = screen.getByTestId("evidence-scope").textContent ?? "";
+    // /guarantee/ and /pin:/ passed on a Turkish screen for as long as those
+    // two words were English. The frame is copy now; assert the copy.
+    expect(scope).toContain(panelCopy()["guarantee.label"].replace("{state}", "").trim());
+    expect(scope).toContain(panelCopy()["pin.none"]);
   });
 
   it("shows a red identity line when the inputs document is missing", () => {
@@ -432,8 +469,9 @@ describe("observatory", () => {
     expect(screen.getByTestId("scope-signature").textContent).toMatch(/ölçülemedi|not measured|doğrulandı|verified/i);
     expect(screen.getByTestId("scope-witness").textContent).toMatch(/self/);
     expect(screen.getByTestId("scope-external").textContent).toMatch(/bağlı değil|not bound/);
-    expect(screen.getByTestId("evidence-scope").textContent).toMatch(/guarantee/);
-    expect(screen.getByTestId("evidence-scope").textContent).toMatch(/pin:/);
+    const scope = screen.getByTestId("evidence-scope").textContent ?? "";
+    expect(scope).toContain(panelCopy()["guarantee.label"].replace("{state}", "").trim());
+    expect(scope).toContain(panelCopy()["pin.none"]);
   });
 
   it("does not draw unbound product names", () => {
