@@ -16,6 +16,9 @@ import { measured, unmeasured } from "../src/measured.ts";
 import type { GalaxyModel } from "../src/model.ts";
 import { groupRadius, placeScene } from "../src/place.ts";
 
+/** The galaxy stage measured off the live capture: 580 x 630 CSS pixels. */
+const STAGE_ASPECT = 580 / 630;
+
 const src = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 const opening = 85;
 
@@ -27,7 +30,7 @@ function eyeAt(distance: number, yaw = 0, pitch = 0.62) {
   orbit.targetPitch = pitch;
   orbit.targetDistance = distance;
   orbit.distance = distance;
-  return { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG };
+  return { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG, viewportAspect: STAGE_ASPECT };
 }
 
 function emptyModel(): GalaxyModel {
@@ -102,7 +105,7 @@ describe("body clusters", () => {
     const seat = focusOrbit(planet.at, groupRadius(placed, planet.id));
     const orbit = createOrbit(seat.distance);
     aimOrbit(orbit, seat, true);
-    const near = bodyClusters(bodies, { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG });
+    const near = bodyClusters(bodies, { ...cameraPosition(orbit), fovDeg: LABEL_FOV_DEG, viewportAspect: STAGE_ASPECT });
     assert.equal(accounted(far), 500);
     assert.equal(accounted(near), 500);
     const farFocusedSingles = far.singles.filter((s) => focusedIds.has(s.id)).length;

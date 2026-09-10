@@ -5,8 +5,12 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { cameraPosition, createOrbit, ZOOM_MAX, ZOOM_MIN } from "../src/camera.ts";
 import {
+  AGENT_LABEL_SPRITE_SCALE,
   LABEL_FOV_DEG,
-  densestNeighborhood,
+  densestOverlap,
+  labelNdcHeight,
+  PLANET_LABEL_SPRITE_SCALE,
+  readableLabels,
   labelBudget,
   labelCrowd,
   labelText,
@@ -18,6 +22,15 @@ import {
 import { measured, unmeasured } from "../src/measured.ts";
 import type { GalaxyModel } from "../src/model.ts";
 import { placeScene, SCENE_RADIUS } from "../src/place.ts";
+
+/**
+ * The canvas the sky is drawn on: measured off the live 1440x900 capture,
+ * the galaxy stage is 580 x 630 CSS pixels because it sits in the middle
+ * pane. The camera divides x by this.
+ */
+const STAGE_ASPECT = 580 / 630;
+const BOX = { spriteScale: AGENT_LABEL_SPRITE_SCALE, fovDeg: LABEL_FOV_DEG, viewportAspect: STAGE_ASPECT };
+
 
 const src = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
 
@@ -131,7 +144,7 @@ function eyeAt(distance: number, yaw = 0, pitch = 0.62): CameraEye {
   orbit.targetDistance = distance;
   orbit.distance = distance;
   const p = cameraPosition(orbit);
-  return { ...p, fovDeg: LABEL_FOV_DEG };
+  return { ...p, fovDeg: LABEL_FOV_DEG, viewportAspect: STAGE_ASPECT };
 }
 
 function emptyModel(): GalaxyModel {
@@ -190,73 +203,115 @@ describe("label crowd (neighborhood, not scene average)", () => {
   it("gives a clustered 500 and a scattered 500 different answers at the same count", () => {
     const cam = eyeAt(ZOOM_MIN);
     const clusteredNdc = projectAgents(crowdModel(500, 12), cam);
-    const clustered = labelCrowd(clusteredNdc, "agent", ZOOM_MIN, SCENE_RADIUS);
-    const scattered = labelCrowd(scatterNdc(500, cam), "agent", ZOOM_MIN, SCENE_RADIUS);
+    const clustered = labelCrowd(clusteredNdc, "agent", ZOOM_MIN, SCENE_RADIUS, STAGE_ASPECT);
+    const scattered = labelCrowd(scatterNdc(500, cam), "agent", ZOOM_MIN, SCENE_RADIUS, STAGE_ASPECT);
     assert.equal(clustered.show, false);
-    assert.equal(clustered.hidden, clusteredNdc.length);
     assert.ok(clustered.hidden > 0);
     assert.equal(clustered.reason, "crowd");
     assert.ok(clustered.densest > scattered.densest, `densest clustered=${clustered.densest} scattered=${scattered.densest}`);
     assert.equal(scattered.show, true);
     assert.equal(scattered.hidden, 0);
     assert.notEqual(clustered.show, scattered.show);
+    // The knot loses names, the open sky loses none.
+    assert.ok(clustered.hidden > scattered.hidden);
   });
 
-  it("does not return clustered names at near zoom when the knot is still dense", () => {
+  it("prints no name on top of another when the knot is still dense", () => {
     const cam = eyeAt(ZOOM_MIN);
     const clusteredNdc = projectAgents(crowdModel(500, 12), cam);
-    const clustered = labelCrowd(clusteredNdc, "agent", ZOOM_MIN, SCENE_RADIUS);
+    const clustered = labelCrowd(clusteredNdc, "agent", ZOOM_MIN, SCENE_RADIUS, STAGE_ASPECT);
     assert.equal(clustered.show, false);
-    assert.equal(clustered.hidden, clusteredNdc.length);
     assert.ok(clustered.hidden > 0);
     assert.equal(clustered.reason, "crowd");
+    // The knot is thinned, not smeared: what is left standing is readable,
+    // and what stood down is in the count.
+    const shown = clusteredNdc.filter((_, i) => clustered.keep[i] === true);
+    assert.equal(shown.length, clusteredNdc.length - clustered.hidden);
+    assert.equal(densestOverlap(shown, BOX), 1);
   });
 
   it("keeps a hidden count at near zoom on a clustered 500 so the confession line stays", () => {
     const cam = eyeAt(ZOOM_MIN);
-    const clustered = labelCrowd(projectAgents(crowdModel(500, 12), cam), "agent", ZOOM_MIN, SCENE_RADIUS);
+    const clustered = labelCrowd(projectAgents(crowdModel(500, 12), cam), "agent", ZOOM_MIN, SCENE_RADIUS, STAGE_ASPECT);
     assert.ok(clustered.hidden > 0);
     assert.equal(clustered.reason, "crowd");
   });
 
   it("names a far handful as distance, not crowd", () => {
     const cam = eyeAt(ZOOM_MAX);
-    const out = labelCrowd(projectAgents(crowdModel(3, 2), cam), "agent", ZOOM_MAX, SCENE_RADIUS);
+    const out = labelCrowd(projectAgents(crowdModel(3, 2), cam), "agent", ZOOM_MAX, SCENE_RADIUS, STAGE_ASPECT);
     assert.equal(out.show, false);
     assert.equal(out.reason, "distance");
   });
 
   it("returns scattered names at near zoom once each neighborhood holds one name", () => {
     const cam = eyeAt(ZOOM_MIN);
-    const scattered = labelCrowd(scatterNdc(500, cam), "agent", ZOOM_MIN, SCENE_RADIUS);
+    const scattered = labelCrowd(scatterNdc(500, cam), "agent", ZOOM_MIN, SCENE_RADIUS, STAGE_ASPECT);
     assert.equal(scattered.show, true);
     assert.equal(scattered.hidden, 0);
-    assert.ok(scattered.densest <= 4, `densest=${scattered.densest}`);
+    assert.equal(scattered.densest, 1, "nothing touches, so every box is alone");
   });
 
-  it("keeps a three-name fixture readable and named", () => {
+  it("keeps a three-name fixture readable, and stands down the one it would sit on", () => {
     const cam = eyeAt(opening);
     const three = crowdModel(3, 2);
     const ndc = projectAgents(three, cam);
-    const out = labelCrowd(ndc, "agent", opening, SCENE_RADIUS);
+    const out = labelCrowd(ndc, "agent", opening, SCENE_RADIUS, STAGE_ASPECT);
     assert.equal(ndc.length, 3);
-    assert.equal(out.show, true);
-    assert.equal(out.hidden, 0);
-    assert.ok(out.densest <= 4, `densest=${out.densest}`);
+    // Two of the three share a planet and land 0.012 NDC apart at the
+    // opening distance, inside a box 0.144 wide: printing both is the white
+    // smear this rule exists to stop. The old disk called them readable.
+    assert.equal(out.hidden, 1);
+    assert.equal(out.reason, "crowd");
+    assert.equal(out.keep.filter((k) => k).length, 2);
+    const shown = ndc.filter((_, i) => out.keep[i] === true);
+    assert.equal(densestOverlap(shown, BOX), 1);
   });
 
-  it("does not show a subset: hidden is 0 or the whole projected count", () => {
-    const camNear = eyeAt(ZOOM_MIN);
-    const camFar = eyeAt(opening);
-    for (const [ndc, distance] of [
-      [projectAgents(crowdModel(500, 12), camNear), ZOOM_MIN],
-      [scatterNdc(500, camNear), ZOOM_MIN],
-      [projectAgents(crowdModel(3, 2), camFar), opening],
-      [scatterNdc(500, camFar), opening],
-    ] as const) {
-      const out = labelCrowd(ndc, "agent", distance, SCENE_RADIUS);
-      assert.ok(out.hidden === 0 || out.hidden === ndc.length, `hidden=${out.hidden} n=${ndc.length}`);
+  it("hides a far set whole, and a near one name by name", () => {
+    // Distance is still all-or-nothing: at that range no arrangement of
+    // these names is readable, and printing eight of five hundred would
+    // leak, through which names survived, a count we are not making.
+    // Close in the question is different -- the names are readable, some
+    // of them land on each other -- so the set is thinned rather than
+    // dropped, and every name stood down is counted in the line the sky
+    // prints. Hiding fourteen readable names because two touch was the
+    // other half of the defect measured on 8 Sep.
+    const camFar = eyeAt(ZOOM_MAX);
+    for (const ndc of [projectAgents(crowdModel(500, 12), camFar), scatterNdc(500, camFar)]) {
+      const out = labelCrowd(ndc, "agent", ZOOM_MAX, SCENE_RADIUS, STAGE_ASPECT);
+      assert.equal(out.reason, "distance");
+      assert.equal(out.hidden, ndc.length);
+      assert.ok(out.keep.every((k) => k === false));
     }
+    const camNear = eyeAt(ZOOM_MIN);
+    const near = projectAgents(crowdModel(500, 12), camNear);
+    const out = labelCrowd(near, "agent", ZOOM_MIN, SCENE_RADIUS, STAGE_ASPECT);
+    assert.ok(out.hidden > 0 && out.hidden < near.length, `hidden=${out.hidden} n=${near.length}`);
+    assert.equal(out.keep.filter((k) => k).length, near.length - out.hidden);
+    const shown = near.filter((_, i) => out.keep[i] === true);
+    assert.equal(densestOverlap(shown, BOX), 1, "a printed name has nothing on top of it");
+  });
+
+  it("keeps an agent name off a group name that is already printed", () => {
+    // Each kind used to be judged only against its own, so a group name and
+    // an agent name could be printed on the same spot -- the same smear,
+    // seen on the overview on 10 Sep. Group names go down first and keep
+    // their claim; agent names have to clear them.
+    const planetBox = {
+      spriteScale: PLANET_LABEL_SPRITE_SCALE,
+      fovDeg: LABEL_FOV_DEG,
+      viewportAspect: STAGE_ASPECT,
+    };
+    const group = { x: 0.1, y: -0.2 };
+    const taken = [{ at: group, box: planetBox }];
+    const onTop = [{ x: 0.105, y: -0.198 }];
+    const clear = [{ x: 0.9, y: 0.6 }];
+    const free = readableLabels([...onTop, ...clear], BOX);
+    assert.deepEqual(free.keep, [true, true], "nothing else on screen, both print");
+    const guarded = readableLabels([...onTop, ...clear], BOX, taken);
+    assert.deepEqual(guarded.keep, [false, true]);
+    assert.equal(guarded.hidden, 1);
   });
 
   it("changes when the camera turns, because the metric is the image", () => {
@@ -266,10 +321,17 @@ describe("label crowd (neighborhood, not scene average)", () => {
     const face = worlds.map((w) => projectNdc(w, along)).filter((p): p is Ndc => p !== null);
     const edge = worlds.map((w) => projectNdc(w, endOn)).filter((p): p is Ndc => p !== null);
     assert.ok(face.length > 0 && edge.length > 0);
-    assert.notEqual(densestNeighborhood(face), densestNeighborhood(edge));
-    const faceCrowd = labelCrowd(face, "agent", 80, SCENE_RADIUS);
-    const edgeCrowd = labelCrowd(edge, "agent", 80, SCENE_RADIUS);
-    assert.notEqual(faceCrowd.show, edgeCrowd.show);
+    assert.notEqual(
+      densestOverlap(face, BOX),
+      densestOverlap(edge, BOX),
+    );
+    const faceCrowd = labelCrowd(face, "agent", 80, SCENE_RADIUS, STAGE_ASPECT);
+    const edgeCrowd = labelCrowd(edge, "agent", 80, SCENE_RADIUS, STAGE_ASPECT);
+    // Twenty names on one line: seen face-on they spread out and most are
+    // printed; seen end-on they stack into one point and nearly all stand
+    // down. Same records, same count, different image -- so a different
+    // answer, which is what "the metric is the image" means.
+    assert.ok(faceCrowd.hidden < edgeCrowd.hidden, `face=${faceCrowd.hidden} edge=${edgeCrowd.hidden}`);
   });
 });
 
