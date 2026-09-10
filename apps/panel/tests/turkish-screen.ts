@@ -62,13 +62,9 @@ export function demoLedgerValues(): string[] {
     "defer",
     "approval-required",
     "approved-by-operator",
-    // Pre-existing machine labels this task did not re-home. They are
-    // field names the audit already prints; the gate still catches held /
-    // last read / empty / inputs [].
-    "guarantee",
-    "pin: none",
-    "pin: env",
-    "pin: own key",
+    // Audit field values the record carries as they are. The frames around
+    // them ("Guarantee: …", "trust root: …") went into the copy table, so
+    // the gate now catches those too.
     "none",
     "unknown",
     "body",
@@ -105,7 +101,6 @@ function isLedgerFragment(word: string, ledger: string[]): boolean {
     if (v === w) return true;
     for (const token of v.split(/[^a-z0-9]+/)) {
       if (token === w) return true;
-      if (token.startsWith(w) && w.length >= 3) return true;
     }
   }
   return false;
@@ -115,6 +110,9 @@ function englishWordsIn(text: string, ledger: string[], copyPlain: string[]): st
   let rest = text;
   rest = rest.replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z/g, " ");
   rest = rest.replace(/\b[0-9a-f]{8,}\b/gi, " ");
+  // A value the screen cut short is not a word. shortHash prints
+  // "demo-spe…", and the fragment before the ellipsis has no language.
+  rest = rest.replace(/\S*…/gu, " ");
   rest = rest.replace(/[0-9]+/g, " ");
   for (const phrase of copyPlain) {
     if (phrase.length < 2) continue;

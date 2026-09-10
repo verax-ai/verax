@@ -83,10 +83,16 @@ export function evidenceScope(copy: Copy, opts: {
   return { signature, witness, external };
 }
 
-export function pinLabel(source: "env" | "own-key" | null | undefined): string {
-  if (source === "env") return "pin: env";
-  if (source === "own-key") return "pin: own key";
-  return "pin: none";
+export function pinLabel(copy: Copy, source: "env" | "own-key" | null | undefined): string {
+  if (source === "env") return copy["pin.env"];
+  if (source === "own-key") return copy["pin.ownKey"];
+  return copy["pin.none"];
+}
+
+export function guaranteeLabel(copy: Copy, state: "unconditional" | "conditional" | null | undefined): string {
+  if (state === "unconditional") return copy["guarantee.unconditional"];
+  if (state === "conditional") return copy["guarantee.conditional"];
+  return copy.disconnected;
 }
 
 export function warningCodes(warnings: readonly RailWarning[]): string {

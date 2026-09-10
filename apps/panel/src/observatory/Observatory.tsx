@@ -18,7 +18,7 @@ import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
 import { LANGS, readLang, writeLang, type Lang } from "../lang.ts";
 import { formatMinor } from "../records/money.ts";
-import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
+import { evidenceScope, guaranteeLabel, pinLabel, warningCodes } from "../records/scope.ts";
 import { spendFields } from "../records/spend.ts";
 import { Timeline } from "../records/Timeline.tsx";
 import { formatStamp } from "../records/timeline.ts";
@@ -34,6 +34,26 @@ export type Healthz = {
 } | null;
 
 export type ObservatoryStatus = "loading" | "ok" | "error" | "empty";
+
+/**
+ * Why the ledger could not be read, as a reason the copy table can speak.
+ * It used to arrive as a finished English sentence, which printed twice on
+ * the error line ("ledger unreachable ledger unreachable: 500") and stayed
+ * English on the Turkish screen. The machine's own words - a status code, a
+ * message from the server - ride along in `detail` and are not translated.
+ */
+export type LedgerError = {
+  code: "http" | "invalid-json" | "network" | "session";
+  status?: number;
+  detail?: string | null;
+};
+
+function errorReason(copy: ReturnType<typeof panelCopy>, error: LedgerError): string {
+  if (error.code === "http") return fillCopy(copy["error.http"], { code: error.status ?? "" });
+  if (error.code === "invalid-json") return copy["error.invalidJson"];
+  if (error.code === "network") return copy["error.network"];
+  return copy["error.session"];
+}
 
 const TAB_IDS = ["records", "galaxy", "status"] as const;
 type TabId = (typeof TAB_IDS)[number];
@@ -126,7 +146,7 @@ export function Observatory({
   demo,
   health = null,
   reconcile = null,
-  errorText = null,
+  error = null,
   stale = false,
   ageMs = null,
   onRefresh,
@@ -142,7 +162,7 @@ export function Observatory({
   pending?: PendingApproval[];
   health?: Healthz;
   reconcile?: ReconcileCardReport | null;
-  errorText?: string | null;
+  error?: LedgerError | null;
   stale?: boolean;
   ageMs?: number | null;
   inventory?: Inventory | null;
@@ -182,7 +202,6 @@ export function Observatory({
   const action = actions.find((a) => a.record.claims.ref === selected) ?? exhibitAction(actions);
   const audit = action?.record.claims.ref ? audits[action.record.claims.ref] : undefined;
   const guarantee = audit?.guarantee ?? action?.guarantee;
-  const pin = pinLabel(audit?.trustRoot?.source ?? action?.trustRoot?.source ?? null);
   const summary = audit?.finding?.summary ?? action?.finding?.summary ?? "";
   const identityMissing = Boolean(
     action && !action.inputsBound && typeof action.record.claims.inputsHash === "string",
@@ -250,6 +269,7 @@ export function Observatory({
   };
 
   const copy = panelCopy();
+  const pin = pinLabel(copy, audit?.trustRoot?.source ?? action?.trustRoot?.source ?? null);
   const ledgerModel = useMemo(
     () => ledgerToGalaxy(actions, health, reconcile),
     [actions, health, reconcile],
@@ -308,7 +328,9 @@ export function Observatory({
         <p className={`rail-status ${status}${stale ? " stale" : ""}`} data-status={status}>
           {status === "error" ? (
             <>
-              <span>{copy["status.error"]}</span> {errorText}
+              <span>{copy["status.error"]}</span>{" "}
+              {error ? errorReason(copy, error) : null}
+              {error?.detail ? <span className="muted"> · {error.detail}</span> : null}
             </>
           ) : (
             statusLabel(copy, status)
@@ -665,7 +687,7 @@ function DetailPane({
             <li data-testid="scope-witness">{scope.witness}</li>
             <li data-testid="scope-external">{scope.external}</li>
             <li>
-              guarantee {guarantee ?? copy.disconnected} {pin}
+              {fillCopy(copy["guarantee.label"], { state: guaranteeLabel(copy, guarantee) })} · {pin}
               {warnings.length > 0 ? ` ${warningCodes(warnings)}` : ""}
               {summary && !/^balanced$/i.test(summary.trim()) ? ` ${summary}` : ""}
             </li>
@@ -678,7 +700,7 @@ function DetailPane({
           ) : inputs ? (
             <p>
               {inputs.principal.brain} · {inputs.principal.scopes.join(", ")} ·{" "}
-              {inputs.inputs.map((i) => `${i.id} ${shortHash(i.versionHash)} ${i.validFromMs}–${i.validUntilMs}`).join("; ") || copy["inputs.label"]}
+              {inputs.inputs.map((i) => `${i.id} ${shortHash(i.versionHash)} ${i.validFromMs}–${i.validUntilMs}`).join("; ") || copy["inputs.none"]}
             </p>
           ) : (
             <p className="muted">{copy.disconnected}</p>

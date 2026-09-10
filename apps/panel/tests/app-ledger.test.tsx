@@ -136,6 +136,30 @@ describe("panel ledger fetch states", () => {
     });
   });
 
+  it("re-reads /healthz with the ledger, so the status tab counts one moment", async () => {
+    // The status tab reads its totals from /healthz and its witness split
+    // from the rows. /healthz was fetched once at mount and the rows every
+    // five seconds, so one screen could print an old total beside a fresh
+    // split. A refresh has to move both.
+    let healthReads = 0;
+    const ledgerBody = { decisions: [histDecision], effects: [], policies: {} };
+    stubLedgerFetch((url) => {
+      if (url.includes("/healthz")) {
+        healthReads += 1;
+        return new Response(JSON.stringify({ decisions: healthReads, effects: 0 }), { status: 200 });
+      }
+      return new Response(JSON.stringify(ledgerBody), { status: 200 });
+    });
+    render(<App />);
+    await waitFor(() => {
+      expect(healthReads).toBe(1);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Yenile" }));
+    await waitFor(() => {
+      expect(healthReads).toBe(2);
+    });
+  });
+
   it("keeps data-status=error and no rows when fetch rejects", async () => {
     stubLedgerFetch(() => Promise.reject(new Error("offline")));
     render(<App />);
