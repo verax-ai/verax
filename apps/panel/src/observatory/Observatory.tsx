@@ -22,8 +22,6 @@ import { evidenceScope, pinLabel, warningCodes } from "../records/scope.ts";
 import { spendFields } from "../records/spend.ts";
 import { Timeline } from "../records/Timeline.tsx";
 import { formatStamp } from "../records/timeline.ts";
-import bodyEn from "../../../body-map/src/copy/en.json";
-import bodyTr from "../../../body-map/src/copy/tr.json";
 
 export type Healthz = {
   ok?: boolean;
@@ -51,16 +49,6 @@ function readTab(): TabId {
   if (q === "history") return "records";
   return TAB_IDS.includes(q as TabId) ? (q as TabId) : "records";
 }
-
-const ANATOMY = [
-  { key: "head", tr: bodyTr["head.part"], en: bodyEn["head.part"] },
-  { key: "face", tr: bodyTr["face.part"], en: bodyEn["face.part"] },
-  { key: "core", tr: bodyTr["core.part"], en: bodyEn["core.part"] },
-  { key: "hands", tr: bodyTr["hands.part"], en: bodyEn["hands.part"] },
-  { key: "torso", tr: bodyTr["torso.part"], en: bodyEn["torso.part"] },
-  { key: "ground", tr: bodyTr["ground.part"], en: bodyEn["ground.part"] },
-  { key: "whole", tr: bodyTr["whole.part"], en: bodyEn["whole.part"] },
-] as const;
 
 function shortHash(h: string | null | undefined): string {
   if (!h) return "—";
@@ -517,7 +505,6 @@ function StatusView({
         )}
       </section>
       <ReconcileCard report={reconcile} />
-      <AnatomyDocument />
     </div>
   );
 }
@@ -539,23 +526,6 @@ function pendingMoney(copy: ReturnType<typeof panelCopy>, row: PendingApproval):
   if (money !== null) parts.push(money);
   else if (row.amount !== undefined) parts.push(copy["spend.amount.unmeasured"]);
   return parts.length === 0 ? "" : ` · ${parts.join(" · ")}`;
-}
-
-function AnatomyDocument() {
-  const copy = panelCopy();
-  return (
-    <section className="anatomy-document" data-testid="anatomy-document">
-      <h3>{copy["tab.anatomy"]}</h3>
-      <p className="muted">{copy["anatomy.approx"]}</p>
-      <ul>
-        {ANATOMY.map((a) => (
-          <li key={a.key} data-anchor={a.key}>
-            {a.tr} / {a.en}
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
 }
 
 function chainLine(
