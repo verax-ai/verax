@@ -119,6 +119,7 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 5_000}
       />,
     );
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     const groups = screen.getByTestId("rail-inventory-groups");
     const button = groups.querySelector("button");
     expect(button?.textContent).toMatch(/Team A/);
@@ -137,6 +138,7 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 5_000}
       />,
     );
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     expect(screen.getByText("Projeler (defter)")).toBeTruthy();
     expect(screen.getByText("Ajanlar (defter)")).toBeTruthy();
     expect(screen.getByText("Gruplar (envanter, ölçülemedi)")).toBeTruthy();
@@ -155,6 +157,7 @@ describe("observatory", () => {
 
   it("omits the inventory rail when the roster is not bound", () => {
     render(<Observatory actions={[]} status="ok" demo={false} />);
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
     expect(screen.queryByTestId("rail-inventory-groups")).toBeNull();
     expect(screen.queryByTestId("rail-inventory-agents")).toBeNull();
     expect(screen.getByText("Projeler (defter)")).toBeTruthy();
@@ -204,6 +207,32 @@ describe("observatory", () => {
     // From the other tabs the rail is the only way back into a record, so it
     // has to still be there.
     expect(screen.getByTestId("rail-records").textContent ?? "").toMatch(/memory\.|spend|audit\./);
+  });
+
+  it("gives the records tab no rail, and keeps the facts the rail carried", () => {
+    const demoActions = loadDemoActions();
+    render(<Observatory actions={demoActions} status="ok" demo={true} />);
+    const copy = panelCopy();
+    // Two sparse lines did not earn a column as wide as the detail pane. They
+    // are facts about the ledger, not a way into a record, so they belong in
+    // the view that reads the ledger -- and the column goes to the panes.
+    expect(document.querySelector(".obs-left")).toBeNull();
+    const source = screen.getByTestId("records-source").textContent ?? "";
+    const brains = [...new Set(demoActions.map((a) => a.inputs?.principal.brain).filter(Boolean))];
+    expect(brains.length).toBeGreaterThan(0);
+    for (const brain of brains) expect(source).toContain(brain as string);
+    // Dropping the rail must not drop what it said: projects are still not
+    // bound, and a screen that stops saying so is claiming more than it has.
+    expect(source).toContain(copy["records.source.noProjects"]);
+    // From the other tabs the rail is the only way into a record.
+    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    expect(document.querySelector(".obs-left")).not.toBeNull();
+  });
+
+  it("names the ledger empty of agents instead of printing an empty line", () => {
+    render(<Observatory actions={[]} status="empty" demo={false} />);
+    const copy = panelCopy();
+    expect(screen.getByTestId("records-source").textContent).toContain(copy["records.source.noAgents"]);
   });
 
   it("opens in English and hands the reader the other language", () => {

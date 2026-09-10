@@ -1,4 +1,5 @@
 import { panelCopy } from "../copy.ts";
+import { fillCopy } from "../galaxy/coverage-line.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
 import { recordLine, statusWord } from "./line.ts";
@@ -9,6 +10,7 @@ export function RecordList({
   status,
   pending,
   reconcile,
+  brains,
   selected,
   onSelect,
 }: {
@@ -16,16 +18,29 @@ export function RecordList({
   status: "loading" | "ok" | "error" | "empty";
   pending: PendingApproval[];
   reconcile: ReconcileCardReport | null;
+  brains: string[];
   selected: string | null;
   onSelect: (ref: string) => void;
 }) {
   const copy = panelCopy();
   const sentence = summarySentence(copy, countRecords(actions, pending, reconcile));
   const empty = actions.length === 0;
+  // What the rail used to hold: who wrote into this ledger, and what is not
+  // bound to it. It is one line about the source of the list, not a second
+  // copy of the list.
+  const source = [
+    brains.length === 0
+      ? copy["records.source.noAgents"]
+      : fillCopy(copy["records.source.agents"], { agents: brains.join(", ") }),
+    copy["records.source.noProjects"],
+  ].join(" · ");
   return (
     <div className="records-view">
       <p className="records-summary" data-testid="records-summary">
         {sentence}
+      </p>
+      <p className="records-source muted" data-testid="records-source">
+        {source}
       </p>
       {empty ? (
         <div className="records-empty" data-testid="records-empty">

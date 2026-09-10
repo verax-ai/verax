@@ -62,11 +62,6 @@ const ANATOMY = [
   { key: "whole", tr: bodyTr["whole.part"], en: bodyEn["whole.part"] },
 ] as const;
 
-function reducedMotion(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
-  return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-}
-
 function shortHash(h: string | null | undefined): string {
   if (!h) return "—";
   return h.length > 12 ? `${h.slice(0, 8)}…` : h;
@@ -267,7 +262,7 @@ export function Observatory({
   }, {});
 
   return (
-    <div className={`observatory${reducedMotion() ? "" : ""}`}>
+    <div className={`observatory${tab === "records" ? " no-rail" : ""}`}>
       {demo ? <p className="demo-badge">{copy["badge.demo"]}</p> : null}
       <div className="obs-top">
         <div role="tablist" aria-label={copy["aria.observatory"]} onKeyDown={onKeyTabs}>
@@ -326,6 +321,12 @@ export function Observatory({
           </button>
         ) : null}
       </div>
+      {/* The rail is the only way into a record from the galaxy and status
+          tabs. On the records tab the middle pane is that way in, and what
+          was left -- two lines about the ledger -- now sits under the
+          sentence there. A column that wide has to carry more than a fact
+          the view it borders can state in one line. */}
+      {tab === "records" ? null : (
       <aside className="obs-left" aria-label={copy["aria.rail"]}>
         <h2>{copy["rail.ledger.projects"]}</h2>
         <p className="muted">{copy.disconnected}</p>
@@ -376,11 +377,6 @@ export function Observatory({
             )}
           </>
         ) : null}
-        {/* The middle pane already is this list on the records tab. Printing it
-            again in a narrower column is the screen saying one thing twice,
-            and the rail is only a way in from the other two tabs. */}
-        {tab === "records" ? null : (
-          <>
         <h2>{copy.records}</h2>
         {actions.length === 0 ? (
           <p className="muted">{copy["summary.empty"]}</p>
@@ -406,9 +402,8 @@ export function Observatory({
             })}
           </ul>
         )}
-          </>
-        )}
       </aside>
+      )}
       <section className="obs-main" id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
         {tab === "records" ? (
           <RecordList
@@ -416,6 +411,7 @@ export function Observatory({
             status={status}
             pending={pending}
             reconcile={reconcile}
+            brains={brains}
             selected={action?.record.claims.ref ?? selected}
             onSelect={(ref) => setSelected(ref)}
           />
