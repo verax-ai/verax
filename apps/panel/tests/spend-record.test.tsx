@@ -1,8 +1,9 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval, RailAction } from "../src/rail/types.ts";
 import type { ReconcileCardReport } from "../src/ReconcileCard.tsx";
+import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
@@ -93,6 +94,10 @@ const reconcile: ReconcileCardReport = {
   matched: [{ effect: { ref: "398befdf-78f6-4780-833b-aa7c7ee5ef5d" } }],
   authorizedUnpaid: [],
 };
+
+beforeEach(() => {
+  setLang("tr");
+});
 
 describe("10 TRY spend record", () => {
   it("shows amount, payee, approver, statement match, witness self, and the defer-approve chain", () => {

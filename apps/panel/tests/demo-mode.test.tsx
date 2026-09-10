@@ -1,5 +1,6 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
@@ -23,10 +24,16 @@ beforeEach(() => {
  * unauthorised /api/ledger left the demo rows on screen. With the session
  * working, an empty real ledger overwrote the sample and demo=1 showed nothing.
  */
+beforeEach(() => {
+  setLang("tr");
+});
+
 describe("demo mode", () => {
   it("keeps the sample scenario when the real ledger is empty", async () => {
     vi.stubGlobal("location", {
-      search: "?demo=1",
+      // The stub stands in for the whole address, so the language has to be
+      // named here: setLang cannot reach a location that is not the real one.
+      search: "?demo=1&lang=tr",
       origin: "http://127.0.0.1:5173",
       pathname: "/",
       hash: "",

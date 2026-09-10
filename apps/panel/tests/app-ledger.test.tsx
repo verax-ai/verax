@@ -11,6 +11,7 @@ import { App } from "../src/App.tsx";
 import { rememberToken } from "../src/session.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle } from "../src/rail/types.ts";
+import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
@@ -44,6 +45,10 @@ const histDecision = {
   },
 };
 
+
+beforeEach(() => {
+  setLang("tr");
+});
 
 describe("historical policy sentence", () => {
   it("uses the decision policyHash document, not a later live policy", () => {
