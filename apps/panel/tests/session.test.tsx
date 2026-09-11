@@ -168,6 +168,55 @@ describe("panel session", () => {
     expect(body).toMatch(/code_verifier=verifier-1/);
   });
 
+  it("carries the panel's own address across the issuer round trip", async () => {
+    // redirect_uri is origin + pathname, because that is what the issuer has
+    // registered. The query is not in it, so ?focus= and ?tab= were gone by
+    // the time the panel came back: the address bar read "/" and the deep
+    // link pointed at a page the panel never opened.
+    const assign = vi.fn();
+    vi.stubGlobal("location", {
+      search: "?tab=galaxy&focus=g-alpha",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => prmResponse()));
+    expect(await beginSession()).toBe("redirect");
+    const state = sessionStorage.getItem("verax-pkce-state");
+    expect(state).toBeTruthy();
+
+    // The issuer sends the browser back to the bare redirect_uri. The stub
+    // tracks replaceState the way a browser does - a spy that leaves
+    // location.search untouched would have let a half-fix look green.
+    rememberToken(null);
+    const here = {
+      search: `?code=abc&state=${state}`,
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign,
+    };
+    const replaceState = vi.fn((_s: unknown, _t: unknown, url: string) => {
+      here.search = url.includes("?") ? url.slice(url.indexOf("?")) : "";
+    });
+    vi.stubGlobal("location", here);
+    vi.stubGlobal("history", { replaceState });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        if (isPrm(input)) return prmResponse();
+        return new Response(JSON.stringify({ access_token: "issued-token" }), { status: 200 });
+      }),
+    );
+    expect(await beginSession()).toBe("ok");
+    const written = String(replaceState.mock.calls.at(-1)?.[2] ?? "");
+    expect(written).toMatch(/focus=g-alpha/);
+    expect(written).toMatch(/tab=galaxy/);
+    expect(written).not.toMatch(/code=/);
+    expect(written).not.toMatch(/state=/);
+  });
+
   it("reads the issuer from resource metadata before authorize", async () => {
     const assign = vi.fn();
     vi.stubGlobal("location", {

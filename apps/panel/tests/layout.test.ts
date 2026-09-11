@@ -248,6 +248,30 @@ describe("observatory layout", () => {
           await page.screenshot({ path: join(shotDir, `${view.name}.png`), fullPage: false });
           await page.close();
         }
+
+        // The address has to survive the issuer round trip in the product, not
+        // only in a unit test: main.tsx restores it before the first render,
+        // and nothing else would notice if that line were dropped. There is no
+        // issuer here, so the session ends in a visible error - the point is
+        // that the query and the tab it chooses are already in place by then.
+        const returning = await browser.newPage({ viewport: { width: 1360, height: 880 } });
+        await returning.addInitScript(() => {
+          sessionStorage.setItem("verax-return-query", "focus=g-alpha&tab=galaxy");
+        });
+        await returning.goto(`${preview.base}/?code=abc&state=st`, { waitUntil: "domcontentloaded" });
+        await returning.waitForFunction(() => window.location.search.includes("focus="), null, { timeout: 15_000 })
+          .catch(() => undefined);
+        const back = await returning.evaluate(() => ({
+          search: window.location.search,
+          galaxy: document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
+        }));
+        if (!back.search.includes("focus=g-alpha")) {
+          fails.push(`round-trip: the restored address is ${back.search || "(empty)"}`);
+        }
+        if (back.galaxy === null || !/Galaxy|Galaksi/.test(back.galaxy)) {
+          fails.push(`round-trip: the open tab is ${back.galaxy ?? "none"}, not the sky`);
+        }
+        await returning.close();
       } finally {
         await browser.close();
         stopBrowser();
