@@ -1,5 +1,6 @@
 const VERIFIER_KEY = "verax-pkce-verifier";
 const STATE_KEY = "verax-pkce-state";
+const RETURN_KEY = "verax-return-query";
 const PRM_PATH = "/.well-known/oauth-protected-resource";
 
 let token: string | null = null;
@@ -41,7 +42,47 @@ async function issuerFromPrm(): Promise<string | null> {
 }
 
 function redirectUri(): string {
+  // Origin and path only: this has to match what the issuer registered, and a
+  // query string would not. Which is why the panel's own address is kept here
+  // instead of in the redirect, and put back when the browser returns.
   return `${window.location.origin}${window.location.pathname}`;
+}
+
+function rememberAddress(): void {
+  const params = new URLSearchParams(window.location.search);
+  params.delete("code");
+  params.delete("state");
+  const q = params.toString();
+  if (q === "") sessionStorage.removeItem(RETURN_KEY);
+  else sessionStorage.setItem(RETURN_KEY, q);
+}
+
+/**
+ * Put the address the panel was opened at back into the bar, on the way in
+ * from the issuer.
+ *
+ * Called before the app renders, not after the token exchange: the tab to open
+ * and the seat to focus are read on the first render, so an address restored a
+ * few awaits later would be correct in the bar and too late for the screen.
+ * `code` and `state` are left where they are - the exchange still needs them,
+ * and it strips them itself once it is done.
+ */
+export function restoreAddress(): boolean {
+  if (typeof window === "undefined") return false;
+  const params = new URLSearchParams(window.location.search);
+  if (!params.has("code")) return false;
+  const saved = sessionStorage.getItem(RETURN_KEY);
+  sessionStorage.removeItem(RETURN_KEY);
+  if (!saved) return false;
+  let added = false;
+  for (const [key, value] of new URLSearchParams(saved)) {
+    if (params.has(key)) continue;
+    params.set(key, value);
+    added = true;
+  }
+  if (!added) return false;
+  window.history.replaceState({}, "", `${window.location.pathname}?${params.toString()}${window.location.hash}`);
+  return true;
 }
 
 function randomUrl(): string {
@@ -62,6 +103,7 @@ async function s256(verifier: string): Promise<string> {
 }
 
 async function startAuthorize(issuer: string): Promise<void> {
+  rememberAddress();
   const verifier = randomUrl();
   const state = randomUrl();
   sessionStorage.setItem(VERIFIER_KEY, verifier);
@@ -89,6 +131,8 @@ export async function beginSession(): Promise<"ok" | "redirect" | "demo" | "erro
 
 async function beginSessionOnce(): Promise<"ok" | "redirect" | "demo" | "error"> {
   if (wantDemo()) return "demo";
+  // Harmless when main.tsx already did it: the saved address is consumed once.
+  restoreAddress();
   if (token) return "ok";
   const issuer = await issuerFromPrm();
   if (!issuer) {

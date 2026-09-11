@@ -63,11 +63,26 @@ const TAB_COPY: Record<TabId, "tab.records" | "tab.galaxy" | "tab.status"> = {
   status: "tab.status",
 };
 
+/**
+ * Which tab an address opens on.
+ *
+ * A ?focus= names a seat in the sky. It was read into state and then never
+ * used, because the panel opened on Records and the galaxy was not mounted at
+ * all: the link worked in the address bar and nowhere else. An explicit ?tab=
+ * still wins - someone who asked for a tab gets that tab.
+ */
+export function openingTab(search: string): TabId {
+  const q = new URLSearchParams(search);
+  const tab = q.get("tab");
+  if (tab === "history") return "records";
+  if (TAB_IDS.includes(tab as TabId)) return tab as TabId;
+  if ((q.get("focus") ?? "") !== "") return "galaxy";
+  return "records";
+}
+
 function readTab(): TabId {
   if (typeof window === "undefined") return "records";
-  const q = new URLSearchParams(window.location.search).get("tab");
-  if (q === "history") return "records";
-  return TAB_IDS.includes(q as TabId) ? (q as TabId) : "records";
+  return openingTab(window.location.search);
 }
 
 function shortHash(h: string | null | undefined): string {

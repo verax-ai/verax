@@ -5,7 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parseInventory, type Inventory } from "@verax-ai/galaxy";
 import { panelCopy } from "../src/copy.ts";
-import { Observatory } from "../src/observatory/Observatory.tsx";
+import { Observatory, openingTab } from "../src/observatory/Observatory.tsx";
 import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle, RailAction } from "../src/rail/types.ts";
@@ -104,9 +104,28 @@ describe("observatory", () => {
     expect(tr["galaxy.focus.leave"].length).toBeGreaterThan(0);
   });
 
-  it("reads ?focus= so a group seat can open from the address", () => {
-    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
-    expect(src).toMatch(/window\.location\.search\)\.get\("focus"\)/);
+  it("opens the sky when the address names a seat, and obeys an explicit tab", () => {
+    // This read a string out of Observatory.tsx and passed for as long as the
+    // query was parsed and thrown away. It asks the function now.
+    expect(openingTab("?focus=g-alpha")).toBe("galaxy");
+    expect(openingTab("?focus=g-alpha&tab=status")).toBe("status");
+    expect(openingTab("?focus=")).toBe("records");
+    expect(openingTab("")).toBe("records");
+    expect(openingTab("?tab=history")).toBe("records");
+  });
+
+  it("mounts the sky, not the record list, when the address names a seat", () => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("focus", "g-alpha");
+    window.history.replaceState({}, "", url);
+    try {
+      render(<Observatory actions={actions} status="ok" demo={false} />);
+      expect(screen.getByTestId("galaxy-stage")).toBeTruthy();
+      expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
+    } finally {
+      url.searchParams.delete("focus");
+      window.history.replaceState({}, "", url);
+    }
   });
 
   it("lets the inventory rail pick a group without calling it measured", () => {
