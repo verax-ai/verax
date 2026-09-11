@@ -12,6 +12,7 @@ import { rememberToken } from "../src/session.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
+import { panelCopy } from "../src/copy.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
   Galaxy: () => <div data-testid="galaxy-stage" />,
@@ -64,10 +65,12 @@ describe("historical policy sentence", () => {
   });
 });
 
-function stubLedgerFetch(handler: (url: string) => Response | Promise<Response>) {
+function stubLedgerFetch(
+  handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
+) {
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (input: RequestInfo) => {
+    vi.fn(async (input: RequestInfo, init?: RequestInit) => {
       const url = String(input);
       if (url.includes("reconcile-report")) {
         return new Response("missing", { status: 404 });
@@ -75,7 +78,7 @@ function stubLedgerFetch(handler: (url: string) => Response | Promise<Response>)
       if (url.includes("/api/inventory")) {
         return new Response(JSON.stringify({ inventory: null }), { status: 200 });
       }
-      return handler(url);
+      return handler(url, init);
     }),
   );
 }
@@ -158,6 +161,93 @@ describe("panel ledger fetch states", () => {
     await waitFor(() => {
       expect(healthReads).toBe(2);
     });
+  });
+
+  it("posts the ref and the hash the screen showed, and re-reads after", async () => {
+    // The button is drawn from the session's scopes and the call is made by
+    // App; a test on the control alone would pass with this wiring missing.
+    rememberToken(
+      `x.${btoa(JSON.stringify({ scope: "verax:audit verax:approve" }))}.y`,
+    );
+    const pending = {
+      ref: "d-open",
+      requestHash: "cd".repeat(32),
+      subject: "spend",
+      ruleText: "Sample spend needs operator approval.",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1000,
+      currency: "TRY",
+      payee: "example-payee",
+      expiresAtMs: 9_999_999_999_999,
+      status: "pending",
+      brain: "sample-brain",
+    };
+    let approveBody: Record<string, unknown> | null = null;
+    let ledgerReads = 0;
+    stubLedgerFetch((url, init) => {
+      if (url.includes("/api/approve")) {
+        approveBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+        return new Response(JSON.stringify({ allowRef: "a-9" }), { status: 200 });
+      }
+      if (url.includes("/healthz")) return new Response(JSON.stringify({}), { status: 200 });
+      ledgerReads += 1;
+      return new Response(
+        JSON.stringify({ decisions: [histDecision], effects: [], policies: {}, approvals: [pending] }),
+        { status: 200 },
+      );
+    });
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.button"] }));
+    const before = ledgerReads;
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
+    await waitFor(() => {
+      expect(approveBody).toEqual({ ref: "d-open", requestHash: "cd".repeat(32) });
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toContain("a-9");
+    });
+    // The ledger changed; the screen reads it again instead of assuming.
+    await waitFor(() => {
+      expect(ledgerReads).toBeGreaterThan(before);
+    });
+  });
+
+  it("draws no approve button for a session that cannot approve", async () => {
+    // Mutation caught this gap: with App hard-wiring canApprove to true, every
+    // other test here still passed. A read-only operator would have been shown
+    // a button that answers 403 - a promise the screen cannot keep.
+    rememberToken(`x.${btoa(JSON.stringify({ scope: "verax:audit" }))}.y`);
+    const pending = {
+      ref: "d-open",
+      requestHash: "cd".repeat(32),
+      subject: "spend",
+      ruleText: "Sample spend needs operator approval.",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1000,
+      currency: "TRY",
+      payee: "example-payee",
+      expiresAtMs: 9_999_999_999_999,
+      status: "pending",
+      brain: "sample-brain",
+    };
+    stubLedgerFetch((url) => {
+      if (url.includes("/healthz")) return new Response(JSON.stringify({}), { status: 200 });
+      return new Response(
+        JSON.stringify({ decisions: [histDecision], effects: [], policies: {}, approvals: [pending] }),
+        { status: 200 },
+      );
+    });
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelectorAll(".record-row").length).toBeGreaterThan(0);
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    expect(screen.getByTestId("pending-approvals").textContent).toContain("d-open");
+    expect(screen.queryByRole("button", { name: panelCopy()["approve.button"] })).toBeNull();
   });
 
   it("keeps data-status=error and no rows when fetch rejects", async () => {

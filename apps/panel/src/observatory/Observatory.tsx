@@ -35,6 +35,9 @@ export type Healthz = {
 
 export type ObservatoryStatus = "loading" | "ok" | "error" | "empty";
 
+/** What the body answered. `error` is its own word, repeated, not guessed. */
+export type ApproveOutcome = { ok: true; allowRef: string } | { ok: false; error: string };
+
 /**
  * Why the ledger could not be read, as a reason the copy table can speak.
  * It used to arrive as a finished English sentence, which printed twice on
@@ -167,6 +170,8 @@ export function Observatory({
   onRefresh,
   onShowDemo,
   onContest,
+  canApprove = false,
+  onApprove,
   pending = [],
   inventory = null,
   nowMs = Date.now(),
@@ -185,6 +190,13 @@ export function Observatory({
   onRefresh?: () => void;
   onShowDemo?: () => void;
   onContest?: (ref: string) => Promise<RailContestResult | void>;
+  /**
+   * Whether this session carries the approve scope. The body decides for real;
+   * this only decides whether to draw a button, because a button that cannot
+   * work is a promise the screen cannot keep.
+   */
+  canApprove?: boolean;
+  onApprove?: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
 }) {
   const initialTab = useMemo<TabId>(() => readTab(), []);
   const [tab, setTab] = useState<TabId>(initialTab);
@@ -483,6 +495,8 @@ export function Observatory({
             witnessCounts={witnessCounts}
             reconcile={reconcile}
             pending={pending}
+            canApprove={canApprove}
+            onApprove={onApprove}
           />
         ) : null}
       </section>
@@ -518,6 +532,85 @@ export function Observatory({
   );
 }
 
+/**
+ * Money leaving, and it cannot be taken back. So: the tap asks first and
+ * repeats what is about to be approved in the operator's own language; the
+ * request the screen was showing goes along with the answer, so the body can
+ * refuse if the screen has gone stale; and nothing here says "approved" that
+ * the body did not say first - a refusal is repeated with its own reason.
+ */
+function ApproveControl({
+  copy,
+  row,
+  onApprove,
+}: {
+  copy: ReturnType<typeof panelCopy>;
+  row: PendingApproval;
+  onApprove: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
+}) {
+  const [asking, setAsking] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [said, setSaid] = useState<string | null>(null);
+
+  if (said !== null) {
+    return (
+      <p data-testid="approve-outcome" className="approve-outcome">
+        {said}
+      </p>
+    );
+  }
+  if (!asking) {
+    return (
+      <button type="button" className="approve focusable" onClick={() => setAsking(true)}>
+        {copy["approve.button"]}
+      </button>
+    );
+  }
+  const money = formatMinor(row.amount, row.currency, readLang());
+  return (
+    <div data-testid="approve-confirm" className="approve-confirm">
+      <p>{copy["approve.title"]}</p>
+      <p>
+        {row.subject}
+        {money !== null ? ` · ${money}` : ""}
+        {row.payee === undefined ? "" : ` → ${String(row.payee)}`}
+      </p>
+      <p className="muted">{row.ruleText ?? copy["line.rule.none"]}</p>
+      <button
+        type="button"
+        className="approve focusable"
+        disabled={sending}
+        onClick={() => {
+          setSending(true);
+          void onApprove(row.ref, row.requestHash).then(
+            (out) => {
+              setSaid(
+                out.ok
+                  ? fillCopy(copy["approve.done"], { ref: out.allowRef })
+                  : out.error === "stale"
+                    ? copy["approve.stale"]
+                    : fillCopy(copy["approve.refused"], { reason: out.error }),
+              );
+            },
+            (err: unknown) => {
+              setSaid(
+                fillCopy(copy["approve.refused"], {
+                  reason: err instanceof Error ? err.message : "unknown",
+                }),
+              );
+            },
+          );
+        }}
+      >
+        {sending ? copy["approve.sending"] : copy["approve.yes"]}
+      </button>
+      <button type="button" className="focusable" onClick={() => setAsking(false)}>
+        {copy["approve.no"]}
+      </button>
+    </div>
+  );
+}
+
 function StatusView({
   actions,
   health,
@@ -525,11 +618,15 @@ function StatusView({
   witnessCounts,
   reconcile,
   pending,
+  canApprove,
+  onApprove,
 }: {
   actions: RailAction[];
   health: Healthz;
   lastMs: number | null;
   witnessCounts: Record<string, number>;
+  canApprove?: boolean;
+  onApprove?: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
   reconcile: ReconcileCardReport | null;
   pending: PendingApproval[];
 }) {
@@ -566,6 +663,9 @@ function StatusView({
               <li key={p.ref}>
                 {p.ref} · {p.subject} · {p.ruleText ?? ""} · {p.brain}
                 {pendingMoney(copy, p)}
+                {canApprove && onApprove ? (
+                  <ApproveControl copy={copy} row={p} onApprove={onApprove} />
+                ) : null}
               </li>
             ))}
           </ul>
