@@ -56,6 +56,19 @@ function statusPath(stateDir: string): string {
  * renames failed that way. Retrying briefly lost none of them and still let no
  * torn read through.
  */
+const napper = new Int32Array(new SharedArrayBuffer(4));
+
+/**
+ * Sleep without spinning. The first version of the retry below burned the
+ * processor between attempts, which is the worst thing to do while waiting for
+ * another process to let go of a file: under the unit suite's own load the
+ * spin starved the reader it was waiting on, the retries ran out in 200 ms,
+ * and the write threw EPERM. Atomics.wait yields the core instead.
+ */
+function napSync(ms: number): void {
+  Atomics.wait(napper, 0, 0, ms);
+}
+
 function writeFileAtomic(path: string, text: string): void {
   const tmp = `${path}.tmp`;
   writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
@@ -65,12 +78,10 @@ function writeFileAtomic(path: string, text: string): void {
       return;
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
-      if (attempt >= 40 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
-      const until = Date.now() + 5;
-      while (Date.now() < until) {
-        // Busy-wait: this runs on the witness's own start-up path, where there
-        // is nothing else to do and no event loop turn worth yielding for.
-      }
+      // Two seconds of patience. A reader holds this file for microseconds
+      // when the machine is idle; the budget is for the machine that is not.
+      if (attempt >= 100 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
+      napSync(20);
     }
   }
 }
