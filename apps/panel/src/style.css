@@ -311,6 +311,60 @@ body {
     border: 0;
     border-top: 1px solid #1a2a40;
   }
+  /* A thumb is not a mouse pointer. 44 CSS pixels is the smallest target it
+     hits reliably, and on 11 Sep 2026 six controls on this screen were under
+     it - the language buttons at 26. The rule is scoped to the narrow layout
+     so the desktop keeps its denser rhythm, where a pointer does the work. */
+  [role="tab"],
+  .lang-switch button,
+  .refresh,
+  .contest,
+  .timeline-mark,
+  .obs-left button,
+  .rail-records button {
+    min-height: 44px;
+  }
+  .lang-switch button,
+  .refresh,
+  .contest {
+    min-width: 44px;
+  }
+  /* The marks sit on a track; growing them downward would push the strip into
+     the band below, so they grow around their own middle. */
+  .timeline-mark {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+  /* Pinned to the top right, the badge sat on top of the third tab - 43x16 of
+     it, measured at 390. There is no corner to spare at this width, so it
+     stops floating and takes its own line. */
+  .demo-badge {
+    position: static;
+    display: block;
+    width: fit-content;
+    margin: 0.4rem 0 0;
+  }
+  /* A timestamp has nowhere to break. The external-source line is one long
+     ISO pair and ran 438 wide in a 390 box; the page did not scroll, the
+     text was simply cut. */
+  .status-view,
+  .reconcile-card,
+  .obs-detail {
+    overflow-wrap: anywhere;
+  }
+  /* 22rem plus its padding is wider than the window here, and the auto margin
+     pushed what was left off the right edge: the card measured 408 wide with
+     its right edge at 438 in a 390 viewport. A fixed column is a desktop
+     shape. */
+  .reconcile-card {
+    width: auto;
+    max-width: 100%;
+    margin-left: 0;
+    /* Its own 1rem of side padding sits outside max-width without this, which
+       is how a 365-wide card still reached 394 in a 390 window. */
+    box-sizing: border-box;
+  }
 }
 .stage {
   position: relative;
