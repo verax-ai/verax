@@ -130,6 +130,14 @@ describe("observatory layout", () => {
               pairText: document.querySelector("[data-testid=explain-pair]")?.textContent ?? null,
               detailScroll: detail?.scrollHeight ?? null,
               detailClient: detail?.clientHeight ?? null,
+              smallTargets: [...document.querySelectorAll('button, [role="tab"]')]
+                .map((el) => ({ el, r: el.getBoundingClientRect() }))
+                .filter(({ r }) => r.width > 0 && r.height > 0 && r.height < 44)
+                .map(({ el, r }) => ({
+                  text: (el.textContent ?? "").trim().slice(0, 16),
+                  w: Math.round(r.width),
+                  h: Math.round(r.height),
+                })),
             };
           });
           if (metrics.scrollWidth > metrics.clientWidth + 1) {
@@ -207,6 +215,24 @@ describe("observatory layout", () => {
                 fails.push(`${view.name}: explain-pair missing`);
               }
             }
+          } else {
+            // A phone is not a narrow desktop. Nothing above applies at 390:
+            // the bands are stacked and the page is meant to scroll, so
+            // "on the first screen" is not a claim worth making. What does
+            // hold is that the screen can be operated with a thumb, and that
+            // it still asks its five questions.
+            if (metrics.questions.length !== 5) {
+              fails.push(`${view.name}: the pane asks ${metrics.questions.length} questions, not five`);
+            }
+            // 44 CSS pixels is the smallest target a finger hits reliably;
+            // measured on 11 Sep 2026 six controls were under it, the
+            // language buttons at 26.
+            if (metrics.smallTargets.length > 0) {
+              const named = metrics.smallTargets
+                .map((c) => `${c.text} ${c.w}x${c.h}`)
+                .join(", ");
+              fails.push(`${view.name}: ${metrics.smallTargets.length} controls under 44px: ${named}`);
+            }
           }
           if (pageErrors.length) fails.push(`${view.name}: pageerror ${pageErrors.join(" | ")}`);
           if (consoleErrors.length) fails.push(`${view.name}: console ${consoleErrors.join(" | ")}`);
@@ -233,6 +259,58 @@ describe("observatory layout", () => {
             // The rail is a way into a record from the two tabs that have no
             // list of their own. On the records tab it is neither that nor a
             // full column of anything else, so it is not drawn there at all.
+            // Every tab, not just the one the panel opens on: the first version
+            // of this measured the records tab alone and passed while two
+            // controls on the other two were still under the touch floor.
+            if (view.width <= 800) {
+              // Three things the document-level overflow check cannot see, all
+              // three measured on this screen on 11 Sep 2026: the sample badge
+              // sat on 43x16 of the third tab, the external-source card was a
+              // fixed 22rem column whose right edge landed at 438 in a 390
+              // window, and six controls were under the touch floor.
+              const wide = await page.evaluate(
+                (limit: number) =>
+                  [...document.querySelectorAll("section, p, ul, ol, h1, h2, h3")]
+                    .map((el) => ({ el, r: el.getBoundingClientRect() }))
+                    .filter(({ r }) => r.width > 0 && r.right > limit + 0.5)
+                    .slice(0, 4)
+                    .map(({ el, r }) => `${el.tagName}.${el.className}`.slice(0, 30) + ` right ${Math.round(r.right)}`),
+                view.width,
+              );
+              if (wide.length > 0) {
+                fails.push(`${view.name}/${TAB_FILES[t]}: past the right edge: ${wide.join(", ")}`);
+              }
+              const overlaps = await page.evaluate(() => {
+                const boxes = [...document.querySelectorAll('[role="tab"], .demo-badge, .lang-switch button, .refresh')]
+                  .map((el) => ({ name: (el.textContent ?? "").trim().slice(0, 14), r: el.getBoundingClientRect() }))
+                  .filter((b) => b.r.width > 0);
+                const hits: string[] = [];
+                for (let i = 0; i < boxes.length; i += 1) {
+                  for (let j = i + 1; j < boxes.length; j += 1) {
+                    const a = boxes[i]!.r;
+                    const b = boxes[j]!.r;
+                    const ox = Math.min(a.right, b.right) - Math.max(a.left, b.left);
+                    const oy = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
+                    if (ox > 1 && oy > 1) {
+                      hits.push(`${boxes[i]!.name} over ${boxes[j]!.name} (${Math.round(ox)}x${Math.round(oy)})`);
+                    }
+                  }
+                }
+                return hits;
+              });
+              if (overlaps.length > 0) {
+                fails.push(`${view.name}/${TAB_FILES[t]}: controls on top of each other: ${overlaps.join(", ")}`);
+              }
+              const small = await page.evaluate(() =>
+                [...document.querySelectorAll('button, [role="tab"]')]
+                  .map((el) => ({ el, r: el.getBoundingClientRect() }))
+                  .filter(({ r }) => r.width > 0 && r.height > 0 && r.height < 44)
+                  .map(({ el, r }) => `${(el.textContent ?? "").trim().slice(0, 16)} ${Math.round(r.width)}x${Math.round(r.height)}`),
+              );
+              if (small.length > 0) {
+                fails.push(`${view.name}/${TAB_FILES[t]}: ${small.length} controls under 44px: ${small.join(", ")}`);
+              }
+            }
             const rail = await page.evaluate(() => document.querySelector(".obs-left") !== null);
             if (TAB_FILES[t] === "records" && rail) {
               fails.push(`${view.name}/${TAB_FILES[t]}: the rail is drawn on the records tab`);
