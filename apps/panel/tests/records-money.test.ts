@@ -34,11 +34,18 @@ describe("money read from the ledger", () => {
 });
 
 /**
- * The hundred-times fault has now been found twice: on the record screen,
- * where three tests had frozen it, and on the status tab, where one had. Both
- * times a file was consistent with itself. This compares the files instead:
- * a panel source that reads an amount off a row has to read it through the
- * one function that knows the ledger stores minor units.
+ * A cheap net, and only that: a panel source that reads an amount off a row
+ * has to mention the one function that knows the ledger stores minor units.
+ *
+ * What it cannot do is say whether the amount on the screen went through it.
+ * Measured on 11 Sep 2026: with `recordLine` mutated to print the stored
+ * number raw - the list then read `spend 1000 -> example-payee` - this test
+ * stayed green, because the file still imports formatMinor two lines up. A
+ * row whose field is not called `amount` never reaches it at all.
+ *
+ * The claim that the operator reads ten lira where the ledger stores a
+ * thousand minor units belongs to money-on-screen.test.tsx, which draws the
+ * three screens and compares them against the stored number.
  */
 describe("no screen prints a stored amount raw", () => {
   it("routes every amount a panel source reads through formatMinor", () => {
