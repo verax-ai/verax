@@ -4,7 +4,13 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { BodyConfig } from "./config.ts";
-import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir } from "@verax-ai/proxy";
+import {
+  approvalsLogFor,
+  approvePending,
+  explain,
+  LedgerDenyUnrecorded,
+  loadApprovalsFromDir,
+} from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
 import { isRevokedJti } from "./revoke.ts";
@@ -238,14 +244,22 @@ export async function listen(config: BodyConfig): Promise<Server> {
         resource: config.audience,
         authorization_servers: [config.issuer],
         bearer_methods_supported: ["header"],
-        scopes_supported: ["verax:read", "verax:memory", "verax:act", "verax:pay", "verax:audit"],
+        scopes_supported: [
+          "verax:read",
+          "verax:memory",
+          "verax:act",
+          "verax:pay",
+          "verax:audit",
+          "verax:approve",
+        ],
       });
       return;
     }
     const apiLedger = req.method === "GET" && url.pathname === "/api/ledger";
     const apiInventory = url.pathname === "/api/inventory";
     const contest = req.method === "POST" && url.pathname.startsWith("/api/contest/");
-    if (url.pathname !== "/mcp" && !apiLedger && !apiInventory && !contest) {
+    const apiApprove = req.method === "POST" && url.pathname === "/api/approve";
+    if (url.pathname !== "/mcp" && !apiLedger && !apiInventory && !contest && !apiApprove) {
       send(res, 404, { error: "not-found" });
       return;
     }
@@ -270,6 +284,67 @@ export async function listen(config: BodyConfig): Promise<Server> {
       return;
     }
     try {
+      if (apiApprove) {
+        // Reading the ledger is not approving from it. The audit scope opens
+        // every door above; this one signs a new decision and lets money go,
+        // so it has a scope of its own.
+        if (!verified.principal.scopes.has("verax:approve")) {
+          send(res, 403, { error: "scope-missing" });
+          return;
+        }
+        const parsed = await readJsonBody(req, MAX_BODY_BYTES);
+        if (!parsed.ok) {
+          send(res, 400, { error: "bad-body" });
+          return;
+        }
+        const asked = (parsed.value ?? {}) as { ref?: unknown; requestHash?: unknown };
+        const ref = typeof asked.ref === "string" ? asked.ref : "";
+        const sawHash = typeof asked.requestHash === "string" ? asked.requestHash : "";
+        if (ref === "" || sawHash === "") {
+          send(res, 400, { error: "ref-and-requestHash-required" });
+          return;
+        }
+        const waiting = loadApprovalsFromDir(config.stateDir).find((row) => row.ref === ref);
+        if (!waiting) {
+          send(res, 404, { error: "unknown-ref" });
+          return;
+        }
+        // The list on a phone can be ten minutes old. An approval names the
+        // request the operator was looking at, and if that is not what is
+        // waiting any more, nothing is approved: "I approved what I saw" is
+        // only true when something checks it.
+        if (waiting.requestHash !== sawHash) {
+          send(res, 409, { error: "stale", requestHash: waiting.requestHash });
+          return;
+        }
+        const decisions = await services.ledger.decisions();
+        const defer = decisions.find((d) => d.claims.ref === ref && d.claims.decision === "defer");
+        if (!defer) {
+          send(res, 404, { error: "unknown-ref" });
+          return;
+        }
+        // Who approved, on the record. The CLI writes the machine's login name,
+        // which says nothing about the person holding the phone; the session's
+        // own subject does.
+        const approver = verified.principal.brain;
+        const outcome = await approvePending({
+          ledger: services.ledger,
+          recordSigner: loadOrCreateSigners(config.stateDir).recordSigner,
+          now: () => Date.now(),
+          nonce: () => crypto.randomUUID(),
+          ref,
+          approverId: approver,
+          policyHash: defer.claims.policyHash,
+          approvals: approvalsLogFor(services.ledger),
+        });
+        if (!outcome.ok) {
+          const code = outcome.reason === "unknown-ref" || outcome.reason === "snapshot-missing" ? 404 : 409;
+          send(res, code, { error: outcome.reason });
+          return;
+        }
+        send(res, 200, { allowRef: outcome.allowRef, approver });
+        return;
+      }
       if (apiLedger || apiInventory || contest) {
         // The audit doors hand out the whole ledger: every tenant's decisions, the
         // inputs documents that name their principals, and the approval snapshots
