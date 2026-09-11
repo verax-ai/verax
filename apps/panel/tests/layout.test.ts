@@ -1,11 +1,11 @@
 import { strict as assert } from "node:assert";
-import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { englishInterfaceLeftovers } from "./turkish-screen.ts";
+import { killStragglers, startPreview, trackBrowser } from "../../../scripts/test-preview.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
@@ -43,32 +43,18 @@ const TURKISH_ONLY = Object.keys(trCopy)
 
 const TAB_FILES = ["records", "galaxy", "status"] as const;
 
+after(killStragglers);
+
 describe("observatory layout", () => {
   it("keeps three tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
     mkdirSync(shotDir, { recursive: true });
-    const child = spawn(process.execPath, [viteJs, "--host", "127.0.0.1", "--port", "4189", "--strictPort"], {
-      cwd: root,
-      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4189, label: "panel-layout" });
+    const ready = `${preview.base}/?demo=1`;
     const fails: string[] = [];
     try {
-      const ready = await new Promise<string>((resolve, reject) => {
-        let buf = "";
-        const timer = setTimeout(() => reject(new Error(`preview-timeout:${buf.slice(-400)}`)), 90_000);
-        const onData = (chunk: Buffer) => {
-          buf += String(chunk);
-          if (buf.includes("http://127.0.0.1:4189/")) {
-            clearTimeout(timer);
-            resolve("http://127.0.0.1:4189/?demo=1");
-          }
-        };
-        child.stdout.on("data", onData);
-        child.stderr.on("data", onData);
-        child.on("exit", (code) => reject(new Error(`preview-exit:${code}:${buf.slice(-400)}`)));
-      });
       const { chromium } = await import("playwright");
       const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
+      const stopBrowser = trackBrowser(browser);
       try {
         for (const view of VIEWS) {
           const page = await browser.newPage({ viewport: { width: view.width, height: view.height } });
@@ -264,9 +250,10 @@ describe("observatory layout", () => {
         }
       } finally {
         await browser.close();
+        stopBrowser();
       }
     } finally {
-      child.kill();
+      preview.stop();
     }
     if (fails.length) assert.fail(fails.join("\n"));
   });
@@ -274,29 +261,13 @@ describe("observatory layout", () => {
   it("keeps the Turkish screen free of English interface words the copy table did not supply", { timeout: 120_000 }, async () => {
     const shotTr = join(homedir(), "Desktop", "Work", "VERAX_EKRAN_DILI_20260910");
     mkdirSync(shotTr, { recursive: true });
-    const child = spawn(process.execPath, [viteJs, "--host", "127.0.0.1", "--port", "4190", "--strictPort"], {
-      cwd: root,
-      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4190, label: "panel-layout-tr" });
+    const ready = `${preview.base}/?demo=1&lang=tr`;
     const fails: string[] = [];
     try {
-      const ready = await new Promise<string>((resolve, reject) => {
-        let buf = "";
-        const timer = setTimeout(() => reject(new Error(`preview-timeout:${buf.slice(-400)}`)), 90_000);
-        const onData = (chunk: Buffer) => {
-          buf += String(chunk);
-          if (buf.includes("http://127.0.0.1:4190/")) {
-            clearTimeout(timer);
-            resolve("http://127.0.0.1:4190/?demo=1&lang=tr");
-          }
-        };
-        child.stdout.on("data", onData);
-        child.stderr.on("data", onData);
-        child.on("exit", (code) => reject(new Error(`preview-exit:${code}:${buf.slice(-400)}`)));
-      });
       const { chromium } = await import("playwright");
       const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
+      const stopBrowser = trackBrowser(browser);
       try {
         const page = await browser.newPage({ viewport: { width: 1360, height: 880 } });
         await page.goto(ready, { waitUntil: "domcontentloaded" });
@@ -320,9 +291,10 @@ describe("observatory layout", () => {
         }
       } finally {
         await browser.close();
+        stopBrowser();
       }
     } finally {
-      child.kill();
+      preview.stop();
     }
     if (fails.length) assert.fail(fails.join("\n"));
   });

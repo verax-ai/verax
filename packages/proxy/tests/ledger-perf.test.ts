@@ -156,87 +156,140 @@ describe("B8 FileLedger append cost and durability", () => {
   });
 });
 
+/**
+ * Time one approve against a ledger that already holds `fill` decisions, and
+ * count how often it rereads inputs.jsonl.
+ */
+async function measureApprove(fill: number): Promise<{
+  approveMs: number;
+  approveReads: number;
+  approveDecisionReads: number;
+  explainMs: number;
+  explainReads: number;
+}> {
+  const dir = mkdtempSync(join(tmpdir(), "verax-resolve-cost-"));
+  const ledger = new FileLedger(dir);
+  const approvePolicy = loadPolicy({
+    version: 1,
+    default: "deny",
+    approvalTtlMs: 86_400_000,
+    rules: [
+      {
+        id: "put-approve",
+        tool: "memory.put",
+        requires: ["verax:memory"],
+        mode: "approve",
+        text: "Writes need operator approval.",
+      },
+      { id: "get", tool: "memory.get", requires: ["verax:read"], text: "Reads need the read scope." },
+    ],
+  });
+  const principal = { brain: "brain-1", scopes: new Set(["verax:memory", "verax:read"]) };
+  let n = 0;
+  const proxy = createProxy({
+    policy: approvePolicy,
+    recordSigner: RECORD_SIGNER,
+    effectSigner: EFFECT_SIGNER,
+    ledger,
+    now: tickingNow(1_000, 10),
+    nonce: () => `g${++n}`,
+    inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+  });
+  try {
+    for (let i = 0; i < fill; i += 1) {
+      await proxy.call({ name: "memory.get", arguments: { id: `k${i}` } }, principal);
+    }
+    await proxy.call(
+      {
+        name: "memory.put",
+        arguments: { id: "n5", body: "hello", source: { kind: "t" }, validUntilMs: 9_999, _ref: "r5" },
+      },
+      principal,
+    );
+    const origRead = ledgerFs.readFile.bind(ledgerFs);
+    let inputReads = 0;
+    let decisionReads = 0;
+    ledgerFs.readFile = (async (path: Parameters<typeof origRead>[0], ...rest: unknown[]) => {
+      const name = String(path);
+      if (name.endsWith("inputs.jsonl")) inputReads += 1;
+      if (name.endsWith("decisions.jsonl")) decisionReads += 1;
+      return origRead(path, ...(rest as []));
+    }) as typeof ledgerFs.readFile;
+    try {
+      inputReads = 0;
+      let t0 = performance.now();
+      await explain(ledger, "r5");
+      const explainMs = performance.now() - t0;
+      const explainReads = inputReads;
+      inputReads = 0;
+      decisionReads = 0;
+      t0 = performance.now();
+      const approved = await approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: tickingNow(10_000, 10),
+        nonce: queuedNonce(["a5"]),
+        ref: "r5",
+        approverId: "op",
+        policyHash: (await ledger.decisions()).find((d) => d.claims.ref === "r5")!.claims.policyHash,
+        approvals: proxy.approvals,
+        inputsLog: proxy.inputsLog,
+      });
+      const approveMs = performance.now() - t0;
+      assert.equal(approved.ok, true);
+      return { approveMs, approveReads: inputReads, approveDecisionReads: decisionReads, explainMs, explainReads };
+    } finally {
+      ledgerFs.readFile = origRead;
+    }
+  } finally {
+    ledger.close();
+  }
+}
+
 describe("S1F resolvedBy cost", () => {
   it("approve stays O(1) on inputs.jsonl after 600 decisions", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verax-resolve-cost-"));
-    const ledger = new FileLedger(dir);
-    const approvePolicy = loadPolicy({
-      version: 1,
-      default: "deny",
-      approvalTtlMs: 86_400_000,
-      rules: [
-        {
-          id: "put-approve",
-          tool: "memory.put",
-          requires: ["verax:memory"],
-          mode: "approve",
-          text: "Writes need operator approval.",
-        },
-        { id: "get", tool: "memory.get", requires: ["verax:read"], text: "Reads need the read scope." },
-      ],
-    });
-    const principal = { brain: "brain-1", scopes: new Set(["verax:memory", "verax:read"]) };
-    let n = 0;
-    const proxy = createProxy({
-      policy: approvePolicy,
-      recordSigner: RECORD_SIGNER,
-      effectSigner: EFFECT_SIGNER,
-      ledger,
-      now: tickingNow(1_000, 10),
-      nonce: () => `g${++n}`,
-      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
-    });
-    try {
-      for (let i = 0; i < 600; i += 1) {
-        await proxy.call({ name: "memory.get", arguments: { id: `k${i}` } }, principal);
-      }
-      await proxy.call(
-        {
-          name: "memory.put",
-          arguments: { id: "n5", body: "hello", source: { kind: "t" }, validUntilMs: 9_999, _ref: "r5" },
-        },
-        principal,
-      );
-      const origRead = ledgerFs.readFile.bind(ledgerFs);
-      let inputReads = 0;
-      ledgerFs.readFile = (async (path: Parameters<typeof origRead>[0], ...rest: unknown[]) => {
-        if (String(path).endsWith("inputs.jsonl")) inputReads += 1;
-        return origRead(path, ...(rest as []));
-      }) as typeof ledgerFs.readFile;
-      try {
-        inputReads = 0;
-        let t0 = performance.now();
-        await explain(ledger, "r5");
-        const explainMs = performance.now() - t0;
-        const explainReads = inputReads;
-        inputReads = 0;
-        t0 = performance.now();
-        const approved = await approvePending({
-          ledger,
-          recordSigner: RECORD_SIGNER,
-          now: tickingNow(10_000, 10),
-          nonce: queuedNonce(["a5"]),
-          ref: "r5",
-          approverId: "op",
-          policyHash: (await ledger.decisions()).find((d) => d.claims.ref === "r5")!.claims.policyHash,
-          approvals: proxy.approvals,
-          inputsLog: proxy.inputsLog,
-        });
-        const approveMs = performance.now() - t0;
-        const approveReads = inputReads;
-        console.log(
-          `resolve-cost explain=${explainMs.toFixed(0)}ms reads=${explainReads} approve=${approveMs.toFixed(0)}ms reads=${approveReads}`,
-        );
-        assert.equal(approved.ok, true);
-        assert.ok(explainReads < 5, `explain(pending defer) reread inputs.jsonl ${explainReads} times`);
-        assert.ok(approveReads < 5, `approve reread inputs.jsonl ${approveReads} times`);
-        assert.ok(approveMs < 200, `approve ${approveMs.toFixed(0)}ms (ceiling 200)`);
-      } finally {
-        ledgerFs.readFile = origRead;
-      }
-    } finally {
-      ledger.close();
-    }
+    // Two things are measured here, and only one of them used to be true.
+    //
+    // The claim is that approve does not grow with the ledger. What proves it
+    // is the reread count: one read of inputs.jsonl whether the ledger holds
+    // 60 decisions or 600. That assertion has never failed.
+    //
+    // The wall clock is not evidence of the claim, it is evidence about the
+    // machine. A fixed `approveMs < 200` ceiling failed on a hosted Windows
+    // runner at 294 ms on 10 Sep 2026 while the same tree passed minutes
+    // earlier, and locally the same call measured 6, 21, 22, 23, 37 and 63 ms
+    // - a tenfold spread on an idle laptop. Raising the ceiling would only
+    // raise the stake on the same bet.
+    //
+    // Comparing time against time on the same machine was tried next and is
+    // not good enough either. Mutating approve to walk the whole decision log
+    // twice moved the ratio from 1.7 to 2.75 and to 3.01 - inside any budget
+    // loose enough not to fire on noise, and three clean runs of this suite
+    // produced 1.53, 4.26 and 4.14 with no mutation at all.
+    //
+    // What does hold is counting. The two numbers below are integers the
+    // filesystem hands us: they do not move with the machine, and the same
+    // mutation took them from 1 to 3 at once. The timings are still printed,
+    // because a human reading a build log can use them; nothing is asserted
+    // about them, because nothing true can be.
+    const small = await measureApprove(60);
+    const large = await measureApprove(600);
+    console.log(
+      `resolve-cost explain=${large.explainMs.toFixed(0)}ms reads=${large.explainReads}` +
+        ` approve=${large.approveMs.toFixed(0)}ms reads=${large.approveReads}` +
+        ` approve@60=${small.approveMs.toFixed(0)}ms ratio=${(large.approveMs / Math.max(small.approveMs, 1)).toFixed(2)}` +
+        ` decisionReads=${small.approveDecisionReads}/${large.approveDecisionReads}`,
+    );
+    assert.ok(large.explainReads < 5, `explain(pending defer) reread inputs.jsonl ${large.explainReads} times`);
+    assert.ok(small.approveReads < 5, `approve at 60 reread inputs.jsonl ${small.approveReads} times`);
+    assert.ok(large.approveReads < 5, `approve at 600 reread inputs.jsonl ${large.approveReads} times`);
+    // approve resolves a defer by ref: it opens the decision log once. The
+    // mutation that the clock could not see moved this from 1 to 3, and would
+    // move the pair apart if a scan grew with the ledger.
+    assert.equal(small.approveDecisionReads, large.approveDecisionReads,
+      `approve read decisions.jsonl ${small.approveDecisionReads} times at 60 and ${large.approveDecisionReads} at 600`);
+    assert.ok(large.approveDecisionReads <= 1,
+      `approve read the whole decision log ${large.approveDecisionReads} times; it is meant to resolve by ref`);
   });
 });
 
