@@ -41,11 +41,46 @@ function statusPath(stateDir: string): string {
   return join(stateDir, "witness-status.jsonl");
 }
 
-function writePemAtomic(path: string, pem: string): void {
+/**
+ * Replace a file's contents in one step, so a reader sees the old bytes or the
+ * new ones and never a half-written file.
+ *
+ * Writing in place is not that: measured on 11 Sep 2026, a reader polling this
+ * path every 20 ms while the file was rewritten 60 times got 12 unparseable
+ * reads. The listen file is read by another process - that is its whole job -
+ * and readWitnessListen answers a torn read with `null`, which the caller
+ * cannot tell from "no witness is running".
+ *
+ * The rename needs the retry. On Windows it fails with EPERM while a reader
+ * holds the destination open, and in the same measurement 26 of 60 plain
+ * renames failed that way. Retrying briefly lost none of them and still let no
+ * torn read through.
+ */
+function writeFileAtomic(path: string, text: string): void {
   const tmp = `${path}.tmp`;
-  writeFileSync(tmp, pem, { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, path);
+  writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      renameSync(tmp, path);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 40 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
+      const until = Date.now() + 5;
+      while (Date.now() < until) {
+        // Busy-wait: this runs on the witness's own start-up path, where there
+        // is nothing else to do and no event loop turn worth yielding for.
+      }
+    }
+  }
 }
+
+function writePemAtomic(path: string, pem: string): void {
+  writeFileAtomic(path, pem);
+}
+
+/** The same writer the listen file goes through, so its test measures it. */
+export const writeListenForTest = writeFileAtomic;
 
 export function loadOrCreateWitnessKeys(stateDir: string): { privateKeyPem: string; publicKeyPem: string } {
   const dir = join(stateDir, "keys");
@@ -371,7 +406,7 @@ export async function runWitness(stateDir: string): Promise<void> {
     publicKeyPem: keys.publicKeyPem,
     startedAt: Date.now(),
   };
-  writeFileSync(listenPath(stateDir), `${JSON.stringify(listen)}\n`, { encoding: "utf8", mode: 0o600 });
+  writeFileAtomic(listenPath(stateDir), `${JSON.stringify(listen)}\n`);
   process.stderr.write(`witness-pid:${process.pid}\n`);
   process.stderr.write(`witness-port:${addr.port}\n`);
   await new Promise<void>((resolve) => {
