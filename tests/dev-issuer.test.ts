@@ -19,6 +19,19 @@ const LISTENING = /dev-issuer listening on http:\/\/127\.0\.0\.1:(\d+)\//;
  * The wait stays under the tightest test timeout here (10 s) so the assertion
  * below is what fails, with the issuer's own stderr in the message.
  */
+/**
+ * How long a request to a server on this machine may take before the test
+ * gives up. This is a guard against a hung request, not a claim about
+ * latency: nothing here asserts that the issuer is fast, only that it
+ * answers, and the status and signature checks below carry that.
+ *
+ * It was one second. The unit runner starts 101 files at once, and on
+ * 11 Sep 2026 this test aborted twice at that budget while 24 green runs of
+ * the same suite finished it in 281-2227 ms. A second is inside the spread
+ * of the machine, so it measured the machine.
+ */
+const LOCAL_FETCH_MS = 10_000;
+
 function listeningPort(getStderr: () => string, ms = 8_000): Promise<string> {
   return (async () => {
     const until = Date.now() + ms;
@@ -41,7 +54,7 @@ function assertBound(port: string, stderr: string): void {
 }
 
 describe("6 dev-issuer.mjs", () => {
-  it("serves JWKS on the bound VERAX_DEV_ISSUER_PORT and writes a token jose can verify", { timeout: 10000 }, async () => {
+  it("serves JWKS on the bound VERAX_DEV_ISSUER_PORT and writes a token jose can verify", { timeout: 60_000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-issuer-"));
     const outPath = join(stateDir, "token");
     const child = spawn(process.execPath, [script, "--out", outPath], {
@@ -74,7 +87,7 @@ describe("6 dev-issuer.mjs", () => {
       assert.equal(Number.isInteger(port) && port > 0, true, `issuer did not bind a real port: stderr=${stderr}`);
       const origin = `http://127.0.0.1:${port}`;
       const jwks = `${origin}/.well-known/jwks.json`;
-      const jwksRes = await fetch(jwks, { signal: AbortSignal.timeout(1000) });
+      const jwksRes = await fetch(jwks, { signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
       assert.equal(jwksRes.status, 200);
       const token = readFileSync(outPath, "utf8").trim();
       assert.equal(token.length > 0, true);
@@ -90,7 +103,7 @@ describe("6 dev-issuer.mjs", () => {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ jti: payload.jti }),
-        signal: AbortSignal.timeout(1000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(revoke.status, 200);
       const revokedPath = join(stateDir, "revoked-jti.jsonl");
@@ -135,7 +148,7 @@ describe("6 dev-issuer.mjs", () => {
       const redirect = "http://127.0.0.1:5173/";
       const missing = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}`,
-        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(missing.status >= 400 && missing.status < 500, true, `missing challenge status=${missing.status}`);
       const missingLoc = missing.headers.get("location") ?? "";
@@ -143,7 +156,7 @@ describe("6 dev-issuer.mjs", () => {
 
       const plain = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=abc&code_challenge_method=plain`,
-        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(plain.status >= 400 && plain.status < 500, true, `plain status=${plain.status}`);
       assert.equal((plain.headers.get("location") ?? "").includes("code="), false);
@@ -152,7 +165,7 @@ describe("6 dev-issuer.mjs", () => {
       const challenge = createHash("sha256").update(verifier).digest("base64url");
       const auth = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256&state=st1`,
-        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(auth.status, 302);
       const loc = new URL(auth.headers.get("location") ?? "", origin);
@@ -170,7 +183,7 @@ describe("6 dev-issuer.mjs", () => {
           code_verifier: verifier,
           client_id: "verax-panel",
         }),
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(tokenRes.status, 200);
       const body = (await tokenRes.json()) as { access_token?: string; token_type?: string };
@@ -194,13 +207,13 @@ describe("6 dev-issuer.mjs", () => {
           code_verifier: verifier,
           client_id: "verax-panel",
         }),
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(replay.status >= 400 && replay.status < 500, true);
 
       const mismatch = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
-        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       const code2 = new URL(mismatch.headers.get("location") ?? "", origin).searchParams.get("code");
       const wrongUri = await fetch(`${origin}/token`, {
@@ -213,7 +226,7 @@ describe("6 dev-issuer.mjs", () => {
           code_verifier: verifier,
           client_id: "verax-panel",
         }),
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(wrongUri.status >= 400 && wrongUri.status < 500, true);
     } finally {
@@ -222,7 +235,7 @@ describe("6 dev-issuer.mjs", () => {
     }
   });
 
-  it("refuses an unregistered redirect_uri with 400 and no Location", { timeout: 10000 }, async () => {
+  it("refuses an unregistered redirect_uri with 400 and no Location", { timeout: 60_000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-redir-"));
     const outPath = join(stateDir, "token");
     const child = spawn(process.execPath, [script, "--out", outPath], {
@@ -256,7 +269,7 @@ describe("6 dev-issuer.mjs", () => {
       const challenge = createHash("sha256").update(verifier).digest("base64url");
       const evil = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent("http://evil.example/steal")}&code_challenge=${challenge}&code_challenge_method=S256`,
-        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(evil.status, 400);
       const body = (await evil.json()) as { error?: string };
@@ -304,7 +317,7 @@ describe("6 dev-issuer.mjs", () => {
       const authorize = async () => {
         const auth = await fetch(
           `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
-          { redirect: "manual", signal: AbortSignal.timeout(2000) },
+          { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
         );
         return new URL(auth.headers.get("location") ?? "", origin).searchParams.get("code") ?? "";
       };
@@ -325,7 +338,7 @@ describe("6 dev-issuer.mjs", () => {
             redirect_uri: redirect,
             code_verifier: verifier,
           }),
-          signal: AbortSignal.timeout(2000),
+          signal: AbortSignal.timeout(LOCAL_FETCH_MS),
         });
       const firstRes = await exchange(first);
       assert.equal(firstRes.status, 400, "the oldest code must have been dropped");
@@ -377,7 +390,7 @@ describe("6 dev-issuer.mjs", () => {
       const challenge = createHash("sha256").update(verifier).digest("base64url");
       const authorized = await fetch(
         `${origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
-        { redirect: "manual", signal: AbortSignal.timeout(2000) },
+        { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       const location = authorized.headers.get("location") ?? "";
       const code = new URL(location).searchParams.get("code") ?? "";
@@ -390,7 +403,7 @@ describe("6 dev-issuer.mjs", () => {
           "access-control-request-method": "POST",
           "access-control-request-headers": "content-type",
         },
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(preflight.status < 300, true, `preflight status=${preflight.status}`);
       assert.equal(preflight.headers.get("access-control-allow-origin"), panel);
@@ -405,7 +418,7 @@ describe("6 dev-issuer.mjs", () => {
           code_verifier: verifier,
           client_id: "verax-panel",
         }),
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(token.status, 200, `token status=${token.status}`);
       assert.equal(
@@ -455,7 +468,7 @@ describe("6 dev-issuer.mjs", () => {
           origin: "http://evil.test",
           "access-control-request-method": "POST",
         },
-        signal: AbortSignal.timeout(2000),
+        signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(preflight.headers.get("access-control-allow-origin"), null);
     } finally {
