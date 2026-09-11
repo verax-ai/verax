@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
-import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
-import { describe, it } from "node:test";
+import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import { killStragglers, startPreview, trackBrowser } from "../../../scripts/test-preview.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
@@ -54,31 +54,17 @@ function insideWindow(b: Box, w: number, h: number): boolean {
   return b.left >= -0.5 && b.top >= -0.5 && b.right <= w + 0.5 && b.bottom <= h + 0.5;
 }
 
+after(killStragglers);
+
 describe("body-map layout", () => {
   it("keeps the stage, rain, anchors, labels, card and CTA on the first screen", async () => {
-    const child = spawn(process.execPath, [viteJs, "--host", "127.0.0.1", "--port", "4188", "--strictPort"], {
-      cwd: root,
-      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4188, label: "body-map-layout" });
+    const ready = `${preview.base}/verax/`;
     const fails: string[] = [];
     try {
-      const ready = await new Promise<string>((resolve, reject) => {
-        let buf = "";
-        const timer = setTimeout(() => reject(new Error(`preview-timeout:${buf.slice(-400)}`)), 90_000);
-        const onData = (chunk: Buffer) => {
-          buf += String(chunk);
-          if (buf.includes("http://127.0.0.1:4188/")) {
-            clearTimeout(timer);
-            resolve("http://127.0.0.1:4188/verax/");
-          }
-        };
-        child.stdout.on("data", onData);
-        child.stderr.on("data", onData);
-        child.on("exit", (code) => reject(new Error(`preview-exit:${code}:${buf.slice(-400)}`)));
-      });
       const { chromium } = await import("playwright");
       const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
+      const stopBrowser = trackBrowser(browser);
       const shots: Shot[] = [];
       for (const view of VIEWS) {
         const page = await browser.newPage({ viewport: { width: view.width, height: view.height } });
@@ -152,6 +138,7 @@ describe("body-map layout", () => {
         await page.close();
       }
       await browser.close();
+      stopBrowser();
 
       for (const s of shots) {
         const desktop = s.width > 800;
@@ -227,7 +214,7 @@ describe("body-map layout", () => {
         assert.fail(fails.join("\n"));
       }
     } finally {
-      child.kill();
+      preview.stop();
     }
   });
 });
