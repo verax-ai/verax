@@ -20,6 +20,31 @@ export function sessionIssueError(): string | null {
   return sessionError;
 }
 
+/**
+ * The scopes on the token in memory, for deciding what to draw.
+ *
+ * Read without verifying, deliberately: a signature check here would protect
+ * nothing, because the body verifies every call anyway. This answers "should
+ * this button exist", never "is this allowed" - the second question is not the
+ * screen's to answer.
+ */
+export function sessionScopes(): Set<string> {
+  const out = new Set<string>();
+  if (token === null) return out;
+  const body = token.split(".")[1];
+  if (body === undefined) return out;
+  try {
+    const json = atob(body.replace(/-/g, "+").replace(/_/g, "/"));
+    const claims = JSON.parse(json) as { scope?: unknown };
+    if (typeof claims.scope === "string") {
+      for (const part of claims.scope.split(" ")) if (part !== "") out.add(part);
+    }
+  } catch {
+    return out;
+  }
+  return out;
+}
+
 function fallbackIssuer(): string {
   const fromEnv = import.meta.env.VITE_VERAX_ISSUER;
   if (typeof fromEnv === "string" && fromEnv.trim() !== "") {
@@ -112,6 +137,10 @@ async function startAuthorize(issuer: string): Promise<void> {
   dest.searchParams.set("response_type", "code");
   dest.searchParams.set("client_id", "verax-panel");
   dest.searchParams.set("redirect_uri", redirectUri());
+  // The panel says what it intends to do. Whether the issuer grants the
+  // approve scope is the issuer's call; the panel asks, and draws no approval
+  // button when the answer is no.
+  dest.searchParams.set("scope", "verax:audit verax:approve");
   dest.searchParams.set("code_challenge", await s256(verifier));
   dest.searchParams.set("code_challenge_method", "S256");
   dest.searchParams.set("state", state);

@@ -5,7 +5,7 @@ import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observa
 import { parseLedger } from "./rail/parse.ts";
 import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
-import { authorizedFetch, beginSession, sessionIssueError } from "./session.ts";
+import { authorizedFetch, beginSession, sessionIssueError, sessionScopes } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
 
@@ -28,6 +28,7 @@ export function App() {
   const [health, setHealth] = useState<Healthz>(null);
   const [pending, setPending] = useState<PendingApproval[]>([]);
   const [inventory, setInventory] = useState<Inventory | null>(null);
+  const [canApprove, setCanApprove] = useState(false);
 
   const loadInventory = useCallback(async () => {
     try {
@@ -151,6 +152,7 @@ export function App() {
         setError({ code: "session", detail: sessionIssueError() });
         return;
       }
+      setCanApprove(sessionScopes().has("verax:approve"));
       void load();
       id = setInterval(() => {
         void load();
@@ -200,6 +202,28 @@ export function App() {
         health={health}
         reconcile={reconcileReport}
         error={error}
+        canApprove={canApprove}
+        onApprove={async (ref, requestHash) => {
+          const res = await authorizedFetch("/api/approve", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ ref, requestHash }),
+          });
+          const body = (await res.json().catch(() => ({}))) as {
+            allowRef?: unknown;
+            error?: unknown;
+          };
+          if (res.ok && typeof body.allowRef === "string") {
+            // The approval changed the ledger; the screen reads it again
+            // rather than drawing what it assumes happened.
+            void load();
+            return { ok: true as const, allowRef: body.allowRef };
+          }
+          return {
+            ok: false as const,
+            error: typeof body.error === "string" ? body.error : `http-${res.status}`,
+          };
+        }}
         stale={stale}
         ageMs={ageMs}
         pending={pending}
