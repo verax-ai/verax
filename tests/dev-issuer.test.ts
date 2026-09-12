@@ -194,7 +194,7 @@ describe("6 dev-issuer.mjs", () => {
         issuer: "http://127.0.0.1:8790",
         audience: "http://127.0.0.1:8787",
       });
-      assert.equal(payload.sub, "dev-brain");
+      assert.equal(payload.sub, "operator-1");
       assert.equal(stderr.includes(body.access_token!), false);
 
       const replay = await fetch(`${origin}/token`, {
