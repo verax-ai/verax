@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { killStragglers, startPreview, trackBrowser } from "../../../scripts/test-preview.ts";
+import { killStragglers, launchBrowser, startPreview } from "../../../scripts/test-preview.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
@@ -10,7 +10,7 @@ const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
 after(killStragglers);
 
 describe("body-map page", () => {
-  it("opens seven labels, click changes the card, lang=tr sets the title", async () => {
+  it("opens seven labels, click changes the card, lang=tr sets the title", { timeout: 120_000 }, async () => {
     // This wait used to sit outside the try below, so a preview that never
     // came up failed the test and left vite running - and a live child keeps
     // the runner from exiting at all. startPreview owns the child from the
@@ -18,9 +18,7 @@ describe("body-map page", () => {
     const preview = await startPreview({ viteJs, cwd: root, port: 4177, label: "body-map-page" });
     const ready = `${preview.base}/verax/`;
     try {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
-      const stopBrowser = trackBrowser(browser);
+      const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       const page = await browser.newPage();
       await page.goto(ready, { waitUntil: "networkidle" });
       const labels = page.locator("button.label");

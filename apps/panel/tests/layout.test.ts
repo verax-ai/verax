@@ -5,7 +5,7 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { englishInterfaceLeftovers } from "./turkish-screen.ts";
-import { killStragglers, startPreview, trackBrowser } from "../../../scripts/test-preview.ts";
+import { killStragglers, launchBrowser, startPreview } from "../../../scripts/test-preview.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
@@ -52,9 +52,7 @@ describe("observatory layout", () => {
     const ready = `${preview.base}/?demo=1`;
     const fails: string[] = [];
     try {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
-      const stopBrowser = trackBrowser(browser);
+      const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       try {
         for (const view of VIEWS) {
           const page = await browser.newPage({ viewport: { width: view.width, height: view.height } });
@@ -367,9 +365,7 @@ describe("observatory layout", () => {
     const ready = `${preview.base}/?demo=1&lang=tr`;
     const fails: string[] = [];
     try {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
-      const stopBrowser = trackBrowser(browser);
+      const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       try {
         const page = await browser.newPage({ viewport: { width: 1360, height: 880 } });
         await page.goto(ready, { waitUntil: "domcontentloaded" });
@@ -407,9 +403,7 @@ describe("observatory layout", () => {
     const preview = await startPreview({ viteJs, cwd: root, port: 4191, label: "panel-approve-390" });
     const ready = `${preview.base}/?demo=1&lang=tr`;
     try {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
-      const stopBrowser = trackBrowser(browser);
+      const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       try {
         const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
         await page.goto(ready, { waitUntil: "domcontentloaded" });
@@ -441,9 +435,7 @@ describe("observatory layout", () => {
   it("at 390, the approve control does not pull the page back once the operator scrolls away", { timeout: 120_000 }, async () => {
     const preview = await startPreview({ viteJs, cwd: root, port: 4192, label: "panel-approve-stays" });
     try {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
-      const stopBrowser = trackBrowser(browser);
+      const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       try {
         const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
         await page.goto(`${preview.base}/?demo=1&lang=tr`, { waitUntil: "domcontentloaded" });

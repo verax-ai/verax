@@ -20,7 +20,8 @@
 //
 // This file never asserts. It only starts things and guarantees they die.
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import type { Browser } from "playwright";
 
 /** Anything holding a handle open: a spawned server, a browser process. */
 export type Straggler = { kill: () => void };
@@ -36,37 +37,60 @@ export function trackStraggler(straggler: Straggler): () => void {
   live.add(straggler);
   return () => {
     live.delete(straggler);
-    try {
-      straggler.kill();
-    } catch {
-      // Already gone. Nothing to do, and nothing worth failing a suite over.
-    }
+    // Killing a process that already exited returns false; it does not throw.
+    // Whatever does throw here is a broken kill, and hiding it is how a
+    // browser that was never killed looked like one that was.
+    straggler.kill();
   };
 }
 
 /**
- * A playwright Browser is tracked by its process, not by `close()`: closing is
+ * Launch Chromium as a server this process owns, and connect to it.
+ *
+ * A browser is tracked by its process, not by `close()`: closing is
  * asynchronous and can itself hang, and an after-hook that awaits a hung close
- * is the same trap one level up.
+ * is the same trap one level up. `chromium.launch()` gives no handle on the
+ * process. The helper this replaces called `browser.process()`, which a
+ * Browser does not have; the TypeError fell into an empty catch, so a test
+ * that failed with its browser open left Chromium running and the runner
+ * waiting on it until the CI cap. `launchServer()` returns the process itself.
+ *
+ * `browser.close()` on a connected browser only disconnects. Call
+ * `stopBrowser()` after it to end the process.
  */
-export function trackBrowser(browser: { process: () => ChildProcess | null }): () => void {
-  return trackStraggler({
+export async function launchBrowser(args: string[] = []): Promise<{ browser: Browser; stopBrowser: () => void }> {
+  const { chromium } = await import("playwright");
+  const server = await chromium.launchServer({ args });
+  const stopBrowser = trackStraggler({
     kill: () => {
-      browser.process()?.kill();
+      server.process().kill();
     },
   });
+  try {
+    const browser = await chromium.connect(server.wsEndpoint());
+    return { browser, stopBrowser };
+  } catch (err) {
+    stopBrowser();
+    throw err;
+  }
 }
 
-/** Kill everything still registered. Safe to call more than once. */
+/**
+ * Kill everything still registered. Safe to call more than once. Every entry
+ * is attempted before a failure is reported, so one broken kill cannot leave
+ * the rest alive.
+ */
 export function killStragglers(): void {
+  const failures: unknown[] = [];
   for (const straggler of live) {
     try {
       straggler.kill();
-    } catch {
-      // See above.
+    } catch (err) {
+      failures.push(err);
     }
   }
   live.clear();
+  if (failures.length > 0) throw new AggregateError(failures, "straggler-kill-failed");
 }
 
 export type Preview = {

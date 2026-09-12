@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { killStragglers, startPreview, trackBrowser } from "../../../scripts/test-preview.ts";
+import { killStragglers, launchBrowser, startPreview } from "../../../scripts/test-preview.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
@@ -57,14 +57,12 @@ function insideWindow(b: Box, w: number, h: number): boolean {
 after(killStragglers);
 
 describe("body-map layout", () => {
-  it("keeps the stage, rain, anchors, labels, card and CTA on the first screen", async () => {
+  it("keeps the stage, rain, anchors, labels, card and CTA on the first screen", { timeout: 120_000 }, async () => {
     const preview = await startPreview({ viteJs, cwd: root, port: 4188, label: "body-map-layout" });
     const ready = `${preview.base}/verax/`;
     const fails: string[] = [];
     try {
-      const { chromium } = await import("playwright");
-      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
-      const stopBrowser = trackBrowser(browser);
+      const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       const shots: Shot[] = [];
       for (const view of VIEWS) {
         const page = await browser.newPage({ viewport: { width: view.width, height: view.height } });
