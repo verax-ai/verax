@@ -89,17 +89,24 @@ export async function startPreview(opts: {
   port: number;
   label: string;
   readyTimeoutMs?: number;
+  /** Extra env for the child. Overlay, not a replacement. */
+  env?: NodeJS.ProcessEnv;
+  /**
+   * `preview` is what `verax desktop` runs. The default stays the vite
+   * dev server so the layout gates keep the path they already measure.
+   */
+  command?: "dev" | "preview";
 }): Promise<Preview> {
   const base = `http://127.0.0.1:${opts.port}`;
-  const child = spawn(
-    process.execPath,
-    [opts.viteJs, "--host", "127.0.0.1", "--port", String(opts.port), "--strictPort"],
-    {
-      cwd: opts.cwd,
-      env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
+  const argv =
+    opts.command === "preview"
+      ? [opts.viteJs, "preview", "--host", "127.0.0.1", "--port", String(opts.port), "--strictPort"]
+      : [opts.viteJs, "--host", "127.0.0.1", "--port", String(opts.port), "--strictPort"];
+  const child = spawn(process.execPath, argv, {
+    cwd: opts.cwd,
+    env: { ...process.env, ...opts.env, NO_COLOR: "1", FORCE_COLOR: "0" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
   // Tracked before the first await: a rejection from here on cannot orphan it.
   const stop = trackStraggler(child);
   const startedAt = Date.now();

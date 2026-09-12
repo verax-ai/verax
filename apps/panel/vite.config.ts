@@ -3,8 +3,8 @@ import { defineConfig, loadEnv } from "vite";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const token = process.env.VERAX_DEV_TOKEN ?? env.VERAX_DEV_TOKEN ?? "";
   const target = process.env.VERAX_BODY_URL ?? env.VERAX_BODY_URL ?? "http://127.0.0.1:8787";
+  const toBody = { target, changeOrigin: true };
   return {
     plugins: [react()],
     optimizeDeps: {
@@ -16,62 +16,16 @@ export default defineConfig(({ mode }) => {
     server: {
       fs: { allow: ["..", "../.."] },
       proxy: {
-        "/api": {
-          target,
-          changeOrigin: true,
-          configure: (proxy) => {
-            proxy.on("proxyReq", (req) => {
-              if (token && !req.getHeader("Authorization")) {
-                req.setHeader("Authorization", `Bearer ${token}`);
-              }
-            });
-          },
-        },
-        "/healthz": {
-          target,
-          changeOrigin: true,
-          configure: (proxy) => {
-            proxy.on("proxyReq", (req) => {
-              if (token && !req.getHeader("Authorization")) {
-                req.setHeader("Authorization", `Bearer ${token}`);
-              }
-            });
-          },
-        },
-        "/.well-known": {
-          target,
-          changeOrigin: true,
-        },
+        "/api": toBody,
+        "/healthz": toBody,
+        "/.well-known": toBody,
       },
     },
     preview: {
       proxy: {
-        "/api": {
-          target,
-          changeOrigin: true,
-          configure: (proxy) => {
-            proxy.on("proxyReq", (req) => {
-              if (token && !req.getHeader("Authorization")) {
-                req.setHeader("Authorization", `Bearer ${token}`);
-              }
-            });
-          },
-        },
-        "/healthz": {
-          target,
-          changeOrigin: true,
-          configure: (proxy) => {
-            proxy.on("proxyReq", (req) => {
-              if (token && !req.getHeader("Authorization")) {
-                req.setHeader("Authorization", `Bearer ${token}`);
-              }
-            });
-          },
-        },
-        "/.well-known": {
-          target,
-          changeOrigin: true,
-        },
+        "/api": toBody,
+        "/healthz": toBody,
+        "/.well-known": toBody,
       },
     },
   };
