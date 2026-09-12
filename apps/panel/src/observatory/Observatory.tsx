@@ -766,13 +766,19 @@ function DetailPane({
   const ledgerPair = pairFromLedger(actions, action, pending);
   const waiting = waitingApproval(action, pending);
   const approveRef = useRef<HTMLDivElement>(null);
+  const offersApprove = Boolean(canApprove && onApprove && waiting);
+  const waitingRef = waiting?.ref ?? null;
   // On a phone the detail band sits below the list. Selecting a waiting
   // record used to open the pane off-screen, so the tap looked like nothing
   // happened. Bring the control the operator just asked for into view.
+  // Keyed on the record, not on the row or the handler: the screen redraws
+  // every second and re-reads the ledger every five, and each pass hands
+  // down new objects. Keyed on those, the page pulled the operator back to
+  // the button every second they tried to read anything else.
   useLayoutEffect(() => {
-    if (!waiting || !canApprove || !onApprove) return;
+    if (!offersApprove) return;
     approveRef.current?.scrollIntoView?.({ block: "center", inline: "nearest" });
-  }, [waiting, canApprove, onApprove, action?.record.claims.ref]);
+  }, [offersApprove, waitingRef]);
   const scope = evidenceScope(copy, {
     action,
     inspected,
