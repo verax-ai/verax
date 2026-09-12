@@ -152,7 +152,7 @@ export function App() {
         setError({ code: "session", detail: sessionIssueError() });
         return;
       }
-      setCanApprove(sessionScopes().has("verax:approve"));
+      setCanApprove(phase === "demo" || sessionScopes().has("verax:approve"));
       void load();
       id = setInterval(() => {
         void load();

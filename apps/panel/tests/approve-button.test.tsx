@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { panelCopy } from "../src/copy.ts";
-import type { PendingApproval } from "../src/rail/types.ts";
+import type { PendingApproval, RailAction } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
@@ -33,6 +33,39 @@ const waiting: PendingApproval = {
 };
 
 const resolved: PendingApproval = { ...waiting, ref: "d-done", status: "approved" };
+
+const deferRecord: RailAction = {
+  record: {
+    claims: {
+      subject: "spend",
+      decision: "defer",
+      reasonCode: "approval-required",
+      timestampMs: 1_788_800_000_000,
+      decider: "verax-proxy",
+      ref: "d-open",
+      requestHash: "ab".repeat(32),
+      policyHash: "aa".repeat(32),
+      effectHash: null,
+    },
+  },
+  effect: null,
+  rule: { id: "spend-sample", tool: "spend", text: "Sample spend needs operator approval." },
+  finding: null,
+  inputs: { principal: { brain: "sample-brain", scopes: ["verax:pay"] }, inputs: [] },
+  inputsBound: true,
+};
+
+const allowRecord: RailAction = {
+  ...deferRecord,
+  record: {
+    claims: {
+      ...deferRecord.record.claims,
+      decision: "allow",
+      reasonCode: "approved-by-operator",
+      ref: "a-open",
+    },
+  },
+};
 
 function open(extra: Record<string, unknown> = {}) {
   render(<Observatory actions={[]} status="ok" demo={false} pending={[waiting, resolved]} {...extra} />);
@@ -102,5 +135,44 @@ describe("approving from the screen", () => {
     await waitFor(() => {
       expect(screen.getByTestId("approve-outcome").textContent).toContain("already-resolved");
     });
+  });
+});
+
+function openRecords(extra: Record<string, unknown> = {}) {
+  render(
+    <Observatory
+      actions={[deferRecord, allowRecord]}
+      status="ok"
+      demo={false}
+      pending={[waiting, resolved]}
+      {...extra}
+    />,
+  );
+}
+
+describe("approving from the record", () => {
+  it("draws the control on a waiting record in the detail pane", () => {
+    openRecords({ canApprove: true, onApprove: vi.fn() });
+    const waitingRow = screen.getAllByRole("button").find((b) => (b.textContent ?? "").includes("bekliyor"));
+    expect(waitingRow).toBeTruthy();
+    fireEvent.click(waitingRow!);
+    expect(screen.getByTestId("record-approve")).toBeTruthy();
+    expect(screen.getByRole("button", { name: panelCopy()["approve.button"] })).toBeTruthy();
+  });
+
+  it("draws no control on a record that is not waiting", () => {
+    openRecords({ canApprove: true, onApprove: vi.fn() });
+    const allowed = screen.getAllByRole("button").find((b) => (b.textContent ?? "").includes("onaylandı"));
+    expect(allowed).toBeTruthy();
+    fireEvent.click(allowed!);
+    expect(screen.queryByTestId("record-approve")).toBeNull();
+  });
+
+  it("draws no control when the session cannot approve", () => {
+    openRecords({ onApprove: vi.fn() });
+    const waitingRow = screen.getAllByRole("button").find((b) => (b.textContent ?? "").includes("bekliyor"));
+    fireEvent.click(waitingRow!);
+    expect(screen.queryByRole("button", { name: panelCopy()["approve.button"] })).toBeNull();
+    expect(screen.queryByTestId("record-approve")).toBeNull();
   });
 });
