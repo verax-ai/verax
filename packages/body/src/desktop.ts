@@ -296,7 +296,6 @@ export async function runDesktop(
       [viteJs, "preview", "--host", "127.0.0.1", "--port", String(opts.panelPort), "--strictPort"],
       {
         ...cleanEnv(),
-        VERAX_DEV_TOKEN: token,
         VERAX_BODY_URL: audience,
       },
       panelDir,

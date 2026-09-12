@@ -19,11 +19,11 @@ describe("panel session is not the Vite inject path", () => {
     assert.match(app, /sessionIssueError|resource metadata unreachable/);
   });
 
-  it("Vite still injects VERAX_DEV_TOKEN only when the request has no Authorization", () => {
+  it("Vite does not attach VERAX_DEV_TOKEN to proxied requests", () => {
     const vite = readFileSync(join(root, "vite.config.ts"), "utf8");
-    assert.match(vite, /VERAX_DEV_TOKEN/);
-    assert.match(vite, /Authorization/);
-    assert.match(vite, /getHeader\("Authorization"\)|hasHeader\("Authorization"\)|getHeader\('Authorization'\)/);
+    assert.equal(vite.includes("VERAX_DEV_TOKEN"), false);
+    assert.equal(vite.includes("Authorization"), false);
+    assert.equal(vite.includes("setHeader"), false);
   });
 
   it("session reads authorization_servers and vite proxies the PRM path", () => {
