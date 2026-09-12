@@ -9,6 +9,8 @@ import policyStore from "../../../../packages/proxy/tests/fixtures/ledger-golden
 
 const DEMO_REQUEST_HASH =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DEMO_WAIT_HASH =
+  "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DEMO_DEFER_REF = "demo-spend-defer";
 const DEMO_WAIT_REF = "demo-spend-open";
 const DEMO_ALLOW_REF = "demo-spend-allow";
@@ -109,7 +111,7 @@ function demoWaiting(): RailAction {
         timestampMs: DEMO_WAIT_MS,
         decider: "verax-proxy",
         ref: DEMO_WAIT_REF,
-        requestHash: DEMO_REQUEST_HASH,
+        requestHash: DEMO_WAIT_HASH,
         policyHash: DEMO_POLICY_HASH,
         effectHash: null,
       },
@@ -155,7 +157,7 @@ export function loadDemoApprovals(): PendingApproval[] {
     },
     {
       ref: DEMO_WAIT_REF,
-      requestHash: DEMO_REQUEST_HASH,
+      requestHash: DEMO_WAIT_HASH,
       subject: "spend",
       ruleText: demoRule.text,
       inputsSummary: { count: 0, ids: [] },
