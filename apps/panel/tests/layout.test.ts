@@ -400,4 +400,79 @@ describe("observatory layout", () => {
     }
     if (fails.length) assert.fail(fails.join("\n"));
   });
+
+  it("at 390, tapping a waiting record puts the approve control on screen", { timeout: 120_000 }, async () => {
+    const shot = join(homedir(), "Desktop", "Work", "VERAX_ONAY_KAYIT_20260912");
+    mkdirSync(shot, { recursive: true });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4191, label: "panel-approve-390" });
+    const ready = `${preview.base}/?demo=1&lang=tr`;
+    try {
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
+      const stopBrowser = trackBrowser(browser);
+      try {
+        const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+        await page.goto(ready, { waitUntil: "domcontentloaded" });
+        await page.getByRole("tab", { name: "Kayıtlar" }).waitFor({ state: "visible", timeout: 30_000 });
+        const waiting = page.locator(".record-row.defer").first();
+        await waiting.waitFor({ state: "visible", timeout: 15_000 });
+        await waiting.click();
+        const approve = page.getByTestId("record-approve").getByRole("button", { name: "Onayla", exact: true });
+        await approve.waitFor({ state: "visible", timeout: 10_000 });
+        const box = await approve.evaluate((el) => {
+          const r = el.getBoundingClientRect();
+          return { top: r.top, bottom: r.bottom, left: r.left, right: r.right };
+        });
+        const view = { width: 390, height: 844 };
+        assert.equal(
+          box.top >= 0 && box.bottom <= view.height && box.left >= 0 && box.right <= view.width,
+          true,
+          `approve box ${JSON.stringify(box)} is not inside ${view.width}x${view.height}`,
+        );
+        await page.screenshot({ path: join(shot, "390-records-waiting-tr.png"), fullPage: false });
+      } finally {
+        await browser.close();
+        stopBrowser();
+      }
+    } finally {
+      preview.stop();
+    }
+  });
+  it("at 390, the approve control does not pull the page back once the operator scrolls away", { timeout: 120_000 }, async () => {
+    const preview = await startPreview({ viteJs, cwd: root, port: 4192, label: "panel-approve-stays" });
+    try {
+      const { chromium } = await import("playwright");
+      const browser = await chromium.launch({ args: ["--use-gl=swiftshader"] });
+      const stopBrowser = trackBrowser(browser);
+      try {
+        const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+        await page.goto(`${preview.base}/?demo=1&lang=tr`, { waitUntil: "domcontentloaded" });
+        await page.getByRole("tab", { name: "Kayıtlar" }).waitFor({ state: "visible", timeout: 30_000 });
+        const waiting = page.locator(".record-row.defer").first();
+        await waiting.waitFor({ state: "visible", timeout: 15_000 });
+        await waiting.click();
+        const approve = page.getByTestId("record-approve").getByRole("button", { name: "Onayla", exact: true });
+        await approve.waitFor({ state: "visible", timeout: 10_000 });
+        await page.evaluate(() => {
+          window.scrollTo(0, 0);
+          for (const el of Array.from(document.querySelectorAll<HTMLElement>("*"))) {
+            if (el.scrollTop > 0) el.scrollTop = 0;
+          }
+        });
+        const top = () => approve.evaluate((el) => el.getBoundingClientRect().top);
+        const away = await top();
+        // Without this the check below would pass on a page that never moved.
+        assert.ok(away > 844, `scrolling to the top left the control on screen (top ${away})`);
+        // The screen redraws every second; wait past two redraws.
+        await page.waitForTimeout(2_500);
+        const later = await top();
+        assert.ok(later > 844, `the page pulled back to the approve control on its own: top ${away} -> ${later}`);
+      } finally {
+        await browser.close();
+        stopBrowser();
+      }
+    } finally {
+      preview.stop();
+    }
+  });
 });

@@ -43,6 +43,7 @@ export function demoLedgerValues(): string[] {
   for (const extra of [
     "demo-spend-defer",
     "demo-spend-allow",
+    "demo-spend-open",
     "sample-brain",
     "verax:pay",
     "operator-1",

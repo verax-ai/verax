@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Galaxy, type GalaxySelect } from "@verax-ai/galaxy/react";
 import { inventoryToGalaxy, mergeGalaxy, type GalaxyModel, type Inventory } from "@verax-ai/galaxy";
 import { ledgerToGalaxy } from "../galaxy/adapter.ts";
@@ -14,6 +14,7 @@ import type {
 } from "../rail/types.ts";
 import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
+import { approvalForRef } from "../records/approval-state.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
 import { LANGS, readLang, writeLang, type Lang } from "../lang.ts";
@@ -505,6 +506,8 @@ export function Observatory({
           action={action}
           actions={actions}
           pending={pending}
+          canApprove={canApprove}
+          onApprove={onApprove}
           reconcile={reconcile}
           guarantee={guarantee}
           pin={pin}
@@ -708,10 +711,21 @@ function chainLine(
     .replace("{decider}", action.record.claims.decider);
 }
 
+function waitingApproval(
+  action: RailAction | null,
+  pending: PendingApproval[],
+): PendingApproval | undefined {
+  if (!action || action.record.claims.decision !== "defer") return undefined;
+  const row = approvalForRef(pending, action.record.claims.ref);
+  return row?.status === "pending" ? row : undefined;
+}
+
 function DetailPane({
   action,
   actions,
   pending,
+  canApprove,
+  onApprove,
   reconcile,
   guarantee,
   pin,
@@ -729,6 +743,8 @@ function DetailPane({
   action: RailAction | null;
   actions: RailAction[];
   pending: PendingApproval[];
+  canApprove?: boolean;
+  onApprove?: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
   reconcile: ReconcileCardReport | null;
   guarantee?: "unconditional" | "conditional";
   pin: string;
@@ -748,6 +764,21 @@ function DetailPane({
   const matched = action?.rule && !("missing" in action.rule) ? action.rule : null;
   const inputs = action?.inputs;
   const ledgerPair = pairFromLedger(actions, action, pending);
+  const waiting = waitingApproval(action, pending);
+  const approveRef = useRef<HTMLDivElement>(null);
+  const offersApprove = Boolean(canApprove && onApprove && waiting);
+  const waitingRef = waiting?.ref ?? null;
+  // On a phone the detail band sits below the list. Selecting a waiting
+  // record used to open the pane off-screen, so the tap looked like nothing
+  // happened. Bring the control the operator just asked for into view.
+  // Keyed on the record, not on the row or the handler: the screen redraws
+  // every second and re-reads the ledger every five, and each pass hands
+  // down new objects. Keyed on those, the page pulled the operator back to
+  // the button every second they tried to read anything else.
+  useLayoutEffect(() => {
+    if (!offersApprove) return;
+    approveRef.current?.scrollIntoView?.({ block: "center", inline: "nearest" });
+  }, [offersApprove, waitingRef]);
   const scope = evidenceScope(copy, {
     action,
     inspected,
@@ -780,6 +811,11 @@ function DetailPane({
             </section>
           ) : null}
           <p data-testid="detail-result">{outcomeText(copy, action, pending)}</p>
+          {canApprove && onApprove && waiting ? (
+            <div ref={approveRef} data-testid="record-approve">
+              <ApproveControl copy={copy} row={waiting} onApprove={onApprove} />
+            </div>
+          ) : null}
           {ledgerPair.defer && ledgerPair.resolution ? (
             <div data-testid="explain-pair" className="decision-chain">
               <p>{chainLine(copy, "chain.defer", ledgerPair.defer)}</p>

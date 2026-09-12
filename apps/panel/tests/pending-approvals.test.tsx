@@ -81,4 +81,39 @@ describe("pending approvals", () => {
     expect(list.textContent).toMatch(/Spends need operator approval/);
     expect(document.querySelector("button[data-approve]")).toBeNull();
   });
+
+  it("offers approve on the records tab only for a waiting row the session can approve", () => {
+    const defer: import("../src/rail/types.ts").RailAction = {
+      record: {
+        claims: {
+          subject: "memory.put",
+          decision: "defer",
+          reasonCode: "approval-required",
+          timestampMs: 1,
+          decider: "verax-proxy",
+          ref: "d1",
+          requestHash: "aa".repeat(32),
+          policyHash: "bb".repeat(32),
+          effectHash: null,
+        },
+      },
+      effect: null,
+      rule: { id: "put", tool: "memory.put", text: "Writes need operator approval." },
+      finding: null,
+      inputs: { principal: { brain: "brain-1", scopes: [] }, inputs: [] },
+      inputsBound: true,
+    };
+    render(
+      <Observatory
+        actions={[defer]}
+        status="ok"
+        demo={false}
+        pending={[row]}
+        canApprove={true}
+        onApprove={vi.fn()}
+      />,
+    );
+    expect(screen.getByTestId("record-approve")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Onayla" })).toBeTruthy();
+  });
 });

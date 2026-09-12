@@ -9,13 +9,17 @@ import policyStore from "../../../../packages/proxy/tests/fixtures/ledger-golden
 
 const DEMO_REQUEST_HASH =
   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+const DEMO_WAIT_HASH =
+  "1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const DEMO_DEFER_REF = "demo-spend-defer";
+const DEMO_WAIT_REF = "demo-spend-open";
 const DEMO_ALLOW_REF = "demo-spend-allow";
 const DEMO_POLICY_HASH =
   "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
 const DEMO_EFFECT_HASH =
   "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 const DEMO_DEFER_MS = 1_788_800_000_000;
+const DEMO_WAIT_MS = 1_788_800_000_500;
 const DEMO_ALLOW_MS = 1_788_800_001_100;
 
 const demoRule = {
@@ -97,6 +101,29 @@ function demoAllow(): RailAction {
   };
 }
 
+function demoWaiting(): RailAction {
+  return {
+    record: {
+      claims: {
+        subject: "spend",
+        decision: "defer",
+        reasonCode: "approval-required",
+        timestampMs: DEMO_WAIT_MS,
+        decider: "verax-proxy",
+        ref: DEMO_WAIT_REF,
+        requestHash: DEMO_WAIT_HASH,
+        policyHash: DEMO_POLICY_HASH,
+        effectHash: null,
+      },
+    },
+    effect: null,
+    rule: demoRule,
+    finding: null,
+    inputs: { principal: { brain: "sample-brain", scopes: ["verax:pay"] }, inputs: [] },
+    inputsBound: true,
+  };
+}
+
 export function loadDemoActions(): RailAction[] {
   const golden = parseLedger(
     decisionsText,
@@ -107,7 +134,9 @@ export function loadDemoActions(): RailAction[] {
   // parseLedger is newest-first. These two are the newest outward records so
   // the screen opens on the resolved spend. Appending them would leave the
   // exhibit on golden message.read and the gate would keep measuring a thin pane.
-  return [demoAllow(), demoDefer(), ...golden];
+  // The waiting spend sits after the resolved pair so the exhibit stays the
+  // allow; the operator still has a pending row to tap on the records tab.
+  return [demoAllow(), demoDefer(), demoWaiting(), ...golden];
 }
 
 export function loadDemoApprovals(): PendingApproval[] {
@@ -125,6 +154,19 @@ export function loadDemoApprovals(): PendingApproval[] {
       status: "approved",
       brain: "sample-brain",
       allowRef: DEMO_ALLOW_REF,
+    },
+    {
+      ref: DEMO_WAIT_REF,
+      requestHash: DEMO_WAIT_HASH,
+      subject: "spend",
+      ruleText: demoRule.text,
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1000,
+      currency: "TRY",
+      payee: "example-payee",
+      expiresAtMs: DEMO_ALLOW_MS + 86_400_000,
+      status: "pending",
+      brain: "sample-brain",
     },
   ];
 }
