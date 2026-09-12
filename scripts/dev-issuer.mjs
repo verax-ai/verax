@@ -63,9 +63,17 @@ function agentScope(raw) {
     .join(" ");
 }
 
-async function mintAccessToken(kind) {
-  const tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
-  const tokenSub = kind === "agent" ? agentSub : operatorSub;
+async function mintAccessToken(kind, extra = {}) {
+  // A session without a passkey is read-only, even when VERAX_DEV_SCOPE asks
+  // for approve. Approve is minted only after a registered operator signs in.
+  let tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
+  if (kind === "session" && extra.grantApprove !== true) {
+    tokenScope = agentScope(tokenScope);
+  }
+  if (kind === "session" && extra.grantApprove === true) {
+    tokenScope = "verax:audit verax:approve";
+  }
+  const tokenSub = kind === "agent" ? agentSub : (extra.sub ?? operatorSub);
   return new SignJWT({ scope: tokenScope })
     .setProtectedHeader({ alg: "ES256", kid: "verax-dev" })
     .setSubject(tokenSub)

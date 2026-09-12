@@ -146,6 +146,11 @@ describe("agent token never carries approve", () => {
         const sessionClaims = decodePayload(session.access_token);
         assert.equal(sessionClaims.sub, "operator-1");
         assert.notEqual(sessionClaims.sub, claims.sub);
+        assert.equal(
+          typeof sessionClaims.scope === "string" && sessionClaims.scope.split(/\s+/).includes("verax:approve"),
+          false,
+          `session without a passkey still carries approve: ${sessionClaims.scope}`,
+        );
 
         const body = await listen({
           issuer: "http://127.0.0.1:8790",
