@@ -51,16 +51,24 @@ const key = await importPKCS8(privatePem, "ES256");
 const port = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
 const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
 const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
-const sub = process.env.VERAX_DEV_SUB ?? "dev-brain";
-// Development only: one token stands in for both a brain and the operator panel, so
-// it carries `verax:audit` as well. A real issuer grants that scope to an operator
-// session, never to a brain.
-const scope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory verax:audit";
+const agentSub = process.env.VERAX_DEV_SUB ?? "dev-brain";
+const operatorSub = process.env.VERAX_DEV_OPERATOR_SUB ?? "operator-1";
+const requestedScope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory verax:audit";
 
-async function mintAccessToken() {
-  return new SignJWT({ scope })
+/** The file written for the agent never carries approve, even when the env asks. */
+function agentScope(raw) {
+  return raw
+    .split(/\s+/)
+    .filter((part) => part !== "" && part !== "verax:approve")
+    .join(" ");
+}
+
+async function mintAccessToken(kind) {
+  const tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
+  const tokenSub = kind === "agent" ? agentSub : operatorSub;
+  return new SignJWT({ scope: tokenScope })
     .setProtectedHeader({ alg: "ES256", kid: "verax-dev" })
-    .setSubject(sub)
+    .setSubject(tokenSub)
     .setIssuer(issuer)
     .setAudience(audience)
     .setIssuedAt()
@@ -69,7 +77,7 @@ async function mintAccessToken() {
     .sign(key);
 }
 
-const token = await mintAccessToken();
+const token = await mintAccessToken("agent");
 writeFileSync(outPath, token, { encoding: "utf8", mode: 0o600 });
 chmodSync(outPath, 0o600);
 
@@ -277,7 +285,7 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "invalid_grant" });
         return;
       }
-      const accessToken = await mintAccessToken();
+      const accessToken = await mintAccessToken("session");
       sendJson(res, 200, {
         access_token: accessToken,
         token_type: "Bearer",
