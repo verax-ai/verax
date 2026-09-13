@@ -71,13 +71,12 @@ export function registerWithSoftwarePasskey(
   const flags = 0x01 | 0x04 | 0x40;
   const authenticatorData = authData(options.rpID, flags, passkey.counter, new Uint8Array(attested));
   // tiny-cbor only encodes Map, not plain objects.
-  const attestationObject = isoCBOR.encode(
-    new Map<string, string | Map<never, never> | Uint8Array>([
-      ["fmt", "none"],
-      ["attStmt", new Map()],
-      ["authData", new Uint8Array(authenticatorData)],
-    ]),
-  );
+  const attStmt = new Map<string | number, never>();
+  const attestation = new Map<string | number, string | Uint8Array | Map<string | number, never>>();
+  attestation.set("fmt", "none");
+  attestation.set("attStmt", attStmt);
+  attestation.set("authData", new Uint8Array(authenticatorData));
+  const attestationObject = isoCBOR.encode(attestation);
   const clientDataJSON = clientData("webauthn.create", options.challenge, options.origin);
   return {
     id: passkey.id,

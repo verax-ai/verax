@@ -116,7 +116,13 @@ function pkce() {
   return { verifier, challenge, redirect };
 }
 
-async function enroll(origin: string, rpID: string, code: string) {
+type EnrollBody = { challenge?: string; error?: string; enrolled?: boolean; sub?: string };
+
+async function enroll(origin: string, rpID: string, code: string): Promise<{
+  passkey: ReturnType<typeof mintSoftwarePasskey>;
+  status: number;
+  body: EnrollBody;
+}> {
   const passkey = mintSoftwarePasskey();
   const opt = await fetch(`${origin}/enroll/options`, {
     method: "POST",
@@ -124,7 +130,7 @@ async function enroll(origin: string, rpID: string, code: string) {
     body: JSON.stringify({ code }),
     signal: AbortSignal.timeout(LOCAL_FETCH_MS),
   });
-  const options = (await opt.json()) as { challenge?: string; error?: string };
+  const options = (await opt.json()) as EnrollBody;
   if (opt.status !== 200) {
     return { passkey, status: opt.status, body: options };
   }
@@ -140,7 +146,7 @@ async function enroll(origin: string, rpID: string, code: string) {
     body: JSON.stringify({ code, response }),
     signal: AbortSignal.timeout(LOCAL_FETCH_MS),
   });
-  const body = (await done.json()) as { enrolled?: boolean; error?: string; sub?: string };
+  const body = (await done.json()) as EnrollBody;
   return { passkey, status: done.status, body };
 }
 
