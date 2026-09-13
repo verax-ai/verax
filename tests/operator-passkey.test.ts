@@ -413,6 +413,26 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     }
   });
 
+  it("a signature from another key under the enrolled credential id gets no code", async () => {
+    // The test above sends an id the issuer has never seen, so it is refused
+    // before any signature is checked. With verification skipped it stayed
+    // green; only the counter test noticed, and only by accident. Here the id
+    // is real and the counter advances: the signature is the one thing wrong.
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-passkey-impostor-"));
+    const issuer = await startIssuer(stateDir);
+    try {
+      const { code } = beginPairing(stateDir);
+      const { passkey, status } = await enroll(issuer.origin, issuer.rpID, code);
+      assert.equal(status, 200);
+      const impostor = { ...mintSoftwarePasskey(), id: passkey.id };
+      const signed = await signIn(issuer.origin, issuer.rpID, impostor);
+      assert.equal(signed.status >= 400, true, `impostor signed in: ${signed.status}`);
+      assert.equal(signed.body.location, undefined);
+    } finally {
+      await issuer.kill();
+    }
+  });
+
   it("with no registered operator the old flow still opens and the session has no approve", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-passkey-legacy-"));
     const issuer = await startIssuer(stateDir);
