@@ -592,7 +592,9 @@ function ApproveControl({
                   ? fillCopy(copy["approve.done"], { ref: out.allowRef })
                   : out.error === "stale"
                     ? copy["approve.stale"]
-                    : fillCopy(copy["approve.refused"], { reason: out.error }),
+                    : out.error === "sample-not-sent"
+                      ? copy["approve.sample"]
+                      : fillCopy(copy["approve.refused"], { reason: out.error }),
               );
             },
             (err: unknown) => {

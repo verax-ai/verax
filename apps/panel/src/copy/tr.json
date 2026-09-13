@@ -83,6 +83,7 @@
   "approve.stale": "Bu ekran açıkken istek değişti. Yenile ve yeniden bak.",
   "approve.refused": "Onaylanmadı: {reason}",
   "approve.sending": "Gönderiliyor…",
+  "approve.sample": "Örnek senaryo — onay gönderilmedi.",
   "unmeasured": "ölçülemedi",
   "summary.empty": "Henüz karar üretilmedi.",
   "summary.line": "{decisions} karar · {denied} reddedildi · {pending} onay bekliyor · {unmatched} ekstreyle eşleşmedi",

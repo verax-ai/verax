@@ -216,6 +216,92 @@ describe("panel ledger fetch states", () => {
     });
   });
 
+  it("re-reads the records tab so a just-approved row is no longer waiting", async () => {
+    rememberToken(
+      `x.${btoa(JSON.stringify({ scope: "verax:audit verax:approve" }))}.y`,
+    );
+    const pending = {
+      ref: "d-open",
+      requestHash: "cd".repeat(32),
+      subject: "spend",
+      ruleText: "Sample spend needs operator approval.",
+      inputsSummary: { count: 0, ids: [] },
+      amount: 1000,
+      currency: "TRY",
+      payee: "example-payee",
+      expiresAtMs: 9_999_999_999_999,
+      status: "pending",
+      brain: "sample-brain",
+    };
+    const deferDecision = {
+      claims: {
+        subject: "spend",
+        decision: "defer" as const,
+        reasonCode: "approval-required",
+        timestampMs: 1,
+        decider: "verax-proxy",
+        ref: "d-open",
+        requestHash: "cd".repeat(32),
+        policyHash: "aaa",
+        effectHash: null,
+      },
+    };
+    const allowDecision = {
+      claims: {
+        ...deferDecision.claims,
+        decision: "allow" as const,
+        reasonCode: "approved-by-operator",
+        ref: "a-9",
+      },
+    };
+    let approved = false;
+    let ledgerReads = 0;
+    stubLedgerFetch((url) => {
+      if (url.includes("/api/approve")) {
+        approved = true;
+        return new Response(JSON.stringify({ allowRef: "a-9" }), { status: 200 });
+      }
+      if (url.includes("/healthz")) return new Response(JSON.stringify({}), { status: 200 });
+      ledgerReads += 1;
+      if (!approved) {
+        return new Response(
+          JSON.stringify({
+            decisions: [deferDecision],
+            effects: [],
+            policies: { aaa: { rules: [{ id: "spend", tool: "spend", text: "Sample spend needs operator approval." }] } },
+            approvals: [pending],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          decisions: [allowDecision, deferDecision],
+          effects: [],
+          policies: { aaa: { rules: [{ id: "spend", tool: "spend", text: "Sample spend needs operator approval." }] } },
+          approvals: [{ ...pending, status: "approved", allowRef: "a-9" }],
+        }),
+        { status: 200 },
+      );
+    });
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".record-row.defer")).toBeTruthy();
+    });
+    const waitingRow = document.querySelector(".record-row.defer");
+    expect(waitingRow).toBeTruthy();
+    fireEvent.click(waitingRow!);
+    expect(screen.getByTestId("record-approve")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.button"] }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
+    await waitFor(() => {
+      expect(document.querySelector(".record-row.defer")).toBeNull();
+    });
+    expect(screen.queryByTestId("record-approve")).toBeNull();
+    expect(screen.queryByRole("button", { name: panelCopy()["approve.button"] })).toBeNull();
+    expect(ledgerReads).toBeGreaterThan(1);
+  });
+
   it("draws no approve button for a session that cannot approve", async () => {
     // Mutation caught this gap: with App hard-wiring canApprove to true, every
     // other test here still passed. A read-only operator would have been shown

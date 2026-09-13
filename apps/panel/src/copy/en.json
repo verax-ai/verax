@@ -83,6 +83,7 @@
   "approve.stale": "The request changed while this screen was open. Refresh and look again.",
   "approve.refused": "Not approved: {reason}",
   "approve.sending": "Sending…",
+  "approve.sample": "Sample scenario — nothing was sent.",
   "unmeasured": "not measured",
   "summary.empty": "No decision has been produced yet.",
   "summary.line": "{decisions} decisions · {denied} denied · {pending} waiting for approval · {unmatched} not matched to a statement",

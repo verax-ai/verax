@@ -204,6 +204,12 @@ export function App() {
         error={error}
         canApprove={canApprove}
         onApprove={async (ref, requestHash) => {
+          // The sample scenario draws the same control so the operator can
+          // see the ask. Confirming it must not talk to the body: a 401 on
+          // a button that looks real is how this hole came back after #39.
+          if (wantDemo()) {
+            return { ok: false as const, error: "sample-not-sent" };
+          }
           const res = await authorizedFetch("/api/approve", {
             method: "POST",
             headers: { "content-type": "application/json" },
