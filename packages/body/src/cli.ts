@@ -3,6 +3,7 @@ import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
 import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
+import { runOperator } from "./operator-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
 import { runUnlock } from "./unlock.ts";
 import { runWitness } from "./witness.ts";
@@ -10,6 +11,9 @@ import { runWitness } from "./witness.ts";
 const argv = process.argv.slice(2);
 if (argv[0] === "approve") {
   process.exit(await runApprove(argv));
+}
+if (argv[0] === "operator") {
+  process.exit(await runOperator(argv));
 }
 if (argv[0] === "halt") {
   const stateDir = argv[1];

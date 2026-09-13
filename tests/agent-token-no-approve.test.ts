@@ -73,7 +73,7 @@ describe("agent token never carries approve", () => {
       const stateDir = mkdtempSync(join(tmpdir(), "verax-agent-no-approve-"));
       const outPath = join(stateDir, "token");
       const audience = "http://127.0.0.1/verax-agent-no-approve";
-      const child = spawn(process.execPath, [script, "--out", outPath], {
+      const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
         env: {
           ...process.env,
           VERAX_STATE_DIR: stateDir,
@@ -146,6 +146,11 @@ describe("agent token never carries approve", () => {
         const sessionClaims = decodePayload(session.access_token);
         assert.equal(sessionClaims.sub, "operator-1");
         assert.notEqual(sessionClaims.sub, claims.sub);
+        assert.equal(
+          typeof sessionClaims.scope === "string" && sessionClaims.scope.split(/\s+/).includes("verax:approve"),
+          false,
+          `session without a passkey still carries approve: ${sessionClaims.scope}`,
+        );
 
         const body = await listen({
           issuer: "http://127.0.0.1:8790",

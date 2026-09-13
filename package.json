@@ -33,7 +33,9 @@
     "@cedulon/mcp-guard": "file:vendor/cedulon-mcp-guard-da7bf9b.tgz",
     "@cedulon/mcp-server": "file:vendor/cedulon-mcp-server-da7bf9b.tgz",
     "@cedulon/receipts": "file:vendor/cedulon-receipts-da7bf9b.tgz",
-    "@cedulon/x402-adapter": "file:vendor/cedulon-x402-adapter-da7bf9b.tgz"
+    "@cedulon/x402-adapter": "file:vendor/cedulon-x402-adapter-da7bf9b.tgz",
+    "@simplewebauthn/browser": "^14.0.0",
+    "@simplewebauthn/server": "^14.0.2"
   },
   "overrides": {
     "@cedulon/audit": "file:vendor/cedulon-audit-da7bf9b.tgz",

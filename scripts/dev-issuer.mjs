@@ -5,8 +5,18 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8 } from "jose";
+import { checkPairing, consumePairing } from "../packages/body/src/operator-pairing.ts";
+import {
+  DEFAULT_OPERATOR_SUB,
+  findCredential,
+  hasRegisteredOperator,
+  saveCredential,
+  updateCounter,
+} from "../packages/body/src/operator-credentials.ts";
+import { readRpConfig } from "../packages/body/src/rp-config.ts";
 
 if (process.env.NODE_ENV === "production") {
   process.stderr.write("dev-issuer refuses NODE_ENV=production\n");
@@ -24,6 +34,27 @@ const outPath = outIdx >= 0 ? process.argv[outIdx + 1] : null;
 if (!outPath) {
   process.stderr.write("dev-issuer requires --out <file>\n");
   process.exit(78);
+}
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repoRoot = join(here, "..");
+const rp = readRpConfig(process.env);
+if (!rp.ok) {
+  process.stderr.write(`dev-issuer: passkey enroll and sign-in are closed: ${rp.reason}\n`);
+}
+
+// Importing @simplewebauthn/server takes about 320 ms, more than this issuer
+// needed to start before passkeys (about 110 ms; about 450 ms with the import).
+// Paid up front, every start carried it, including the desktop and test runs
+// that never touch a passkey, and in one of three full unit runs two issuers
+// did not start inside their 8 s budget. Only the passkey routes load it now.
+let webauthnLoad;
+function webauthn() {
+  webauthnLoad ??= Promise.all([
+    import("@simplewebauthn/server"),
+    import("@simplewebauthn/server/helpers"),
+  ]).then(([server, helpers]) => ({ ...server, isoBase64URL: helpers.isoBase64URL }));
+  return webauthnLoad;
 }
 
 const dir = join(stateDir, "dev-issuer");
@@ -63,9 +94,17 @@ function agentScope(raw) {
     .join(" ");
 }
 
-async function mintAccessToken(kind) {
-  const tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
-  const tokenSub = kind === "agent" ? agentSub : operatorSub;
+async function mintAccessToken(kind, extra = {}) {
+  // A session without a passkey is read-only, even when VERAX_DEV_SCOPE asks
+  // for approve. Approve is minted only after a registered operator signs in.
+  let tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
+  if (kind === "session" && extra.grantApprove !== true) {
+    tokenScope = agentScope(tokenScope);
+  }
+  if (kind === "session" && extra.grantApprove === true) {
+    tokenScope = "verax:audit verax:approve";
+  }
+  const tokenSub = kind === "agent" ? agentSub : (extra.sub ?? operatorSub);
   return new SignJWT({ scope: tokenScope })
     .setProtectedHeader({ alg: "ES256", kid: "verax-dev" })
     .setSubject(tokenSub)
@@ -84,8 +123,35 @@ chmodSync(outPath, 0o600);
 const CODE_TTL_MS = 60_000;
 const CODE_LIMIT = 100;
 const DEFAULT_REDIRECTS = ["http://127.0.0.1:5173/", "http://127.0.0.1:4173/"];
-/** @type {Map<string, { challenge: string; redirectUri: string; expiresAtMs: number }>} */
+/** @type {Map<string, { challenge: string; redirectUri: string; expiresAtMs: number; grantApprove?: boolean; sub?: string }>} */
 const codes = new Map();
+/** @type {Map<string, { challenge: string; expiresAtMs: number }>} */
+const enrollChallenges = new Map();
+/** @type {Map<string, { challenge: string; expiresAtMs: number }>} */
+const signinChallenges = new Map();
+
+function pruneWebauthn(now = Date.now()) {
+  for (const store of [enrollChallenges, signinChallenges]) {
+    for (const [id, row] of store) {
+      if (now > row.expiresAtMs) store.delete(id);
+    }
+  }
+}
+
+function htmlPage(title, body) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title}</title>
+</head>
+<body>
+${body}
+</body>
+</html>
+`;
+}
 
 function redirectAllowList() {
   const raw = process.env.VERAX_DEV_REDIRECT_URIS ?? "";
@@ -243,6 +309,56 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "invalid_request" });
         return;
       }
+      if (hasRegisteredOperator(stateDir)) {
+        if (!rp.ok) {
+          sendJson(res, 503, { error: "passkey-closed", reason: rp.reason });
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(
+          htmlPage(
+            "Sign in",
+            `<p>A registered operator must sign in with a passkey.</p>
+<form id="signin" data-query="${String(url.search).replaceAll('"', "&quot;")}">
+  <button type="submit">Sign in with passkey</button>
+</form>
+<p id="out"></p>
+<script type="module">
+  import { startAuthentication } from "/vendor/@simplewebauthn/browser/esm/index.js";
+  const form = document.getElementById("signin");
+  const out = document.getElementById("out");
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    out.textContent = "";
+    const opt = await fetch("/authorize/options", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const options = await opt.json();
+    if (!opt.ok) { out.textContent = options.error ?? "options-failed"; return; }
+    let assertion;
+    try { assertion = await startAuthentication({ optionsJSON: options }); }
+    catch (err) { out.textContent = "cancelled"; return; }
+    const q = new URLSearchParams(form.dataset.query ?? "");
+    const done = await fetch("/authorize/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        response: assertion,
+        response_type: q.get("response_type"),
+        client_id: q.get("client_id"),
+        redirect_uri: q.get("redirect_uri"),
+        code_challenge: q.get("code_challenge"),
+        code_challenge_method: q.get("code_challenge_method"),
+        state: q.get("state"),
+      }),
+    });
+    const body = await done.json();
+    if (!done.ok || typeof body.location !== "string") { out.textContent = body.error ?? "verify-failed"; return; }
+    window.location.assign(body.location);
+  });
+</script>`,
+          ),
+        );
+        return;
+      }
       pruneCodes();
       const code = randomBytes(32).toString("base64url");
       codes.set(code, {
@@ -285,12 +401,278 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "invalid_grant" });
         return;
       }
-      const accessToken = await mintAccessToken("session");
+      const accessToken = await mintAccessToken("session", {
+        grantApprove: row.grantApprove === true,
+        sub: row.sub,
+      });
       sendJson(res, 200, {
         access_token: accessToken,
         token_type: "Bearer",
         expires_in: 600,
       });
+      return;
+    }
+    if (req.method === "GET" && url.pathname.startsWith("/vendor/@simplewebauthn/browser/")) {
+      const rel = url.pathname.slice("/vendor/@simplewebauthn/browser/".length);
+      if (rel.includes("..") || rel.includes("\\")) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const vendorRoot = resolve(repoRoot, "node_modules", "@simplewebauthn", "browser");
+      const file = resolve(vendorRoot, rel);
+      const relToRoot = relative(vendorRoot, file);
+      if (relToRoot.startsWith("..") || relToRoot === "" || !existsSync(file)) {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      const body = readFileSync(file);
+      res.writeHead(200, { "content-type": rel.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream" });
+      res.end(body);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/enroll") {
+      if (!rp.ok) {
+        sendJson(res, 503, { error: "passkey-closed", reason: rp.reason });
+        return;
+      }
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(
+        htmlPage(
+          "Enroll",
+          `<p>Enter the pairing code printed on the desk. The passkey is created on this device.</p>
+<form id="enroll">
+  <label>Pairing code <input name="code" inputmode="numeric" maxlength="8" autocomplete="one-time-code"></label>
+  <button type="submit">Create passkey</button>
+</form>
+<p id="out"></p>
+<script type="module">
+  import { startRegistration } from "/vendor/@simplewebauthn/browser/esm/index.js";
+  const form = document.getElementById("enroll");
+  const out = document.getElementById("out");
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    out.textContent = "";
+    const code = new FormData(form).get("code");
+    const opt = await fetch("/enroll/options", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const options = await opt.json();
+    if (!opt.ok) { out.textContent = options.error ?? "options-failed"; return; }
+    let attestation;
+    try { attestation = await startRegistration({ optionsJSON: options }); }
+    catch (err) { out.textContent = "cancelled"; return; }
+    const done = await fetch("/enroll/verify", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code, response: attestation }),
+    });
+    const body = await done.json();
+    out.textContent = done.ok ? "enrolled" : (body.error ?? "verify-failed");
+  });
+</script>`,
+        ),
+      );
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/enroll/options") {
+      if (!rp.ok) {
+        sendJson(res, 503, { error: "passkey-closed", reason: rp.reason });
+        return;
+      }
+      let parsed;
+      try {
+        parsed = await readJson(req);
+      } catch {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const code = typeof parsed.code === "string" ? parsed.code : "";
+      const checked = checkPairing(stateDir, code);
+      if (!checked.ok) {
+        sendJson(res, 400, { error: checked.reason });
+        return;
+      }
+      pruneWebauthn();
+      const { generateRegistrationOptions } = await webauthn();
+      const options = await generateRegistrationOptions({
+        rpName: "Verax",
+        rpID: rp.config.rpID,
+        userName: DEFAULT_OPERATOR_SUB,
+        userDisplayName: DEFAULT_OPERATOR_SUB,
+        attestationType: "none",
+        authenticatorSelection: { userVerification: "required", residentKey: "preferred" },
+      });
+      enrollChallenges.set(options.challenge, { challenge: options.challenge, expiresAtMs: Date.now() + CODE_TTL_MS });
+      sendJson(res, 200, options);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/enroll/verify") {
+      if (!rp.ok) {
+        sendJson(res, 503, { error: "passkey-closed", reason: rp.reason });
+        return;
+      }
+      let parsed;
+      try {
+        parsed = await readJson(req);
+      } catch {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const code = typeof parsed.code === "string" ? parsed.code : "";
+      const checked = checkPairing(stateDir, code);
+      if (!checked.ok) {
+        sendJson(res, 400, { error: checked.reason });
+        return;
+      }
+      const response = parsed.response;
+      if (!response || typeof response !== "object") {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      pruneWebauthn();
+      const { verifyRegistrationResponse, isoBase64URL } = await webauthn();
+      let verified;
+      try {
+        verified = await verifyRegistrationResponse({
+          response,
+          expectedChallenge: (challenge) => {
+            const row = enrollChallenges.get(challenge);
+            if (!row || Date.now() > row.expiresAtMs) return false;
+            enrollChallenges.delete(challenge);
+            return true;
+          },
+          expectedOrigin: rp.config.origins,
+          expectedRPID: rp.config.rpID,
+          requireUserVerification: true,
+        });
+      } catch {
+        sendJson(res, 400, { error: "verification-failed" });
+        return;
+      }
+      if (!verified.verified || !verified.registrationInfo) {
+        sendJson(res, 400, { error: "verification-failed" });
+        return;
+      }
+      const cred = verified.registrationInfo.credential;
+      saveCredential(stateDir, {
+        id: cred.id,
+        publicKey: isoBase64URL.fromBuffer(cred.publicKey),
+        counter: cred.counter,
+        sub: DEFAULT_OPERATOR_SUB,
+      });
+      consumePairing(stateDir);
+      sendJson(res, 200, { enrolled: true, sub: DEFAULT_OPERATOR_SUB });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/authorize/options") {
+      if (!hasRegisteredOperator(stateDir)) {
+        sendJson(res, 400, { error: "no-operator" });
+        return;
+      }
+      if (!rp.ok) {
+        sendJson(res, 503, { error: "passkey-closed", reason: rp.reason });
+        return;
+      }
+      pruneWebauthn();
+      const { generateAuthenticationOptions } = await webauthn();
+      const options = await generateAuthenticationOptions({
+        rpID: rp.config.rpID,
+        userVerification: "required",
+      });
+      signinChallenges.set(options.challenge, { challenge: options.challenge, expiresAtMs: Date.now() + CODE_TTL_MS });
+      sendJson(res, 200, options);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/authorize/verify") {
+      if (!hasRegisteredOperator(stateDir)) {
+        sendJson(res, 400, { error: "no-operator" });
+        return;
+      }
+      if (!rp.ok) {
+        sendJson(res, 503, { error: "passkey-closed", reason: rp.reason });
+        return;
+      }
+      let parsed;
+      try {
+        parsed = await readJson(req);
+      } catch {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const responseType = parsed.response_type;
+      const clientId = parsed.client_id;
+      const redirectUri = parsed.redirect_uri;
+      const challenge = parsed.code_challenge;
+      const method = parsed.code_challenge_method;
+      const state = parsed.state;
+      if (responseType !== "code" || !clientId || typeof redirectUri !== "string") {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      if (!challenge || method !== "S256" || !redirectAllowed(redirectUri)) {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const assertion = parsed.response;
+      if (!assertion || typeof assertion !== "object" || typeof assertion.id !== "string") {
+        sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      const stored = findCredential(stateDir, assertion.id);
+      if (!stored) {
+        sendJson(res, 400, { error: "unknown-credential" });
+        return;
+      }
+      const { verifyAuthenticationResponse, isoBase64URL } = await webauthn();
+      let verified;
+      try {
+        verified = await verifyAuthenticationResponse({
+          response: assertion,
+          expectedChallenge: (chal) => {
+            const row = signinChallenges.get(chal);
+            if (!row || Date.now() > row.expiresAtMs) return false;
+            signinChallenges.delete(chal);
+            return true;
+          },
+          expectedOrigin: rp.config.origins,
+          expectedRPID: rp.config.rpID,
+          requireUserVerification: true,
+          credential: {
+            id: stored.id,
+            publicKey: isoBase64URL.toBuffer(stored.publicKey),
+            counter: stored.counter,
+          },
+        });
+      } catch {
+        sendJson(res, 400, { error: "verification-failed" });
+        return;
+      }
+      if (!verified.verified) {
+        sendJson(res, 400, { error: "verification-failed" });
+        return;
+      }
+      const nextCounter = verified.authenticationInfo.newCounter;
+      if (!updateCounter(stateDir, stored.id, nextCounter)) {
+        sendJson(res, 400, { error: "cloned-authenticator" });
+        return;
+      }
+      pruneCodes();
+      const code = randomBytes(32).toString("base64url");
+      codes.set(code, {
+        challenge,
+        redirectUri,
+        expiresAtMs: Date.now() + CODE_TTL_MS,
+        grantApprove: true,
+        sub: stored.sub,
+      });
+      const loc = new URL(redirectUri);
+      loc.searchParams.set("code", code);
+      if (typeof state === "string" && state !== "") loc.searchParams.set("state", state);
+      sendJson(res, 200, { location: loc.toString(), sub: stored.sub });
       return;
     }
     if (req.method === "POST" && url.pathname === "/revoke") {

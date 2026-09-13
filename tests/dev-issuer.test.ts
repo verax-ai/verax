@@ -57,7 +57,7 @@ describe("6 dev-issuer.mjs", () => {
   it("serves JWKS on the bound VERAX_DEV_ISSUER_PORT and writes a token jose can verify", { timeout: 60_000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-issuer-"));
     const outPath = join(stateDir, "token");
-    const child = spawn(process.execPath, [script, "--out", outPath], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
       env: {
         ...process.env,
         VERAX_STATE_DIR: stateDir,
@@ -118,7 +118,7 @@ describe("6 dev-issuer.mjs", () => {
   it("authorize without code_challenge fails; plain is refused; S256 mints a one-use code", { timeout: 15000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-pkce-"));
     const outPath = join(stateDir, "token");
-    const child = spawn(process.execPath, [script, "--out", outPath], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
       env: {
         ...process.env,
         VERAX_STATE_DIR: stateDir,
@@ -238,7 +238,7 @@ describe("6 dev-issuer.mjs", () => {
   it("refuses an unregistered redirect_uri with 400 and no Location", { timeout: 60_000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-redir-"));
     const outPath = join(stateDir, "token");
-    const child = spawn(process.execPath, [script, "--out", outPath], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
       env: {
         ...process.env,
         VERAX_STATE_DIR: stateDir,
@@ -284,7 +284,7 @@ describe("6 dev-issuer.mjs", () => {
   it("drops the oldest code when the map is full", { timeout: 20000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-codes-"));
     const outPath = join(stateDir, "token");
-    const child = spawn(process.execPath, [script, "--out", outPath], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
       env: {
         ...process.env,
         VERAX_STATE_DIR: stateDir,
@@ -355,7 +355,7 @@ describe("6 dev-issuer.mjs", () => {
     const outPath = join(stateDir, "token");
     const panel = "http://127.0.0.1:5173";
     const redirect = `${panel}/`;
-    const child = spawn(process.execPath, [script, "--out", outPath], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
       env: {
         ...process.env,
         VERAX_STATE_DIR: stateDir,
@@ -434,7 +434,7 @@ describe("6 dev-issuer.mjs", () => {
   it("does not invite an origin it never registered", { timeout: 15000 }, async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-cors-no-"));
     const outPath = join(stateDir, "token");
-    const child = spawn(process.execPath, [script, "--out", outPath], {
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
       env: {
         ...process.env,
         VERAX_STATE_DIR: stateDir,

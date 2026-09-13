@@ -1,7 +1,8 @@
 import { randomBytes, generateKeyPairSync } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
 import {
   buildCheckpointClaims,
   checkpointHash,
@@ -39,51 +40,6 @@ function listenPath(stateDir: string): string {
 
 function statusPath(stateDir: string): string {
   return join(stateDir, "witness-status.jsonl");
-}
-
-/**
- * Replace a file's contents in one step, so a reader sees the old bytes or the
- * new ones and never a half-written file.
- *
- * Writing in place is not that: measured on 11 Sep 2026, a reader polling this
- * path every 20 ms while the file was rewritten 60 times got 12 unparseable
- * reads. The listen file is read by another process - that is its whole job -
- * and readWitnessListen answers a torn read with `null`, which the caller
- * cannot tell from "no witness is running".
- *
- * The rename needs the retry. On Windows it fails with EPERM while a reader
- * holds the destination open, and in the same measurement 26 of 60 plain
- * renames failed that way. Retrying briefly lost none of them and still let no
- * torn read through.
- */
-const napper = new Int32Array(new SharedArrayBuffer(4));
-
-/**
- * Sleep without spinning. The first version of the retry below burned the
- * processor between attempts, which is the worst thing to do while waiting for
- * another process to let go of a file: under the unit suite's own load the
- * spin starved the reader it was waiting on, the retries ran out in 200 ms,
- * and the write threw EPERM. Atomics.wait yields the core instead.
- */
-function napSync(ms: number): void {
-  Atomics.wait(napper, 0, 0, ms);
-}
-
-function writeFileAtomic(path: string, text: string): void {
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
-  for (let attempt = 0; ; attempt += 1) {
-    try {
-      renameSync(tmp, path);
-      return;
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      // Two seconds of patience. A reader holds this file for microseconds
-      // when the machine is idle; the budget is for the machine that is not.
-      if (attempt >= 100 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
-      napSync(20);
-    }
-  }
 }
 
 function writePemAtomic(path: string, pem: string): void {
