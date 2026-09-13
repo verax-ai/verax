@@ -1,6 +1,7 @@
 import { createHash, randomInt } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
 
 export const PAIRING_TTL_MS = 5 * 60_000;
 export const PAIRING_MAX_ATTEMPTS = 5;
@@ -15,14 +16,6 @@ export type PairingRecord = {
 export type PairingCheck =
   | { ok: true }
   | { ok: false; reason: "missing" | "expired" | "mismatch" | "burned" };
-
-function writeFileAtomic(path: string, text: string): void {
-  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-  const tmp = `${path}.tmp`;
-  writeFileSync(tmp, text, { encoding: "utf8", mode: 0o600 });
-  renameSync(tmp, path);
-  chmodSync(path, 0o600);
-}
 
 export function pairingPath(stateDir: string): string {
   return join(stateDir, PAIRING_FILE);

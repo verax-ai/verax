@@ -58,14 +58,20 @@ describe("the witness listen file is never half written", () => {
 
     try {
       await new Promise((resolve) => setTimeout(resolve, 200));
+      let failed = 0;
       for (let i = 0; i < 40; i += 1) {
-        writeListenForTest(path, payload);
+        try {
+          writeListenForTest(path, payload);
+        } catch {
+          failed += 1;
+        }
         await new Promise((resolve) => setTimeout(resolve, 50));
       }
       await closed;
       const seen = JSON.parse(out || '{"ok":0,"torn":0}') as { ok: number; torn: number };
       assert.ok(seen.ok > 0, `the reader never saw the file at all: ${out}`);
       assert.equal(seen.torn, 0, `reader parsed ${seen.torn} torn files out of ${seen.ok + seen.torn}`);
+      assert.equal(failed, 0, `writer failed ${failed} times while the reader held the file`);
     } finally {
       reader.kill();
       rmSync(dir, { recursive: true, force: true });
