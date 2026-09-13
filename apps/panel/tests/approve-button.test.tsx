@@ -116,6 +116,16 @@ describe("approving from the screen", () => {
     });
   });
 
+  it("says the sample was not sent instead of claiming it approved one", async () => {
+    const onApprove = vi.fn(async () => ({ ok: false as const, error: "sample-not-sent" }));
+    open({ canApprove: true, onApprove });
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.button"] }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.sample"]);
+    });
+  });
+
   it("says the request changed instead of claiming it approved one", async () => {
     const onApprove = vi.fn(async () => ({ ok: false as const, error: "stale" }));
     open({ canApprove: true, onApprove });

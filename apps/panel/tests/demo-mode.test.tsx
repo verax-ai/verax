@@ -1,5 +1,7 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { panelCopy } from "../src/copy.ts";
+import { rememberToken } from "../src/session.ts";
 import { setLang } from "./with-lang.ts";
 
 vi.mock("@verax-ai/galaxy/react", () => ({
@@ -10,6 +12,7 @@ const ledgerBody = { decisions: [], effects: [], policies: {}, inputs: {}, appro
 
 afterEach(() => {
   cleanup();
+  rememberToken(null);
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -51,5 +54,88 @@ describe("demo mode", () => {
     });
     const ledgerCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/ledger"));
     expect(ledgerCalls.length).toBe(0);
+  });
+
+  it("confirms an approval in the sample scenario without talking to the body", async () => {
+    vi.stubGlobal("location", {
+      search: "?demo=1&lang=tr",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign: vi.fn(),
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(ledgerBody), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { App } = await import("../src/App.tsx");
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".record-row.defer")).toBeTruthy();
+    });
+    fireEvent.click(document.querySelector(".record-row.defer")!);
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.button"] }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome")).toBeTruthy();
+    });
+    const approveCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/approve"));
+    expect(approveCalls.length).toBe(0);
+    expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.sample"]);
+  });
+
+  it("says the English sample sentence when the sample is in English", async () => {
+    vi.stubGlobal("location", {
+      search: "?demo=1&lang=en",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign: vi.fn(),
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(ledgerBody), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { App } = await import("../src/App.tsx");
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".record-row.defer")).toBeTruthy();
+    });
+    fireEvent.click(document.querySelector(".record-row.defer")!);
+    fireEvent.click(screen.getByRole("button", { name: panelCopy("en")["approve.button"] }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy("en")["approve.yes"] }));
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome")).toBeTruthy();
+    });
+    expect(fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/approve")).length).toBe(0);
+    expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy("en")["approve.sample"]);
+  });
+
+  it("keeps the sample opened from the error screen off the network too", async () => {
+    // No demo=1 in the address: the operator reached the sample through the
+    // button a failing ledger offers. Checking the address alone let this
+    // confirmation post a sample ref to the real body.
+    rememberToken(`x.${btoa(JSON.stringify({ scope: "verax:audit verax:approve" }))}.y`);
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.includes("/api/ledger")) {
+        return new Response(JSON.stringify({ error: "fault" }), { status: 500 });
+      }
+      if (url.includes("/api/approve")) {
+        return new Response(JSON.stringify({ error: "unknown-ref" }), { status: 404 });
+      }
+      return new Response("{}", { status: 404 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const { App } = await import("../src/App.tsx");
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: panelCopy()["showDemo"] }));
+    await waitFor(() => {
+      expect(document.querySelector(".record-row.defer")).toBeTruthy();
+    });
+    fireEvent.click(document.querySelector(".record-row.defer")!);
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.button"] }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).not.toBe("");
+    });
+    expect(fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/approve")).length).toBe(0);
+    expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.sample"]);
   });
 });
