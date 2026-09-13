@@ -8,13 +8,6 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chm
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8 } from "jose";
-import {
-  generateAuthenticationOptions,
-  generateRegistrationOptions,
-  verifyAuthenticationResponse,
-  verifyRegistrationResponse,
-} from "@simplewebauthn/server";
-import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import { checkPairing, consumePairing } from "../packages/body/src/operator-pairing.ts";
 import {
   DEFAULT_OPERATOR_SUB,
@@ -48,6 +41,20 @@ const repoRoot = join(here, "..");
 const rp = readRpConfig(process.env);
 if (!rp.ok) {
   process.stderr.write(`dev-issuer: passkey enroll and sign-in are closed: ${rp.reason}\n`);
+}
+
+// Importing @simplewebauthn/server takes about 320 ms, more than this issuer
+// needed to start before passkeys (about 110 ms; about 450 ms with the import).
+// Paid up front, every start carried it, including the desktop and test runs
+// that never touch a passkey, and in one of three full unit runs two issuers
+// did not start inside their 8 s budget. Only the passkey routes load it now.
+let webauthnLoad;
+function webauthn() {
+  webauthnLoad ??= Promise.all([
+    import("@simplewebauthn/server"),
+    import("@simplewebauthn/server/helpers"),
+  ]).then(([server, helpers]) => ({ ...server, isoBase64URL: helpers.isoBase64URL }));
+  return webauthnLoad;
 }
 
 const dir = join(stateDir, "dev-issuer");
@@ -490,6 +497,7 @@ const server = createServer((req, res) => {
         return;
       }
       pruneWebauthn();
+      const { generateRegistrationOptions } = await webauthn();
       const options = await generateRegistrationOptions({
         rpName: "Verax",
         rpID: rp.config.rpID,
@@ -526,6 +534,7 @@ const server = createServer((req, res) => {
         return;
       }
       pruneWebauthn();
+      const { verifyRegistrationResponse, isoBase64URL } = await webauthn();
       let verified;
       try {
         verified = await verifyRegistrationResponse({
@@ -569,6 +578,7 @@ const server = createServer((req, res) => {
         return;
       }
       pruneWebauthn();
+      const { generateAuthenticationOptions } = await webauthn();
       const options = await generateAuthenticationOptions({
         rpID: rp.config.rpID,
         userVerification: "required",
@@ -617,6 +627,7 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "unknown-credential" });
         return;
       }
+      const { verifyAuthenticationResponse, isoBase64URL } = await webauthn();
       let verified;
       try {
         verified = await verifyAuthenticationResponse({
