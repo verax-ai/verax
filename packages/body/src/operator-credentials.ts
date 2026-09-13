@@ -38,8 +38,14 @@ export function readCredentials(stateDir: string): StoredCredential[] {
   }
 }
 
+/**
+ * The file is written only when an operator enrolls, so its presence is the
+ * answer. Asking whether it parses would read a truncated or mistyped file as
+ * "no operator" and reopen the passkey-less flow; the issuer stays closed
+ * instead, and a fresh enrollment replaces the file.
+ */
 export function hasRegisteredOperator(stateDir: string): boolean {
-  return readCredentials(stateDir).length > 0;
+  return existsSync(credentialsPath(stateDir));
 }
 
 export function findCredential(stateDir: string, id: string): StoredCredential | null {

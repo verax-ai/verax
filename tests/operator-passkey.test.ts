@@ -433,6 +433,27 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     }
   });
 
+  it("an unreadable credential file keeps authorize closed instead of reopening the old flow", async () => {
+    // The file only exists because an operator enrolled. Reading a truncated
+    // or mistyped file as "no operator" handed a read code to anyone who
+    // asked, which is the passkey-less flow this gate exists to close.
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-passkey-unreadable-"));
+    const issuer = await startIssuer(stateDir);
+    try {
+      const { challenge, redirect } = pkce();
+      const authorizeUrl = `${issuer.origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`;
+      for (const broken of ['{"credentials": [', JSON.stringify({ credentials: [{ id: "a", publicKey: "b", counter: "0", sub: "operator-1" }] })]) {
+        writeFileSync(join(stateDir, "operator-credentials.json"), broken, "utf8");
+        const auth = await fetch(authorizeUrl, { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
+        assert.equal((auth.headers.get("location") ?? "").includes("code="), false, `code minted for ${broken}`);
+        assert.notEqual(auth.status, 302, `old flow reopened for ${broken}`);
+        await auth.body?.cancel();
+      }
+    } finally {
+      await issuer.kill();
+    }
+  });
+
   it("with no registered operator the old flow still opens and the session has no approve", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-passkey-legacy-"));
     const issuer = await startIssuer(stateDir);
