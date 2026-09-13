@@ -73,7 +73,7 @@ describe("agent token never carries approve", () => {
       const stateDir = mkdtempSync(join(tmpdir(), "verax-agent-no-approve-"));
       const outPath = join(stateDir, "token");
       const audience = "http://127.0.0.1/verax-agent-no-approve";
-      const child = spawn(process.execPath, [script, "--out", outPath], {
+      const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
         env: {
           ...process.env,
           VERAX_STATE_DIR: stateDir,

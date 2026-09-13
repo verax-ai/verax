@@ -229,7 +229,7 @@ export async function runDesktop(
   try {
     const issuer = spawnLogged(
       process.execPath,
-      [issuerScript, "--out", tokenPath],
+      ["--experimental-strip-types", issuerScript, "--out", tokenPath],
       issuerEnv(cleanEnv(), opts, audience, issuerUrl),
       repoRoot,
     );
