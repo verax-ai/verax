@@ -79,6 +79,7 @@ export async function runApprove(
       nonce: () => crypto.randomUUID(),
       ref,
       approverId: operatorName(),
+      via: "cli",
       policyHash: defer.claims.policyHash,
       approvals,
     });

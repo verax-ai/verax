@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -71,6 +71,14 @@ describe("verax approve CLI", () => {
     assert.equal(recs[1]!.claims.decision, "allow");
     assert.equal(recs[1]!.claims.reasonCode, "approved-by-operator");
     again.close();
+    // The signed inputs name the door: this approval came from `verax approve`.
+    const allowRef = recs[1]!.claims.ref;
+    const row = readFileSync(join(dir, "inputs.jsonl"), "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as { ref: string; inputs: { approver?: { via?: string } } })
+      .find((r) => r.ref === allowRef);
+    assert.equal(row?.inputs.approver?.via, "cli");
   });
 
   it("accepts a raw _ref when exactly one pending row ends with it", async () => {

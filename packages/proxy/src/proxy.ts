@@ -358,6 +358,8 @@ export function createProxy(deps: ProxyDeps) {
             nonce: deps.nonce,
             ref: cmd.ref,
             approverId: cmd.approverId,
+            // Only `verax approve` queues a command, when the ledger is locked.
+            via: "cli",
             policyHash: defer.policyHash,
             approvals,
             inputsLog,

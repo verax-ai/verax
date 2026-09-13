@@ -129,6 +129,7 @@ async function run(): Promise<void> {
         nonce: queuedNonce([`a${i}`]),
         ref,
         approverId: "op",
+        via: "cli",
         policyHash: policyHashOf(ref),
         approvals: proxy.approvals,
         inputsLog: proxy.inputsLog,

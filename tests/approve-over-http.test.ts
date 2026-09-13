@@ -144,9 +144,17 @@ describe("approving over HTTP", () => {
       const after = await fetch(`${base}/api/ledger?from=0&to=${Number.MAX_SAFE_INTEGER}`, {
         headers: { authorization: `Bearer ${auditOnly}` },
       });
-      const seen = (await after.json()) as { decisions?: { claims: { decision: string; ref: string } }[] };
+      const seen = (await after.json()) as {
+        decisions?: { claims: { decision: string; ref: string } }[];
+        inputs?: Record<string, { approver?: { id?: string; via?: string } }>;
+      };
       const allows = (seen.decisions ?? []).filter((d) => d.claims.decision === "allow");
       assert.equal(allows.length, 1, `one approval must leave one allow, got ${allows.length}`);
+      // The signed inputs say how the approval arrived. This one came over the
+      // body's HTTP door, not from `verax approve` on the machine.
+      const approver = seen.inputs?.[first.allowRef]?.approver;
+      assert.equal(approver?.id, "operator-7");
+      assert.equal(approver?.via, "http");
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await issuer.close();

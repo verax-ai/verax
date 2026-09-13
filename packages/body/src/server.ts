@@ -334,6 +334,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           nonce: () => crypto.randomUUID(),
           ref,
           approverId: approver,
+          via: "http",
           policyHash: defer.claims.policyHash,
           approvals: approvalsLogFor(services.ledger),
         });
