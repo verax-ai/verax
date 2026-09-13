@@ -110,8 +110,11 @@ export type DecisionInputRow = {
 export type DecisionInputs = {
   principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: DecisionInputRow[];
-  approver?: { id: string; via: "cli" | "proxy"; resolves: string };
+  approver?: { id: string; via: ApprovalChannel | "proxy"; resolves: string };
 };
+
+/** How an operator's approval reached the ledger: `verax approve` on the machine, or the body's `/api/approve`. */
+export type ApprovalChannel = "cli" | "http";
 
 export type InputsLog = {
   append(ref: string, inputs: DecisionInputs): Promise<void>;

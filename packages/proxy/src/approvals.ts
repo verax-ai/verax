@@ -18,7 +18,7 @@ import { signDecisionRecord } from "@cedulon/core";
 import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import type { DecisionInputs, InputsLog, Ledger, RecordSigner } from "./types.ts";
+import type { ApprovalChannel, DecisionInputs, InputsLog, Ledger, RecordSigner } from "./types.ts";
 
 export type ApprovalRow = {
   ref: string;
@@ -173,6 +173,8 @@ export async function approvePending(opts: {
   nonce: () => string;
   ref: string;
   approverId: string;
+  /** Signed into the inputs document, so it has to be the door the approval came through. */
+  via: ApprovalChannel;
   policyHash: string;
   approvals: ApprovalsLog;
   inputsLog?: InputsLog;
@@ -205,7 +207,7 @@ export async function approvePending(opts: {
     const inputs: DecisionInputs = {
       principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
       inputs: prior?.inputs ?? [],
-      approver: { id: opts.approverId, via: "cli", resolves: opts.ref },
+      approver: { id: opts.approverId, via: opts.via, resolves: opts.ref },
     };
     const inputsHash = sha256Canonical(inputs);
     await inputsLog.append(expireRef, inputs);
@@ -238,7 +240,7 @@ export async function approvePending(opts: {
   const inputs: DecisionInputs = {
     principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
     inputs: prior?.inputs ?? [],
-    approver: { id: opts.approverId, via: "cli", resolves: opts.ref },
+    approver: { id: opts.approverId, via: opts.via, resolves: opts.ref },
   };
   const inputsHash = sha256Canonical(inputs);
   const effectHash = sha256Canonical(effectDescriptor(snap.subject, snap.args));

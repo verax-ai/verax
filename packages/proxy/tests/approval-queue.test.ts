@@ -14,7 +14,7 @@ import {
 } from "../src/approvals.ts";
 import { explain } from "../src/explain.ts";
 import { effectDescriptor, sha256Canonical } from "../src/hash.ts";
-import { MemoryLedger } from "../src/ledger.ts";
+import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import { loadPolicy } from "../src/policy.ts";
 import { createProxy } from "../src/proxy.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER, queuedNonce, tickingNow } from "./helpers.ts";
@@ -124,6 +124,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a1"]),
       ref: "d1",
       approverId: "op-1",
+      via: "cli",
       policyHash: defer.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -182,6 +183,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["e1"]),
       ref: "d1",
       approverId: "op-1",
+      via: "cli",
       policyHash: (await ledger.decisions())[0]!.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -210,6 +212,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a1"]),
       ref: "idem-1",
       approverId: "op-1",
+      via: "cli",
       policyHash: (await ledger.decisions())[0]!.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -263,6 +266,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a1"]),
       ref: "d1",
       approverId: "op-1",
+      via: "cli",
       policyHash: (await ledger.decisions())[0]!.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -297,6 +301,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a1"]),
       ref: "d1",
       approverId: "op-1",
+      via: "cli",
       policyHash: defer.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -309,6 +314,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a2"]),
       ref: "d1",
       approverId: "op-1",
+      via: "cli",
       policyHash: defer.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -344,6 +350,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a1"]),
       ref: "s1",
       approverId: "op-1",
+      via: "cli",
       policyHash: (await ledger.decisions())[0]!.claims.policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -393,6 +400,7 @@ describe("approval queue", () => {
           nonce: queuedNonce(["a1"]),
           ref: "r1",
           approverId: "op-1",
+          via: "cli",
           policyHash,
           approvals: proxy.approvals,
           inputsLog: proxy.inputsLog,
@@ -409,6 +417,7 @@ describe("approval queue", () => {
       nonce: queuedNonce(["a2"]),
       ref: "r1",
       approverId: "op-1",
+      via: "cli",
       policyHash,
       approvals: proxy.approvals,
       inputsLog: proxy.inputsLog,
@@ -492,6 +501,31 @@ describe("approval queue", () => {
     assert.equal(inputs?.approver?.via, "proxy");
     assert.equal(inputs?.approver?.id, "verax-proxy");
     assert.equal(inputs?.approver?.resolves, "x1");
+  });
+
+  it("p: an approval queued while the ledger was locked still claims via cli", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-drain-via-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: loadPolicy(APPROVE_POLICY),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(100, 1),
+        nonce: queuedNonce(["d1", "a1", "d2"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call(putCall, principal);
+      // What `verax approve` leaves behind when the body holds the lock.
+      enqueueApprovalCommand(dir, { ref: "d1", approverId: "op", atMs: 150 });
+      await proxy.call(putCall, principal);
+      const inputs = await proxy.inputsLog.get("a1");
+      assert.equal(inputs?.approver?.resolves, "d1");
+      assert.equal(inputs?.approver?.via, "cli");
+    } finally {
+      ledger.close();
+    }
   });
 
   it("S2-8: a busy rename writes stderr and increments a counter", async () => {
