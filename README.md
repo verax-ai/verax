@@ -1,5 +1,10 @@
 # Verax
 
+By [VERAX Teknoloji](https://verax-ai.com). Sister projects:
+[Conarium](https://github.com/dogrucanemek-alt/conarium) ·
+[Tugra](https://github.com/dogrucanemek-alt/tugra) ·
+[Cedulon](https://github.com/dogrucanemek-alt/cedulon).
+
 The accountable agent body. Design intent, not yet a claim:
 
 - any brain that speaks MCP can drive it;
