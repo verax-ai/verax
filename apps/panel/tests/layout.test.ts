@@ -292,6 +292,28 @@ describe("observatory layout", () => {
                 `${view.name}/${TAB_FILES[t]}: Turkish on the English screen: "${leftover}"`,
               );
             }
+            // One black ground, as on the public site: the page (#07090d) and the
+            // black box's own near-blacks read as bands against each other. A flat
+            // fill darker than #242424 that is not black is a seam; the 3D box's
+            // faces are an object, not ground.
+            const seams = await page.evaluate(() => {
+              const w = window as ScreenWindow;
+              const out: string[] = [];
+              const root = getComputedStyle(document.documentElement).backgroundColor;
+              if (root !== "rgb(0, 0, 0)") out.push(`html ${root}`);
+              for (const el of w.__screenElements("*")) {
+                if (el.closest(".assembly")) continue;
+                const m = /rgba?\((\d+), (\d+), (\d+)(?:, ([\d.]+))?\)/.exec(getComputedStyle(el).backgroundColor);
+                if (!m) continue;
+                const [r, g, b] = [Number(m[1]), Number(m[2]), Number(m[3])];
+                if ((m[4] !== undefined && Number(m[4]) === 0) || Math.max(r, g, b) > 0x24 || r + g + b === 0) continue;
+                out.push(`${el.tagName.toLowerCase()}.${String(el.className).trim().split(/\s+/).join(".")} ${m[0]}`);
+              }
+              return [...new Set(out)];
+            });
+            if (seams.length > 0) {
+              fails.push(`${view.name}/${TAB_FILES[t]}: ground not black: ${seams.join(", ")}`);
+            }
             // The rail is a way into a record from the two tabs that have no
             // list of their own. On the records tab it is neither that nor a
             // full column of anything else, so it is not drawn there at all.
