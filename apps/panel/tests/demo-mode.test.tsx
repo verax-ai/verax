@@ -82,6 +82,32 @@ describe("demo mode", () => {
     expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.sample"]);
   });
 
+  it("keeps an approval from the black box console off the body in the sample scenario too", async () => {
+    vi.stubGlobal("location", {
+      search: "?demo=1&lang=tr&tab=box",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign: vi.fn(),
+    });
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(ledgerBody), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const { App } = await import("../src/App.tsx");
+    render(<App />);
+    const console = () => screen.getByTestId("black-box").shadowRoot?.querySelector(".cx") as HTMLElement | null;
+    await waitFor(() => {
+      expect(console()?.querySelector(".button.blue")).toBeTruthy();
+    });
+    fireEvent.click(console()!.querySelector(".button.blue")!);
+    fireEvent.click(console()!.querySelector(".button.blue")!);
+    await waitFor(() => {
+      expect(console()?.querySelector('[data-testid="box-approve-outcome"]')).toBeTruthy();
+    });
+    const approveCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/approve"));
+    expect(approveCalls.length).toBe(0);
+    expect(console()!.querySelector('[data-testid="box-approve-outcome"]')!.textContent).toBe(panelCopy()["approve.sample"]);
+  });
+
   it("says the English sample sentence when the sample is in English", async () => {
     vi.stubGlobal("location", {
       search: "?demo=1&lang=en",

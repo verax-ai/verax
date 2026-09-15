@@ -5,6 +5,7 @@ import { ledgerToGalaxy } from "../galaxy/adapter.ts";
 import { coverageLine, fillCopy } from "../galaxy/coverage-line.ts";
 import { panelCopy } from "../copy.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
+import { BlackBox } from "../blackbox/BlackBox.tsx";
 import type {
   PendingApproval,
   RailAction,
@@ -15,6 +16,7 @@ import type {
 import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { approvalForRef } from "../records/approval-state.ts";
+import { approveFailureText, approveOutcomeText } from "../records/approve-outcome.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
 import { LANGS, readLang, writeLang, type Lang } from "../lang.ts";
@@ -59,13 +61,20 @@ function errorReason(copy: ReturnType<typeof panelCopy>, error: LedgerError): st
   return copy["error.session"];
 }
 
-const TAB_IDS = ["records", "galaxy", "status"] as const;
+const TAB_IDS = ["records", "galaxy", "status", "box"] as const;
 type TabId = (typeof TAB_IDS)[number];
-const TAB_COPY: Record<TabId, "tab.records" | "tab.galaxy" | "tab.status"> = {
+const TAB_COPY: Record<TabId, "tab.records" | "tab.galaxy" | "tab.status" | "tab.box"> = {
   records: "tab.records",
   galaxy: "tab.galaxy",
   status: "tab.status",
+  box: "tab.box",
 };
+
+/**
+ * Tabs that draw their own way into a record and need the whole width. The
+ * black box is a full-width scene; its console opens the record it shows.
+ */
+const WIDE_TABS: readonly TabId[] = ["box"];
 
 /**
  * Which tab an address opens on.
@@ -315,7 +324,7 @@ export function Observatory({
   }, {});
 
   return (
-    <div className={`observatory${tab === "records" ? " no-rail" : ""}`}>
+    <div className={`observatory${tab === "records" ? " no-rail" : ""}${WIDE_TABS.includes(tab) ? " wide-tab" : ""}`}>
       {demo ? <p className="demo-badge">{copy["badge.demo"]}</p> : null}
       <div className="obs-top">
         <div role="tablist" aria-label={copy["aria.observatory"]} onKeyDown={onKeyTabs}>
@@ -385,7 +394,7 @@ export function Observatory({
           was left -- two lines about the ledger -- now sits under the
           sentence there. A column that wide has to carry more than a fact
           the view it borders can state in one line. */}
-      {tab === "records" ? null : (
+      {tab === "records" || WIDE_TABS.includes(tab) ? null : (
       <aside className="obs-left" aria-label={copy["aria.rail"]}>
         <h2>{copy["rail.ledger.projects"]}</h2>
         <p className="muted">{copy.disconnected}</p>
@@ -500,7 +509,23 @@ export function Observatory({
             onApprove={onApprove}
           />
         ) : null}
+        {tab === "box" ? (
+          <BlackBox
+            actions={actions}
+            pending={pending}
+            decisions={health?.decisions}
+            demo={demo}
+            canApprove={canApprove}
+            onApprove={onApprove}
+            onRefresh={onRefresh}
+            onOpenRecord={(ref) => {
+              setSelected(ref);
+              setTab("records");
+            }}
+          />
+        ) : null}
       </section>
+      {WIDE_TABS.includes(tab) ? null : (
       <aside className="obs-detail" aria-label={copy["aria.detail"]}>
         <DetailPane
           action={action}
@@ -523,6 +548,7 @@ export function Observatory({
           onInspect={action?.record.claims.ref ? () => void contest(action.record.claims.ref as string) : undefined}
         />
       </aside>
+      )}
       <Timeline
         actions={actions}
         selected={action?.record.claims.ref ?? selected}
@@ -586,24 +612,8 @@ function ApproveControl({
         onClick={() => {
           setSending(true);
           void onApprove(row.ref, row.requestHash).then(
-            (out) => {
-              setSaid(
-                out.ok
-                  ? fillCopy(copy["approve.done"], { ref: out.allowRef })
-                  : out.error === "stale"
-                    ? copy["approve.stale"]
-                    : out.error === "sample-not-sent"
-                      ? copy["approve.sample"]
-                      : fillCopy(copy["approve.refused"], { reason: out.error }),
-              );
-            },
-            (err: unknown) => {
-              setSaid(
-                fillCopy(copy["approve.refused"], {
-                  reason: err instanceof Error ? err.message : "unknown",
-                }),
-              );
-            },
+            (out) => setSaid(approveOutcomeText(copy, out)),
+            (err: unknown) => setSaid(approveFailureText(copy, err)),
           );
         }}
       >
