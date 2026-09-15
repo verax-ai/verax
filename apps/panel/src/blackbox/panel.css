@@ -9,6 +9,10 @@
 .decision-said,.decision-scope{margin:25px 0 0;font-size:12px;color:#a2b6d5;max-width:340px}
 .console-empty{margin:32px 0;font-size:12px;color:#7d8ea8}
 
+/* One black ground, as on the public site: the box's own near-blacks read as bands
+   against the panel's black. */
+:host{--bg:#000}.lab-console,.timeline li>i,.record-preview{background:#000}.object-controls button{background:#000000e8}
+
 /* A layer the body is not connected to stays drawn, and stays dark. */
 .solid.unbound .face.side{box-shadow:inset 0 2px #7895be33,inset 0 -2px 3px #3a4454,0 2px 9px #0000}
 .solid.unbound .micro-label{color:#7d8ea8;text-shadow:none}
