@@ -35,6 +35,7 @@ function cheapRecord(i: number, prev: string | null): SignedDecisionRecord {
       decision: "allow",
       reasonCode: "allow",
       ref: `perf-${i}`,
+      effectClass: "memory.get",
       effectHash: "11".repeat(32),
       timestampMs: i,
       nonce: `perf-${i}`,

@@ -142,6 +142,10 @@ describe("approval queue", () => {
       sha256Canonical(effectDescriptor("memory.put", dispatched)),
     );
     assert.notEqual(recs[1]!.claims.effectHash, recs[1]!.claims.requestHash);
+    // The operator's allow names the class of effect it releases, and it is the
+    // subject that was held, not a constant: this call is not a spend.
+    assert.equal(recs[1]!.claims.effectClass, "memory.put");
+    assert.equal(defer.claims.effectClass, "memory.put");
     const inputs = await proxy.inputsLog.get(recs[1]!.claims.ref!);
     assert.equal(inputs?.approver?.id, "op-1");
     assert.equal(inputs?.approver?.via, "cli");
@@ -193,6 +197,8 @@ describe("approval queue", () => {
     const recs = await ledger.decisions();
     assert.equal(recs[1]!.claims.decision, "deny");
     assert.equal(recs[1]!.claims.reasonCode, "expired");
+    // A refusal names what it refused.
+    assert.equal(recs[1]!.claims.effectClass, recs[0]!.claims.subject);
   });
 
   it("e: same _ref + same requestHash does not write a third record", async () => {

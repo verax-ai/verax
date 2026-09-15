@@ -38,6 +38,47 @@ describe("signed records and extract", () => {
     assert.equal(signed.body.channelId, "verax-body");
   });
 
+  it("every record names the class of effect it decided about, and the effect row agrees", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-class-"));
+    const ledger = await runGoldenScenario(dir);
+    const decisions = await ledger.decisions();
+    const subjects = new Set(decisions.map((d) => d.claims.subject));
+    // A one-subject scenario would let a constant pass for the real thing.
+    assert.ok(subjects.size > 1, `needs more than one subject, saw ${[...subjects].join(",")}`);
+    for (const d of decisions) {
+      assert.equal(
+        d.claims.effectClass,
+        d.claims.subject,
+        `${d.claims.ref} ${d.claims.decision} ${d.claims.subject}`,
+      );
+    }
+    const effects = await ledger.effects();
+    assert.ok(effects.length > 0, "the scenario writes no effect row");
+    let bound = 0;
+    for (const e of effects) {
+      const record = decisions.find((d) => d.claims.ref === e.row.ref);
+      if (!record) continue;
+      if (record.claims.effectHash !== e.row.effectHash) {
+        // The audit binds a row to a record by hash first. The only row here
+        // that does not bind is the one a thrown call leaves behind, which
+        // already reads as effect-mismatch and is a separate, older question.
+        assert.equal(
+          e.row.effectClass,
+          `${record.claims.subject}:threw`,
+          `unbound row ${e.row.ref} is not the thrown one`,
+        );
+        continue;
+      }
+      bound += 1;
+      assert.equal(
+        record.claims.effectClass,
+        e.row.effectClass,
+        `record and effect disagree on ${e.row.ref}`,
+      );
+    }
+    assert.ok(bound > 1, `needs bound rows to compare, saw ${bound}`);
+  });
+
   it("explain labels a self witness as conditional", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-explain-"));
     const ledger = await runGoldenScenario(dir);
