@@ -24,7 +24,7 @@ const VIEWS = [
 // asked for another language would be measuring a screen no one gets by
 // default -- the same fault as measuring a window size the product never
 // opens at.
-const TABS = ["Records", "Galaxy", "Status"] as const;
+const TABS = ["Records", "Galaxy", "Status", "Black box"] as const;
 
 /**
  * Turkish strings that are not also the English ones. A Turkish word made
@@ -41,7 +41,7 @@ const TURKISH_ONLY = Object.keys(trCopy)
   .map((k) => trCopy[k] as string)
   .filter((v) => v.length >= 4 && !v.includes("{"));
 
-const TAB_FILES = ["records", "galaxy", "status"] as const;
+const TAB_FILES = ["records", "galaxy", "status", "box"] as const;
 
 // These screens are measured with no body behind them. The preview proxies
 // /api and /.well-known to VERAX_BODY_URL, 127.0.0.1:8787 by default, so a
@@ -49,10 +49,35 @@ const TAB_FILES = ["records", "galaxy", "status"] as const;
 // does. Port 9 has nothing listening.
 const NO_BODY = { VERAX_BODY_URL: "http://127.0.0.1:9" };
 
+/**
+ * The black box draws inside a shadow root, and neither document.body.innerText
+ * nor document.querySelectorAll reaches into one. A check that reads only the
+ * page is blind to that tab and passes on it whatever it draws, so every text
+ * and control check here reads the page and the box together, through these
+ * two readers installed in the page before it loads.
+ */
+type ScreenWindow = Window & { __screenText: () => string; __screenElements: (selector: string) => Element[] };
+function installScreenReaders(): void {
+  const w = window as ScreenWindow;
+  const roots = () =>
+    [...document.querySelectorAll("[data-testid=black-box]")]
+      .map((h) => h.shadowRoot)
+      .filter((r): r is ShadowRoot => r !== null);
+  w.__screenText = () =>
+    [
+      document.body.innerText ?? document.body.textContent ?? "",
+      ...roots().map((r) => (r.querySelector(".cx") as HTMLElement | null)?.innerText ?? ""),
+    ].join(String.fromCharCode(10));
+  w.__screenElements = (selector) => [
+    ...document.querySelectorAll(selector),
+    ...roots().flatMap((r) => [...r.querySelectorAll(selector)]),
+  ];
+}
+
 after(killStragglers);
 
 describe("observatory layout", () => {
-  it("keeps three tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
+  it("keeps four tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
     mkdirSync(shotDir, { recursive: true });
     const preview = await startPreview({ viteJs, cwd: root, port: 4189, label: "panel-layout", env: NO_BODY });
     const ready = `${preview.base}/?demo=1`;
@@ -62,6 +87,7 @@ describe("observatory layout", () => {
       try {
         for (const view of VIEWS) {
           const page = await browser.newPage({ viewport: { width: view.width, height: view.height } });
+          await page.addInitScript(installScreenReaders);
           const pageErrors: string[] = [];
           const consoleErrors: string[] = [];
           page.on("pageerror", (err) => pageErrors.push(String(err)));
@@ -243,6 +269,12 @@ describe("observatory layout", () => {
           for (let t = 0; t < TABS.length; t += 1) {
             await page.getByRole("tab", { name: TABS[t] }).click();
             await page.waitForTimeout(200);
+            if (TAB_FILES[t] === "box") {
+              // The box mounts into its shadow root one render after the tab.
+              await page
+                .waitForFunction(() => (window as ScreenWindow).__screenElements(".lab-console").length > 0, null, { timeout: 15_000 })
+                .catch(() => fails.push(`${view.name}/box: the console never drew`));
+            }
             // Every tab, not just the one the panel opens on: the first
             // version of this check read the records tab alone and missed a
             // Turkish word sitting on the status tab.
@@ -251,7 +283,7 @@ describe("observatory layout", () => {
               // languages on purpose was a glossary of body-part names that
               // measured nothing, and it is gone; an English screen now has
               // to be English all the way down.
-              const text = document.body.innerText ?? document.body.textContent ?? "";
+              const text = (window as ScreenWindow).__screenText();
               const hit = needles.find((n) => text.includes(n));
               return hit === undefined ? "" : hit.slice(0, 60);
             }, TURKISH_ONLY);
@@ -274,7 +306,7 @@ describe("observatory layout", () => {
               // window, and six controls were under the touch floor.
               const wide = await page.evaluate(
                 (limit: number) =>
-                  [...document.querySelectorAll("section, p, ul, ol, h1, h2, h3")]
+                  (window as ScreenWindow).__screenElements("section, p, ul, ol, h1, h2, h3")
                     .map((el) => ({ el, r: el.getBoundingClientRect() }))
                     .filter(({ r }) => r.width > 0 && r.right > limit + 0.5)
                     .slice(0, 4)
@@ -306,7 +338,7 @@ describe("observatory layout", () => {
                 fails.push(`${view.name}/${TAB_FILES[t]}: controls on top of each other: ${overlaps.join(", ")}`);
               }
               const small = await page.evaluate(() =>
-                [...document.querySelectorAll('button, [role="tab"]')]
+                (window as ScreenWindow).__screenElements('button, [role="tab"]')
                   .map((el) => ({ el, r: el.getBoundingClientRect() }))
                   .filter(({ r }) => r.width > 0 && r.height > 0 && r.height < 44)
                   .map(({ el, r }) => `${(el.textContent ?? "").trim().slice(0, 16)} ${Math.round(r.width)}x${Math.round(r.height)}`),
@@ -319,8 +351,25 @@ describe("observatory layout", () => {
             if (TAB_FILES[t] === "records" && rail) {
               fails.push(`${view.name}/${TAB_FILES[t]}: the rail is drawn on the records tab`);
             }
-            if (TAB_FILES[t] !== "records" && !rail) {
-              fails.push(`${view.name}/${TAB_FILES[t]}: no rail, and no other way into a record`);
+            if (TAB_FILES[t] === "galaxy" || TAB_FILES[t] === "status") {
+              if (!rail) fails.push(`${view.name}/${TAB_FILES[t]}: no rail, and no other way into a record`);
+            }
+            if (TAB_FILES[t] === "box") {
+              // The box takes the whole width; its way into a record is the
+              // console's own button, and it names no product it is not bound to.
+              const box = await page.evaluate(() => {
+                const w = window as ScreenWindow;
+                const text = w.__screenElements(".cx").map((el) => (el as HTMLElement).innerText).join(String.fromCharCode(10));
+                return {
+                  rail: document.querySelector(".obs-left") !== null,
+                  detail: document.querySelector(".obs-detail") !== null,
+                  openRecord: w.__screenElements(".integrity-row button").length,
+                  product: /Conarium|Tugra|Tuğra|Cedulon/i.exec(text)?.[0] ?? null,
+                };
+              });
+              if (box.rail || box.detail) fails.push(`${view.name}/box: rail ${box.rail}, detail ${box.detail} on a full-width tab`);
+              if (box.openRecord === 0) fails.push(`${view.name}/box: no rail, and no other way into a record`);
+              if (box.product !== null) fails.push(`${view.name}/box: names ${box.product}, which the body is not connected to`);
             }
             await page.screenshot({
               path: join(shotDir, `${view.name}-${TAB_FILES[t]}.png`),
@@ -385,14 +434,20 @@ describe("observatory layout", () => {
       const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       try {
         const page = await browser.newPage({ viewport: { width: 1360, height: 880 } });
+        await page.addInitScript(installScreenReaders);
         await page.goto(ready, { waitUntil: "domcontentloaded" });
         await page.getByRole("tab", { name: "Genel durum" }).waitFor({ state: "visible", timeout: 30_000 });
-        const trTabs = ["Kayıtlar", "Galaksi", "Genel durum"] as const;
-        const tabFiles = ["records", "galaxy", "status"] as const;
+        const trTabs = ["Kayıtlar", "Galaksi", "Genel durum", "Kara kutu"] as const;
+        const tabFiles = ["records", "galaxy", "status", "box"] as const;
         for (let t = 0; t < trTabs.length; t += 1) {
           await page.getByRole("tab", { name: trTabs[t] }).click();
           await page.waitForTimeout(200);
-          const text = await page.evaluate(() => document.body.innerText ?? document.body.textContent ?? "");
+          if (tabFiles[t] === "box") {
+            await page
+              .waitForFunction(() => (window as ScreenWindow).__screenElements(".lab-console").length > 0, null, { timeout: 15_000 })
+              .catch(() => fails.push("box: the console never drew"));
+          }
+          const text = await page.evaluate(() => (window as ScreenWindow).__screenText());
           const leftover = englishInterfaceLeftovers(text);
           if (leftover.length > 0) {
             fails.push(`${tabFiles[t]}: English interface leftover: ${leftover.join(", ")}`);

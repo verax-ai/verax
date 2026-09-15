@@ -682,3 +682,15 @@ aside {
 .timeline-mark {
   font-family: ui-sans-serif, system-ui, sans-serif;
 }
+/* A wide tab is one scene across the window: no rail, no detail pane. Two
+   classes, so it outranks the stacked phone rule without repeating it. */
+.observatory.wide-tab {
+  grid-template-areas:
+    "top"
+    "main"
+    "time";
+  grid-template-columns: minmax(0, 1fr);
+}
+.wide-tab .obs-main {
+  padding: 0;
+}

@@ -60,10 +60,10 @@ beforeEach(() => {
 });
 
 describe("observatory", () => {
-  it("renders three tabs and defaults to records", () => {
+  it("renders four tabs and defaults to records", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Kayıtlar", "Galaksi", "Genel durum"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Kayıtlar", "Galaksi", "Genel durum", "Kara kutu"]);
     expect(screen.getByRole("tab", { name: "Kayıtlar" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByTestId("records-summary")).toBeTruthy();
     expect(screen.queryByTestId("galaxy-stage")).toBeNull();
