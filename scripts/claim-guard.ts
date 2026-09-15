@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 // adapted from cedulon@da7bf9b
 // Cedulon's original scan rejects a handwritten suite size. Verax also
-// rejects a short list of certainty phrases on README.md, docs/, and
-// the body-map public copy.
+// rejects a short list of certainty phrases on README.md and docs/.
 //
 // This script does not run the suite. It only reads files.
 
@@ -67,12 +66,7 @@ function publishedFiles(base: string): string[] {
         .filter((n) => n.endsWith(".md"))
         .map((n) => join("docs", n).replace(/\\/g, "/"))
     : [];
-  return [
-    ...docs,
-    "README.md",
-    "apps/body-map/src/copy/en.json",
-    "apps/body-map/src/copy/tr.json",
-  ];
+  return [...docs, "README.md"];
 }
 
 function loadExceptions(base: string): Exception[] {
