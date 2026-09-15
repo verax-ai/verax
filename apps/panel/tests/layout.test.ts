@@ -43,12 +43,18 @@ const TURKISH_ONLY = Object.keys(trCopy)
 
 const TAB_FILES = ["records", "galaxy", "status"] as const;
 
+// These screens are measured with no body behind them. The preview proxies
+// /api and /.well-known to VERAX_BODY_URL, 127.0.0.1:8787 by default, so a
+// body running on the same machine would answer and change what the page
+// does. Port 9 has nothing listening.
+const NO_BODY = { VERAX_BODY_URL: "http://127.0.0.1:9" };
+
 after(killStragglers);
 
 describe("observatory layout", () => {
   it("keeps three tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
     mkdirSync(shotDir, { recursive: true });
-    const preview = await startPreview({ viteJs, cwd: root, port: 4189, label: "panel-layout" });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4189, label: "panel-layout", env: NO_BODY });
     const ready = `${preview.base}/?demo=1`;
     const fails: string[] = [];
     try {
@@ -337,15 +343,26 @@ describe("observatory layout", () => {
         await returning.goto(`${preview.base}/?code=abc&state=st`, { waitUntil: "domcontentloaded" });
         await returning.waitForFunction(() => window.location.search.includes("focus="), null, { timeout: 15_000 })
           .catch(() => undefined);
-        const back = await returning.evaluate(() => ({
-          search: window.location.search,
-          galaxy: document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
-        }));
-        if (!back.search.includes("focus=g-alpha")) {
-          fails.push(`round-trip: the restored address is ${back.search || "(empty)"}`);
-        }
-        if (back.galaxy === null || !/Galaxy|Galaksi/.test(back.galaxy)) {
-          fails.push(`round-trip: the open tab is ${back.galaxy ?? "none"}, not the sky`);
+        // The check reads this page only once the session has given up on it.
+        // A body answering the preview proxy hands the page an issuer, and the
+        // page leaves for /authorize: reading it then raced the navigation and
+        // failed now and then with "execution context was destroyed".
+        const settled = await returning
+          .waitForSelector('[data-status="error"]', { timeout: 15_000 })
+          .then(() => true, () => false);
+        if (!settled || !returning.url().startsWith(preview.base)) {
+          fails.push(`round-trip: the page did not stay to show the session error; it is at ${returning.url()}`);
+        } else {
+          const back = await returning.evaluate(() => ({
+            search: window.location.search,
+            galaxy: document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
+          }));
+          if (!back.search.includes("focus=g-alpha")) {
+            fails.push(`round-trip: the restored address is ${back.search || "(empty)"}`);
+          }
+          if (back.galaxy === null || !/Galaxy|Galaksi/.test(back.galaxy)) {
+            fails.push(`round-trip: the open tab is ${back.galaxy ?? "none"}, not the sky`);
+          }
         }
         await returning.close();
       } finally {
@@ -361,7 +378,7 @@ describe("observatory layout", () => {
   it("keeps the Turkish screen free of English interface words the copy table did not supply", { timeout: 120_000 }, async () => {
     const shotTr = join(homedir(), "Desktop", "Work", "VERAX_EKRAN_DILI_20260910");
     mkdirSync(shotTr, { recursive: true });
-    const preview = await startPreview({ viteJs, cwd: root, port: 4190, label: "panel-layout-tr" });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4190, label: "panel-layout-tr", env: NO_BODY });
     const ready = `${preview.base}/?demo=1&lang=tr`;
     const fails: string[] = [];
     try {
@@ -400,7 +417,7 @@ describe("observatory layout", () => {
   it("at 390, tapping a waiting record puts the approve control on screen", { timeout: 120_000 }, async () => {
     const shot = join(homedir(), "Desktop", "Work", "VERAX_ONAY_KAYIT_20260912");
     mkdirSync(shot, { recursive: true });
-    const preview = await startPreview({ viteJs, cwd: root, port: 4191, label: "panel-approve-390" });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4191, label: "panel-approve-390", env: NO_BODY });
     const ready = `${preview.base}/?demo=1&lang=tr`;
     try {
       const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
@@ -433,7 +450,7 @@ describe("observatory layout", () => {
     }
   });
   it("at 390, the approve control does not pull the page back once the operator scrolls away", { timeout: 120_000 }, async () => {
-    const preview = await startPreview({ viteJs, cwd: root, port: 4192, label: "panel-approve-stays" });
+    const preview = await startPreview({ viteJs, cwd: root, port: 4192, label: "panel-approve-stays", env: NO_BODY });
     try {
       const { browser, stopBrowser } = await launchBrowser(["--use-gl=swiftshader"]);
       try {
