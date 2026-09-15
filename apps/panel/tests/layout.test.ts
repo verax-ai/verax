@@ -360,13 +360,23 @@ describe("observatory layout", () => {
               const box = await page.evaluate(() => {
                 const w = window as ScreenWindow;
                 const text = w.__screenElements(".cx").map((el) => (el as HTMLElement).innerText).join(String.fromCharCode(10));
+                const controls = w.__screenElements(".object-controls button")[0]?.getBoundingClientRect();
+                const strip = document.querySelector(".obs-timeline")?.getBoundingClientRect();
                 return {
                   rail: document.querySelector(".obs-left") !== null,
                   detail: document.querySelector(".obs-detail") !== null,
                   openRecord: w.__screenElements(".integrity-row button").length,
                   product: /Conarium|Tugra|Tuğra|Cedulon/i.exec(text)?.[0] ?? null,
+                  controlsBottom: controls ? Math.round(controls.bottom) : null,
+                  stripTop: strip ? Math.round(strip.top) : null,
                 };
               });
+              // The site's scene fills a window; in the panel it shares one with
+              // the tab bar and the timeline. At 1440x900 that put the box's own
+              // open control under the strip, found only by scrolling.
+              if (view.width > 800 && (box.controlsBottom === null || box.stripTop === null || box.controlsBottom > box.stripTop)) {
+                fails.push(`${view.name}/box: the box's controls end at ${box.controlsBottom}, under the timeline at ${box.stripTop}`);
+              }
               if (box.rail || box.detail) fails.push(`${view.name}/box: rail ${box.rail}, detail ${box.detail} on a full-width tab`);
               if (box.openRecord === 0) fails.push(`${view.name}/box: no rail, and no other way into a record`);
               if (box.product !== null) fails.push(`${view.name}/box: names ${box.product}, which the body is not connected to`);
