@@ -3,7 +3,7 @@
 //
 // The browser suites spawn vite and launch Chromium inside the test body and
 // clean up in `finally`. That cleanup runs only if the body reaches it. It did
-// not in `body-map/tests/page.test.ts`, where the wait for the server sat
+// not in the since-removed body-map page test, where the wait for the server sat
 // outside the `try`: when the preview never announced itself the test failed
 // at once and the vite child stayed alive. A live child keeps the runner's
 // handles open, so `node --test` cannot exit - it prints nothing more and the

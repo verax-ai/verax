@@ -20,8 +20,6 @@
     "apps/panel/src/**/*.ts",
     "apps/panel/src/**/*.tsx",
     "apps/panel/src/**/*.d.ts",
-    "apps/body-map/src/**/*.ts",
-    "apps/body-map/src/**/*.tsx",
     "scripts/**/*.ts",
     "tests/**/*.ts"
   ]
