@@ -3,13 +3,20 @@ import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
 import { englishInterfaceLeftovers } from "./turkish-screen.ts";
 import { killStragglers, launchBrowser, startPreview } from "../../../scripts/test-preview.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const repoRoot = join(root, "..", "..");
 const viteJs = join(root, "..", "..", "node_modules", "vite", "bin", "vite.js");
-const shotDir = join(homedir(), "Desktop", "Work", "VERAX_GOZLEMEVI_20260906");
+
+/** Screenshots stay in the repo (or VERAX_SHOT_DIR). Never write to a home Desktop. */
+function shotDirFor(name: string): string {
+  const base = process.env.VERAX_SHOT_DIR ?? join(repoRoot, ".shots");
+  return join(base, name);
+}
+
+const shotDir = shotDirFor("VERAX_GOZLEMEVI_20260906");
 
 // 1360x880 is the window `verax desktop` opens. A gate that never runs the
 // product's own size measured everything except what the operator sees.
@@ -457,7 +464,7 @@ describe("observatory layout", () => {
   });
 
   it("keeps the Turkish screen free of English interface words the copy table did not supply", { timeout: 120_000 }, async () => {
-    const shotTr = join(homedir(), "Desktop", "Work", "VERAX_EKRAN_DILI_20260910");
+    const shotTr = shotDirFor("VERAX_EKRAN_DILI_20260910");
     mkdirSync(shotTr, { recursive: true });
     const preview = await startPreview({ viteJs, cwd: root, port: 4190, label: "panel-layout-tr", env: NO_BODY });
     const ready = `${preview.base}/?demo=1&lang=tr`;
@@ -502,7 +509,7 @@ describe("observatory layout", () => {
   });
 
   it("at 390, tapping a waiting record puts the approve control on screen", { timeout: 120_000 }, async () => {
-    const shot = join(homedir(), "Desktop", "Work", "VERAX_ONAY_KAYIT_20260912");
+    const shot = shotDirFor("VERAX_ONAY_KAYIT_20260912");
     mkdirSync(shot, { recursive: true });
     const preview = await startPreview({ viteJs, cwd: root, port: 4191, label: "panel-approve-390", env: NO_BODY });
     const ready = `${preview.base}/?demo=1&lang=tr`;

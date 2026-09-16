@@ -9,4 +9,5 @@ dist/
 apps/panel/perf/last.json
 packages/proxy/perf/last-*.json
 .verax/
+.shots/
 coverage/
