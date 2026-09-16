@@ -16,8 +16,12 @@ const bodyPkg = JSON.parse(readFileSync(join(root, "packages", "body", "package.
 const registry = JSON.parse(readFileSync(join(root, "server.json"), "utf8")) as {
   name: string;
   version: string;
+  description: string;
   packages: { identifier: string; version: string }[];
 };
+
+/** The registry refuses a longer one with a 422, at publish time. */
+const REGISTRY_DESCRIPTION_MAX = 100;
 
 /** No VERAX_* in the environment: this is a fresh install asking what it got. */
 function runCli(args: string[]): { status: number; stdout: string; stderr: string } {
@@ -55,6 +59,13 @@ describe("the published command answers before it is configured", () => {
     const npm = registry.packages.find((p) => p.identifier === bodyPkg.name);
     assert.ok(npm, `server.json does not list ${bodyPkg.name}`);
     assert.equal(npm.version, bodyPkg.version, "server.json package version != package version");
+  });
+
+  it("the manifest description is short enough for the registry to accept it", () => {
+    assert.ok(
+      registry.description.length <= REGISTRY_DESCRIPTION_MAX,
+      `description is ${registry.description.length} characters; the registry allows ${REGISTRY_DESCRIPTION_MAX}`,
+    );
   });
 
   it("the bin points at built JavaScript, because Node will not run TypeScript from node_modules", () => {
