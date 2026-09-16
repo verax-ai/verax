@@ -14,16 +14,20 @@ const workflows = readdirSync(dir)
  * run on Node.js 24": actions/checkout v4, actions/setup-node v4,
  * actions/upload-artifact v4 (on every run of main), and then
  * actions/upload-artifact v5.0.0, whose action.yml still says `node20` and
- * which the proxy-perf run of the first pin change flagged the same way.
+ * which the proxy-perf run of the first pin change flagged the same way,
+ * and github/codeql-action v3, which the scorecard run on main flagged
+ * (scorecard does not run on pull requests, so the PR runs could not show
+ * it) together with "CodeQL Action v3 will be deprecated in December 2026".
  * Node 24 builds, read from each action.yml: checkout v5.1.0, setup-node
- * v5.0.0, upload-artifact v6.0.0. The pins moved on 16 Sep 2026 and must
- * not drift back, in any workflow.
+ * v5.0.0, upload-artifact v6.0.0, codeql-action v4. The pins moved on
+ * 16 Sep 2026 and must not drift back, in any workflow.
  */
 const NODE_20_COMMITS = [
   "11d5960a326750d5838078e36cf38b85af677262",
   "49933ea5288caeca8642d1e84afbd3f7d6820020",
   "ea165f8d65b6e75b540449e92b4886f43607fa02",
   "330a01c490aca151604b8cf639adc76d48f6c5d4",
+  "6f5948dfacef28e207b48d0905cf90c03365536d",
 ];
 
 describe("workflow pins", () => {
