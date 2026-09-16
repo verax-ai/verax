@@ -1,0 +1,102 @@
+name: mcp-registry
+
+# Publishes server.json to the MCP registry from inside this repository, with
+# GitHub's own OIDC token. The interactive path cannot do it: a device-flow
+# login grants the namespace of the person who logged in
+# (io.github.<user>/*), not the organisation's, so publishing
+# io.github.verax-ai/verax from a laptop answers 403. It also hands out a
+# five-minute token, which turns every retry into another device code.
+#
+# Run it from the Actions tab with confirm=publish. Nothing runs on push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to publish server.json to the MCP registry'
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: refuse without confirmation
+        run: |
+          test "${{ inputs.confirm }}" = "publish" || {
+            echo "confirm was '${{ inputs.confirm }}'; expected 'publish'"
+            exit 1
+          }
+      - name: fetch mcp-publisher, and check it is the file we expect
+        env:
+          VERSION: v1.8.1
+          SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
+        run: |
+          set -euo pipefail
+          curl -sSL --retry 5 --retry-delay 5 --retry-all-errors \
+            "https://github.com/modelcontextprotocol/registry/releases/download/${VERSION}/mcp-publisher_linux_amd64.tar.gz" \
+            -o publisher.tar.gz
+          echo "${SHA256}  publisher.tar.gz" | sha256sum -c -
+          tar xzf publisher.tar.gz mcp-publisher
+          ./mcp-publisher --version
+      - name: the manifest still says what the package says
+        run: |
+          set -euo pipefail
+          node -e '
+            const fs = require("node:fs");
+            const server = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const pkg = JSON.parse(fs.readFileSync("packages/body/package.json", "utf8"));
+            const npm = server.packages.find((p) => p.identifier === pkg.name);
+            if (server.name !== pkg.mcpName) throw new Error(`name ${server.name} != mcpName ${pkg.mcpName}`);
+            if (server.version !== pkg.version) throw new Error(`version ${server.version} != ${pkg.version}`);
+            if (!npm || npm.version !== pkg.version) throw new Error("server.json does not name this package version");
+            console.log(`${server.name} ${server.version}`);
+          '
+      - name: the npm package is actually on the registry
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./packages/body/package.json').version")"
+          # npm serves the tarball before the package document; retry rather
+          # than call a fresh publish missing.
+          for i in $(seq 1 20); do
+            if npm view "@verax-ai/body@${version}" version >/dev/null 2>&1; then
+              echo "npm has @verax-ai/body@${version}"
+              exit 0
+            fi
+            echo "attempt ${i}: npm does not answer for ${version} yet"
+            sleep 15
+          done
+          echo "npm never answered for @verax-ai/body@${version}"
+          exit 1
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher validate
+      - run: ./mcp-publisher publish
+      - name: read it back from the registry
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./packages/body/package.json').version")"
+          for i in $(seq 1 20); do
+            body="$(curl -sS "https://registry.modelcontextprotocol.io/v0/servers?search=io.github.verax-ai/verax")"
+            if node -e '
+              const data = JSON.parse(process.argv[1]);
+              const want = process.argv[2];
+              const rows = (data.servers ?? []).filter((s) => s.name === "io.github.verax-ai/verax");
+              const latest = rows.find((s) => s._meta?.["io.modelcontextprotocol.registry/official"]?.isLatest);
+              if (!latest) throw new Error("no row marked latest");
+              if (latest.version !== want) throw new Error(`latest is ${latest.version}, expected ${want}`);
+              console.log(`registry: ${latest.name} ${latest.version} isLatest`);
+            ' "$body" "$version"; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "the registry never answered with this version"
+          exit 1
