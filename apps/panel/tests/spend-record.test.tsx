@@ -1,13 +1,9 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval, RailAction } from "../src/rail/types.ts";
 import type { ReconcileCardReport } from "../src/ReconcileCard.tsx";
 import { setLang } from "./with-lang.ts";
-
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
 
 afterEach(() => {
   cleanup();
@@ -210,7 +206,7 @@ describe("a resolved defer on the screen", () => {
     expect((screen.getByTestId("detail-result").textContent ?? "").trim()).toBe(outcome);
     // The rail stops repeating the list on the records tab, so ask it where it
     // still speaks: the same sentence has to hold there too.
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     expect(screen.getByTestId("rail-records").textContent ?? "").toContain(outcome);
   });
 });

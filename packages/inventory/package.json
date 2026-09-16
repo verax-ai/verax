@@ -2,7 +2,7 @@
   "name": "@verax-ai/inventory",
   "version": "0.1.1",
   "license": "Apache-2.0",
-  "description": "Read the declared roster document a VERAX body serves and a VERAX galaxy draws.",
+  "description": "Read the declared roster document a VERAX body serves and the VERAX panel lists.",
   "homepage": "https://verax-ai.com",
   "keywords": [
     "verax",

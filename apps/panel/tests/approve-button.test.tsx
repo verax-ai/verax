@@ -6,10 +6,6 @@ import { panelCopy } from "../src/copy.ts";
 import type { PendingApproval, RailAction } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
 
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
-
 afterEach(() => {
   cleanup();
 });

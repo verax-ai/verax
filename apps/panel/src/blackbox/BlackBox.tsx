@@ -4,7 +4,7 @@ import codexCss from "./codex.css?raw";
 import panelCss from "./panel.css?raw";
 import "./fonts.css";
 import { panelCopy, readLang, type Copy } from "../copy.ts";
-import { fillCopy } from "../galaxy/coverage-line.ts";
+import { fillCopy } from "../fill.ts";
 import type { ApproveOutcome } from "../observatory/Observatory.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
 import { approveFailureText, approveOutcomeText } from "../records/approve-outcome.ts";

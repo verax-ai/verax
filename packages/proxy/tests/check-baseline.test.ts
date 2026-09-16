@@ -10,8 +10,8 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const script = join(root, "perf", "check-baseline.mjs");
 const lastZero = join(root, "perf", "last-zero.json");
 
-describe("panel-perf check-baseline", () => {
-  it("fails last.json with frames 0 as panel-perf: no frames", () => {
+describe("check-baseline", () => {
+  it("fails last.json with frames 0 as no frames", () => {
     const ran = spawnSync(process.execPath, [script], {
       cwd: root,
       env: { ...process.env, VERAX_PERF_LAST: lastZero },
@@ -19,7 +19,7 @@ describe("panel-perf check-baseline", () => {
       windowsHide: true,
     });
     assert.equal(ran.status, 1, ran.stderr);
-    assert.match(ran.stderr, /panel-perf: no frames/);
+    assert.match(ran.stderr, /^perf: no frames/m);
   });
 
   it("fails p95 0 even when frames meet the minimum", () => {
@@ -36,7 +36,7 @@ describe("panel-perf check-baseline", () => {
       windowsHide: true,
     });
     assert.equal(ran.status, 1, ran.stderr);
-    assert.match(ran.stderr, /panel-perf: no frames/);
+    assert.match(ran.stderr, /^perf: no frames/m);
   });
 
   it("fails a dead run even when the key has no baseline", () => {
@@ -53,7 +53,18 @@ describe("panel-perf check-baseline", () => {
       encoding: "utf8",
       windowsHide: true,
     });
-    assert.equal(ran.status, 1, "a scene that rendered nothing must not pass as not compared");
-    assert.match(ran.stderr, /panel-perf: no frames/);
+    assert.equal(ran.status, 1, "a run that measured nothing must not pass as not compared");
+    assert.match(ran.stderr, /^perf: no frames/m);
+  });
+
+  it("speaks under the label the caller gives it", () => {
+    const ran = spawnSync(process.execPath, [script], {
+      cwd: root,
+      env: { ...process.env, VERAX_PERF_LAST: lastZero, VERAX_PERF_LABEL: "proxy-perf/call" },
+      encoding: "utf8",
+      windowsHide: true,
+    });
+    assert.equal(ran.status, 1, ran.stderr);
+    assert.match(ran.stderr, /^proxy-perf\/call: no frames/m);
   });
 });

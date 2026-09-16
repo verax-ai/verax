@@ -3,17 +3,13 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseInventory, type Inventory } from "@verax-ai/galaxy";
+import { parseInventory, type Inventory } from "@verax-ai/inventory";
 import { panelCopy } from "../src/copy.ts";
 import { Observatory, openingTab } from "../src/observatory/Observatory.tsx";
 import { loadDemoActions } from "../src/observatory/demo.ts";
 import { parseLedger } from "../src/rail/parse.ts";
 import type { PolicyBundle, RailAction } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
-
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const golden = join(root, "packages", "proxy", "tests", "fixtures", "ledger-golden");
@@ -22,7 +18,7 @@ const policy = JSON.parse(
 ) as PolicyBundle["document"];
 
 const sampleParsed = parseInventory(
-  JSON.parse(readFileSync(join(root, "packages", "galaxy", "tests", "fixtures", "inventory-sample.json"), "utf8")),
+  JSON.parse(readFileSync(join(root, "packages", "inventory", "tests", "fixtures", "inventory-sample.json"), "utf8")),
 );
 if (!sampleParsed.ok) throw new Error(sampleParsed.reason);
 const sampleInventory: Inventory = sampleParsed.value;
@@ -60,75 +56,40 @@ beforeEach(() => {
 });
 
 describe("observatory", () => {
-  it("renders four tabs and defaults to records", () => {
+  it("renders three tabs, records first, and defaults to records", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const tabs = screen.getAllByRole("tab");
-    expect(tabs.map((t) => t.textContent)).toEqual(["Kayıtlar", "Galaksi", "Genel durum", "Kara kutu"]);
+    expect(tabs.map((t) => t.textContent)).toEqual(["Kayıtlar", "Kara kutu", "Genel durum"]);
     expect(screen.getByRole("tab", { name: "Kayıtlar" }).getAttribute("aria-selected")).toBe("true");
     expect(screen.getByTestId("records-summary")).toBeTruthy();
-    expect(screen.queryByTestId("galaxy-stage")).toBeNull();
     expect(screen.queryByTestId("stage")).toBeNull();
+    expect(document.querySelector("canvas")).toBeNull();
   });
 
-  it("says the ledger is empty instead of showing an unexplained black stage", () => {
-    render(<Observatory actions={[]} status="ok" demo={false} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
-    expect(screen.getByTestId("galaxy-empty").textContent).toMatch(/kayıt yok/i);
-    expect(screen.getByTestId("galaxy-coverage").textContent).toBe("envanter bağlı değil");
-    expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/\d+\s*\/\s*\d+/);
-  });
-
-  it("passes the hidden-names line from copy into the sky", () => {
-    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
-    expect(src).toMatch(/hiddenLabelsText=\{copy\["galaxy\.labels\.hidden"\]\}/);
-    expect(src).toMatch(/crowdedLabelsText=\{copy\["galaxy\.labels\.hidden\.crowd"\]\}/);
-    const en = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "en.json"), "utf8")) as Record<string, string>;
-    const tr = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "tr.json"), "utf8")) as Record<string, string>;
-    expect(en["galaxy.labels.hidden"]).toMatch(/\{n\}/);
-    expect(en["galaxy.labels.hidden"]).toMatch(/hidden at this distance/i);
-    expect(en["galaxy.labels.hidden.crowd"]).toMatch(/\{n\}/);
-    expect(en["galaxy.labels.hidden.crowd"]).toMatch(/crowded/i);
-    expect(tr["galaxy.labels.hidden.crowd"]).toMatch(/\{n\}/);
-    expect(tr["galaxy.labels.hidden.crowd"]).toMatch(/yığın/);
-  });
-
-  it("passes the focus line from copy into the sky and names how to leave", () => {
-    const src = readFileSync(join(root, "apps", "panel", "src", "observatory", "Observatory.tsx"), "utf8");
-    expect(src).toMatch(/focusText=\{copy\["galaxy\.focus"\]\}/);
-    expect(src).toMatch(/leaveFocusText=\{copy\["galaxy\.focus\.leave"\]\}/);
-    const en = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "en.json"), "utf8")) as Record<string, string>;
-    const tr = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", "tr.json"), "utf8")) as Record<string, string>;
-    expect(en["galaxy.focus"]).toMatch(/\{name\}/);
-    expect(en["galaxy.focus.leave"]).toMatch(/leave/i);
-    expect(tr["galaxy.focus"]).toMatch(/\{name\}/);
-    expect(tr["galaxy.focus.leave"].length).toBeGreaterThan(0);
-  });
-
-  it("opens the sky when the address names a seat, and obeys an explicit tab", () => {
-    // This read a string out of Observatory.tsx and passed for as long as the
-    // query was parsed and thrown away. It asks the function now.
-    expect(openingTab("?focus=g-alpha")).toBe("galaxy");
-    expect(openingTab("?focus=g-alpha&tab=status")).toBe("status");
-    expect(openingTab("?focus=")).toBe("records");
-    expect(openingTab("")).toBe("records");
+  it("opens on the tab the address names, and on records for a name it no longer has", () => {
+    expect(openingTab("?tab=box")).toBe("box");
+    expect(openingTab("?tab=status")).toBe("status");
+    expect(openingTab("?tab=galaxy")).toBe("records");
+    expect(openingTab("?focus=g-alpha")).toBe("records");
     expect(openingTab("?tab=history")).toBe("records");
+    expect(openingTab("")).toBe("records");
   });
 
-  it("mounts the sky, not the record list, when the address names a seat", () => {
-    const url = new URL(window.location.href);
-    url.searchParams.set("focus", "g-alpha");
-    window.history.replaceState({}, "", url);
-    try {
-      render(<Observatory actions={actions} status="ok" demo={false} />);
-      expect(screen.getByTestId("galaxy-stage")).toBeTruthy();
-      expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
-    } finally {
-      url.searchParams.delete("focus");
-      window.history.replaceState({}, "", url);
+  it("names no galaxy anywhere on the screen or in the copy table", () => {
+    // The sky was removed on 16 Sep 2026. A tab, a copy line or a canvas that
+    // still says galaxy is a leftover, not a feature.
+    render(<Observatory actions={actions} status="ok" demo={false} inventory={sampleInventory} />);
+    expect(document.querySelector("canvas")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    expect(document.querySelector("canvas")).toBeNull();
+    expect(document.body.textContent).not.toMatch(/Galaksi|Galaxy/);
+    for (const lang of ["en", "tr"]) {
+      const table = JSON.parse(readFileSync(join(root, "apps", "panel", "src", "copy", `${lang}.json`), "utf8")) as Record<string, string>;
+      expect(Object.keys(table).filter((k) => k.startsWith("galaxy.") || k === "tab.galaxy")).toEqual([]);
     }
   });
 
-  it("lets the inventory rail pick a group without calling it measured", () => {
+  it("lists the roster's groups on the status rail as declared, with no way into a sky", () => {
     render(
       <Observatory
         actions={[]}
@@ -138,13 +99,11 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 5_000}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     const groups = screen.getByTestId("rail-inventory-groups");
-    const button = groups.querySelector("button");
-    expect(button?.textContent).toMatch(/Team A/);
+    expect(groups.textContent).toMatch(/Team A/);
+    expect(groups.querySelector("button")).toBeNull();
     expect(screen.getByText("Gruplar (envanter, ölçülemedi)")).toBeTruthy();
-    fireEvent.click(button!);
-    expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("keeps inventory names off the ledger rail and does not say not-bound for them", () => {
@@ -157,8 +116,7 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 5_000}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
-    expect(screen.getByText("Projeler (defter)")).toBeTruthy();
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     expect(screen.getByText("Ajanlar (defter)")).toBeTruthy();
     expect(screen.getByText("Gruplar (envanter, ölçülemedi)")).toBeTruthy();
     expect(screen.getByText("Ajanlar (envanter, ölçülemedi)")).toBeTruthy();
@@ -174,16 +132,17 @@ describe("observatory", () => {
     expect(inventoryBlock.textContent).not.toMatch(/bağlı değil/);
   });
 
-  it("omits the inventory rail when the roster is not bound", () => {
+  it("omits the inventory rail when the roster is not bound, and says so in one line", () => {
     render(<Observatory actions={[]} status="ok" demo={false} />);
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     expect(screen.queryByTestId("rail-inventory-groups")).toBeNull();
     expect(screen.queryByTestId("rail-inventory-agents")).toBeNull();
-    expect(screen.getByText("Projeler (defter)")).toBeTruthy();
+    expect(screen.getByText("Ajanlar (defter)")).toBeTruthy();
+    expect(screen.getByTestId("inventory-coverage").textContent).toBe("envanter bağlı değil");
     expect(screen.getAllByText("bağlı değil").length).toBeGreaterThan(0);
   });
 
-  it("fills the sky from inventory and names coverage without a percentage", () => {
+  it("counts the roster agents the ledger names, without a percentage", () => {
     render(
       <Observatory
         actions={[]}
@@ -193,11 +152,11 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 5_000}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
-    expect(screen.queryByTestId("galaxy-empty")).toBeNull();
-    expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/0 \/ 3 ajan hesap veriyor/);
-    expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/fixture-source/);
-    expect(screen.getByTestId("galaxy-coverage").textContent).not.toMatch(/%/);
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    const line = screen.getByTestId("inventory-coverage").textContent ?? "";
+    expect(line).toMatch(/0 \/ 3 ajan hesap veriyor/);
+    expect(line).toMatch(/fixture-source/);
+    expect(line).not.toMatch(/%/);
   });
 
   it("says the inventory snapshot is stale instead of hiding it", () => {
@@ -210,19 +169,15 @@ describe("observatory", () => {
         nowMs={sampleInventory.takenAtMs + 25 * 60 * 60 * 1000}
       />,
     );
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
-    expect(screen.getByTestId("galaxy-coverage").textContent).toMatch(/bayat/);
-  });
-
-  it("says nothing about emptiness once there are records", () => {
-    render(<Observatory actions={actions} status="ok" demo={false} />);
-    expect(screen.queryByTestId("galaxy-empty")).toBeNull();
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    expect(screen.getByTestId("inventory-coverage").textContent).toMatch(/bayat/);
+    expect(screen.getByTestId("inventory-coverage").className).toMatch(/stale/);
   });
 
   it("does not repeat the record list in the rail on the records tab", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     expect(screen.queryByTestId("rail-records")).toBeNull();
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     // From the other tabs the rail is the only way back into a record, so it
     // has to still be there.
     expect(screen.getByTestId("rail-records").textContent ?? "").toMatch(/memory\.|spend|audit\./);
@@ -243,8 +198,8 @@ describe("observatory", () => {
     // Dropping the rail must not drop what it said: projects are still not
     // bound, and a screen that stops saying so is claiming more than it has.
     expect(source).toContain(copy["records.source.noProjects"]);
-    // From the other tabs the rail is the only way into a record.
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    // From the status tab the rail is the only way into a record.
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     expect(document.querySelector(".obs-left")).not.toBeNull();
   });
 
@@ -439,7 +394,7 @@ describe("observatory", () => {
     render(<Observatory actions={actions} status="ok" demo={false} />);
     const list = screen.getByRole("tablist");
     fireEvent.keyDown(list, { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "Galaksi" }).getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByRole("tab", { name: "Kara kutu" }).getAttribute("aria-selected")).toBe("true");
   });
 
   it("does not add an animation class when reduced motion is set", () => {
@@ -470,7 +425,7 @@ describe("observatory", () => {
     const labels = [...document.querySelectorAll(".record-asked")].map((n) => n.textContent ?? "");
     expect(labels.length).toBe(6);
     expect(labels.every((t) => t !== "" && !/^n\d+$/.test(t))).toBe(true);
-    fireEvent.click(screen.getByRole("tab", { name: "Galaksi" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     const rail = screen.getByTestId("rail-records").textContent ?? "";
     expect(rail).not.toMatch(/^n1$/);
     expect(rail).toMatch(/memory\.|spend|audit\./);

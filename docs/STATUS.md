@@ -112,11 +112,24 @@ no screen draws a figure. The source GLB was never in git.
 
 Known gaps that still apply:
 
-- panel-perf on hosted runners is a render smoke and a per-environment
-  regression guard; it is not an fps claim. A throw after preview
-  spawn still tears the child down (`runMeasure` finally). Bloom at
-  60k points is in `docs/PERF.md` (measured idle; not an fps claim).
+- the panel has no frame-time gate since the galaxy was removed (16 Sep
+  2026); `proxy-perf` times the body and, with no baseline recorded yet,
+  prints its numbers without failing (`packages/proxy/perf/README.md`)
 - all witnesses remain self; reconciliation stays conditional
+
+## Galaxy (removed)
+
+The panel drew a three.js galaxy from the ledger and the roster document:
+planets for tenants, stars for records, agents on edges, a closed-sphere
+opening, `?focus=` addresses into it, and a `panel-perf` workflow that
+measured its frame times. On 16 September 2026 it was removed: `packages/galaxy`,
+`apps/panel/src/galaxy`, `apps/panel/perf`, the workflow and their tests are
+gone, and the panel carries no three.js. What the galaxy stated is still
+stated in words: the roster's groups and agents are listed on the status
+rail, and one sentence there counts how many roster agents have a decision in
+the ledger. `@verax-ai/inventory` stays, because the body serves the roster.
+The one threshold checker both perf jobs shared moved to
+`packages/proxy/perf/check-baseline.mjs`.
 
 ## Evidence honesty (this commit)
 
@@ -135,7 +148,7 @@ Each line is what the tree carries, then what stays open.
 - F7 — Inputs I/O: carries `fsync` on the inputs document before the decision lands; unproven until the same crash-restart drill as G6.
 - F8 — Healthz: carries `ok` only for an unauthenticated probe or a token without `verax:audit`; ledger counts require `verax:audit`; an audit token also names `heartbeat` (from `heartbeat.json`, or null) and `witness` (last `witness-status.jsonl` class, or null). Unproven until an unauthenticated probe is watched on a hosted body.
 - P4 — Reconcile: carries a channel-export matcher (`reconcile`) that names ghost / unsent / outOfScope without calling Cedulon `audit()`. `outOfScope` is only rows outside an explicit `--window-start/--window-end`; without a window the scope is the channel min/max and unmatched in-window rows are ghost (`nearestEffectDtMs`). CLI writes `/reconcile-report.json`. Unproven until a live Sent export is compared to a production ledger.
-- P1 — Observatory: carries three tabs (status, galaxy, history; default galaxy), a detail pane with evidence scope, a timeline on history, demo data keyed by `loadPolicy(document).hash` plus golden `inputs.jsonl` (no `.rule-missing` on the sample), receipt/attestation read from the effect, network error stays `error` with an optional demo button, a product-independent galaxy fed from ledger + audit `/healthz` (`iss`+brain → planet, no invented tenant), a closed-sphere opening (spin until data; click flies each record to its hash address; `prefers-reduced-motion` is 300 ms linear; no progress bar), TR/EN copy (`?lang=en`), and F0 anatomy as a document on status (figure-box percentages from `anchors.mjs`). Layout shots cover 3 viewports × 3 tabs. Unproven until a hosted panel is watched against a live body. The presence `Stage` is off the main view. Panel-perf measures `tab=galaxy&open=1&demo=1`.
+- P1 — Observatory: carries three tabs (records, black box, status; default records; `?tab=` names one, and a name the panel no longer has opens the records), a detail pane with evidence scope, a timeline, demo data keyed by `loadPolicy(document).hash` plus golden `inputs.jsonl` (no `.rule-missing` on the sample), receipt/attestation read from the effect, network error stays `error` with an optional demo button, TR/EN copy (`?lang=en`), and on the status rail the roster the body serves from `/api/inventory`: its groups and agents as declared, and one sentence counting how many roster agents have a decision in the ledger (the intersection of roster ids and the brains the ledger names; `stale` past 24 h; "not bound" when the body serves none, and the sample scenario says it shows no inventory rather than claiming that). The galaxy, its `?focus=` addresses and `panel-perf` were removed on 16 Sep 2026. Layout shots cover 4 viewports × 3 tabs. Unproven until a hosted panel is watched against a live body.
 - P2 — Desktop: carries `verax desktop` (dev issuer → body → `vite preview` with token on env only → Edge/Chrome `--app=` with `--user-data-dir=<state>/browser-profile`, `--no-first-run`, `--no-default-browser-check`). A browser that exits within 3 s is `desktop-browser-exited-early` (exit 1). Window close kills the process tree (`taskkill /T` / POSIX group). When `<state>/ledger.lock` is held by a live process and `/healthz` answers on `--body-port`, it starts no issuer and no body: the panel is served against that body, `desktop-ready … attached=1 pid=<n>` names it, and closing the window takes down only the panel. A live lock with nothing answering on that port is `desktop-body-locked:<pid>` (exit 1) with nothing started; a dead lock is left to `verax unlock`. A joined body's issuer has to list the panel's origin itself (`VERAX_DEV_REDIRECT_URIS` on that issuer); this run cannot add it. `src/desktop.ts` is the only body file allowed to name `child_process`; it is still scanned for `import(`, `require(`, `eval`, and `tools/` imports. The CLI test builds `apps/panel/dist` when it is missing (D3). This machine (6 Sep 2026): Edge already open; `verax desktop` stayed up 20.0 s; ports closed 2.1 s after the isolated profile window closed. This machine (16 Sep 2026): the logon body held the lock (pid 8748, 8787); `verax desktop` reported `attached=1` in 3 s, the panel on 5173 read 10 decisions from that ledger through the running issuer, and closing the window left the body answering. Still unproven on a host that has never run the profile path.
 
 - S1 — Approvals: carries `defer` on `mode: "approve"`, `<stateDir>/approvals.jsonl` (rule sentence + inputs summary + amount/payee), `verax approve` (CLI only; queues when the ledger is locked; drain renames `approval-commands.jsonl` before apply), a panel pending list with no approve control, an explain `pair` (defer + resolution via `approver.resolves` / snapshot `allowRef`, not `prevRecordHash`), lazy `expired`, and `_ref` idempotency (`ref-reuse` / `ref-invalid` under a new nonce; retry uses that defer's resolution only). Approved `allow` uses `effectDescriptor` for `effectHash`. S1 `_ref` retry is at-least-once if the allow exists and the effect row is missing. Unproven until an operator approves a live hostile-brain call.

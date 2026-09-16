@@ -4,10 +4,6 @@ import { Observatory } from "../src/observatory/Observatory.tsx";
 import type { PendingApproval } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
 
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
-
 afterEach(() => {
   cleanup();
 });

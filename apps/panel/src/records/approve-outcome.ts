@@ -1,5 +1,5 @@
 import type { Copy } from "../copy.ts";
-import { fillCopy } from "../galaxy/coverage-line.ts";
+import { fillCopy } from "../fill.ts";
 import type { ApproveOutcome } from "../observatory/Observatory.tsx";
 
 /**

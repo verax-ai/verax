@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { overlayInventoryArg } from "../src/config.ts";
 import { inventoryHealth, readInventoryFile } from "../src/inventory-file.ts";
 
-const sample = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "galaxy", "tests", "fixtures", "inventory-sample.json");
+const sample = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "inventory", "tests", "fixtures", "inventory-sample.json");
 
 describe("readInventoryFile", () => {
   it("treats a missing path or missing file as absence, not a fault", () => {
