@@ -24,7 +24,7 @@ Usage: verax <command> [options]
   witness <stateDir>   run the witness alongside a body
   halt <stateDir>      stop the body from allowing anything further
   unlock [--force] <stateDir>   clear a stale ledger lock
-  desktop <args>       open the local panel
+  desktop <args>       open the local panel, joining the body that holds the ledger if one is up
 
   --help, -h           print this
   --version, -v        print the version
