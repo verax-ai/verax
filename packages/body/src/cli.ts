@@ -16,7 +16,7 @@ const HELP = `verax - the body an agent asks before it acts, and the ledger it a
 
 Usage: verax <command> [options]
 
-  (no command)         serve the body over MCP stdio, or HTTP when VERAX_PORT is set
+  (no command)         serve MCP over Streamable HTTP at /mcp on VERAX_BIND (default 127.0.0.1:8787)
   doctor [--json]      check the configuration this process would run with
   approve <args>       approve a waiting request from this machine
   operator <args>      enrol an operator and manage their passkeys
@@ -29,8 +29,9 @@ Usage: verax <command> [options]
   --help, -h           print this
   --version, -v        print the version
 
-Serving needs VERAX_ISSUER, VERAX_JWKS_URL and VERAX_AUDIENCE; \`verax doctor\`
-names what is missing. Records stay on this machine, under VERAX_STATE_DIR.
+Serving needs VERAX_ISSUER, VERAX_JWKS_URL, VERAX_AUDIENCE, VERAX_STATE_DIR and
+VERAX_POLICY_FILE; \`verax doctor\` names what is missing. Records stay on this
+machine, under VERAX_STATE_DIR.
 `;
 
 function version(): string {

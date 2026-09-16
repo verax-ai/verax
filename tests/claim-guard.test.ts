@@ -1,5 +1,7 @@
 import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -38,6 +40,21 @@ describe("claim-guard", () => {
     assert.equal(matchBanned("Works out of the box."), "works (sentence-initial)");
     assert.equal(matchBanned("The network works when configured."), null);
     assert.equal(matchBanned("114 passing tests on CI"), "suite-size");
+  });
+
+  it("a package README is a published surface: npm shows it as the package page", () => {
+    const base = mkdtempSync(join(tmpdir(), "claim-guard-"));
+    mkdirSync(join(base, "scripts"));
+    writeFileSync(join(base, "scripts", "claim-guard-exceptions.json"), "[]\n", "utf8");
+    writeFileSync(join(base, "README.md"), "# clean\n", "utf8");
+    mkdirSync(join(base, "packages", "demo"), { recursive: true });
+    writeFileSync(join(base, "packages", "demo", "README.md"), "# demo\n\nThis path is proven.\n", "utf8");
+    const { hits } = scanClaims(base);
+    assert.deepEqual(
+      hits.map((h) => `${h.file}:${h.line}`),
+      ["packages/demo/README.md:3"],
+      "the scan did not reach packages/demo/README.md",
+    );
   });
 
   it("the gate script is the same scan (exit 0)", () => {
