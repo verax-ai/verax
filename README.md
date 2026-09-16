@@ -40,10 +40,56 @@ audience, a state directory and a policy file before it listens; `verax
 doctor` names what is missing. The variables and the run steps are in
 [`packages/body/README.md`](packages/body/README.md).
 
-The tools a brain sees are `memory.get`, `memory.put`, `audit.explain`,
-`message.read`, `message.send` and `spend`. The policy decides which of them
-a token's scopes may call; `packages/proxy/policy/default.json` denies what it
-does not name.
+## Tools
+
+The policy decides which of these a token's scopes may call;
+`packages/proxy/policy/default.json` denies what it does not name.
+
+- `memory.get`, `memory.put`: memory behind the gate, stored per tenant.
+- `audit.explain`: a decision read back from the signed ledger, with its
+  chain, its signatures and its findings.
+- `message.read`, `message.send`: an inbox and an outbox; `send` reaches only
+  hosts the policy allow-lists.
+- `spend`: authorizes a payment and records it, under a cap, a payee list and
+  a daily limit from the policy; held for an operator when the policy says so.
+  The body does not move money.
+
+## What the body does beyond the gate
+
+- Approval: a held call is approved with `verax approve` on this machine, or
+  from the panel after a passkey sign-in (`verax operator`); the approver's
+  operator id is bound into the signed record by hash.
+- Witness: `verax witness` signs effect rows from a second process and writes
+  durable checkpoints; without it the witness class stays `self`.
+- Halt and revoke: `verax halt` turns every further call into a signed deny;
+  a revoked token id is refused before any record is written.
+- Reconcile: `verax reconcile` matches recorded spends against a card
+  statement export and names the matched, ghost and authorized-but-unpaid
+  rows.
+- Tenant key: memory and inbox are stored under a key derived from the
+  token's issuer and subject; another tenant's id is answered with a signed
+  deny.
+- Bounds: rate and daily counters, a disk-low refusal (HTTP 507) when a deny
+  could not be recorded, and an egress allow-list; counters that cannot be
+  read fail closed.
+- Doctor and heartbeat: `verax doctor` names what is missing or stale before
+  the first call finds out.
+
+## Connect a client
+
+The body listens on `http://127.0.0.1:8787/mcp` by default. A client
+configuration looks like this; the token comes from your issuer.
+
+```json
+{
+  "mcpServers": {
+    "verax": {
+      "url": "http://127.0.0.1:8787/mcp",
+      "headers": { "Authorization": "Bearer <token from your issuer>" }
+    }
+  }
+}
+```
 
 ## Status
 
