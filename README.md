@@ -45,14 +45,14 @@ doctor` names what is missing. The variables and the run steps are in
 The policy decides which of these a token's scopes may call;
 `packages/proxy/policy/default.json` denies what it does not name.
 
-- `memory.get`, `memory.put`: memory behind the gate, stored per tenant.
-- `audit.explain`: a decision read back from the signed ledger, with its
-  chain, its signatures and its findings.
-- `message.read`, `message.send`: an inbox and an outbox; `send` reaches only
-  hosts the policy allow-lists.
-- `spend`: authorizes a payment and records it, under a cap, a payee list and
-  a daily limit from the policy; held for an operator when the policy says so.
-  The body does not move money.
+| Tool | Description |
+| --- | --- |
+| `memory.get` | Reads one memory item behind the gate, stored per tenant. |
+| `memory.put` | Writes one memory item behind the gate, stored per tenant. |
+| `audit.explain` | Reads a decision back from the signed ledger, with its chain, its signatures and its findings. |
+| `message.read` | Reads the inbox. |
+| `message.send` | Writes to the outbox; reaches only hosts the policy allow-lists. |
+| `spend` | Authorizes a payment and records it, under a cap, a payee list and a daily limit from the policy; held for an operator when the policy says so. The body does not move money. |
 
 ## What the body does beyond the gate
 
