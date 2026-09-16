@@ -25,6 +25,9 @@ const ALLOWED = new Set([
   "reconcile",
   "tenantKey",
   "spokenReason",
+  "checkpointsPath",
+  "signEffectAttestation",
+  "diskProbe",
 ]);
 
 describe("B1 exports map", () => {

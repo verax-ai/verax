@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { parseInventory, type Inventory } from "../../galaxy/src/inventory.ts";
+import { parseInventory, type Inventory } from "@verax-ai/inventory";
 
 export type InventoryDoor =
   | { inventory: Inventory }
