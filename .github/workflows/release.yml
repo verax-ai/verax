@@ -1,0 +1,219 @@
+name: release
+
+# Publishes @verax-ai/inventory, @verax-ai/proxy and @verax-ai/body to npm
+# from inside this repository, with GitHub's own OIDC identity. npm trusted
+# publishing exchanges that identity for a short-lived credential, so there is
+# no token on anyone's machine and no one-time password to type three times,
+# and each publish carries a provenance attestation that names this workflow
+# and this commit.
+#
+# One-time setup on npmjs.com, per package: Settings -> Trusted Publisher ->
+# GitHub Actions, repository verax-ai/verax, workflow release.yml, no
+# environment. Until that is done for a package, its publish step fails with
+# a permission error and falls back to nothing weaker.
+#
+# Run it from the Actions tab. confirm=check runs everything up to the publish
+# and stops; confirm=publish sends the three packages and reads them back from
+# npm, then installs them from npm in an empty directory. Nothing runs on push.
+# The MCP registry record is a separate step, mcp-registry.yml, once npm
+# answers for the new version.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to publish the three packages to npm, or "check" to run everything except the publish'
+        required: true
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          # Trusted publishing needs npm 11.5.1 or newer; Node 24 carries it.
+          # No dependency cache: a release resolves from nothing.
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: refuse without confirmation
+        run: |
+          c="${{ inputs.confirm }}"
+          if [ "$c" != "publish" ] && [ "$c" != "check" ]; then
+            echo "confirm was '$c'; expected \"publish\" or \"check\""
+            exit 1
+          fi
+          echo "mode: $c"
+      - name: npm is new enough for trusted publishing
+        run: |
+          v="$(npm --version)"
+          echo "npm $v"
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
+              console.error(`npm ${process.argv[1]} is older than 11.5.1, which trusted publishing needs`);
+              process.exit(1);
+            }
+          ' "$v"
+      - run: npm ci --ignore-scripts
+      # The panel browser tests drive a real Chromium; the suite must carry it too.
+      - run: npx playwright install --with-deps chromium
+      # The same proof the suite gives on main, on the exact tree that is about
+      # to be sent, plus what the tarballs themselves install to.
+      - run: npm test
+      - run: npm run pack:smoke
+      - name: the three packages carry one version, and server.json agrees
+        id: version
+        run: |
+          set -euo pipefail
+          v="$(node -p "require('./packages/body/package.json').version")"
+          for p in inventory proxy body; do
+            pv="$(node -p "require('./packages/$p/package.json').version")"
+            if [ "$pv" != "$v" ]; then
+              echo "@verax-ai/$p is $pv, @verax-ai/body is $v; the three ship together"
+              exit 1
+            fi
+          done
+          sv="$(node -p "require('./server.json').version")"
+          if [ "$sv" != "$v" ]; then
+            echo "server.json says $sv, the packages say $v"
+            exit 1
+          fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version $v"
+      # Trusted publishing is configured on a package's own settings page,
+      # which exists only after a first publish. A package that has never been
+      # published fails here, not halfway through the loop.
+      - name: every package already exists on npm
+        run: |
+          set -e
+          for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
+            if npm view "$p" version >/dev/null 2>&1; then
+              echo "  $p exists"
+            else
+              echo "  $p has never been published; publish it once by hand and configure its trusted publisher first"
+              exit 1
+            fi
+          done
+      # A version already on npm is not sent again, so a run that failed after
+      # the first package can be run again and completes the rest. When all
+      # three are already there, there is nothing to publish.
+      - name: what npm already has at this version
+        run: |
+          v="${{ steps.version.outputs.version }}"
+          all=1
+          for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
+            if npm view "$p@$v" version >/dev/null 2>&1; then
+              echo "  $p@$v is already on npm"
+            else
+              echo "  $p@$v is not on npm yet"
+              all=0
+            fi
+          done
+          if [ "$all" = 1 ] && [ "${{ inputs.confirm }}" = "publish" ]; then
+            echo "all three are already at $v; nothing to publish. Bump the version first."
+            exit 1
+          fi
+      - name: check mode stops here
+        if: ${{ inputs.confirm == 'check' }}
+        run: echo "check mode - nothing was sent to npm"
+      # Dependency order: body asks for proxy and inventory by name.
+      - name: send them in dependency order
+        if: ${{ inputs.confirm == 'publish' }}
+        run: |
+          set -e
+          v="${{ steps.version.outputs.version }}"
+          for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
+            if npm view "$p@$v" version >/dev/null 2>&1; then
+              echo "=== $p@$v already on npm, not sent again ==="
+              continue
+            fi
+            echo "=== $p ==="
+            npm publish -w "$p" --provenance --access public
+          done
+      # npm is read-after-write eventual in both directions: the package
+      # document has answered minutes before the tarball, and the tarball
+      # minutes before the document. Both are asked, under one deadline.
+      - name: npm answers with this version
+        if: ${{ inputs.confirm == 'publish' }}
+        run: |
+          set -e
+          v="${{ steps.version.outputs.version }}"
+          deadline=$((SECONDS + 480))
+          for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
+            got=""
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              got="$(npm view "$p@$v" version 2>/dev/null || echo "")"
+              [ "$got" = "$v" ] && break
+              echo "  $p@$v -> ${got:-no answer} (waiting, ${SECONDS}s of 480)"
+              sleep 15
+            done
+            if [ "$got" != "$v" ]; then
+              echo "$p@$v was sent but npm has not served this version after ${SECONDS}s; run again, already-published packages are skipped"
+              exit 1
+            fi
+            echo "  $p@$v -> $got"
+          done
+      - name: every tarball of this version answers
+        if: ${{ inputs.confirm == 'publish' }}
+        run: |
+          set -e
+          v="${{ steps.version.outputs.version }}"
+          deadline=$((SECONDS + 480))
+          for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
+            tarball="$(npm view "$p@$v" dist.tarball)"
+            code=""
+            while [ "$SECONDS" -lt "$deadline" ]; do
+              code="$(curl -s -o /dev/null -w '%{http_code}' -I -L "$tarball" || echo "000")"
+              [ "$code" = "200" ] && break
+              echo "  $p tarball -> HTTP $code (waiting, ${SECONDS}s of 480)"
+              sleep 15
+            done
+            if [ "$code" != "200" ]; then
+              echo "tarball for $p@$v still answers $code after ${SECONDS}s"
+              exit 1
+            fi
+            echo "  $p tarball -> HTTP $code"
+          done
+      # The proof from the destination: an empty directory, the registry, the
+      # installed bin, and npm's own check of the attestations.
+      - name: a clean install from the registry
+        if: ${{ inputs.confirm == 'publish' }}
+        run: |
+          set -e
+          v="${{ steps.version.outputs.version }}"
+          dir="$(mktemp -d)"
+          cd "$dir"
+          printf '{"name":"verax-release-probe","private":true,"version":"1.0.0","type":"module"}\n' > package.json
+          npm install "@verax-ai/body@$v" --no-audit --no-fund
+          for p in inventory proxy body; do
+            got="$(node -p "require('./node_modules/@verax-ai/$p/package.json').version")"
+            if [ "$got" != "$v" ]; then
+              echo "@verax-ai/$p installed as $got, expected $v"
+              exit 1
+            fi
+            test -s "node_modules/@verax-ai/$p/README.md" || { echo "@verax-ai/$p installed without README.md"; exit 1; }
+            test -s "node_modules/@verax-ai/$p/LICENSE" || { echo "@verax-ai/$p installed without LICENSE"; exit 1; }
+            echo "  @verax-ai/$p@$got with README.md and LICENSE"
+          done
+          got="$(npx --no-install verax --version)"
+          if [ "$got" != "$v" ]; then
+            echo "the installed verax --version says $got, expected $v"
+            exit 1
+          fi
+          echo "  verax --version -> $got"
+          out="$(npm audit signatures 2>&1)"
+          echo "$out"
+          echo "$out" | grep -Eq '[1-9][0-9]* packages? (has|have) verified attestations' || {
+            echo "npm audit signatures reports no verified attestations; provenance did not reach the registry"
+            exit 1
+          }
+          echo "next: run mcp-registry.yml with confirm=publish so the registry record names $v"
