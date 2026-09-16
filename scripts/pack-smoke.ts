@@ -11,6 +11,8 @@ import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { packReportFiles } from "./pack-report.ts";
+
 const PACKAGES = ["@verax-ai/inventory", "@verax-ai/proxy", "@verax-ai/body"] as const;
 
 // npm and npx are scripts on Windows and need a shell; node is an executable
@@ -19,22 +21,6 @@ function run(cmd: string, args: string[], cwd: string): { status: number; out: s
   const shell = process.platform === "win32" && cmd !== process.execPath;
   const r = spawnSync(cmd, args, { cwd, encoding: "utf8", shell });
   return { status: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
-}
-
-/** What npm says it would publish, from npm itself rather than a tar reader. */
-function packedFiles(name: string, cwd: string): string[] {
-  const r = run("npm", ["pack", "--dry-run", "--json", "-w", name], cwd);
-  // npm 12 prints an object keyed by package name, after its own notices.
-  // Only stdout: npm writes its notices to stderr, and they are not JSON.
-  const start = r.stdout.indexOf("{");
-  if (r.status !== 0 || start < 0) return [];
-  try {
-    const parsed = JSON.parse(r.stdout.slice(start)) as Record<string, { files?: { path: string }[] }>;
-    const entry = parsed[name] ?? Object.values(parsed)[0];
-    return (entry?.files ?? []).map((f) => f.path.replace(/\\/g, "/"));
-  } catch {
-    return [];
-  }
 }
 
 const failures: string[] = [];
@@ -56,8 +42,9 @@ for (const name of PACKAGES) {
     continue;
   }
   tarballs.set(name, join(packDir, file));
-  const files = packedFiles(name, repo);
-  check(files.length > 0, `${name}: npm lists the packed files`);
+  const listing = run("npm", ["pack", "--dry-run", "--json", "-w", name], repo);
+  const { files, why } = packReportFiles(listing.stdout, name);
+  check(files.length > 0, `${name}: npm lists the packed files`, why);
   check(!files.some((f) => /^(src|tests)\//.test(f)), `${name}: no sources or tests in the tarball`);
   check(
     !files.some((f) => f.endsWith(".ts") && !f.endsWith(".d.ts")),
