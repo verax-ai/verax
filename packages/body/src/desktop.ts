@@ -1,8 +1,10 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { get } from "node:http";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { pidAlive, readLockFile } from "./unlock.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..", "..", "..");
@@ -117,6 +119,50 @@ async function waitPort(port: number, ms: number): Promise<boolean> {
   return false;
 }
 
+/** GET /healthz on the loopback port; true only for a 200. */
+export function healthzUp(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const req = get({ host: "127.0.0.1", port, path: "/healthz", timeout: 3_000 }, (res) => {
+      res.resume();
+      resolve(res.statusCode === 200);
+    });
+    req.once("timeout", () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.once("error", () => resolve(false));
+  });
+}
+
+export type DesktopMode =
+  | { mode: "spawn" }
+  | { mode: "attach"; pid: number }
+  | { error: "desktop-body-locked"; pid: number };
+
+/**
+ * One ledger, one body. The desktop used to build its own issuer and body on
+ * every open, which on a machine whose body starts at logon put the window on
+ * a second, empty ledger: the panel looked broken while the real decisions sat
+ * in the directory the lock names. So the lock is read first. Held by a live
+ * process that answers /healthz where this run was told to look, the panel
+ * joins that body. Held by a live process that does not answer there, the
+ * desktop stops: someone owns the ledger and is not where we were pointed, and
+ * a second body would be refused by the lock anyway. A dead or unreadable lock
+ * is the body's own to clear (`verax unlock`); the desktop builds as before.
+ */
+export async function desktopMode(
+  stateDir: string,
+  bodyPort: number,
+  probe: (port: number) => Promise<boolean> = healthzUp,
+): Promise<DesktopMode> {
+  const lockPath = join(stateDir, "ledger.lock");
+  if (!existsSync(lockPath)) return { mode: "spawn" };
+  const lock = readLockFile(lockPath);
+  if (!lock || !pidAlive(lock.pid)) return { mode: "spawn" };
+  if (await probe(bodyPort)) return { mode: "attach", pid: lock.pid };
+  return { error: "desktop-body-locked", pid: lock.pid };
+}
+
 export function killTree(pid: number | undefined): void {
   if (pid == null) return;
   if (process.platform === "win32") {
@@ -227,47 +273,60 @@ export async function runDesktop(
   };
 
   try {
-    const issuer = spawnLogged(
-      process.execPath,
-      ["--experimental-strip-types", issuerScript, "--out", tokenPath],
-      issuerEnv(cleanEnv(), opts, audience, issuerUrl),
-      repoRoot,
-    );
-    kids.push(issuer);
-    collectOutput(issuer, log);
-    if (!(await waitPort(opts.issuerPort, 15_000))) {
-      writeErr("desktop-issuer-timeout\n");
-      stopAll();
-      return 1;
-    }
-    const token = readFileSync(tokenPath, "utf8").trim();
-    if (token === "") {
-      writeErr("desktop-token-missing\n");
-      stopAll();
+    const decided = await desktopMode(opts.stateDir, opts.bodyPort);
+    if ("error" in decided) {
+      writeErr(`${decided.error}:${decided.pid}\n`);
       return 1;
     }
 
-    const body = spawnLogged(
-      process.execPath,
-      ["--experimental-strip-types", mainTs],
-      {
-        ...cleanEnv(),
-        VERAX_STATE_DIR: opts.stateDir,
-        VERAX_ISSUER: issuerUrl,
-        VERAX_JWKS_URL: `${issuerUrl}/.well-known/jwks.json`,
-        VERAX_AUDIENCE: audience,
-        VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
-        VERAX_POLICY_FILE: policy,
-        ...(opts.inventoryFile ? { VERAX_INVENTORY_FILE: opts.inventoryFile } : {}),
-      },
-      repoRoot,
-    );
-    kids.push(body);
-    collectOutput(body, log);
-    if (!(await waitPort(opts.bodyPort, 15_000))) {
-      writeErr("desktop-body-timeout\n");
-      stopAll();
-      return 1;
+    // Joining a running body: its issuer is whatever the body's resource
+    // metadata names, and its token is not ours to read. The panel's own
+    // origin has to be on that issuer's allow-list (VERAX_DEV_REDIRECT_URIS on
+    // the running issuer), which this run cannot set after the fact.
+    let token: string | null = null;
+    if (decided.mode === "spawn") {
+      const issuer = spawnLogged(
+        process.execPath,
+        ["--experimental-strip-types", issuerScript, "--out", tokenPath],
+        issuerEnv(cleanEnv(), opts, audience, issuerUrl),
+        repoRoot,
+      );
+      kids.push(issuer);
+      collectOutput(issuer, log);
+      if (!(await waitPort(opts.issuerPort, 15_000))) {
+        writeErr("desktop-issuer-timeout\n");
+        stopAll();
+        return 1;
+      }
+      token = readFileSync(tokenPath, "utf8").trim();
+      if (token === "") {
+        writeErr("desktop-token-missing\n");
+        stopAll();
+        return 1;
+      }
+
+      const body = spawnLogged(
+        process.execPath,
+        ["--experimental-strip-types", mainTs],
+        {
+          ...cleanEnv(),
+          VERAX_STATE_DIR: opts.stateDir,
+          VERAX_ISSUER: issuerUrl,
+          VERAX_JWKS_URL: `${issuerUrl}/.well-known/jwks.json`,
+          VERAX_AUDIENCE: audience,
+          VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
+          VERAX_POLICY_FILE: policy,
+          ...(opts.inventoryFile ? { VERAX_INVENTORY_FILE: opts.inventoryFile } : {}),
+        },
+        repoRoot,
+      );
+      kids.push(body);
+      collectOutput(body, log);
+      if (!(await waitPort(opts.bodyPort, 15_000))) {
+        writeErr("desktop-body-timeout\n");
+        stopAll();
+        return 1;
+      }
     }
 
     const panelSources = [
@@ -330,13 +389,15 @@ export async function runDesktop(
     const browser = spawnLogged(browserBin, browserArgv, cleanEnv(), repoRoot, false);
     kids.push(browser);
     collectOutput(browser, log);
-    if (log.text.includes(token)) {
+    if (token !== null && log.text.includes(token)) {
       writeErr("desktop-token-leaked\n");
       stopAll();
       return 1;
     }
     process.stdout.write(
-      `desktop-ready issuer=${opts.issuerPort} body=${opts.bodyPort} panel=${opts.panelPort}\n`,
+      decided.mode === "attach"
+        ? `desktop-ready body=${opts.bodyPort} panel=${opts.panelPort} attached=1 pid=${decided.pid}\n`
+        : `desktop-ready issuer=${opts.issuerPort} body=${opts.bodyPort} panel=${opts.panelPort}\n`,
     );
     const onSignal = () => {
       stopAll();
