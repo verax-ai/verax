@@ -66,7 +66,15 @@ function publishedFiles(base: string): string[] {
         .filter((n) => n.endsWith(".md"))
         .map((n) => join("docs", n).replace(/\\/g, "/"))
     : [];
-  return [...docs, "README.md"];
+  // npm renders packages/<name>/README.md as that package's page.
+  const packagesDir = join(base, "packages");
+  const packageReadmes = existsSync(packagesDir)
+    ? readdirSync(packagesDir)
+        .map((n) => join("packages", n, "README.md"))
+        .filter((rel) => existsSync(join(base, rel)))
+        .map((rel) => rel.replace(/\\/g, "/"))
+    : [];
+  return [...docs, ...packageReadmes, "README.md"];
 }
 
 function loadExceptions(base: string): Exception[] {

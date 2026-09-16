@@ -52,6 +52,10 @@ for (const name of PACKAGES) {
     files.filter((f) => f.endsWith(".ts") && !f.endsWith(".d.ts")).join(" "),
   );
   check(files.includes("dist/index.js"), `${name}: ships dist/index.js`);
+  // npm renders README.md as the package page and shows nothing without it;
+  // the license text has to travel with what it licenses.
+  check(files.includes("README.md"), `${name}: ships README.md`);
+  check(files.includes("LICENSE"), `${name}: ships LICENSE`);
   check(!files.some((f) => /(^|\/)state\/|\.pem$|dev-token/.test(f)), `${name}: no keys or state`);
 }
 

@@ -8,14 +8,15 @@
     "url": "https://github.com/verax-ai/verax",
     "source": "github"
   },
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@verax-ai/body",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "transport": {
-        "type": "stdio"
+        "type": "streamable-http",
+        "url": "http://{VERAX_BIND}/mcp"
       },
       "environmentVariables": [
         {
@@ -36,7 +37,26 @@
         {
           "name": "VERAX_STATE_DIR",
           "description": "Directory the ledger, keys and approvals live in. It stays on this machine.",
-          "isRequired": false
+          "isRequired": true,
+          "format": "filepath"
+        },
+        {
+          "name": "VERAX_POLICY_FILE",
+          "description": "Policy the gate applies. @verax-ai/proxy ships policy/default.json, which denies what it does not name.",
+          "isRequired": true,
+          "format": "filepath"
+        },
+        {
+          "name": "VERAX_BIND",
+          "description": "host:port the body listens on. Anything but loopback needs VERAX_TLS_TERMINATED=1.",
+          "isRequired": false,
+          "default": "127.0.0.1:8787"
+        },
+        {
+          "name": "VERAX_INVENTORY_FILE",
+          "description": "Roster document the body serves; the format is @verax-ai/inventory.",
+          "isRequired": false,
+          "format": "filepath"
         }
       ]
     }
