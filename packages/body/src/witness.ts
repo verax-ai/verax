@@ -11,9 +11,7 @@ import {
   type SignedCheckpoint,
 } from "@cedulon/checkpoint";
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
-import type { LedgerEffect } from "@verax-ai/proxy";
-import { checkpointsPath } from "../../proxy/src/checkpoints.ts";
-import { signEffectAttestation } from "../../proxy/src/ledger.ts";
+import { checkpointsPath, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
 import { pidAlive } from "./unlock.ts";
 
 const WITNESS_CLASS = "same-org" as const;

@@ -5,6 +5,15 @@ export { explain } from "./explain.ts";
 export { approvePending, approvalsLogFor, enqueueApprovalCommand, loadApprovalsFromDir } from "./approvals.ts";
 export { loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "./reconcile.ts";
 export { tenantKey } from "./tenant.ts";
+// The body writes checkpoints and signs its own effect attestations. Both were
+// reached through a relative path into this package, which only exists inside
+// this repository: a published body would have imported a file that is not there.
+// The disk seam is public for the same reason: a caller that drives the body
+// through this package must be able to inject a full disk into the very
+// instance the proxy uses. Deep imports are not in the exports map.
+export { diskProbe } from "./disk.ts";
+export { checkpointsPath } from "./checkpoints.ts";
+export { signEffectAttestation } from "./ledger.ts";
 export { spokenReason } from "./spoken-reason.ts";
 export type { ApprovalRow, ApproveResult } from "./approvals.ts";
 export type { CardCsvOpts, ChannelRow, ReconcileReport } from "./reconcile.ts";

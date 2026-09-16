@@ -1,18 +1,21 @@
 {
   "name": "@verax-ai/proxy",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22.6"
   },
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   },
   "files": [
-    "src",
+    "dist",
     "policy"
   ],
   "dependencies": {
@@ -20,5 +23,15 @@
     "@cedulon/core": "0.13.1",
     "@cedulon/effect-extract": "0.13.1",
     "@cedulon/x402-adapter": "0.13.1"
+  },
+  "description": "The decision proxy behind VERAX: policy, signed decision records, and the ledger they live in.",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/verax-ai/verax.git",
+    "directory": "packages/proxy"
   }
 }

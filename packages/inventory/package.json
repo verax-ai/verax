@@ -1,7 +1,8 @@
 {
-  "name": "@verax-ai/body",
+  "name": "@verax-ai/inventory",
   "version": "0.1.0",
   "license": "Apache-2.0",
+  "description": "Read the declared roster document a VERAX body serves and a VERAX galaxy draws.",
   "type": "module",
   "engines": {
     "node": ">=22.6"
@@ -14,20 +15,9 @@
       "default": "./dist/index.js"
     }
   },
-  "bin": {
-    "verax": "./dist/cli.js"
-  },
   "files": [
     "dist"
   ],
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.30.0",
-    "@verax-ai/inventory": "^0.1.0",
-    "@verax-ai/proxy": "^0.1.0",
-    "jose": "^6.2.11"
-  },
-  "description": "VERAX body: an MCP server that decides, records and proves what an agent did.",
-  "mcpName": "io.github.verax-ai/verax",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build"
@@ -35,6 +25,6 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/verax-ai/verax.git",
-    "directory": "packages/body"
+    "directory": "packages/inventory"
   }
 }

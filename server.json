@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.verax-ai/verax",
+  "title": "VERAX",
+  "description": "The body an agent asks before it acts: policy decisions, human approval, and a signed record that stays on your machine.",
+  "websiteUrl": "https://verax-ai.com",
+  "repository": {
+    "url": "https://github.com/verax-ai/verax",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@verax-ai/body",
+      "version": "0.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "VERAX_ISSUER",
+          "description": "Issuer the agent's token must carry. The body refuses to start without one; `verax doctor` names what is missing.",
+          "isRequired": true
+        },
+        {
+          "name": "VERAX_JWKS_URL",
+          "description": "Where the body fetches the keys that verify that token.",
+          "isRequired": true
+        },
+        {
+          "name": "VERAX_AUDIENCE",
+          "description": "Audience the token must name, so a token minted for something else is refused.",
+          "isRequired": true
+        },
+        {
+          "name": "VERAX_STATE_DIR",
+          "description": "Directory the ledger, keys and approvals live in. It stays on this machine.",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

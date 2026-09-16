@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { diskProbe } from "../packages/proxy/src/disk.ts";
+import { diskProbe } from "@verax-ai/proxy";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 

@@ -41,3 +41,6 @@ jobs:
       # The panel browser tests drive a real Chromium; the suite must carry it too.
       - run: npx playwright install --with-deps chromium
       - run: npm test
+      # What the suite proves about the repository, this proves about the
+      # tarballs: a clean install elsewhere, and the installed bin answering.
+      - run: npm run pack:smoke

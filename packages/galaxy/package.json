@@ -21,5 +21,8 @@
     "@react-three/postprocessing": "^3.0.4",
     "react": "^19.1.0",
     "three": "0.184.0"
+  },
+  "dependencies": {
+    "@verax-ai/inventory": "^0.1.0"
   }
 }

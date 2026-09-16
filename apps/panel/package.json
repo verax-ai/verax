@@ -9,8 +9,10 @@
   },
   "scripts": {
     "dev": "vite",
+    "prebuild": "npm --prefix ../.. run build:dist",
     "build": "vite build",
     "preview": "vite preview",
+    "pretest": "npm --prefix ../.. run build:dist",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {

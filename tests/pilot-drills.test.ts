@@ -5,12 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createProxy, explain, FileLedger, loadPolicy } from "@verax-ai/proxy";
+import { createProxy, diskProbe, explain, FileLedger, loadPolicy } from "@verax-ai/proxy";
 
 import { createBodyServices } from "../packages/body/src/wiring.ts";
 import { runDoctor } from "../packages/body/src/doctor.ts";
 import { listen } from "../packages/body/src/server.ts";
-import { diskProbe } from "../packages/proxy/src/disk.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER, queuedNonce, tickingNow } from "../packages/proxy/tests/helpers.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
