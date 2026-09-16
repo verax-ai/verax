@@ -178,6 +178,11 @@ export function createProxy(deps: ProxyDeps) {
           reasonCode: opts.reasonCode,
           ref: opts.ref,
           effectHash: opts.effectHash,
+          // The class of effect this decision names, in this channel's own
+          // vocabulary: the call it decided about. An allow must carry one, and
+          // a refusal names what it refused, so the audit can hold a decision
+          // and an effect row to the same word.
+          effectClass: opts.subject,
           timestampMs: opts.timestampMs,
           nonce: opts.ref,
           prevRecordHash,

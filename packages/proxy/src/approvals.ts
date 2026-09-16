@@ -223,6 +223,9 @@ export async function approvePending(opts: {
           reasonCode: "expired",
           ref: expireRef,
           effectHash: null,
+          // A refusal names what it refused, in the same word the effect row
+          // would have carried had the operator approved in time.
+          effectClass: defer.subject,
           timestampMs: opts.now(),
           nonce: expireRef,
           prevRecordHash,
@@ -257,6 +260,9 @@ export async function approvePending(opts: {
         reasonCode: "approved-by-operator",
         ref: allowRef,
         effectHash,
+        // Same word the effect row below carries, so the audit can hold the
+        // two to each other.
+        effectClass: defer.subject,
         timestampMs: opts.now(),
         nonce: allowRef,
         prevRecordHash,
