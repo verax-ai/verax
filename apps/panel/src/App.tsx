@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { parseInventory, type Inventory } from "@verax-ai/galaxy";
+import { parseInventory, type Inventory } from "@verax-ai/inventory";
 import { Observatory, type Healthz, type LedgerError } from "./observatory/Observatory.tsx";
 import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
 import { parseLedger } from "./rail/parse.ts";

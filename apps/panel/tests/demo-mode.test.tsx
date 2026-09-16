@@ -4,10 +4,6 @@ import { panelCopy } from "../src/copy.ts";
 import { rememberToken } from "../src/session.ts";
 import { setLang } from "./with-lang.ts";
 
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
-
 const ledgerBody = { decisions: [], effects: [], policies: {}, inputs: {}, approvals: [] };
 
 afterEach(() => {
@@ -49,8 +45,9 @@ describe("demo mode", () => {
     await waitFor(() => {
       expect(screen.getByText("ÖRNEK SENARYO")).toBeTruthy();
     });
+    // The empty-ledger placeholder must not replace the sample.
     await waitFor(() => {
-      expect(screen.queryByTestId("galaxy-empty")).toBeNull();
+      expect(screen.queryByTestId("records-empty")).toBeNull();
     });
     const ledgerCalls = fetchMock.mock.calls.filter((c) => String(c[0]).includes("/api/ledger"));
     expect(ledgerCalls.length).toBe(0);

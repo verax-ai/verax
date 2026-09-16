@@ -1,9 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Galaxy, type GalaxySelect } from "@verax-ai/galaxy/react";
-import { inventoryToGalaxy, mergeGalaxy, type GalaxyModel, type Inventory } from "@verax-ai/galaxy";
-import { ledgerToGalaxy } from "../galaxy/adapter.ts";
-import { coverageLine, fillCopy } from "../galaxy/coverage-line.ts";
+import type { Inventory } from "@verax-ai/inventory";
 import { panelCopy } from "../copy.ts";
+import { fillCopy } from "../fill.ts";
+import { coverageLine } from "../rail/coverage.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
 import { BlackBox } from "../blackbox/BlackBox.tsx";
 import type {
@@ -61,13 +60,12 @@ function errorReason(copy: ReturnType<typeof panelCopy>, error: LedgerError): st
   return copy["error.session"];
 }
 
-const TAB_IDS = ["records", "galaxy", "status", "box"] as const;
+const TAB_IDS = ["records", "box", "status"] as const;
 type TabId = (typeof TAB_IDS)[number];
-const TAB_COPY: Record<TabId, "tab.records" | "tab.galaxy" | "tab.status" | "tab.box"> = {
+const TAB_COPY: Record<TabId, "tab.records" | "tab.box" | "tab.status"> = {
   records: "tab.records",
-  galaxy: "tab.galaxy",
-  status: "tab.status",
   box: "tab.box",
+  status: "tab.status",
 };
 
 /**
@@ -77,19 +75,12 @@ const TAB_COPY: Record<TabId, "tab.records" | "tab.galaxy" | "tab.status" | "tab
 const WIDE_TABS: readonly TabId[] = ["box"];
 
 /**
- * Which tab an address opens on.
- *
- * A ?focus= names a seat in the sky. It was read into state and then never
- * used, because the panel opened on Records and the galaxy was not mounted at
- * all: the link worked in the address bar and nowhere else. An explicit ?tab=
- * still wins - someone who asked for a tab gets that tab.
+ * Which tab an address opens on. An explicit ?tab= wins; a name the panel no
+ * longer has - history, and the galaxy that was removed - opens the records.
  */
 export function openingTab(search: string): TabId {
-  const q = new URLSearchParams(search);
-  const tab = q.get("tab");
-  if (tab === "history") return "records";
+  const tab = new URLSearchParams(search).get("tab");
   if (TAB_IDS.includes(tab as TabId)) return tab as TabId;
-  if ((q.get("focus") ?? "") !== "") return "galaxy";
   return "records";
 }
 
@@ -118,54 +109,6 @@ function lockLabel(copy: ReturnType<typeof panelCopy>, health: Healthz): string 
     return health.lock;
   }
   return health.lock.held ? copy["lock.held"] : copy["lock.open"];
-}
-
-/**
- * An empty ledger draws an empty sky, which reads as a broken page rather than
- * as "nothing has been decided yet". The scene stays - the core still says
- * whether the body has a heartbeat - and a line says why it is empty.
- */
-function GalaxyTab({
-  model,
-  ready,
-  onSelect,
-  coverageText,
-  focusId,
-  onFocus,
-}: {
-  model: GalaxyModel;
-  ready: boolean;
-  onSelect: (hit: GalaxySelect) => void;
-  coverageText: string;
-  focusId: string | null;
-  onFocus: (id: string | null) => void;
-}) {
-  const copy = panelCopy();
-  const empty =
-    model.stars.length === 0 && model.planets.length === 0 && model.agents.length === 0;
-  return (
-    <>
-      <p className="galaxy-coverage" data-testid="galaxy-coverage">
-        {coverageText}
-      </p>
-      {empty ? (
-        <p className="galaxy-empty" data-testid="galaxy-empty">
-          {copy["galaxy.empty"]}
-        </p>
-      ) : null}
-      <Galaxy
-        model={model}
-        ready={ready}
-        onSelect={onSelect}
-        hiddenLabelsText={copy["galaxy.labels.hidden"]}
-        crowdedLabelsText={copy["galaxy.labels.hidden.crowd"]}
-        focusId={focusId}
-        onFocus={onFocus}
-        focusText={copy["galaxy.focus"]}
-        leaveFocusText={copy["galaxy.focus.leave"]}
-      />
-    </>
-  );
 }
 
 export function Observatory({
@@ -211,11 +154,6 @@ export function Observatory({
   const initialTab = useMemo<TabId>(() => readTab(), []);
   const [tab, setTab] = useState<TabId>(initialTab);
   const [selected, setSelected] = useState<string | null>(exhibitRef(actions));
-  const [focusId, setFocusId] = useState<string | null>(() => {
-    if (typeof window === "undefined") return null;
-    const q = new URLSearchParams(window.location.search).get("focus");
-    return q && q.length > 0 ? q : null;
-  });
   // panelCopy() is read during render all the way down, so a language
   // change only needs this subtree to render again.
   const [langNonce, setLangNonce] = useState(0);
@@ -307,15 +245,7 @@ export function Observatory({
 
   const copy = panelCopy();
   const pin = pinLabel(copy, audit?.trustRoot?.source ?? action?.trustRoot?.source ?? null);
-  const ledgerModel = useMemo(
-    () => ledgerToGalaxy(actions, health, reconcile),
-    [actions, health, reconcile],
-  );
-  const scene = useMemo(() => {
-    if (!inventory) return ledgerModel;
-    return mergeGalaxy(ledgerModel, inventoryToGalaxy(inventory));
-  }, [ledgerModel, inventory]);
-  const cover = coverageLine(inventory, ledgerModel, nowMs, copy, demo);
+  const cover = coverageLine(inventory, brains, nowMs, copy, demo);
   const lastMs = health?.lastDecisionMs ?? actions[0]?.record.claims.timestampMs ?? null;
   const witnessCounts = actions.reduce<Record<string, number>>((acc, a) => {
     const w = a.witnessClass ?? a.effect?.witnessClass ?? "none";
@@ -389,21 +319,25 @@ export function Observatory({
           </button>
         ) : null}
       </div>
-      {/* The rail is the only way into a record from the galaxy and status
-          tabs. On the records tab the middle pane is that way in, and what
-          was left -- two lines about the ledger -- now sits under the
-          sentence there. A column that wide has to carry more than a fact
-          the view it borders can state in one line. */}
+      {/* The rail is the only way into a record from the status tab. On the
+          records tab the middle pane is that way in, and what was left -- two
+          lines about the ledger -- now sits under the sentence there. A column
+          that wide has to carry more than a fact the view it borders can state
+          in one line. */}
       {tab === "records" || WIDE_TABS.includes(tab) ? null : (
       <aside className="obs-left" aria-label={copy["aria.rail"]}>
-        <h2>{copy["rail.ledger.projects"]}</h2>
-        <p className="muted">{copy.disconnected}</p>
         <h2>{copy["rail.ledger.agents"]}</h2>
         {brains.length === 0 ? <p className="muted">{copy.disconnected}</p> : (
           <ul className="rail-ledger" data-testid="rail-ledger-agents">
             {brains.map((b) => <li key={b}>{b}</li>)}
           </ul>
         )}
+        {/* The roster is a document the body serves, not a measurement: its
+            names are listed as declared, and the one sentence that counts
+            says how many of them this ledger has heard from. */}
+        <p className={cover.stale ? "muted rail-coverage stale" : "muted rail-coverage"} data-testid="inventory-coverage">
+          {cover.text}
+        </p>
         {inventory ? (
           <>
             <h2>{copy["rail.inventory.groups"]}</h2>
@@ -412,11 +346,7 @@ export function Observatory({
             ) : (
               <ul className="rail-inventory" data-testid="rail-inventory-groups">
                 {inventory.groups.map((g) => (
-                  <li key={g.id}>
-                    <button type="button" className="focusable" onClick={() => { setFocusId(g.id); setTab("galaxy"); }}>
-                      {g.label}
-                    </button>
-                  </li>
+                  <li key={g.id}>{g.label}</li>
                 ))}
               </ul>
             )}
@@ -426,20 +356,7 @@ export function Observatory({
             ) : (
               <ul className="rail-inventory" data-testid="rail-inventory-agents">
                 {inventory.agents.map((a) => (
-                  <li key={a.id}>
-                    <button
-                      type="button"
-                      className="focusable"
-                      onClick={() => {
-                        if (a.groupId) {
-                          setFocusId(a.groupId);
-                          setTab("galaxy");
-                        }
-                      }}
-                    >
-                      {a.label}
-                    </button>
-                  </li>
+                  <li key={a.id}>{a.label}</li>
                 ))}
               </ul>
             )}
@@ -482,19 +399,6 @@ export function Observatory({
             brains={brains}
             selected={action?.record.claims.ref ?? selected}
             onSelect={(ref) => setSelected(ref)}
-          />
-        ) : null}
-        {tab === "galaxy" ? (
-          <GalaxyTab
-            model={scene}
-            ready={status !== "loading"}
-            coverageText={cover.text}
-            focusId={focusId}
-            onFocus={setFocusId}
-            onSelect={(hit) => {
-              if (hit.kind === "star") setSelected(hit.id);
-              if (hit.kind === "planet") setFocusId(hit.id);
-            }}
           />
         ) : null}
         {tab === "status" ? (

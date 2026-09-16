@@ -1,10 +1,10 @@
 # @verax-ai/inventory
 
-The declared roster document a Verax body serves and a Verax galaxy draws:
+The declared roster document a Verax body serves and the Verax panel lists:
 which agents exist, which group each belongs to, when each last ran, and
 which pulses the roster does not name. This package carries the types and one
 strict parser, and nothing else, so a body can read the document without
-pulling in the galaxy's three.js and React.
+pulling in the panel's React.
 
 Part of [Verax](https://github.com/verax-ai/verax) by
 [VERAX Teknoloji](https://verax-ai.com). What the code carries and what stays

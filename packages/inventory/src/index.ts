@@ -2,8 +2,8 @@
  * The declared roster document: what it says, and how to read it.
  *
  * It lives in its own package because two very different readers need it:
- * the body, which serves roster health from a file on disk, and the galaxy,
- * which draws it. The galaxy carries three.js and React; the body must not.
+ * the body, which serves roster health from a file on disk, and the panel,
+ * which lists it. The panel carries React; the body must not.
  */
 export type InventoryState = "live" | "stale" | "failed" | "unmonitored" | "retired" | "unknown";
 

@@ -22,7 +22,7 @@ describe("P3 hygiene", () => {
   });
 
   it("14: multiplication sign U+00D7 is gone", () => {
-    const a = readFileSync(join(root, "apps", "panel", "perf", "check-baseline.mjs"), "utf8");
+    const a = readFileSync(join(root, "packages", "proxy", "perf", "check-baseline.mjs"), "utf8");
     const b = readFileSync(join(root, "docs", "PERF.md"), "utf8");
     assert.equal(a.includes("\u00d7"), false);
     assert.equal(b.includes("\u00d7"), false);

@@ -170,12 +170,12 @@ describe("panel session", () => {
 
   it("carries the panel's own address across the issuer round trip", async () => {
     // redirect_uri is origin + pathname, because that is what the issuer has
-    // registered. The query is not in it, so ?focus= and ?tab= were gone by
+    // registered. The query is not in it, so ?seat= and ?tab= were gone by
     // the time the panel came back: the address bar read "/" and the deep
     // link pointed at a page the panel never opened.
     const assign = vi.fn();
     vi.stubGlobal("location", {
-      search: "?tab=galaxy&focus=g-alpha",
+      search: "?tab=status&seat=g-alpha",
       origin: "http://127.0.0.1:5173",
       pathname: "/",
       hash: "",
@@ -211,8 +211,8 @@ describe("panel session", () => {
     );
     expect(await beginSession()).toBe("ok");
     const written = String(replaceState.mock.calls.at(-1)?.[2] ?? "");
-    expect(written).toMatch(/focus=g-alpha/);
-    expect(written).toMatch(/tab=galaxy/);
+    expect(written).toMatch(/seat=g-alpha/);
+    expect(written).toMatch(/tab=status/);
     expect(written).not.toMatch(/code=/);
     expect(written).not.toMatch(/state=/);
   });

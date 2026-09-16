@@ -1,15 +1,11 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { loadDemoActions, loadDemoApprovals } from "../src/observatory/demo.ts";
 import { formatMinor } from "../src/records/money.ts";
 import type { PendingApproval } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
-
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
 
 afterEach(() => {
   cleanup();

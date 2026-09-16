@@ -1,5 +1,5 @@
 import { panelCopy } from "../copy.ts";
-import { fillCopy } from "../galaxy/coverage-line.ts";
+import { fillCopy } from "../fill.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
 import { recordLine, statusWord } from "./line.ts";

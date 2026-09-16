@@ -6,9 +6,9 @@ import { fileURLToPath } from "node:url";
 const dir = dirname(fileURLToPath(import.meta.url));
 const lastPath = process.env.VERAX_PERF_LAST ?? join(dir, "last.json");
 const baselinePath = process.env.VERAX_PERF_BASELINE ?? join(dir, "baseline.json");
-// Which probe is speaking. The panel measures frame times; the body measures
-// processor time per operation. The comparison is the same either way.
-const label = process.env.VERAX_PERF_LABEL ?? "panel-perf";
+// Which probe is speaking: check.mjs names each timed operation. The default
+// is for a run by hand. The comparison is the same whatever is measured.
+const label = process.env.VERAX_PERF_LABEL ?? "perf";
 const last = JSON.parse(readFileSync(lastPath, "utf8"));
 const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
 const gl = typeof last.gl === "string" && last.gl.length > 0 ? last.gl : "swiftshader";

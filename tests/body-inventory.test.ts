@@ -9,7 +9,7 @@ import { startDevIssuer } from "./issuer-helper.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const policyFile = join(root, "packages", "proxy", "policy", "default.json");
-const sample = join(root, "packages", "galaxy", "tests", "fixtures", "inventory-sample.json");
+const sample = join(root, "packages", "inventory", "tests", "fixtures", "inventory-sample.json");
 
 async function withBody(
   inventoryFile: string | null,

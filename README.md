@@ -22,7 +22,7 @@ the Cedulon record format.
 | --- | --- |
 | [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock`, `desktop`. |
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
-| [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and a galaxy draws, with its strict parser. |
+| [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
 The body is also listed in the MCP registry as `io.github.verax-ai/verax`.
 
@@ -101,15 +101,12 @@ vulnerability is in [`SECURITY.md`](SECURITY.md).
 
 ## What else is in the tree
 
-- `apps/panel` is a 2D account-for rail beside a three.js galaxy fed from the
-  signed ledger. Private; it is not published. The panel session uses the
-  code flow; the access token stays in memory and is dropped on refresh. Vite
-  may still attach `VERAX_DEV_TOKEN` from `.env.local` to `/api` when the
-  request has no Authorization header (desktop MCP brains and tests).
-  Relative frame-time checks live in `apps/panel/perf`; they are not an
-  absolute smoothness claim.
-- `packages/galaxy` turns an inventory document into the galaxy the panel
-  draws. Private.
+- `apps/panel` is the account-for screen: the records list, the black box and
+  the status view, read from the signed ledger. Private; it is not published.
+  The panel session uses the code flow; the access token stays in memory and
+  is dropped on refresh. Vite may still attach `VERAX_DEV_TOKEN` from
+  `.env.local` to `/api` when the request has no Authorization header
+  (desktop MCP brains and tests).
 - `scripts/dev-issuer.mjs` is development only; not a production
   authorization server. It serves `GET /authorize` (PKCE S256) and
   `POST /token`, writes a token to `--out`, and never prints one. It listens
@@ -124,7 +121,7 @@ npm run pack:smoke  # pack the three packages and install them elsewhere
 ```
 
 CI runs the suite as a non-root user on Linux and again on Windows, plus the
-panel and proxy performance checks. Releases go out from the Actions tab:
+proxy performance check. Releases go out from the Actions tab:
 `release.yml` publishes the three packages with npm trusted publishing and a
 provenance attestation, then `mcp-registry.yml` updates the registry record
 once npm answers for the new version. Neither runs on push.

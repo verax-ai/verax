@@ -55,7 +55,7 @@ describe("panel build freshness", () => {
   it("builds when a source in another watched place is newer", () => {
     const { dist, src } = tree();
     const other = mkdtempSync(join(tmpdir(), "verax-panel-dep-"));
-    const dep = join(other, "Galaxy.tsx");
+    const dep = join(other, "Scene.tsx");
     writeFileSync(dep, "export const b = 2;\n", "utf8");
     stamp(dist, 600);
     stamp(dep, 30);

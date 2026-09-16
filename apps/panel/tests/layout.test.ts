@@ -31,7 +31,7 @@ const VIEWS = [
 // asked for another language would be measuring a screen no one gets by
 // default -- the same fault as measuring a window size the product never
 // opens at.
-const TABS = ["Records", "Galaxy", "Status", "Black box"] as const;
+const TABS = ["Records", "Black box", "Status"] as const;
 
 /**
  * Turkish strings that are not also the English ones. A Turkish word made
@@ -48,7 +48,7 @@ const TURKISH_ONLY = Object.keys(trCopy)
   .map((k) => trCopy[k] as string)
   .filter((v) => v.length >= 4 && !v.includes("{"));
 
-const TAB_FILES = ["records", "galaxy", "status", "box"] as const;
+const TAB_FILES = ["records", "box", "status"] as const;
 
 // These screens are measured with no body behind them. The preview proxies
 // /api and /.well-known to VERAX_BODY_URL, 127.0.0.1:8787 by default, so a
@@ -84,7 +84,7 @@ function installScreenReaders(): void {
 after(killStragglers);
 
 describe("observatory layout", () => {
-  it("keeps four tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
+  it("keeps three tabs, detail and timeline on screen; no overflow; 0 console errors", { timeout: 180_000 }, async () => {
     mkdirSync(shotDir, { recursive: true });
     const preview = await startPreview({ viteJs, cwd: root, port: 4189, label: "panel-layout", env: NO_BODY });
     const ready = `${preview.base}/?demo=1`;
@@ -142,8 +142,8 @@ describe("observatory layout", () => {
               time: box(time),
               paneBottom: paneBox ? paneBox.bottom : null,
               questions,
-              // The strip is measured the way the galaxy crowd rule is: by the
-              // boxes, not by the dots. Two stamps that print on top of each
+              // The strip is measured by the boxes, not by the dots. Two
+              // stamps that print on top of each
               // other, or a stamp clipped by the track, hide a record on a
               // screen whose whole claim is that it hides nothing.
               timeline: (() => {
@@ -321,8 +321,8 @@ describe("observatory layout", () => {
             if (seams.length > 0) {
               fails.push(`${view.name}/${TAB_FILES[t]}: ground not black: ${seams.join(", ")}`);
             }
-            // The rail is a way into a record from the two tabs that have no
-            // list of their own. On the records tab it is neither that nor a
+            // The rail is a way into a record from the status tab, which has
+            // no list of its own. On the records tab it is neither that nor a
             // full column of anything else, so it is not drawn there at all.
             // Every tab, not just the one the panel opens on: the first version
             // of this measured the records tab alone and passed while two
@@ -380,7 +380,7 @@ describe("observatory layout", () => {
             if (TAB_FILES[t] === "records" && rail) {
               fails.push(`${view.name}/${TAB_FILES[t]}: the rail is drawn on the records tab`);
             }
-            if (TAB_FILES[t] === "galaxy" || TAB_FILES[t] === "status") {
+            if (TAB_FILES[t] === "status") {
               if (!rail) fails.push(`${view.name}/${TAB_FILES[t]}: no rail, and no other way into a record`);
             }
             if (TAB_FILES[t] === "box") {
@@ -426,10 +426,10 @@ describe("observatory layout", () => {
         // that the query and the tab it chooses are already in place by then.
         const returning = await browser.newPage({ viewport: { width: 1360, height: 880 } });
         await returning.addInitScript(() => {
-          sessionStorage.setItem("verax-return-query", "focus=g-alpha&tab=galaxy");
+          sessionStorage.setItem("verax-return-query", "seat=g-alpha&tab=status");
         });
         await returning.goto(`${preview.base}/?code=abc&state=st`, { waitUntil: "domcontentloaded" });
-        await returning.waitForFunction(() => window.location.search.includes("focus="), null, { timeout: 15_000 })
+        await returning.waitForFunction(() => window.location.search.includes("seat="), null, { timeout: 15_000 })
           .catch(() => undefined);
         // The check reads this page only once the session has given up on it.
         // A body answering the preview proxy hands the page an issuer, and the
@@ -443,13 +443,13 @@ describe("observatory layout", () => {
         } else {
           const back = await returning.evaluate(() => ({
             search: window.location.search,
-            galaxy: document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
+            open: document.querySelector('[role="tab"][aria-selected="true"]')?.textContent ?? null,
           }));
-          if (!back.search.includes("focus=g-alpha")) {
+          if (!back.search.includes("seat=g-alpha")) {
             fails.push(`round-trip: the restored address is ${back.search || "(empty)"}`);
           }
-          if (back.galaxy === null || !/Galaxy|Galaksi/.test(back.galaxy)) {
-            fails.push(`round-trip: the open tab is ${back.galaxy ?? "none"}, not the sky`);
+          if (back.open === null || !/Status|Genel durum/.test(back.open)) {
+            fails.push(`round-trip: the open tab is ${back.open ?? "none"}, not the status tab the address named`);
           }
         }
         await returning.close();
@@ -476,8 +476,8 @@ describe("observatory layout", () => {
         await page.addInitScript(installScreenReaders);
         await page.goto(ready, { waitUntil: "domcontentloaded" });
         await page.getByRole("tab", { name: "Genel durum" }).waitFor({ state: "visible", timeout: 30_000 });
-        const trTabs = ["Kayıtlar", "Galaksi", "Genel durum", "Kara kutu"] as const;
-        const tabFiles = ["records", "galaxy", "status", "box"] as const;
+        const trTabs = ["Kayıtlar", "Kara kutu", "Genel durum"] as const;
+        const tabFiles = ["records", "box", "status"] as const;
         for (let t = 0; t < trTabs.length; t += 1) {
           await page.getByRole("tab", { name: trTabs[t] }).click();
           await page.waitForTimeout(200);

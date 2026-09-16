@@ -1,4 +1,4 @@
-import { fillCopy } from "../galaxy/coverage-line.ts";
+import { fillCopy } from "../fill.ts";
 import type { Copy } from "../copy.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";

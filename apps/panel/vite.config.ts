@@ -7,11 +7,8 @@ export default defineConfig(({ mode }) => {
   const toBody = { target, changeOrigin: true };
   return {
     plugins: [react()],
-    optimizeDeps: {
-      exclude: ["@verax-ai/galaxy"],
-    },
     resolve: {
-      dedupe: ["react", "react-dom", "three"],
+      dedupe: ["react", "react-dom"],
     },
     server: {
       fs: { allow: ["..", "../.."] },

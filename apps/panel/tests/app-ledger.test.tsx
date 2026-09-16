@@ -14,10 +14,6 @@ import type { PolicyBundle } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
 import { panelCopy } from "../src/copy.ts";
 
-vi.mock("@verax-ai/galaxy/react", () => ({
-  Galaxy: () => <div data-testid="galaxy-stage" />,
-}));
-
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const golden = join(root, "packages", "proxy", "tests", "fixtures", "ledger-golden");
 const policy = JSON.parse(

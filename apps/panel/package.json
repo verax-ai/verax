@@ -16,12 +16,9 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "@verax-ai/galaxy": "^0.0.0",
-    "@react-three/fiber": "^9.1.2",
-    "@react-three/postprocessing": "^3.0.4",
+    "@verax-ai/inventory": "^0.1.1",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
-    "three": "0.184.0"
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@testing-library/react": "^16.3.0",
