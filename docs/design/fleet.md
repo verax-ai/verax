@@ -7,6 +7,13 @@ body's ledger. The note answers plan §2-G
 Every figure names its source. A quantity that was not timed is marked
 **not measured**.
 
+**Decision taken (17 September 2026, operator).** Live view is (a): the
+operator's panel reads several bodies directly, one session, no central
+ledger. Coverage layer is (c): each body's signed checkpoints are
+collected at a place the operator holds. (b), a read-only collector, is
+not built as the default. Still design until two live bodies are listed
+on one session (STATUS G8).
+
 ## Why this exists
 
 STATUS does not describe a multi-body view. The company model in the

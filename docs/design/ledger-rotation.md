@@ -7,6 +7,13 @@ STATUS line: G7.
 Every figure below names its source. A quantity that was not timed on
 this machine is marked **not measured**.
 
+**Decisions taken (17 September 2026, operator).** F1 piece bound:
+50,000 decision rows or 200 MB of `decisions.jsonl`, whichever comes
+first; not a calendar month on its own. F4 retention: no automatic
+delete; a drop is an explicit operator command; the default keep window
+when an operator does drop is 13 months after close. Both stay design
+until the F7 guards have been seen red and the F8 measurement has run.
+
 ## Why this exists
 
 B (tail window) and C (panel last 200) cut the *read* path. They do not
