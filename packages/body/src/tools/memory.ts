@@ -49,6 +49,13 @@ export function memoryBelongsToOtherTenant(stateDir: string, id: string, selfKey
   return false;
 }
 
+/** True when this tenant already has `id` under its own memory path. */
+export function memoryExistsForTenant(stateDir: string, id: string, principal: Principal): boolean {
+  const path = resolveMemoryPath(stateDir, id, principal);
+  if (path === null) return false;
+  return existsSync(path);
+}
+
 export async function readMemoryMeta(
   stateDir: string,
   id: string,

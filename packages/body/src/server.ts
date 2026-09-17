@@ -7,6 +7,7 @@ import type { BodyConfig } from "./config.ts";
 import {
   approvalsLogFor,
   approvePending,
+  createApprovalBudgetGuard,
   explain,
   LedgerDenyUnrecorded,
   loadApprovalsFromDir,
@@ -441,6 +442,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         // which says nothing about the person holding the phone; the session's
         // own subject does.
         const approver = verified.principal.brain;
+        const approvals = approvalsLogFor(services.ledger);
         const outcome = await approvePending({
           ledger: services.ledger,
           recordSigner: loadOrCreateSigners(config.stateDir).recordSigner,
@@ -450,11 +452,19 @@ export async function listen(config: BodyConfig): Promise<Server> {
           approverId: approver,
           via: "http",
           policyHash: defer.policyHash,
-          approvals: approvalsLogFor(services.ledger),
+          approvals,
+          budgetGuard: createApprovalBudgetGuard({
+            policy: services.policy,
+            approvals,
+            now: () => Date.now(),
+          }),
         });
         if (!outcome.ok) {
           const code = outcome.reason === "unknown-ref" || outcome.reason === "snapshot-missing" ? 404 : 409;
-          send(res, code, { error: outcome.reason });
+          send(res, code, {
+            error: outcome.reason,
+            ...(outcome.allowRef ? { allowRef: outcome.allowRef } : {}),
+          });
           return;
         }
         send(res, 200, { allowRef: outcome.allowRef, approver });

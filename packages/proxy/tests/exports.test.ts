@@ -17,6 +17,9 @@ const ALLOWED = new Set([
   "explain",
   "approvePending",
   "approvalsLogFor",
+  // HTTP and CLI approve doors share the spend daily-max check; the factory
+  // lives next to approvePending so both pass the same function.
+  "createApprovalBudgetGuard",
   "enqueueApprovalCommand",
   "loadApprovalsFromDir",
   "loadEffectsFromDir",
