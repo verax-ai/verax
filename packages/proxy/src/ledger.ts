@@ -1,6 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, open, readFile } from "node:fs/promises";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 
 /** I/O seam so append-cost tests can count rereads without mocking node:fs. */
 export const ledgerFs = {
@@ -8,7 +16,8 @@ export const ledgerFs = {
   readFileSync,
   open,
 };
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { writeFileAtomic } from "./atomic-write.ts";
 import { canonical, decisionRecordHash } from "@cedulon/core";
 import { coseToHex, signCoseSign1 } from "@cedulon/cose";
 import {
@@ -17,6 +26,24 @@ import {
   type SignedEffectExtract,
 } from "@cedulon/effect-extract";
 import { readJsonlTail, type TailVisit } from "./jsonl-tail.ts";
+import {
+  copyRel,
+  decisionIndexCount,
+  DEFAULT_PIECE_MAX_BYTES,
+  DEFAULT_PIECE_MAX_ROWS,
+  indexPath,
+  LEGACY_PIECE_ID,
+  legacyPieceRow,
+  newPieceRow,
+  nextPieceId,
+  pieceOverlaps,
+  readLedgerIndex,
+  readLedgerManifest,
+  writeLedgerManifest,
+  type LedgerIndexLine,
+  type LedgerManifest,
+  type LedgerPieceRow,
+} from "./ledger-manifest.ts";
 import { tenantKey } from "./tenant.ts";
 import type {
   DecisionInputs,
@@ -92,6 +119,20 @@ export function readLedgerTail<T>(path: string, visit: (row: T) => TailVisit, ch
  * can be set back. A row stamped a minute before its neighbour is still seen.
  */
 export const WINDOW_SLACK_MS = 60_000;
+
+/**
+ * Write without fsync. For the ref index only: it is derived from the
+ * pieces, a tail lost to a crash is rebuilt on the next open, and the
+ * decision's own fsync stays the one per append.
+ */
+async function appendPlain(path: string, line: string): Promise<void> {
+  const fh = await ledgerFs.open(path, "a");
+  try {
+    await fh.write(line);
+  } finally {
+    await fh.close();
+  }
+}
 
 /** Write then fsync so a crash cannot drop a committed line. */
 export async function appendDurable(path: string, line: string): Promise<void> {
@@ -380,14 +421,35 @@ function readLock(path: string): { pid: number; startedAt: number; token?: strin
   }
 }
 
+export type FileLedgerOpts = {
+  pieceMaxRows?: number;
+  pieceMaxBytes?: number;
+  onPieceClose?: (window: { startMs: number; endMs: number; pieceId: string }) => Promise<void>;
+};
+
+export type LedgerCounts = {
+  decisions: number;
+  effects: number;
+  lastDecisionMs: number | null;
+  activeDecisions: number;
+  pieces: number;
+};
+
 export class FileLedger implements Ledger {
   readonly permissionCheck: PermissionCheck;
   readonly dir: string;
   effectSigner?: EffectSigner;
   /** Optional signer in another process. Null means stay `self`. */
   remoteWitness?: RemoteWitnessSign;
-  private readonly decisionsPath: string;
-  private readonly effectsPath: string;
+  /** Asked after a piece closes. A missing or failing hook does not block the close. */
+  onPieceClose?: FileLedgerOpts["onPieceClose"];
+  pieceMaxRows: number;
+  pieceMaxBytes: number;
+  private decisionsPath: string;
+  private effectsPath: string;
+  private inputsPath: string;
+  private copyDecisionsPath: string;
+  private copyEffectsPath: string;
   private readonly lockPath: string;
   private readonly q = new SerialQueue();
   private readonly token = randomBytes(16).toString("hex");
@@ -400,22 +462,54 @@ export class FileLedger implements Ledger {
   private readonly reauthByHash = new Map<string, string>();
   private readonly countedAt: number[] = [];
   countsReadable = true;
-  private readonly copyDir: string;
   private readonly heartbeatPath: string;
   private decisionCount = 0;
   private effectCount = 0;
   private lastDecisionMs: number | null = null;
+  private pieces: LedgerPieceRow[] = [];
+  /** Inputs rows appended through this instance, until their decision lands. */
+  private readonly recentInputs = new Map<string, DecisionInputs>();
+  private activeId = LEGACY_PIECE_ID;
+  private activeDecisionN = 0;
+  private activeEffectN = 0;
 
-  constructor(dir: string) {
+  constructor(dir: string, opts?: FileLedgerOpts) {
     this.dir = dir;
     this.permissionCheck = ensureLedgerDir(dir);
+    this.pieceMaxRows = opts?.pieceMaxRows ?? DEFAULT_PIECE_MAX_ROWS;
+    this.pieceMaxBytes = opts?.pieceMaxBytes ?? DEFAULT_PIECE_MAX_BYTES;
+    this.onPieceClose = opts?.onPieceClose;
     this.decisionsPath = join(dir, "decisions.jsonl");
     this.effectsPath = join(dir, "effects.jsonl");
+    this.inputsPath = join(dir, "inputs.jsonl");
+    this.copyDecisionsPath = join(dir, "evidence-copy", "decisions.jsonl");
+    this.copyEffectsPath = join(dir, "evidence-copy", "effects.jsonl");
     this.lockPath = join(dir, "ledger.lock");
-    this.copyDir = join(dir, "evidence-copy");
     this.heartbeatPath = join(dir, "heartbeat.json");
     this.acquireLock();
-    this.loadCaches();
+    try {
+      this.loadCaches();
+    } catch (err) {
+      // A ledger that cannot be read is not held: the lock goes back so the
+      // operator's next attempt is not refused as "locked" by a dead open.
+      this.close();
+      throw err;
+    }
+  }
+
+  noteInputs(ref: string, inputs: DecisionInputs): void {
+    this.recentInputs.set(ref, inputs);
+    if (this.recentInputs.size > RECENT_INPUTS_MAX) {
+      const oldest = this.recentInputs.keys().next().value;
+      if (oldest !== undefined) this.recentInputs.delete(oldest);
+    }
+  }
+
+  inputsPaths(): { active: string; all: string[] } {
+    return {
+      active: this.inputsPath,
+      all: this.pieces.map((p) => join(this.dir, p.inputs)),
+    };
   }
 
   /** After lock handoff a new instance reloads; the lost owner cannot append. */
@@ -426,87 +520,304 @@ export class FileLedger implements Ledger {
     this.reauthByHash.clear();
     this.countedAt.length = 0;
     this.countsReadable = true;
-    let decisions: SignedDecisionRecord[] = [];
+    const stored = readLedgerManifest(this.dir);
+    this.pieces = stored ? stored.pieces.map((p) => ({ ...p })) : [legacyPieceRow()];
+    const open = [...this.pieces].reverse().find((p) => !p.closed) ?? this.pieces[this.pieces.length - 1]!;
+    this.activeId = open.id;
+    this.applyActivePaths();
+    let activeDecisions: SignedDecisionRecord[] = [];
     try {
-      decisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
+      activeDecisions = readJsonlSync<SignedDecisionRecord>(this.decisionsPath);
     } catch {
       this.countsReadable = false;
     }
-    this.decisionCount = decisions.length;
-    const last = decisions[decisions.length - 1];
-    this.tailHash = last ? decisionRecordHash(last) : null;
-    this.lastDecisionMs = last ? last.claims.timestampMs : null;
-    const rowsByRef = new Map<string, DecisionIndexRow[]>();
-    for (const rec of decisions) {
-      const row = indexRowOf(rec);
-      if (row) {
-        this.byRef.set(row.ref, row);
-        const list = rowsByRef.get(row.ref) ?? [];
-        list.push(row);
-        rowsByRef.set(row.ref, list);
-        noteReauth(this.reauthByHash, row);
-        noteCounted(this.countedAt, row);
+    const closedN = this.pieces.filter((p) => p.closed).reduce((s, p) => s + p.n, 0);
+    let indexLines = readLedgerIndex(this.dir);
+    if (decisionIndexCount(indexLines) < closedN + activeDecisions.length) {
+      indexLines = this.rebuildIndex(activeDecisions);
+    }
+    for (const line of indexLines) this.applyIndexLine(line);
+    for (const line of indexLines) {
+      if (line.kind === "allow" || line.kind === "defer") {
+        noteCounted(this.countedAt, {
+          ref: line.ref,
+          requestHash: line.requestHash,
+          decision: line.kind,
+          reasonCode: line.reasonCode,
+          subject: line.subject,
+          policyHash: line.policyHash,
+          timestampMs: line.ts,
+        });
       }
     }
-    this.loadTenantRefs(rowsByRef);
+    this.pruneCounted(Date.now());
+    const last = activeDecisions[activeDecisions.length - 1];
+    if (last) {
+      this.tailHash = decisionRecordHash(last);
+      this.lastDecisionMs = last.claims.timestampMs;
+    } else {
+      const prev = [...this.pieces].reverse().find((p) => p.closed);
+      this.tailHash = prev?.lastHash ?? null;
+      this.lastDecisionMs = prev?.lastMs ?? null;
+    }
+    this.activeDecisionN = activeDecisions.length;
+    this.decisionCount = closedN + activeDecisions.length;
+    if (open.firstMs === null && activeDecisions[0]) open.firstMs = activeDecisions[0].claims.timestampMs;
+    if (activeDecisions.length > 0) open.lastMs = activeDecisions[activeDecisions.length - 1]!.claims.timestampMs;
+    open.n = activeDecisions.length;
     this.effectCount = 0;
-    for (const effect of readJsonlSync<LedgerEffect>(this.effectsPath)) {
+    const activeEffects = readJsonlSync<LedgerEffect>(this.effectsPath);
+    for (const effect of activeEffects) {
       this.effectCount += 1;
       if (effect.row.effectClass !== "duplicate-effect") this.effectRefs.add(effect.row.ref);
     }
-    this.loadResolvedBy();
+    this.activeEffectN = activeEffects.length;
+    const closedEffects = this.pieces.filter((p) => p.closed).reduce((s, p) => s + p.effectN, 0);
+    this.effectCount = closedEffects + activeEffects.length;
+    open.effectN = activeEffects.length;
   }
 
-  /** Pair inputs.jsonl with decisions so a restart keeps per-tenant `_ref` keys. */
-  private loadTenantRefs(rowsByRef: Map<string, DecisionIndexRow[]>): void {
-    let text: string;
+  private applyActivePaths(): void {
+    const piece = this.pieces.find((p) => p.id === this.activeId) ?? this.pieces[this.pieces.length - 1]!;
+    this.activeId = piece.id;
+    this.decisionsPath = join(this.dir, piece.decisions);
+    this.effectsPath = join(this.dir, piece.effects);
+    this.inputsPath = join(this.dir, piece.inputs);
+    this.copyDecisionsPath = join(this.dir, copyRel(piece.id, "decisions.jsonl"));
+    this.copyEffectsPath = join(this.dir, copyRel(piece.id, "effects.jsonl"));
+  }
+
+  private activePiece(): LedgerPieceRow {
+    return this.pieces.find((p) => p.id === this.activeId) ?? this.pieces[this.pieces.length - 1]!;
+  }
+
+  private applyIndexLine(line: LedgerIndexLine): void {
+    // An effect marker names its decision's ref and nothing else: the
+    // decision's own line already carries the row, and counting the marker
+    // as a decision doubled the rate-limit work after a restart.
+    if (line.kind === "effect") {
+      this.effectRefs.add(line.ref);
+      return;
+    }
+    const row: DecisionIndexRow = {
+      ref: line.ref,
+      requestHash: line.requestHash,
+      decision: line.kind as DecisionKind,
+      reasonCode: line.reasonCode,
+      subject: line.subject,
+      policyHash: line.policyHash,
+      timestampMs: line.ts,
+    };
+    this.byRef.set(line.ref, row);
+    if (line.tenantRef !== "") this.byRef.set(`${line.tenantRef}:${line.ref}`, row);
+    noteReauth(this.reauthByHash, row);
+    if (line.resolves) {
+      const kind = resolutionKindOf(row);
+      if (kind) this.resolvedBy.set(line.resolves, { ref: line.ref, kind });
+    }
+    if (line.hasEffect) this.effectRefs.add(line.ref);
+  }
+
+  private pruneCounted(nowMs: number): void {
+    const day = new Date(nowMs);
+    const keepFrom = Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate()) - 60_000;
+    let w = 0;
+    for (const t of this.countedAt) {
+      if (t >= keepFrom) {
+        this.countedAt[w] = t;
+        w += 1;
+      }
+    }
+    this.countedAt.length = w;
+  }
+
+  private rebuildIndex(activeDecisions: SignedDecisionRecord[]): LedgerIndexLine[] {
+    const lines: LedgerIndexLine[] = [];
+    for (const piece of this.pieces) {
+      const path = join(this.dir, piece.decisions);
+      const recs =
+        piece.id === this.activeId ? activeDecisions : readJsonlSync<SignedDecisionRecord>(path);
+      const inputLists = inputsByRef(join(this.dir, piece.inputs));
+      const effectSet = primaryEffectRefs(join(this.dir, piece.effects));
+      const seen = new Map<string, number>();
+      for (const rec of recs) {
+        const row = indexRowOf(rec);
+        if (!row) continue;
+        const idx = seen.get(row.ref) ?? 0;
+        seen.set(row.ref, idx + 1);
+        const inputs = inputLists.get(row.ref)?.[idx];
+        const principal = inputs?.principal;
+        const tenantRef =
+          principal && typeof principal.brain === "string"
+            ? tenantKey({
+                brain: principal.brain,
+                iss: principal.iss,
+                tenant: principal.tenant,
+                org: principal.org,
+              })
+            : "";
+        lines.push({
+          ref: row.ref,
+          tenantRef,
+          piece: piece.id,
+          ts: row.timestampMs,
+          kind: row.decision,
+          requestHash: row.requestHash,
+          resolves: inputs?.approver?.resolves ?? null,
+          hasEffect: effectSet.has(row.ref),
+          reasonCode: row.reasonCode,
+          subject: row.subject,
+          policyHash: row.policyHash,
+        });
+      }
+    }
+    const text = lines.map((l) => lineOf(l)).join("");
+    writeFileAtomic(indexPath(this.dir), text);
+    return lines;
+  }
+
+  private async writeIndexForDecision(signed: SignedDecisionRecord): Promise<void> {
+    const row = indexRowOf(signed);
+    if (!row) return;
+    // The inputs row was handed over in memory when it was appended (the
+    // proxy writes it just before the decision). The tail read is for a row
+    // this instance did not write, and it is bounded: an append never reads
+    // a piece back.
+    let inputs = this.recentInputs.get(row.ref) ?? null;
+    if (inputs) this.recentInputs.delete(row.ref);
+    else inputs = await peekInputsTail(this.inputsPath, row.ref);
+    const principal = inputs?.principal;
+    const tenantRef =
+      principal && typeof principal.brain === "string"
+        ? tenantKey({
+            brain: principal.brain,
+            iss: principal.iss,
+            tenant: principal.tenant,
+            org: principal.org,
+          })
+        : "";
+    const line: LedgerIndexLine = {
+      ref: row.ref,
+      tenantRef,
+      piece: this.activeId,
+      ts: row.timestampMs,
+      kind: row.decision,
+      requestHash: row.requestHash,
+      resolves: inputs?.approver?.resolves ?? null,
+      hasEffect: this.effectRefs.has(row.ref),
+      reasonCode: row.reasonCode,
+      subject: row.subject,
+      policyHash: row.policyHash,
+    };
+    await appendPlain(indexPath(this.dir), lineOf(line));
+    this.applyIndexLine(line);
+  }
+
+  private async writeIndexHasEffect(ref: string): Promise<void> {
+    const existing = this.byRef.get(ref);
+    if (!existing) return;
+    const line: LedgerIndexLine = {
+      ref,
+      tenantRef: "",
+      piece: this.activeId,
+      ts: existing.timestampMs,
+      kind: "effect",
+      requestHash: "",
+      resolves: null,
+      hasEffect: true,
+      reasonCode: "",
+      subject: "",
+      policyHash: "",
+    };
+    await appendPlain(indexPath(this.dir), lineOf(line));
+    this.effectRefs.add(ref);
+  }
+
+  private noteActiveStamp(ts: number): void {
+    const piece = this.activePiece();
+    if (piece.firstMs === null) piece.firstMs = ts;
+    piece.lastMs = ts;
+  }
+
+  private persistManifest(): void {
+    const manifest: LedgerManifest = {
+      version: 1,
+      pieces: this.pieces,
+      countedAtMs: [...this.countedAt],
+    };
+    writeLedgerManifest(this.dir, manifest);
+  }
+
+  private async fsyncPath(path: string): Promise<void> {
     try {
-      text = ledgerFs.readFileSync(join(this.dir, "inputs.jsonl"), "utf8");
+      const fh = await ledgerFs.open(path, "r+");
+      try {
+        await fh.sync();
+      } finally {
+        await fh.close();
+      }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
       throw err;
     }
-    const seen = new Map<string, number>();
-    for (const line of text.split("\n")) {
-      if (line === "") continue;
-      const row = JSON.parse(line) as { ref?: unknown; inputs?: DecisionInputs };
-      if (typeof row.ref !== "string") continue;
-      const principal = row.inputs?.principal;
-      if (!principal || typeof principal.brain !== "string") continue;
-      const idx = seen.get(row.ref) ?? 0;
-      seen.set(row.ref, idx + 1);
-      const indexed = rowsByRef.get(row.ref)?.[idx];
-      if (!indexed) continue;
-      const key = tenantKey({
-        brain: principal.brain,
-        iss: principal.iss,
-        tenant: principal.tenant,
-        org: principal.org,
+  }
+
+  private ensurePieceFiles(piece: LedgerPieceRow): void {
+    mkdirSync(join(this.dir, dirname(piece.decisions)), { recursive: true, mode: 0o700 });
+    mkdirSync(join(this.dir, dirname(copyRel(piece.id, "decisions.jsonl"))), { recursive: true, mode: 0o700 });
+    for (const rel of [piece.decisions, piece.effects, piece.inputs, copyRel(piece.id, "decisions.jsonl"), copyRel(piece.id, "effects.jsonl")]) {
+      const path = join(this.dir, rel);
+      if (!existsSync(path)) writeFileSync(path, "", { encoding: "utf8", mode: 0o600 });
+    }
+  }
+
+  private async closeActivePiece(): Promise<void> {
+    this.assertOwned();
+    const closing = this.activePiece();
+    await this.fsyncPath(this.decisionsPath);
+    await this.fsyncPath(this.effectsPath);
+    await this.fsyncPath(this.inputsPath);
+    closing.closed = true;
+    closing.closedAtMs = Date.now();
+    closing.n = this.activeDecisionN;
+    closing.effectN = this.activeEffectN;
+    closing.lastHash = this.tailHash;
+    const nextId = nextPieceId(
+      this.pieces.map((p) => p.id),
+      closing.lastMs ?? Date.now(),
+    );
+    const next = newPieceRow(nextId);
+    this.pieces.push(next);
+    this.pruneCounted(Date.now());
+    this.persistManifest();
+    this.activeId = nextId;
+    this.applyActivePaths();
+    this.ensurePieceFiles(next);
+    this.activeDecisionN = 0;
+    this.activeEffectN = 0;
+    try {
+      await this.onPieceClose?.({
+        startMs: closing.firstMs ?? 0,
+        endMs: (closing.lastMs ?? 0) + 1,
+        pieceId: closing.id,
       });
-      this.byRef.set(`${key}:${row.ref}`, indexed);
+    } catch {
+      // witness down: the piece stays closed
     }
   }
 
-  /** Single pass over inputs.jsonl. FileInputsLog itself stays cache-less. */
-  private loadResolvedBy(): void {
-    let text: string;
+  private async maybeRotate(): Promise<void> {
+    if (this.activeDecisionN >= this.pieceMaxRows) {
+      await this.closeActivePiece();
+      return;
+    }
+    let bytes = 0;
     try {
-      text = ledgerFs.readFileSync(join(this.dir, "inputs.jsonl"), "utf8");
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
-      throw err;
+      bytes = statSync(this.decisionsPath).size;
+    } catch {
+      bytes = 0;
     }
-    for (const line of text.split("\n")) {
-      if (line === "") continue;
-      const row = JSON.parse(line) as { ref?: unknown; inputs?: { approver?: { resolves?: unknown } } };
-      if (typeof row.ref !== "string") continue;
-      const resolves = row.inputs?.approver?.resolves;
-      if (typeof resolves !== "string") continue;
-      const indexed = this.byRef.get(row.ref);
-      if (!indexed) continue;
-      const kind = resolutionKindOf(indexed);
-      if (kind) this.resolvedBy.set(resolves, { ref: row.ref, kind });
-    }
+    if (bytes >= this.pieceMaxBytes) await this.closeActivePiece();
   }
 
   private lockBody(): string {
@@ -576,12 +887,16 @@ export class FileLedger implements Ledger {
       await this.pulse("decisions.jsonl", line, "decision");
       this.tailHash = decisionRecordHash(signed);
       this.lastDecisionMs = signed.claims.timestampMs;
+      this.noteActiveStamp(signed.claims.timestampMs);
+      this.activeDecisionN += 1;
       const row = indexRowOf(signed);
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
         noteCounted(this.countedAt, row);
       }
+      await this.writeIndexForDecision(signed);
+      await this.maybeRotate();
     });
   }
 
@@ -596,12 +911,16 @@ export class FileLedger implements Ledger {
       await this.pulse("decisions.jsonl", line, "decision");
       this.tailHash = decisionRecordHash(signed);
       this.lastDecisionMs = signed.claims.timestampMs;
+      this.noteActiveStamp(signed.claims.timestampMs);
+      this.activeDecisionN += 1;
       const row = indexRowOf(signed);
       if (row) {
         this.byRef.set(row.ref, row);
         noteReauth(this.reauthByHash, row);
         noteCounted(this.countedAt, row);
       }
+      await this.writeIndexForDecision(signed);
+      await this.maybeRotate();
     });
   }
 
@@ -612,46 +931,89 @@ export class FileLedger implements Ledger {
    * every five seconds. Null when the decision file could not be parsed on
    * load; then the caller reads for itself and fails the way it always did.
    */
-  counts(): { decisions: number; effects: number; lastDecisionMs: number | null } | null {
+  counts(): LedgerCounts | null {
     if (!this.countsReadable) return null;
-    return { decisions: this.decisionCount, effects: this.effectCount, lastDecisionMs: this.lastDecisionMs };
+    return {
+      decisions: this.decisionCount,
+      effects: this.effectCount,
+      lastDecisionMs: this.lastDecisionMs,
+      activeDecisions: this.activeDecisionN,
+      pieces: this.pieces.length,
+    };
   }
 
   /**
-   * Decisions stamped in [fromMs, toMs), read from the end of the file so the
-   * cost is the window's, not the ledger's. With a limit, the newest rows of
-   * the window come back and `more` says the window went on.
+   * Decisions stamped in [fromMs, toMs), read from the end of each overlapping
+   * piece so the cost is the window's, not the ledger's. With a limit, the
+   * newest rows of the window come back and `more` says the window went on,
+   * including in a closed piece.
    */
   async decisionsWindow(
     fromMs: number,
     toMs: number,
     limit?: number,
-  ): Promise<{ rows: SignedDecisionRecord[]; more: boolean }> {
+  ): Promise<{ rows: SignedDecisionRecord[]; more: boolean; piecesTouched: string[] }> {
     const max = limit === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(limit));
+    const overlapping = this.pieces.filter((p) => pieceOverlaps(p, fromMs, toMs));
+    const piecesTouched = overlapping.map((p) => p.id);
     let taken = 0;
     let more = false;
-    const rows = await readLedgerTail<SignedDecisionRecord>(this.decisionsPath, (row) => {
-      const ts = row.claims.timestampMs;
-      if (ts >= toMs) return "skip";
-      if (ts < fromMs) return ts < fromMs - WINDOW_SLACK_MS ? "stop" : "skip";
-      if (taken >= max) {
+    let stopOld = false;
+    const newestFirst = [...overlapping].reverse();
+    const collected: SignedDecisionRecord[] = [];
+    for (let i = 0; i < newestFirst.length; i += 1) {
+      const piece = newestFirst[i]!;
+      if (stopOld) break;
+      const part = await readLedgerTail<SignedDecisionRecord>(join(this.dir, piece.decisions), (row) => {
+        const ts = row.claims.timestampMs;
+        if (ts >= toMs) return "skip";
+        if (ts < fromMs) {
+          if (ts < fromMs - WINDOW_SLACK_MS) {
+            stopOld = true;
+            return "stop";
+          }
+          return "skip";
+        }
+        if (taken >= max) {
+          more = true;
+          return "stop";
+        }
+        taken += 1;
+        return "take";
+      });
+      collected.unshift(...part);
+      if (more || stopOld) break;
+      if (taken >= max && i + 1 < newestFirst.length) {
         more = true;
-        return "stop";
+        break;
       }
-      taken += 1;
-      return "take";
-    });
-    return { rows, more };
+    }
+    return { rows: collected, more, piecesTouched };
   }
 
-  /** Effects stamped in [fromMs, toMs), read from the end of the file. */
+  /** Effects stamped in [fromMs, toMs), read from the end of each overlapping piece. */
   async effectsWindow(fromMs: number, toMs: number): Promise<LedgerEffect[]> {
-    return readLedgerTail<LedgerEffect>(this.effectsPath, (effect) => {
-      const ts = effect.row.timestampMs;
-      if (ts >= toMs) return "skip";
-      if (ts < fromMs) return ts < fromMs - WINDOW_SLACK_MS ? "stop" : "skip";
-      return "take";
-    });
+    const overlapping = this.pieces.filter((p) => pieceOverlaps(p, fromMs, toMs));
+    const newestFirst = [...overlapping].reverse();
+    const collected: LedgerEffect[] = [];
+    let stopOld = false;
+    for (const piece of newestFirst) {
+      if (stopOld) break;
+      const part = await readLedgerTail<LedgerEffect>(join(this.dir, piece.effects), (effect) => {
+        const ts = effect.row.timestampMs;
+        if (ts >= toMs) return "skip";
+        if (ts < fromMs) {
+          if (ts < fromMs - WINDOW_SLACK_MS) {
+            stopOld = true;
+            return "stop";
+          }
+          return "skip";
+        }
+        return "take";
+      });
+      collected.unshift(...part);
+    }
+    return collected;
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
@@ -683,20 +1045,33 @@ export class FileLedger implements Ledger {
       );
       await appendDurable(this.effectsPath, dup);
       await this.pulse("effects.jsonl", dup, "effect");
+      this.activeEffectN += 1;
       throw new Error(`duplicate-effect:${row.ref}`);
     }
     const line = lineOf(await this.storeEffect(row, witnessClass, resultHash));
     await appendDurable(this.effectsPath, line);
     await this.pulse("effects.jsonl", line, "effect");
-    if (row.effectClass !== "duplicate-effect") this.effectRefs.add(row.ref);
+    this.activeEffectN += 1;
+    if (row.effectClass !== "duplicate-effect") {
+      this.effectRefs.add(row.ref);
+      await this.writeIndexHasEffect(row.ref);
+    }
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
-    return readJsonl<SignedDecisionRecord>(this.decisionsPath);
+    const out: SignedDecisionRecord[] = [];
+    for (const piece of this.pieces) {
+      out.push(...(await readJsonl<SignedDecisionRecord>(join(this.dir, piece.decisions))));
+    }
+    return out;
   }
 
   async effects(): Promise<LedgerEffect[]> {
-    return readJsonl<LedgerEffect>(this.effectsPath);
+    const out: LedgerEffect[] = [];
+    for (const piece of this.pieces) {
+      out.push(...(await readJsonl<LedgerEffect>(join(this.dir, piece.effects))));
+    }
+    return out;
   }
 
   async lastDecisionHash(): Promise<string | null> {
@@ -745,8 +1120,9 @@ export class FileLedger implements Ledger {
     line: string,
     kind: "decision" | "effect",
   ): Promise<void> {
-    mkdirSync(this.copyDir, { recursive: true, mode: 0o700 });
-    appendFileSync(join(this.copyDir, name), line, { encoding: "utf8" });
+    const dest = name === "decisions.jsonl" ? this.copyDecisionsPath : this.copyEffectsPath;
+    mkdirSync(dirname(dest), { recursive: true, mode: 0o700 });
+    appendFileSync(dest, line, { encoding: "utf8" });
     if (kind === "decision") this.decisionCount += 1;
     else this.effectCount += 1;
     writeFileSync(
@@ -782,6 +1158,59 @@ export class FileLedger implements Ledger {
     }
     return asStoredEffect(row, witnessClass, resultHash, this.effectSigner);
   }
+}
+
+const RECENT_INPUTS_MAX = 4096;
+const PEEK_INPUTS_ROWS = 256;
+
+/** The newest rows of inputs.jsonl, from the end, for a ref this instance did not append. */
+async function peekInputsTail(path: string, ref: string): Promise<DecisionInputs | null> {
+  let visited = 0;
+  let found = false;
+  let rows: { ref?: unknown; inputs?: DecisionInputs }[];
+  try {
+    rows = await readLedgerTail<{ ref?: unknown; inputs?: DecisionInputs }>(path, (row) => {
+      if (found) return "stop";
+      visited += 1;
+      if (row.ref === ref) {
+        found = true;
+        return "take";
+      }
+      return visited >= PEEK_INPUTS_ROWS ? "stop" : "skip";
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  return rows[0]?.inputs ?? null;
+}
+
+function inputsByRef(path: string): Map<string, DecisionInputs[]> {
+  const out = new Map<string, DecisionInputs[]>();
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return out;
+    throw err;
+  }
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    const row = JSON.parse(line) as { ref?: unknown; inputs?: DecisionInputs };
+    if (typeof row.ref !== "string" || !row.inputs) continue;
+    const list = out.get(row.ref) ?? [];
+    list.push(row.inputs);
+    out.set(row.ref, list);
+  }
+  return out;
+}
+
+function primaryEffectRefs(path: string): Set<string> {
+  const refs = new Set<string>();
+  for (const effect of readJsonlSync<LedgerEffect>(path)) {
+    if (effect.row.effectClass !== "duplicate-effect") refs.add(effect.row.ref);
+  }
+  return refs;
 }
 
 function signWindow(

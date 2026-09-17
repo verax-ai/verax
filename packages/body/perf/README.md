@@ -39,6 +39,7 @@ and Playwright's Chromium (the same one the panel tests use).
 | `VERAX_SCALE_AGENTS` | number of agents in the synthetic roster | `150` |
 | `VERAX_SCALE_ROUNDS` | timing rounds per request | see each probe |
 | `VERAX_SCALE_ISSUER_PORT` / `VERAX_SCALE_BODY_PORT` | loopback ports | `8796` / `8797` (panel probe: `8794` / `8795`) |
+| `VERAX_SCALE_PIECE_ROWS` | rows per ledger piece while `ledger-scale.ts` generates; a value above N keeps one piece | the ledger's own bound (50k) |
 
 The defaults stay away from `8787`, the port a live body on the same machine
 normally listens on.
@@ -49,7 +50,21 @@ directories are safe to delete; a probe rebuilds them.
 
 ## Two-piece measurement (ledger rotation, F8)
 
-`docs/design/ledger-rotation.md` §F8 asks for the same probes on two 100k
-pieces once rotation exists: boot time, RSS, and the 24-hour window across
-the piece boundary. Until rotation is implemented, `VERAX_SCALE_N=200000`
-measures the single-file case that rotation is meant to replace.
+`docs/design/ledger-rotation.md` §F8 asks for the same probe on two 100k
+pieces: boot time, RSS, and a 24-hour window that crosses the piece
+boundary. `ledger-scale.ts` generates through the real `FileLedger`, so
+the pieces close where the ledger closes them; `VERAX_SCALE_PIECE_ROWS`
+sets that bound for the run. When the manifest names a closed piece, the
+probe also times a 24-hour window centred on that piece's last row
+(`ledgerCross24h`, with the `piecesTouched` the body answered) and
+records the manifest's piece list and the `/healthz` document.
+
+```
+VERAX_SCALE_N=100000 VERAX_SCALE_PIECE_ROWS=1000000 node --experimental-strip-types packages/body/perf/ledger-scale.ts
+VERAX_SCALE_N=200000 VERAX_SCALE_PIECE_ROWS=100000  node --experimental-strip-types packages/body/perf/ledger-scale.ts
+```
+
+The first is the single-piece layout the 17 September figures came from,
+run again on the same code for a regression check. The second closes
+`legacy` at 100k rows and the next piece at 200k, so the body boots on an
+empty open piece and a 200k-line index.

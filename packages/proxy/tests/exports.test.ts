@@ -31,6 +31,9 @@ const ALLOWED = new Set([
   // The body reads inputs.jsonl from its end for a ledger window; the reader
   // goes through the ledgerFs seam, so it has to be this package's.
   "readLedgerTail",
+  // The body walks the ledger pieces (doctor, inputs window, witness) and
+  // the manifest that names them is this package's file to read.
+  "listPieceFiles",
 ]);
 
 describe("B1 exports map", () => {

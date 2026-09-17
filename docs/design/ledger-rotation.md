@@ -1,7 +1,11 @@
 # Ledger rotation and archive
 
-This is a design, not a release. No code in this tree splits a ledger
-file. The note answers plan §2-F (`Work\VERAX_PANEL_OLCEK_VE_SITE_PLANI_20260917.md`).
+This note was written before the split. The tree now carries the piece
+list, the chain handoff across a close, a persistent ref index (appended
+without fsync, rebuilt from the pieces when it falls short) and the
+lifetime counts described below; STATUS G7 says what of it is measured.
+The archive side (keep, move, drop of closed pieces) is still design
+only. The note answers plan §2-F (`Work\VERAX_PANEL_OLCEK_VE_SITE_PLANI_20260917.md`).
 STATUS line: G7.
 
 Every figure below names its source. A quantity that was not timed on

@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { canonical } from "@cedulon/core";
-import { readLedgerTail } from "@verax-ai/proxy";
+import { listPieceFiles, readLedgerTail } from "@verax-ai/proxy";
 
 function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
@@ -26,14 +25,18 @@ export async function matchingInputs(
   const out: Record<string, unknown> = {};
   if (wanted.size === 0) return out;
   const seen = new Set<string>();
-  await readLedgerTail<{ ref?: unknown; inputs?: unknown }>(join(stateDir, "inputs.jsonl"), (row) => {
-    if (typeof row.ref !== "string" || seen.has(row.ref)) return "skip";
-    const hash = wanted.get(row.ref);
-    if (hash === undefined) return "skip";
-    seen.add(row.ref);
-    if (sha256Canonical(row.inputs) === hash) out[row.ref] = row.inputs;
-    return seen.size === wanted.size ? "stop" : "skip";
-  });
+  const pieces = [...listPieceFiles(stateDir)].reverse();
+  for (const piece of pieces) {
+    if (seen.size === wanted.size) break;
+    await readLedgerTail<{ ref?: unknown; inputs?: unknown }>(piece.inputs, (row) => {
+      if (typeof row.ref !== "string" || seen.has(row.ref)) return "skip";
+      const hash = wanted.get(row.ref);
+      if (hash === undefined) return "skip";
+      seen.add(row.ref);
+      if (sha256Canonical(row.inputs) === hash) out[row.ref] = row.inputs;
+      return seen.size === wanted.size ? "stop" : "skip";
+    });
+  }
   return out;
 }
 
@@ -43,18 +46,20 @@ export async function inputsPrincipal(
   stateDir: string,
   ref: string,
 ): Promise<{ brain: string; iss?: string; tenant?: string; org?: string } | null> {
-  let text: string;
-  try {
-    text = await readFile(join(stateDir, "inputs.jsonl"), "utf8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
   let found: InputsPrincipal | null = null;
-  for (const line of text.split("\n")) {
-    if (line === "") continue;
-    const row = JSON.parse(line) as { ref?: string; inputs?: { principal?: InputsPrincipal } };
-    if (row.ref === ref) found = row.inputs?.principal ?? null;
+  for (const piece of listPieceFiles(stateDir)) {
+    let text: string;
+    try {
+      text = await readFile(piece.inputs, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const row = JSON.parse(line) as { ref?: string; inputs?: { principal?: InputsPrincipal } };
+      if (row.ref === ref) found = row.inputs?.principal ?? null;
+    }
   }
   if (!found || typeof found.brain !== "string") return null;
   return {

@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { createProxy, FileLedger, listPieceFiles, loadPolicy } from "@verax-ai/proxy";
+
 import { createBodyServices } from "../src/wiring.ts";
 import { runDoctor } from "../src/doctor.ts";
 
@@ -117,4 +119,52 @@ describe("evidence copy and heartbeat", () => {
     assert.equal(bad2?.level, "fail");
     assert.match(bad2?.detail ?? "", /corrupt/);
   });
+
+  it("7: a truncated closed-piece copy fails even when the other piece matches", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-copy-piece-"));
+    const ledger = new FileLedger(dir, { pieceMaxRows: 2 });
+    try {
+      await putOn(ledger, "p1");
+      await putOn(ledger, "p2");
+      await putOn(ledger, "p3");
+      await putOn(ledger, "p4");
+    } finally {
+      ledger.close();
+    }
+    const pieces = listPieceFiles(dir);
+    const closed = pieces.find((p) => p.id === "legacy");
+    const open = pieces.find((p) => p.id !== "legacy");
+    assert.ok(closed && open);
+    writeFileSync(closed!.copyDecisions, "", { encoding: "utf8" });
+    const lag = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "evidence-copy");
+    assert.equal(lag?.level, "fail", JSON.stringify(lag));
+    assert.match(lag?.detail ?? "", /legacy|stale|behind/);
+  });
 });
+
+async function putOn(ledger: FileLedger, ref: string): Promise<void> {
+  const keys = testKeys();
+  const policy = loadPolicy(readFileSync(policyFile, "utf8"));
+  const proxy = createProxy({
+    policy,
+    recordSigner: keys,
+    effectSigner: keys,
+    ledger,
+    now: () => 9_000,
+    nonce: () => ref,
+    inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+  });
+  const allowed = await proxy.call(
+    {
+      name: "memory.put",
+      arguments: {
+        id: `note-${ref}`,
+        body: { t: 1 },
+        source: { uri: "file://t", retrievedAtMs: 1 },
+        validUntilMs: 9_999,
+      },
+    },
+    { brain: "brain-1", scopes: new Set(["verax:memory"]) },
+  );
+  assert.equal(allowed.isError, false);
+}
