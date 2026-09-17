@@ -34,6 +34,9 @@ const ALLOWED = new Set([
   // The body walks the ledger pieces (doctor, inputs window, witness) and
   // the manifest that names them is this package's file to read.
   "listPieceFiles",
+  // Doctor compares the ref index to the pieces; the count lives next to
+  // the manifest reader and must stay this package's.
+  "indexCoverage",
 ]);
 
 describe("B1 exports map", () => {

@@ -256,6 +256,19 @@ export function decisionIndexCount(lines: readonly LedgerIndexLine[]): number {
   return refs.size;
 }
 
+/**
+ * What the on-disk index names, or null when the file is missing. Doctor
+ * compares this to the pieces; a short index is rebuilt on the next open
+ * but a running body does not see the missing refs until then.
+ */
+export function indexCoverage(dir: string): { refs: number; pieces: Set<string> } | null {
+  if (!existsSync(indexPath(dir))) return null;
+  const lines = readLedgerIndex(dir);
+  const pieces = new Set<string>();
+  for (const line of lines) pieces.add(line.piece);
+  return { refs: decisionIndexCount(lines), pieces };
+}
+
 export function manifestExists(dir: string): boolean {
   return existsSync(manifestPath(dir));
 }

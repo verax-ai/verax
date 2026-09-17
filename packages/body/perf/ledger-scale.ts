@@ -252,7 +252,7 @@ async function run(): Promise<void> {
     }
     const all: Timed[] = [];
     for (let i = 0; i < ROUNDS; i += 1) {
-      all.push(await timed(`${booted.bodyUrl}/api/ledger?from=0&to=9999999999999`, token));
+      all.push(await timed(`${booted.bodyUrl}/api/ledger?from=0&to=9999999999999&limit=5000`, token));
       log(`all #${i + 1}: ${Math.round(all[i]!.totalMs)} ms, ${all[i]!.bytes} B${all[i]!.error ? ` (${all[i]!.error})` : ""}`);
     }
     const rssAfterAllMb = rssMb(booted.bodyPid);

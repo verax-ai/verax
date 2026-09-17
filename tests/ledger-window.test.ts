@@ -93,6 +93,7 @@ type LedgerAnswer = {
   effects: { row: { ref: string } }[];
   inputs: Record<string, unknown>;
   more?: boolean;
+  limit?: number;
 };
 
 describe("api/ledger window", () => {
@@ -178,11 +179,7 @@ describe("api/ledger window", () => {
       assert.deepEqual(limited.effects.map((e) => e.row.ref), [refOf(N - 4), refOf(N - 2)]);
       assert.equal(limited.more, true);
 
-      // No limit and from=0 is what the panel asks today: everything, still.
-      const all = await ask(`from=0&to=9999999999999`);
-      assert.equal(all.decisions.length, N);
-      assert.equal(all.effects.length, N / 2);
-      assert.equal(all.more, false);
+      // Unbounded from=0 used to mean every row; the default cap is the next test.
     } finally {
       builtLedgerFs.open = origOpen;
       builtLedgerFs.readFile = origRead;
@@ -239,6 +236,53 @@ describe("api/ledger window", () => {
       );
       assert.equal(body.more, true);
       assert.ok(body.piecesTouched && body.piecesTouched.length >= 2, `piecesTouched=${JSON.stringify(body.piecesTouched)}`);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+
+  it("an omitted limit returns the newest 1000 rows and a huge limit clips to 5000", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-ledger-limit-"));
+    await buildLedger(stateDir);
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const bodyPort = (server.address() as { port: number }).port;
+    try {
+      const audit = await issuer.sign({ scope: "verax:read verax:audit" });
+      const ask = async (query: string): Promise<LedgerAnswer> => {
+        const res = await fetch(`http://127.0.0.1:${bodyPort}/api/ledger?${query}`, {
+          headers: { authorization: `Bearer ${audit}` },
+        });
+        assert.equal(res.status, 200);
+        return (await res.json()) as LedgerAnswer;
+      };
+
+      const all = await ask(`from=0&to=${Number.MAX_SAFE_INTEGER}`);
+      assert.equal(all.decisions.length, 1000);
+      assert.equal(all.more, true);
+      assert.equal(all.limit, 1000);
+      assert.deepEqual(
+        all.decisions.map((d) => d.claims.ref),
+        Array.from({ length: 1000 }, (_, k) => refOf(N - 1000 + k)),
+      );
+
+      const clipped = await ask(`from=0&to=${Number.MAX_SAFE_INTEGER}&limit=99999`);
+      assert.equal(clipped.limit, 5000);
+      assert.equal(clipped.decisions.length, N);
+      assert.equal(clipped.more, false);
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()));
