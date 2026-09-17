@@ -117,6 +117,7 @@
   "records.filter.ref": "ref ara",
   "records.filter.clear": "Süzgeci temizle",
   "records.filter.shown": "{shown} / {loaded} kayıt gösteriliyor",
+  "records.reveal": "Daha fazla satır göster ({n} satır daha)",
   "records.older": "Daha eskileri göster",
   "status.allow": "onaylandı",
   "status.deny": "reddedildi",

@@ -117,6 +117,7 @@
   "records.filter.ref": "search ref",
   "records.filter.clear": "Clear filter",
   "records.filter.shown": "{shown} of {loaded} loaded records shown",
+  "records.reveal": "Show more rows ({n} more)",
   "records.older": "Show older records",
   "status.allow": "allowed",
   "status.deny": "denied",

@@ -693,3 +693,18 @@ aside {
 .agents-table tr.agents-group button[aria-expanded="false"]::before {
   content: "▸ ";
 }
+
+/* Records tab: the rest of the list, revealed a hundred rows at a time. */
+.record-list li.records-reveal {
+  list-style: none;
+  padding: 0.5rem 0;
+}
+.record-list li.records-reveal button {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--ink);
+  font: inherit;
+  padding: 0.3rem 0.6rem;
+  cursor: pointer;
+}
