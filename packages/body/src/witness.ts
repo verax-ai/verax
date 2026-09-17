@@ -11,7 +11,7 @@ import {
   type SignedCheckpoint,
 } from "@cedulon/checkpoint";
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
-import { checkpointsPath, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
+import { checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
 import { pidAlive } from "./unlock.ts";
 
 const WITNESS_CLASS = "same-org" as const;
@@ -145,18 +145,20 @@ export type CheckpointWindow = {
 };
 
 function loadDecisions(stateDir: string): SignedDecisionRecord[] {
-  try {
-    const text = readFileSync(join(stateDir, "decisions.jsonl"), "utf8");
-    const out: SignedDecisionRecord[] = [];
-    for (const line of text.split("\n")) {
-      if (line === "") continue;
-      out.push(JSON.parse(line) as SignedDecisionRecord);
+  const out: SignedDecisionRecord[] = [];
+  for (const piece of listPieceFiles(stateDir)) {
+    try {
+      const text = readFileSync(piece.decisions, "utf8");
+      for (const line of text.split("\n")) {
+        if (line === "") continue;
+        out.push(JSON.parse(line) as SignedDecisionRecord);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
     }
-    return out;
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
-    throw err;
   }
+  return out;
 }
 
 function lastCheckpointHash(stateDir: string): string | null {

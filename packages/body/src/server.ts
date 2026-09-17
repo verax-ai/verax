@@ -10,6 +10,7 @@ import {
   explain,
   LedgerDenyUnrecorded,
   loadApprovalsFromDir,
+  type LedgerCounts,
 } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
@@ -324,7 +325,11 @@ export async function listen(config: BodyConfig): Promise<Server> {
       // The ledger counts its own lines as it writes them; asking it is free.
       // Reading both files back to count them was one second per call on a
       // 100k-decision ledger, five times a minute for as long as a panel was open.
-      let counted = services.ledger.counts();
+      // When the active piece cannot be read back, the fallback below counts
+      // the merged files; it cannot tell which rows sit in the active piece,
+      // so the piece fields stay out of that degraded answer.
+      let counted: LedgerCounts | Omit<LedgerCounts, "activeDecisions" | "pieces"> | null =
+        services.ledger.counts();
       if (!counted) {
         const decisions = await services.ledger.decisions();
         const effects = await services.ledger.effects();
@@ -424,9 +429,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
           send(res, 409, { error: "stale", requestHash: waiting.requestHash });
           return;
         }
-        const decisions = await services.ledger.decisions();
-        const defer = decisions.find((d) => d.claims.ref === ref && d.claims.decision === "defer");
-        if (!defer) {
+        const defer = services.ledger.lookupByRef(ref);
+        if (!defer || defer.decision !== "defer") {
           send(res, 404, { error: "unknown-ref" });
           return;
         }
@@ -442,7 +446,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           ref,
           approverId: approver,
           via: "http",
-          policyHash: defer.claims.policyHash,
+          policyHash: defer.policyHash,
           approvals: approvalsLogFor(services.ledger),
         });
         if (!outcome.ok) {
@@ -507,7 +511,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           // The window is read from the end of the files, so a day costs a
           // day whatever the ledger's age. With a limit, the newest rows of
           // the window come back and `more` says the rest is there to ask for.
-          const { rows: decisions, more } = await services.ledger.decisionsWindow(from, to, limit);
+          const { rows: decisions, more, piecesTouched } = await services.ledger.decisionsWindow(from, to, limit);
           // Effects belong to the decisions returned. When the limit cut the
           // window, the oldest decision returned is where their window starts.
           const effectsFrom = more && decisions.length > 0 ? decisions[0]!.claims.timestampMs : from;
@@ -521,6 +525,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             inputs: await matchingInputs(config.stateDir, decisions),
             approvals: loadApprovalsFromDir(config.stateDir),
             more,
+            piecesTouched,
           });
           return;
         }

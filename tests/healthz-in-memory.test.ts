@@ -112,4 +112,77 @@ describe("healthz counts from memory", () => {
       await issuer.close();
     }
   });
+
+  it("6: after a close at 50, healthz decisions stays 50 and activeDecisions is 0", async () => {
+    const { FileLedger } = await import("../packages/proxy/src/ledger.ts");
+    const { inputsLogFor } = await import("../packages/proxy/src/inputs.ts");
+    const { sha256Canonical } = await import("../packages/proxy/src/hash.ts");
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-healthz-rot-"));
+    const writer = new FileLedger(stateDir, { pieceMaxRows: 50 });
+    const inputs = inputsLogFor(writer);
+    try {
+      for (let i = 0; i < 50; i += 1) {
+        const body = {
+          principal: { brain: "fixture", scopes: ["verax:read"] },
+          inputs: [{ id: `k${i}`, versionHash: "00".repeat(32), validFromMs: 0, validUntilMs: 9_000_000_000_000 }],
+        };
+        await inputs.append(`h-${i}`, body);
+        await writer.appendDecisionChained((prev) => ({
+          claims: {
+            decider: "verax-proxy",
+            subject: "memory.get",
+            requestHash: "00".repeat(32),
+            policyHash: "00".repeat(32),
+            inputsHash: sha256Canonical(body),
+            decision: "allow",
+            reasonCode: "allow",
+            ref: `h-${i}`,
+            effectClass: "memory.get",
+            effectHash: "11".repeat(32),
+            timestampMs: 1_700_000_000_000 + i * 1000,
+            nonce: `n-${i}`,
+            prevRecordHash: prev,
+          },
+          publicKeyPem: "-----BEGIN PUBLIC KEY-----\nM\n-----END PUBLIC KEY-----\n",
+          encoding: "cose",
+          coseHex: i.toString(16).padStart(128, "0"),
+        }));
+      }
+    } finally {
+      writer.close();
+    }
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const bodyPort = (server.address() as { port: number }).port;
+    try {
+      const audit = await issuer.sign({ scope: "verax:read verax:audit" });
+      const res = await fetch(`http://127.0.0.1:${bodyPort}/healthz`, {
+        headers: { authorization: `Bearer ${audit}` },
+      });
+      assert.equal(res.status, 200);
+      const health = (await res.json()) as {
+        decisions?: number;
+        activeDecisions?: number;
+        pieces?: number;
+      };
+      assert.equal(health.decisions, 50);
+      assert.equal(health.activeDecisions, 0);
+      assert.ok((health.pieces ?? 0) >= 2);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
 });

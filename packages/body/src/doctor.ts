@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
@@ -270,7 +271,14 @@ function heartbeatMaxMs(env: NodeJS.ProcessEnv): number {
 
 function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
-  const src = countJsonl(join(stateDir, "decisions.jsonl"));
+  let pieces: ReturnType<typeof listPieceFiles>;
+  try {
+    pieces = listPieceFiles(stateDir);
+  } catch (err) {
+    checks.push({ id: "ledger-manifest", level: "fail", detail: (err as Error).message });
+    return checks;
+  }
+  const srcLines = pieces.reduce((s, p) => s + countJsonl(p.decisions).lines, 0);
   const hbPath = join(stateDir, "heartbeat.json");
   let hb: { atMs?: unknown; lastDecisionN?: unknown } | null = null;
   if (existsSync(hbPath)) {
@@ -280,7 +288,7 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       hb = null;
     }
   }
-  if (src.lines > 0 || hb) {
+  if (srcLines > 0 || hb) {
     if (!hb || typeof hb.atMs !== "number") {
       checks.push({
         id: "heartbeat",
@@ -301,44 +309,57 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       });
     }
   }
-  // Both halves of the evidence are mirrored, so both are compared: an effects
-  // copy that quietly drops rows is the same silence as a missing decision copy.
-  const srcEffects = countJsonl(join(stateDir, "effects.jsonl"));
-  const copy = countJsonl(join(stateDir, "evidence-copy", "decisions.jsonl"));
-  const copyEffects = countJsonl(join(stateDir, "evidence-copy", "effects.jsonl"));
-  const anything =
-    src.lines > 0 ||
-    srcEffects.lines > 0 ||
-    copy.lines > 0 ||
-    copyEffects.lines > 0 ||
-    copy.corrupt ||
-    copyEffects.corrupt;
-  if (anything) {
+  // Each piece is mirrored on its own, so a short copy on one piece is a fail
+  // even when another piece's copy still matches.
+  let anything = false;
+  let fail: DoctorCheck | null = null;
+  let decisionLines = 0;
+  let effectLines = 0;
+  for (const piece of pieces) {
+    const src = countJsonl(piece.decisions);
+    const srcEffects = countJsonl(piece.effects);
+    const copy = countJsonl(piece.copyDecisions);
+    const copyEffects = countJsonl(piece.copyEffects);
+    decisionLines += src.lines;
+    effectLines += srcEffects.lines;
+    const pieceAnything =
+      src.lines > 0 ||
+      srcEffects.lines > 0 ||
+      copy.lines > 0 ||
+      copyEffects.lines > 0 ||
+      copy.corrupt ||
+      copyEffects.corrupt;
+    if (!pieceAnything) continue;
+    anything = true;
+    if (fail) continue;
     if (copy.corrupt || copyEffects.corrupt) {
-      checks.push({
+      fail = {
         id: "evidence-copy",
         level: "fail",
-        detail: `evidence-copy/${copy.corrupt ? "decisions" : "effects"}.jsonl is corrupt`,
-      });
+        detail: `evidence-copy piece ${piece.id} ${copy.corrupt ? "decisions" : "effects"}.jsonl is corrupt`,
+      };
     } else if (copy.lines < src.lines) {
-      checks.push({
+      fail = {
         id: "evidence-copy",
         level: "fail",
-        detail: `evidence copy is stale: ${copy.lines} lines behind source ${src.lines}`,
-      });
+        detail: `evidence copy is stale on piece ${piece.id}: ${copy.lines} lines behind source ${src.lines}`,
+      };
     } else if (copyEffects.lines < srcEffects.lines) {
-      checks.push({
+      fail = {
         id: "evidence-copy",
         level: "fail",
-        detail: `evidence copy is stale on effects: ${copyEffects.lines} effect line(s) behind source ${srcEffects.lines}`,
-      });
-    } else {
-      checks.push({
+        detail: `evidence copy is stale on piece ${piece.id} effects: ${copyEffects.lines} effect line(s) behind source ${srcEffects.lines}`,
+      };
+    }
+  }
+  if (anything) {
+    checks.push(
+      fail ?? {
         id: "evidence-copy",
         level: "ok",
-        detail: `evidence copy has ${copy.lines} decision line(s) and ${copyEffects.lines} effect line(s)`,
-      });
-    }
+        detail: `evidence copy has ${decisionLines} decision line(s) and ${effectLines} effect line(s)`,
+      },
+    );
   }
   return checks;
 }

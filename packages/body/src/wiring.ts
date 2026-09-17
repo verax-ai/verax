@@ -17,7 +17,7 @@ import { memoryBelongsToOtherTenant, memoryGet, memoryPut, readMemoryMeta } from
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead, messageSend } from "./tools/message.ts";
 import { spendAuthorize } from "./tools/spend.ts";
-import { requestWitnessSign } from "./witness.ts";
+import { requestWitnessCheckpoint, requestWitnessSign } from "./witness.ts";
 
 export type ToolFn = (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
 
@@ -74,6 +74,13 @@ export function createBodyServices(opts: {
 
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
+  ledger.onPieceClose = async (window) => {
+    await requestWitnessCheckpoint(opts.stateDir, {
+      epoch: 0,
+      startMs: window.startMs,
+      endMs: window.endMs,
+    });
+  };
   const policyText = readFileSync(opts.policyFile, "utf8");
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);

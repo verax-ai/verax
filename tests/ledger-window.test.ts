@@ -192,4 +192,58 @@ describe("api/ledger window", () => {
       await issuer.close();
     }
   });
+
+  it("2: a from/to window that crosses a close at 30 returns both pieces and more", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-ledger-window-rot-"));
+    const realOpen = ledgerFs.open;
+    ledgerFs.open = (async (path: string, flags: string) => {
+      const fh = await open(path, flags);
+      return { write: (data: string) => fh.write(data), sync: async () => undefined, close: () => fh.close() };
+    }) as unknown as typeof open;
+    const writer = new FileLedger(stateDir, { pieceMaxRows: 30 });
+    const inputs = inputsLogFor(writer);
+    try {
+      for (let i = 0; i < 60; i += 1) {
+        await inputs.append(refOf(i), inputsOf(i));
+        await writer.appendDecisionChained((prev) => record(i, prev));
+      }
+    } finally {
+      writer.close();
+      ledgerFs.open = realOpen;
+    }
+    const audience = "http://127.0.0.1/verax-test";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const bodyPort = (server.address() as { port: number }).port;
+    try {
+      const audit = await issuer.sign({ scope: "verax:read verax:audit" });
+      const res = await fetch(
+        `http://127.0.0.1:${bodyPort}/api/ledger?from=${tsOf(20)}&to=${tsOf(41)}&limit=15`,
+        { headers: { authorization: `Bearer ${audit}` } },
+      );
+      assert.equal(res.status, 200);
+      const body = (await res.json()) as LedgerAnswer & { piecesTouched?: string[] };
+      // Rows 26..29 are in the closed piece, 30..40 in the open one.
+      assert.deepEqual(
+        body.decisions.map((d) => d.claims.ref),
+        Array.from({ length: 15 }, (_, k) => refOf(26 + k)),
+      );
+      assert.equal(body.more, true);
+      assert.ok(body.piecesTouched && body.piecesTouched.length >= 2, `piecesTouched=${JSON.stringify(body.piecesTouched)}`);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
 });
