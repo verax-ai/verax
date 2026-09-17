@@ -94,6 +94,25 @@ export type RailAction = {
   trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
 };
 
+/** One agent's day, as /api/agents answers it. */
+export type AgentRow = {
+  brain: string;
+  decisions: number;
+  allowed: number;
+  denied: number;
+  deferred: number;
+  pending: number;
+  lastMs: number | null;
+  roster: { state: string; label: string; group: string | null } | null;
+};
+
+export type AgentsAnswer = {
+  fromMs: number;
+  toMs: number;
+  agents: AgentRow[];
+  unattributed: number;
+};
+
 /** What a re-audit hands back to the screen that asked for one. */
 export type RailContestResult = {
   reAuditedAt?: number;
