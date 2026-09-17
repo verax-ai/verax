@@ -21,46 +21,111 @@ import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
-const TOOL_META = [
+// What a brain reads before it calls. Each description says what the tool is
+// for, what it does and does not do, what the gate may answer, and what comes
+// back; each parameter says its format and its bounds. The answers named here
+// are the proxy's: `denied:<reason>:<ref>`, `deferred:approval-required:<ref>`
+// and `allowed:<ref>` (packages/proxy/src/proxy.ts).
+const ID_FORMAT =
+  "1 to 128 characters of letters, digits, '.', '_' or '-', starting with a letter or digit; case-sensitive.";
+const REF_FORMAT = "1 to 64 characters of letters, digits, '.', '_' or '-', starting with a letter or digit.";
+const REF_PARAM = {
+  type: "string",
+  description:
+    "Optional reference you choose for this call, " +
+    REF_FORMAT +
+    " Resend the same call with the same _ref after an operator approved it to receive allowed:<ref>; " +
+    "a _ref reused for a different call is refused with denied:ref-reuse.",
+};
+
+export const TOOL_META = [
   {
     name: "memory.get",
-    description: "Read a memory item. Stale items return { stale: true } without the body.",
+    description:
+      "Reads one memory item this tenant stored earlier with memory.put, by its id. " +
+      "Use it to recall a fact, a setting or a note before acting on it; nothing is written. " +
+      "Like every call it passes the policy gate and leaves a signed decision record; an id that belongs to another tenant is answered with a signed deny. " +
+      "Returns the stored item as JSON: {id, body, source, validFromMs, validUntilMs, versionHash}. " +
+      "Outside the validity window the body is withheld: {stale: true, id, validUntilMs} after it, {notYetValid: true, id, validFromMs} before it. " +
+      'An unknown id answers {error: "not-found", id}.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { id: { type: "string" } },
+      properties: {
+        id: { type: "string", description: "The id given to memory.put: " + ID_FORMAT },
+      },
       required: ["id"],
     },
   },
   {
     name: "memory.put",
-    description: "Write a memory item. source and validUntilMs are required.",
+    description:
+      "Writes one memory item for this tenant, or replaces the item with the same id, in the body's state directory on this machine. " +
+      "Use it to keep a fact for a later memory.get together with where it came from and how long it holds, so a stale fact is not served later. " +
+      "The call passes the policy gate and is recorded; the record carries the item's versionHash, a SHA-256 over id, body and validity window. " +
+      "Returns {ok: true, id, versionHash}. " +
+      'A missing source answers {error: "source-required"}, a missing validUntilMs {error: "validUntilMs-required"}, a malformed id {error: "id-invalid"}.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        id: { type: "string" },
-        body: {},
-        source: { type: "object" },
-        validFromMs: { type: "number" },
-        validUntilMs: { type: "number" },
+        id: {
+          type: "string",
+          description:
+            "Identifier to store under and read back with memory.get: " +
+            ID_FORMAT +
+            " An existing item with this id is replaced.",
+        },
+        body: {
+          description:
+            "The value to keep, as any JSON: object, array, string, number or boolean. Stored as given and returned as given by memory.get.",
+        },
+        source: {
+          type: "object",
+          description:
+            'Where the value came from, as a JSON object of your choosing, for example {"kind": "document", "ref": "invoice-2026-09.pdf"}. Required; stored with the item so a later reader can weigh it.',
+        },
+        validFromMs: {
+          type: "number",
+          description:
+            "Optional. Unix time in milliseconds from which the item may be served; before it memory.get answers notYetValid. Omit to serve it at once.",
+        },
+        validUntilMs: {
+          type: "number",
+          description:
+            "Required. Unix time in milliseconds after which memory.get answers stale and withholds the body. Pick the moment the fact should no longer be trusted.",
+        },
       },
       required: ["id", "body", "source", "validUntilMs"],
     },
   },
   {
     name: "audit.explain",
-    description: "Explain a decision ref against the ledger.",
+    description:
+      "Reads one decision back from the signed ledger by its ref and explains it. " +
+      "Use it to check what the body decided about an earlier call and whether the recorded effect matched, before repeating a call or reporting on it; read-only, and the lookup itself is recorded too. " +
+      "Returns JSON with record (the signed decision's claims: tool, verdict, policy hash, timestamps), effect (the reconciled effect row), finding (match, mismatch or missing), witnessClass, guarantee, warnings, trustRoot (which key verified the signatures), and for a held call pair with its defer and resolution records. " +
+      "A ref that does not exist, or belongs to another tenant, is answered with the same signed deny, so neither case reveals the other.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
-      properties: { ref: { type: "string" } },
+      properties: {
+        ref: {
+          type: "string",
+          description:
+            "The decision reference: the ref returned by an earlier call, also the tail of a denied:… or deferred:… answer; " +
+            REF_FORMAT,
+        },
+      },
       required: ["ref"],
     },
   },
   {
     name: "message.read",
-    description: "Read the local inbox fixture as JSON.",
+    description:
+      "Reads this tenant's inbox, the messages placed for it in the body's state directory on this machine, and returns them as a JSON array in arrival order, oldest first. " +
+      "Use it to see what has arrived before deciding what to answer. " +
+      "Takes no arguments; read-only; the call is recorded like every other. An empty or absent inbox answers [].",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -69,28 +134,59 @@ const TOOL_META = [
   },
   {
     name: "message.send",
-    description: "Queue a message on the local outbox. Does not open a network.",
+    description:
+      "Queues one message in this tenant's outbox on this machine for the delivery step the operator runs; this call opens no network connection and nothing leaves the body from it. " +
+      "Use it to hand off a message, not to deliver one. " +
+      "Like every call it passes the policy gate and leaves a signed decision record. " +
+      "The gate reads the host after the last '@' in to and allows it only when it is on the policy's egress allow-list; otherwise the call is refused with denied:egress-blocked, or denied:egress-host-missing when no host can be read. " +
+      "A policy rule in approve mode holds the call for an operator instead and answers deferred:approval-required:<ref>. " +
+      "Returns {queued: true, ref}, where ref is the decision reference for audit.explain.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        to: { type: "string" },
-        text: { type: "string" },
+        to: {
+          type: "string",
+          description:
+            "Recipient address with a host after the last '@', for example ops@example.com. The host, lower-cased, is matched against the policy's egress list.",
+        },
+        text: { type: "string", description: "The message body as plain text. Stored as given in the outbox row." },
+        _ref: REF_PARAM,
       },
       required: ["to", "text"],
     },
   },
   {
     name: "spend",
-    description: "Authorizes a payment; does not move money.",
+    description:
+      "Asks the body to authorize a payment and records the decision; the body never moves money, so authorized: true is a signed permission for a later payment step, not a transfer. " +
+      "Use it before any payment so that amount, currency, payee and reference are checked against the policy: the one currency the policy names, a cap per call, a payee list and a daily limit. " +
+      "A call outside those bounds is refused with a signed deny naming the bound: denied:spend-cap, denied:spend-payee, denied:spend-currency or denied:spend-daily. " +
+      "A call within them is held for an operator on this machine and answers deferred:approval-required:<ref>; once that ref is approved (verax approve, or the panel), resending the same call with the same _ref answers allowed:<ref>, and the authorization is recorded as {authorized: true, ref, amountMinor, currency, payee, reference}. " +
+      "Without a spend rule in the policy every call answers denied:spend-not-wired.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
       properties: {
-        amountMinor: { type: "integer" },
-        currency: { type: "string" },
-        payee: { type: "string" },
-        reference: { type: "string" },
+        amountMinor: {
+          type: "integer",
+          description:
+            "Amount in the currency's minor unit as a positive integer: cents, kuruş or pence, so 1250 means 12.50. Compared against the policy's cap per call and daily limit.",
+        },
+        currency: {
+          type: "string",
+          description: "ISO 4217 code in upper case, for example USD, EUR or TRY. Must equal the currency the policy's spend rule names.",
+        },
+        payee: {
+          type: "string",
+          description: "Who is to be paid, spelled exactly as the policy's payee list spells it (a merchant or account name). A payee off the list is refused.",
+        },
+        reference: {
+          type: "string",
+          description:
+            "Your own reference for this payment, such as an invoice or order id. Recorded with the authorization and used by verax reconcile to match the card statement.",
+        },
+        _ref: REF_PARAM,
       },
       required: ["amountMinor", "currency", "payee", "reference"],
     },
