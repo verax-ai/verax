@@ -56,7 +56,9 @@ Known gaps:
 - no-bypass: export map only in this commit; CI scan + runtime
   registry land with the body; compiled-JS and foreign-binding paths
   are not covered
-- payload encryption and retention policy not designed
+- payload encryption not designed; ledger-piece and evidence-copy
+  keep/move/drop designed in `docs/design/ledger-rotation.md`, not
+  implemented
 - `spend` / `pay` are denied as `spend-not-wired`
 
 ## Phase 1 — body (this commit)
@@ -76,7 +78,9 @@ Known gaps:
   now serves local `GET /authorize` (PKCE S256) and `POST /token`.
   `NODE_ENV=production` still exits. It listens on
   `VERAX_DEV_ISSUER_PORT` (default 8790)
-- payload encryption and retention policy not designed
+- payload encryption not designed; ledger-piece and evidence-copy
+  keep/move/drop designed in `docs/design/ledger-rotation.md`, not
+  implemented
 - memory items are not bound to the decision that read them (question 3
   is "not tracked yet")
 - company effect is not connected (Talamus, question 4)
@@ -141,6 +145,8 @@ Each line is what the tree carries, then what stays open.
 - G4 — Inputs: carries a `DecisionInputs` document (principal + declared memory versions) bound by `inputsHash`, including deny; unproven until brains declare `_inputs` on every call (optional unless `policy.requireInputs` is `true`).
 - G5 — Effects: carries a one-row Cedulon `SignedEffectExtract` receipt at call time and a COSE Sign1 attestation over `{ ref, effectHash, witnessClass, resultHash }`; unproven until a witness other than `self` signs the row.
 - G6 — Ledger I/O: carries a cached chain tail, an in-memory effect-ref index, and `fsync` after each append; unproven until a crash-restart drill on the production disk.
+- G7 — Ledger rotation: designed in `docs/design/ledger-rotation.md`, not implemented. The tree still opens one `decisions.jsonl` and `loadCaches` parses every row. Piece list, chain handoff, durable ref index, and evidence-copy keep/move/drop are on that note. Unproven until a two-piece boot is measured on the same scripts as the 17 Sep 2026 100k run.
+- G8 — Fleet view: designed in `docs/design/fleet.md`, not implemented. The panel reads one body. A central single ledger is out of scope. Unproven until two live bodies are listed on one operator session.
 - F2 — Explain: carries every general Cedulon warning as a named condition; unproven until a production deny is read and the summary is not `conditional: conditional`.
 - F3 — Inputs: carries `inputs-document-missing` when `claims.inputsHash` is on the record and the document is not on disk; unproven until a crash leaves a decision without `inputs.jsonl`.
 - F4 — Trust root: carries `source` (`env` / `own-key` / none) and names an own-key pin; unproven until an external pin is set in production.
@@ -181,6 +187,7 @@ full disk, silenced copy). They are tests, not a live body.
 Remaining gaps, still open:
 
 - `_inputs` is optional unless `policy.requireInputs` is `true`; without that flag a call with no declaration still stores `inputs: []`. The flag is off on the default policy. Production brains have not been required to declare yet.
+- ledger rotation and a multi-body panel are designed (`docs/design/ledger-rotation.md`, `docs/design/fleet.md`) and not implemented; `loadCaches` still parses every decision
 - a FileLedger effect is `same-org` only when `verax witness` signed it
   in another process; without that process the class is `self` and
   `witness-status.jsonl` records the fallback. MemoryLedger tests and

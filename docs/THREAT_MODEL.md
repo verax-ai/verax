@@ -39,8 +39,9 @@ The directory lock detects an accidental second body on the same state directory
 ## retention and erasure
 
 Append-only records conflict with a right to erase. Phase 1 payloads are
-plaintext. Known gap, also in `STATUS.md`: payload encryption and
-retention policy not designed.
+plaintext. Ledger-piece and evidence-copy keep/move/drop is designed in
+`docs/design/ledger-rotation.md` and not implemented. Payload encryption
+and a right-to-erase path are still not designed.
 
 ## out of scope: OS compromise
 
