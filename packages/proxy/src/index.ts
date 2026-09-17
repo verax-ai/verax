@@ -1,6 +1,6 @@
 export { createProxy, LedgerDenyUnrecorded } from "./proxy.ts";
 export { loadPolicy } from "./policy.ts";
-export { FileLedger, MemoryLedger } from "./ledger.ts";
+export { FileLedger, MemoryLedger, readLedgerTail } from "./ledger.ts";
 export { explain } from "./explain.ts";
 export { approvePending, approvalsLogFor, enqueueApprovalCommand, loadApprovalsFromDir } from "./approvals.ts";
 export { loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "./reconcile.ts";
