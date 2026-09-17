@@ -419,6 +419,9 @@ These tests do not exist. They should fail on today's tree.
 
 ## F8 — Measure plan
 
+A window still walks each overlapping piece from the end, 64 KiB at a time.
+When the window's upper edge plus the 60 s slack sits before a piece's last stamp, the reader seeks that stamp and starts the walk there; the gate measures the cost, this note does not quote a number.
+
 Same scripts as 17 September 2026: `packages/body/perf/boot.ts`,
 `ledger-scale.ts` (untracked in that run;
 `Work\VERAX_OLCEK_OLCUMU_20260917.md` §0). They are still not in this

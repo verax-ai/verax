@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { readJsonlTail } from "../src/jsonl-tail.ts";
+import { readJsonlTail, seekOffsetByTimestamp } from "../src/jsonl-tail.ts";
 
-type Row = { i: number; pad?: string; text?: string };
+type Row = { i: number; pad?: string; text?: string; ts?: number };
 
 function dir(): string {
   return mkdtempSync(join(tmpdir(), "verax-jsonl-tail-"));
@@ -101,5 +101,49 @@ describe("readJsonlTail", () => {
     // Ten rows of ~220 bytes live in the last chunk; the reader may need the
     // one before it to finish the oldest row it looked at, and no more.
     assert.ok(bytesRead <= 2 * chunkBytes, `read ${bytesRead} bytes of a ~1.1 MB file`);
+  });
+});
+
+describe("seekOffsetByTimestamp", () => {
+  const BASE = 1_700_000_000_000;
+
+  function writeStamped(path: string): { starts: number[]; size: number } {
+    const rows = Array.from({ length: 5000 }, (_, i) => ({ ts: BASE + i * 1000, i }));
+    writeRows(path, rows);
+    const starts: number[] = [];
+    let pos = 0;
+    for (const row of rows) {
+      starts.push(pos);
+      pos += Buffer.byteLength(`${JSON.stringify(row)}\n`);
+    }
+    return { starts, size: pos };
+  }
+
+  it("finds the first, last, middle, and out-of-range rows", async () => {
+    const path = join(dir(), "seek.jsonl");
+    const { starts, size } = writeStamped(path);
+    const tsOf = (row: Row) => row.ts!;
+    assert.equal(await seekOffsetByTimestamp(path, BASE, tsOf), starts[0]);
+    assert.equal(await seekOffsetByTimestamp(path, BASE + 4999 * 1000, tsOf), starts[4999]);
+    assert.equal(await seekOffsetByTimestamp(path, BASE + 2500 * 1000, tsOf), starts[2500]);
+    assert.equal(await seekOffsetByTimestamp(path, BASE - 1, tsOf), starts[0]);
+    assert.equal(await seekOffsetByTimestamp(path, BASE + 5000 * 1000, tsOf), size);
+  });
+
+  it("readJsonlTail with endOffset starts at the rows before that offset", async () => {
+    const path = join(dir(), "end-offset.jsonl");
+    const { starts } = writeStamped(path);
+    const taken = await readJsonlTail<Row>(path, () => "take", { endOffset: starts[2500] });
+    assert.deepEqual(
+      taken.map((r) => r.i),
+      Array.from({ length: 2500 }, (_, k) => k),
+    );
+    const tail = await readJsonlTail<Row>(path, (row) => (row.i >= 2490 ? "take" : "stop"), {
+      endOffset: starts[2500],
+    });
+    assert.deepEqual(
+      tail.map((r) => r.i),
+      Array.from({ length: 10 }, (_, k) => 2490 + k),
+    );
   });
 });

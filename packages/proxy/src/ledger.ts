@@ -25,7 +25,7 @@ import {
   type EffectRow,
   type SignedEffectExtract,
 } from "@cedulon/effect-extract";
-import { readJsonlTail, type TailVisit } from "./jsonl-tail.ts";
+import { readJsonlTail, seekOffsetByTimestamp, type TailVisit } from "./jsonl-tail.ts";
 import {
   copyRel,
   decisionIndexCount,
@@ -109,8 +109,35 @@ function readJsonlSync<T>(path: string): T[] {
  * A ledger file read from its end through the same seam the reads above use,
  * so a test can count what a window costs.
  */
-export function readLedgerTail<T>(path: string, visit: (row: T) => TailVisit, chunkBytes?: number): Promise<T[]> {
-  return readJsonlTail<T>(path, visit, { open: ledgerFs.open, ...(chunkBytes === undefined ? {} : { chunkBytes }) });
+export function readLedgerTail<T>(
+  path: string,
+  visit: (row: T) => TailVisit,
+  chunkBytesOrOpts?: number | { chunkBytes?: number; endOffset?: number },
+): Promise<T[]> {
+  const opts =
+    chunkBytesOrOpts === undefined
+      ? {}
+      : typeof chunkBytesOrOpts === "number"
+        ? { chunkBytes: chunkBytesOrOpts }
+        : chunkBytesOrOpts;
+  return readJsonlTail<T>(path, visit, { open: ledgerFs.open, ...opts });
+}
+
+async function readPieceWindow<T>(
+  dir: string,
+  piece: LedgerPieceRow,
+  fileRel: string,
+  toMs: number,
+  tsOf: (row: T) => number,
+  visit: (row: T) => TailVisit,
+): Promise<T[]> {
+  const path = join(dir, fileRel);
+  const seekTarget = toMs + WINDOW_SLACK_MS;
+  if (piece.lastMs !== null && seekTarget < piece.lastMs) {
+    const endOffset = await seekOffsetByTimestamp(path, seekTarget, tsOf, { open: ledgerFs.open });
+    return readLedgerTail(path, visit, { endOffset });
+  }
+  return readLedgerTail(path, visit);
 }
 
 /**
@@ -964,23 +991,30 @@ export class FileLedger implements Ledger {
     for (let i = 0; i < newestFirst.length; i += 1) {
       const piece = newestFirst[i]!;
       if (stopOld) break;
-      const part = await readLedgerTail<SignedDecisionRecord>(join(this.dir, piece.decisions), (row) => {
-        const ts = row.claims.timestampMs;
-        if (ts >= toMs) return "skip";
-        if (ts < fromMs) {
-          if (ts < fromMs - WINDOW_SLACK_MS) {
-            stopOld = true;
+      const part = await readPieceWindow<SignedDecisionRecord>(
+        this.dir,
+        piece,
+        piece.decisions,
+        toMs,
+        (row) => row.claims.timestampMs,
+        (row) => {
+          const ts = row.claims.timestampMs;
+          if (ts >= toMs) return "skip";
+          if (ts < fromMs) {
+            if (ts < fromMs - WINDOW_SLACK_MS) {
+              stopOld = true;
+              return "stop";
+            }
+            return "skip";
+          }
+          if (taken >= max) {
+            more = true;
             return "stop";
           }
-          return "skip";
-        }
-        if (taken >= max) {
-          more = true;
-          return "stop";
-        }
-        taken += 1;
-        return "take";
-      });
+          taken += 1;
+          return "take";
+        },
+      );
       collected.unshift(...part);
       if (more || stopOld) break;
       if (taken >= max && i + 1 < newestFirst.length) {
@@ -999,18 +1033,25 @@ export class FileLedger implements Ledger {
     let stopOld = false;
     for (const piece of newestFirst) {
       if (stopOld) break;
-      const part = await readLedgerTail<LedgerEffect>(join(this.dir, piece.effects), (effect) => {
-        const ts = effect.row.timestampMs;
-        if (ts >= toMs) return "skip";
-        if (ts < fromMs) {
-          if (ts < fromMs - WINDOW_SLACK_MS) {
-            stopOld = true;
-            return "stop";
+      const part = await readPieceWindow<LedgerEffect>(
+        this.dir,
+        piece,
+        piece.effects,
+        toMs,
+        (effect) => effect.row.timestampMs,
+        (effect) => {
+          const ts = effect.row.timestampMs;
+          if (ts >= toMs) return "skip";
+          if (ts < fromMs) {
+            if (ts < fromMs - WINDOW_SLACK_MS) {
+              stopOld = true;
+              return "stop";
+            }
+            return "skip";
           }
-          return "skip";
-        }
-        return "take";
-      });
+          return "take";
+        },
+      );
       collected.unshift(...part);
     }
     return collected;

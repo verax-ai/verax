@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -139,6 +139,80 @@ describe("evidence copy and heartbeat", () => {
     const lag = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "evidence-copy");
     assert.equal(lag?.level, "fail", JSON.stringify(lag));
     assert.match(lag?.detail ?? "", /legacy|stale|behind/);
+  });
+
+  it("ledger-index is ok when the index names every decision", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-index-ok-"));
+    const ledger = new FileLedger(dir, { pieceMaxRows: 50 });
+    try {
+      await putOn(ledger, "i1");
+      await putOn(ledger, "i2");
+    } finally {
+      ledger.close();
+    }
+    const idx = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "ledger-index");
+    assert.equal(idx?.level, "ok", JSON.stringify(idx));
+    assert.match(idx?.detail ?? "", /index names \d+ of \d+ decisions/);
+  });
+
+  it("ledger-index fails when decisions exist and the index file is missing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-index-missing-"));
+    const ledger = new FileLedger(dir, { pieceMaxRows: 50 });
+    try {
+      await putOn(ledger, "m1");
+      await putOn(ledger, "m2");
+    } finally {
+      ledger.close();
+    }
+    // The next open rebuilds it; until then a running body knows no ref.
+    unlinkSync(join(dir, "index.jsonl"));
+    const idx = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "ledger-index");
+    assert.equal(idx?.level, "fail", JSON.stringify(idx));
+    assert.match(idx?.detail ?? "", /index names 0 of 2 decisions/);
+  });
+
+  it("ledger-index fails when a decision line is dropped from the index", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-index-short-"));
+    const ledger = new FileLedger(dir, { pieceMaxRows: 50 });
+    try {
+      await putOn(ledger, "s1");
+      await putOn(ledger, "s2");
+    } finally {
+      ledger.close();
+    }
+    const indexFile = join(dir, "index.jsonl");
+    const lines = readFileSync(indexFile, "utf8").split("\n").filter((l) => l !== "");
+    const drop = lines.findIndex((l) => {
+      const row = JSON.parse(l) as { kind?: string };
+      return row.kind === "allow" || row.kind === "deny" || row.kind === "defer";
+    });
+    assert.ok(drop >= 0);
+    lines.splice(drop, 1);
+    writeFileSync(indexFile, `${lines.join("\n")}\n`);
+    const idx = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "ledger-index");
+    assert.equal(idx?.level, "fail", JSON.stringify(idx));
+    assert.match(idx?.detail ?? "", /of \d+/);
+  });
+
+  it("ledger-index fails when an index row names a piece the manifest does not", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-index-ghost-"));
+    const ledger = new FileLedger(dir, { pieceMaxRows: 50 });
+    try {
+      await putOn(ledger, "g1");
+      await putOn(ledger, "g2");
+    } finally {
+      ledger.close();
+    }
+    const indexFile = join(dir, "index.jsonl");
+    const lines = readFileSync(indexFile, "utf8").split("\n").filter((l) => l !== "");
+    const edited = lines.map((l, i) => {
+      if (i !== 0) return l;
+      const row = JSON.parse(l) as Record<string, unknown>;
+      return JSON.stringify({ ...row, piece: "ghost" });
+    });
+    writeFileSync(indexFile, `${edited.join("\n")}\n`);
+    const idx = runDoctor(envFor(dir), ["node", "cli.ts", "doctor"]).find((c) => c.id === "ledger-index");
+    assert.equal(idx?.level, "fail", JSON.stringify(idx));
   });
 });
 

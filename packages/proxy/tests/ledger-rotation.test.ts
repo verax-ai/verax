@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { existsSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -297,6 +298,61 @@ describe("ledger rotation", () => {
       assert.ok(piecesTouched.includes(LEGACY_PIECE_ID));
       assert.ok(piecesTouched.some((id) => id !== LEGACY_PIECE_ID));
     } finally {
+      ledger.close();
+    }
+  });
+
+  it("a window inside a piece seeks by timestamp and still reads the tail", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-rot-seek-"));
+    const realOpen = ledgerFs.open;
+    ledgerFs.open = (async (path: string, flags: string) => {
+      const fh = await open(path, flags);
+      return { write: (data: string) => fh.write(data), sync: async () => undefined, close: () => fh.close() };
+    }) as unknown as typeof open;
+    const ledger = new FileLedger(dir, { pieceMaxRows: 10000 });
+    try {
+      for (let i = 0; i < 5000; i += 1) {
+        await ledger.appendDecisionChained((prev) => record(i, prev));
+      }
+    } finally {
+      ledgerFs.open = realOpen;
+    }
+    const decisionsPath = join(dir, "decisions.jsonl");
+    const fileBytes = statSync(decisionsPath).size;
+    const origOpen = ledgerFs.open.bind(ledgerFs);
+    let bytesRead = 0;
+    ledgerFs.open = (async (path: Parameters<typeof origOpen>[0], ...rest: unknown[]) => {
+      const fh = await origOpen(path, ...(rest as []));
+      if (String(path) === decisionsPath) {
+        const read = fh.read.bind(fh);
+        (fh as { read: typeof fh.read }).read = (async (...args: Parameters<typeof read>) => {
+          const out = await read(...args);
+          bytesRead += out.bytesRead;
+          return out;
+        }) as typeof fh.read;
+      }
+      return fh;
+    }) as typeof ledgerFs.open;
+    try {
+      const from = 1_700_000_000_000 + 100 * 1000;
+      const to = 1_700_000_000_000 + 200 * 1000;
+      const mid = await ledger.decisionsWindow(from, to);
+      assert.deepEqual(
+        mid.rows.map((r) => r.claims.ref),
+        Array.from({ length: 100 }, (_, k) => `r-${100 + k}`),
+      );
+      assert.equal(mid.more, false);
+      assert.ok(bytesRead < fileBytes * 0.1, `read ${bytesRead} of ${fileBytes}`);
+
+      const tailFrom = 1_700_000_000_000 + 4900 * 1000;
+      const tail = await ledger.decisionsWindow(tailFrom, 9_999_999_999_999);
+      assert.deepEqual(
+        tail.rows.map((r) => r.claims.ref),
+        Array.from({ length: 100 }, (_, k) => `r-${4900 + k}`),
+      );
+      assert.equal(tail.more, false);
+    } finally {
+      ledgerFs.open = origOpen;
       ledger.close();
     }
   });

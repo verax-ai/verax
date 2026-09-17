@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { listPieceFiles } from "@verax-ai/proxy";
+import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
@@ -279,6 +279,39 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
     return checks;
   }
   const srcLines = pieces.reduce((s, p) => s + countJsonl(p.decisions).lines, 0);
+  const decisionN = pieces.reduce((s, p) => s + (p.closed ? p.n : countJsonl(p.decisions).lines), 0);
+  if (decisionN > 0) {
+    const known = new Set(pieces.map((p) => p.id));
+    const cov = indexCoverage(stateDir);
+    if (cov === null) {
+      checks.push({
+        id: "ledger-index",
+        level: "fail",
+        detail: `index names 0 of ${decisionN} decisions; the next open rebuilds it, a running body misses the rest until then`,
+      });
+    } else {
+      const ghost = [...cov.pieces].find((id) => !known.has(id));
+      if (ghost !== undefined) {
+        checks.push({
+          id: "ledger-index",
+          level: "fail",
+          detail: `index names piece ${ghost} that the manifest does not`,
+        });
+      } else if (cov.refs === decisionN) {
+        checks.push({
+          id: "ledger-index",
+          level: "ok",
+          detail: `index names ${decisionN} of ${decisionN} decisions`,
+        });
+      } else {
+        checks.push({
+          id: "ledger-index",
+          level: "fail",
+          detail: `index names ${cov.refs} of ${decisionN} decisions; the next open rebuilds it, a running body misses the rest until then`,
+        });
+      }
+    }
+  }
   const hbPath = join(stateDir, "heartbeat.json");
   let hb: { atMs?: unknown; lastDecisionN?: unknown } | null = null;
   if (existsSync(hbPath)) {

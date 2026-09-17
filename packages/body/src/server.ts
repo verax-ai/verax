@@ -196,6 +196,9 @@ export const TOOL_META = [
 ];
 
 const MAX_BODY_BYTES = 1024 * 1024;
+// Unbounded GET /api/ledger stringified ~690 MB at 200k rows and threw Invalid string length (HTTP 500).
+const DEFAULT_LEDGER_LIMIT = 1000;
+const MAX_LEDGER_LIMIT = 5000;
 const responseSlot = new AsyncLocalStorage<ServerResponse>();
 
 function contentLengthOverLimit(req: IncomingMessage): boolean {
@@ -503,11 +506,17 @@ export async function listen(config: BodyConfig): Promise<Server> {
           const from = Number(url.searchParams.get("from") ?? "0");
           const to = Number(url.searchParams.get("to") ?? String(Number.MAX_SAFE_INTEGER));
           const limitRaw = url.searchParams.get("limit");
-          const limit = limitRaw === null ? undefined : Number(limitRaw);
-          if (!Number.isFinite(from) || !Number.isFinite(to) || (limit !== undefined && !Number.isFinite(limit))) {
+          const parsedLimit = limitRaw === null ? undefined : Number(limitRaw);
+          if (
+            !Number.isFinite(from) ||
+            !Number.isFinite(to) ||
+            (parsedLimit !== undefined && (!Number.isFinite(parsedLimit) || parsedLimit < 0))
+          ) {
             send(res, 400, { error: "bad-window" });
             return;
           }
+          const limit =
+            parsedLimit === undefined ? DEFAULT_LEDGER_LIMIT : Math.min(MAX_LEDGER_LIMIT, Math.floor(parsedLimit));
           // The window is read from the end of the files, so a day costs a
           // day whatever the ledger's age. With a limit, the newest rows of
           // the window come back and `more` says the rest is there to ask for.
@@ -526,6 +535,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             approvals: loadApprovalsFromDir(config.stateDir),
             more,
             piecesTouched,
+            limit,
           });
           return;
         }

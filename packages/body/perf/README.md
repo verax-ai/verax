@@ -57,7 +57,8 @@ the pieces close where the ledger closes them; `VERAX_SCALE_PIECE_ROWS`
 sets that bound for the run. When the manifest names a closed piece, the
 probe also times a 24-hour window centred on that piece's last row
 (`ledgerCross24h`, with the `piecesTouched` the body answered) and
-records the manifest's piece list and the `/healthz` document.
+records the manifest's piece list and the `/healthz` document. The
+whole-ledger read is the 5000-row cap (`limit=5000` on `ledgerAll`).
 
 ```
 VERAX_SCALE_N=100000 VERAX_SCALE_PIECE_ROWS=1000000 node --experimental-strip-types packages/body/perf/ledger-scale.ts
