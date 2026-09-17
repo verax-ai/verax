@@ -13,7 +13,7 @@ import { rememberToken } from "../src/session.ts";
 import { setLang } from "./with-lang.ts";
 
 const T = 1_700_000_000_000;
-const N = 350;
+const N = 250;
 
 function decision(i: number): RailDecision {
   return {
@@ -65,34 +65,43 @@ beforeEach(() => {
   rememberToken("test-session");
 });
 
-describe("records list reveals rows a hundred at a time", () => {
-  it("draws the first hundred, reveals the rest on request, and starts over when the filter changes", async () => {
-    stubFetch();
-    render(<App />);
-    await waitFor(() => {
-      expect(document.querySelectorAll(".record-row").length).toBe(100);
-    });
-    // The summary counts what is loaded, not what is drawn.
-    expect(screen.getByText("350 karar · 0 reddedildi · 0 onay bekliyor · ekstre bağlı değil")).toBeTruthy();
-    const more = () => screen.getByRole("button", { name: /Daha fazla satır göster/ });
-    expect(more().textContent).toBe("Daha fazla satır göster (250 satır daha)");
-    fireEvent.click(more());
-    expect(document.querySelectorAll(".record-row").length).toBe(200);
-    fireEvent.click(more());
-    fireEvent.click(more());
-    expect(document.querySelectorAll(".record-row").length).toBe(350);
-    expect(screen.queryByRole("button", { name: /Daha fazla satır göster/ })).toBeNull();
+/** The reveal button, or null once every row is drawn. Found by test id: a role query walks every button in the list. */
+function revealButton(): HTMLButtonElement | null {
+  return screen.queryByTestId("records-reveal")?.querySelector("button") ?? null;
+}
 
-    // Narrowing to 35 rows needs no reveal; clearing the filter starts at a hundred again.
-    fireEvent.change(screen.getByLabelText("Ajan"), { target: { value: "agent-ten" } });
-    await waitFor(() => {
-      expect(document.querySelectorAll(".record-row").length).toBe(35);
-    });
-    expect(screen.queryByRole("button", { name: /Daha fazla satır göster/ })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Süzgeci temizle" }));
-    await waitFor(() => {
-      expect(document.querySelectorAll(".record-row").length).toBe(100);
-    });
-    expect(more().textContent).toBe("Daha fazla satır göster (250 satır daha)");
-  });
+describe("records list reveals rows a hundred at a time", () => {
+  it(
+    "draws the first hundred, reveals the rest on request, and starts over when the filter changes",
+    async () => {
+      stubFetch();
+      render(<App />);
+      await waitFor(() => {
+        expect(document.querySelectorAll(".record-row").length).toBe(100);
+      });
+      // The summary counts what is loaded, not what is drawn.
+      expect(screen.getByText("250 karar · 0 reddedildi · 0 onay bekliyor · ekstre bağlı değil")).toBeTruthy();
+      expect(revealButton()?.textContent).toBe("Daha fazla satır göster (150 satır daha)");
+      fireEvent.click(revealButton()!);
+      expect(document.querySelectorAll(".record-row").length).toBe(200);
+      fireEvent.click(revealButton()!);
+      expect(document.querySelectorAll(".record-row").length).toBe(250);
+      expect(revealButton()).toBeNull();
+
+      // Narrowing to 25 rows needs no reveal; clearing the filter starts at a hundred again.
+      fireEvent.change(screen.getByLabelText("Ajan"), { target: { value: "agent-ten" } });
+      await waitFor(() => {
+        expect(document.querySelectorAll(".record-row").length).toBe(25);
+      });
+      expect(revealButton()).toBeNull();
+      fireEvent.click(screen.getByRole("button", { name: "Süzgeci temizle" }));
+      await waitFor(() => {
+        expect(document.querySelectorAll(".record-row").length).toBe(100);
+      });
+      expect(revealButton()?.textContent).toBe("Daha fazla satır göster (150 satır daha)");
+    },
+    // jsdom draws hundreds of rows here; the Windows runner took over five
+    // seconds on 17 Sep 2026 where this laptop takes under one.
+    { timeout: 15_000 },
+  );
 });
