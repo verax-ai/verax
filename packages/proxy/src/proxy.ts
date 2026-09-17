@@ -3,7 +3,14 @@ import { join } from "node:path";
 import { signDecisionRecord } from "@cedulon/core";
 import type { DecisionKind } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
-import { approvePending, approvalsLogFor, drainApprovalCommands } from "./approvals.ts";
+import {
+  approvePending,
+  approvalsLogFor,
+  createApprovalBudgetGuard,
+  drainApprovalCommands,
+  spentTodayMinorOf,
+} from "./approvals.ts";
+import { SerialQueue } from "./serial-queue.ts";
 import { diskProbe } from "./disk.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
@@ -146,6 +153,13 @@ function toolCallOf(call: ToolCall): ToolCall {
 export function createProxy(deps: ProxyDeps) {
   const inputsLog = deps.inputsLog ?? inputsLogFor(deps.ledger);
   const approvals = approvalsLogFor(deps.ledger);
+  const admission = new SerialQueue();
+  const inFlight = new Map<string, Promise<ToolResult>>();
+  const budgetGuard = createApprovalBudgetGuard({
+    policy: deps.policy,
+    approvals,
+    now: deps.now,
+  });
   (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   const ledgerDir = (deps.ledger as unknown as { dir?: unknown }).dir;
   const stateDir = typeof ledgerDir === "string" ? ledgerDir : null;
@@ -221,27 +235,6 @@ export function createProxy(deps: ProxyDeps) {
     if (limits.ratePerMinute !== undefined && counts.minute >= limits.ratePerMinute) return "rate-limited";
     if (limits.dailyMax !== undefined && counts.day >= limits.dailyMax) return "daily-limited";
     return null;
-  }
-
-  function utcDayStart(ms: number): number {
-    const d = new Date(ms);
-    return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
-  }
-
-  function spentTodayMinorOf(rows: { subject: string; status: string; createdAtMs?: number; expiresAtMs: number; args: Record<string, unknown> }[], nowMs: number, currency: string): number {
-    const start = utcDayStart(nowMs);
-    const end = start + 86_400_000;
-    let sum = 0;
-    for (const row of rows) {
-      if (row.subject !== "spend") continue;
-      if (row.status !== "pending" && row.status !== "approved") continue;
-      const created = row.createdAtMs ?? row.expiresAtMs - deps.policy.approvalTtlMs;
-      if (created < start || created >= end) continue;
-      if (row.args.currency !== currency) continue;
-      const amt = row.args.amountMinor;
-      if (typeof amt === "number") sum += amt;
-    }
-    return sum;
   }
 
   async function spendReauth(
@@ -348,6 +341,58 @@ export function createProxy(deps: ProxyDeps) {
     };
   }
 
+  type AdmissionPlan =
+    | { kind: "done"; result: ToolResult }
+    | { kind: "run"; work: Promise<ToolResult>; key: string; replayRef: string }
+    | { kind: "wait"; work: Promise<ToolResult>; replayRef: string };
+
+  function launchInner(
+    dispatchedCall: ToolCall,
+    principal: Principal,
+    allowRef: string,
+    flightKey: string,
+  ): AdmissionPlan {
+    const work = runInner(dispatchedCall, principal, allowRef);
+    inFlight.set(flightKey, work);
+    return { kind: "run", work, key: flightKey, replayRef: allowRef };
+  }
+
+  async function retryPolicyDeny(
+    dispatchedCall: ToolCall,
+    principal: Principal,
+    requestHash: string,
+    inputs: DecisionInputs,
+    timestampMs: number,
+    subject: string,
+    scopedRef: string,
+  ): Promise<ToolResult | null> {
+    let spendCtx: { spentTodayMinor: (currency: string) => number } | undefined;
+    if (dispatchedCall.name === "spend") {
+      const approvalRows = await approvals.listAll();
+      spendCtx = {
+        spentTodayMinor: (currency) =>
+          spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs),
+      };
+    }
+    const verdict = deps.policy.evaluate(dispatchedCall, principal, spendCtx);
+    if (verdict.decision !== "deny") return null;
+    const denyRef = deps.nonce();
+    await writeRecord({
+      decision: "deny",
+      reasonCode: verdict.reasonCode,
+      ref: denyRef,
+      requestHash,
+      inputs: {
+        ...inputs,
+        approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+      },
+      effectHash: null,
+      subject,
+      timestampMs,
+    });
+    return denied(verdict.reasonCode, denyRef);
+  }
+
   return {
     approvals,
     inputsLog,
@@ -368,6 +413,7 @@ export function createProxy(deps: ProxyDeps) {
             policyHash: defer.policyHash,
             approvals,
             inputsLog,
+            budgetGuard,
           });
         });
       }
@@ -405,54 +451,132 @@ export function createProxy(deps: ProxyDeps) {
       }
       const given = readRef(call.arguments);
 
-      if (given === "invalid") {
-        const ref = deps.nonce();
-        await writeRecord({
-          decision: "deny",
-          reasonCode: "ref-invalid",
-          ref,
-          requestHash,
-          inputs: resolved.inputs,
-          effectHash: null,
-          subject: call.name,
-          timestampMs,
-        });
-        return denied("ref-invalid", ref);
-      }
+      const plan = await admission.enqueue(async (): Promise<AdmissionPlan> => {
+        if (given === "invalid") {
+          const ref = deps.nonce();
+          await writeRecord({
+            decision: "deny",
+            reasonCode: "ref-invalid",
+            ref,
+            requestHash,
+            inputs: resolved.inputs,
+            effectHash: null,
+            subject: call.name,
+            timestampMs,
+          });
+          return { kind: "done", result: denied("ref-invalid", ref) };
+        }
 
-      if (typeof given === "string") {
-        // The ledger, the approvals snapshot and the resolution index all key on the
-        // scoped ref. The brain only ever sees and resends the raw `_ref` it chose.
-        const scopedRef = scopedClaimsRef(principal, given);
-        const existing = await lookupDecisionByRef(deps.ledger, given, tenantKey(principal));
-        if (existing) {
-          if (existing.requestHash !== requestHash) {
-            const ref = deps.nonce();
-            await writeRecord({
-              decision: "deny",
-              reasonCode: "ref-reuse",
-              ref,
-              requestHash,
-              inputs: resolved.inputs,
-              effectHash: null,
-              subject: call.name,
-              timestampMs,
-            });
-            return denied("ref-reuse", ref);
-          }
-          if (existing.decision === "defer") {
-            const snap = await approvals.get(scopedRef);
-            const boundHit = lookupResolvedBy(deps.ledger, scopedRef);
-            if (boundHit?.kind === "expired") {
-              if (snap?.status === "pending") await approvals.updateStatus(scopedRef, "expired");
-              return denied("expired", boundHit.ref);
-            }
-            if (snap && timestampMs > snap.expiresAtMs) {
-              const expireRef = deps.nonce();
+        if (typeof given === "string") {
+          // The ledger, the approvals snapshot and the resolution index all key on the
+          // scoped ref. The brain only ever sees and resends the raw `_ref` it chose.
+          const scopedRef = scopedClaimsRef(principal, given);
+          const existing = await lookupDecisionByRef(deps.ledger, given, tenantKey(principal));
+          if (existing) {
+            if (existing.requestHash !== requestHash) {
+              const ref = deps.nonce();
               await writeRecord({
                 decision: "deny",
-                reasonCode: "expired",
-                ref: expireRef,
+                reasonCode: "ref-reuse",
+                ref,
+                requestHash,
+                inputs: resolved.inputs,
+                effectHash: null,
+                subject: call.name,
+                timestampMs,
+              });
+              return { kind: "done", result: denied("ref-reuse", ref) };
+            }
+            if (existing.decision === "defer") {
+              const snap = await approvals.get(scopedRef);
+              const boundHit = lookupResolvedBy(deps.ledger, scopedRef);
+              if (boundHit?.kind === "expired") {
+                if (snap?.status === "pending") await approvals.updateStatus(scopedRef, "expired");
+                return { kind: "done", result: denied("expired", boundHit.ref) };
+              }
+              if (snap && timestampMs > snap.expiresAtMs) {
+                const expireRef = deps.nonce();
+                await writeRecord({
+                  decision: "deny",
+                  reasonCode: "expired",
+                  ref: expireRef,
+                  requestHash,
+                  inputs: {
+                    ...resolved.inputs,
+                    approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+                  },
+                  effectHash: null,
+                  subject: call.name,
+                  timestampMs,
+                });
+                await approvals.updateStatus(scopedRef, "expired");
+                return { kind: "done", result: denied("expired", expireRef) };
+              }
+              const allowRef = snap?.allowRef ?? (boundHit?.kind === "allow" ? boundHit.ref : undefined);
+              const allow = allowRef ? await lookupDecisionByRef(deps.ledger, allowRef) : null;
+              if (allow?.ref && allow.decision === "allow" && allow.reasonCode === "approved-by-operator") {
+                const bound = await inputsLog.get(allow.ref);
+                if (bound?.approver?.resolves && bound.approver.resolves !== scopedRef) {
+                  return { kind: "done", result: deferred(given) };
+                }
+                if (!snap?.allowRef) {
+                  await approvals.updateStatus(scopedRef, "approved", { allowRef: allow.ref });
+                }
+                if (await hasPrimaryEffect(deps.ledger, allow.ref)) {
+                  return { kind: "done", result: allowedReplay(allow.ref) };
+                }
+                if (allow.subject === "spend") {
+                  return {
+                    kind: "done",
+                    result: await spendReauth(requestHash, resolved.inputs, timestampMs, call.name),
+                  };
+                }
+                const policyDeny = await retryPolicyDeny(
+                  dispatched,
+                  principal,
+                  requestHash,
+                  resolved.inputs,
+                  timestampMs,
+                  call.name,
+                  scopedRef,
+                );
+                if (policyDeny) return { kind: "done", result: policyDeny };
+                const flying = inFlight.get(scopedRef);
+                if (flying) return { kind: "wait", work: flying, replayRef: allow.ref };
+                return launchInner(dispatched, principal, allow.ref, scopedRef);
+              }
+              return { kind: "done", result: deferred(given) };
+            }
+            if (existing.decision === "deny") {
+              return { kind: "done", result: denied(existing.reasonCode, given, call) };
+            }
+            if (existing.decision === "allow" && existing.ref) {
+              if (await hasPrimaryEffect(deps.ledger, existing.ref)) {
+                return { kind: "done", result: allowedReplay(existing.ref) };
+              }
+              if (existing.subject === "spend") {
+                return {
+                  kind: "done",
+                  result: await spendReauth(requestHash, resolved.inputs, timestampMs, call.name),
+                };
+              }
+              const policyDeny = await retryPolicyDeny(
+                dispatched,
+                principal,
+                requestHash,
+                resolved.inputs,
+                timestampMs,
+                call.name,
+                scopedRef,
+              );
+              if (policyDeny) return { kind: "done", result: policyDeny };
+              const flying = inFlight.get(scopedRef);
+              if (flying) return { kind: "wait", work: flying, replayRef: existing.ref };
+              const denyRef = deps.nonce();
+              await writeRecord({
+                decision: "deny",
+                reasonCode: "outcome-unknown",
+                ref: denyRef,
                 requestHash,
                 inputs: {
                   ...resolved.inputs,
@@ -462,113 +586,99 @@ export function createProxy(deps: ProxyDeps) {
                 subject: call.name,
                 timestampMs,
               });
-              await approvals.updateStatus(scopedRef, "expired");
-              return denied("expired", expireRef);
+              return { kind: "done", result: denied("outcome-unknown", denyRef) };
             }
-            const allowRef = snap?.allowRef ?? (boundHit?.kind === "allow" ? boundHit.ref : undefined);
-            const allow = allowRef ? await lookupDecisionByRef(deps.ledger, allowRef) : null;
-            if (allow?.ref && allow.decision === "allow" && allow.reasonCode === "approved-by-operator") {
-              const bound = await inputsLog.get(allow.ref);
-              if (bound?.approver?.resolves && bound.approver.resolves !== scopedRef) {
-                return deferred(given);
-              }
-              if (!snap?.allowRef) {
-                await approvals.updateStatus(scopedRef, "approved", { allowRef: allow.ref });
-              }
-              if (await hasPrimaryEffect(deps.ledger, allow.ref)) return allowedReplay(allow.ref);
-              if (allow.subject === "spend") {
-                return spendReauth(requestHash, resolved.inputs, timestampMs, call.name);
-              }
-              return runInner(dispatched, principal, allow.ref);
-            }
-            return deferred(given);
-          }
-          if (existing.decision === "deny") {
-            return denied(existing.reasonCode, given, call);
-          }
-          if (existing.decision === "allow" && existing.ref) {
-            if (await hasPrimaryEffect(deps.ledger, existing.ref)) {
-              return allowedReplay(existing.ref);
-            }
-            if (existing.subject === "spend") {
-              return spendReauth(requestHash, resolved.inputs, timestampMs, call.name);
-            }
-            return runInner(dispatched, principal, existing.ref);
           }
         }
-      }
 
-      let spendCtx: { spentTodayMinor: (currency: string) => number } | undefined;
-      if (dispatched.name === "spend") {
-        const approvalRows = await approvals.listAll();
-        spendCtx = {
-          spentTodayMinor: (currency) => spentTodayMinorOf(approvalRows, timestampMs, currency),
-        };
-      }
-      const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);
-      let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
-      let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
-      const bound = rateBound(timestampMs, decision === "allow" || decision === "defer");
-      if (bound) {
-        decision = "deny";
-        reasonCode = bound;
-      }
-      if (
-        !bound &&
-        decision === "allow" &&
-        deps.checkTenantMismatch &&
-        (await deps.checkTenantMismatch(dispatched, principal))
-      ) {
-        decision = "deny";
-        reasonCode = "tenant-mismatch";
-      }
-      const ref = typeof given === "string" ? scopedClaimsRef(principal, given) : deps.nonce();
-      // What the brain is told: its own `_ref`, so a retry carries the same key back.
-      const shown = typeof given === "string" ? given : ref;
-      const allow = decision === "allow";
-      await writeRecord({
-        decision,
-        reasonCode,
-        ref,
-        requestHash,
-        inputs: resolved.inputs,
-        effectHash: allow ? sha256Canonical(effectDescriptor(dispatched.name, dispatched.arguments)) : null,
-        subject: call.name,
-        timestampMs,
-      });
-      if (typeof given === "string") {
-        noteTenantRef(deps.ledger, tenantKey(principal), given);
-      }
-      if (decision === "defer") {
-        const rule = deps.policy.rule(verdict.rule);
-        const amount = dispatched.name === "spend" ? dispatched.arguments.amountMinor : dispatched.arguments.amount;
-        const payee = dispatched.arguments.payee;
-        const currency = dispatched.arguments.currency;
-        await approvals.append({
+        let spendCtx: { spentTodayMinor: (currency: string) => number } | undefined;
+        if (dispatched.name === "spend") {
+          const approvalRows = await approvals.listAll();
+          spendCtx = {
+            spentTodayMinor: (currency) =>
+              spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs),
+          };
+        }
+        const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);
+        let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
+        let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
+        const bound = rateBound(timestampMs, decision === "allow" || decision === "defer");
+        if (bound) {
+          decision = "deny";
+          reasonCode = bound;
+        }
+        if (
+          !bound &&
+          decision === "allow" &&
+          deps.checkTenantMismatch &&
+          (await deps.checkTenantMismatch(dispatched, principal))
+        ) {
+          decision = "deny";
+          reasonCode = "tenant-mismatch";
+        }
+        const ref = typeof given === "string" ? scopedClaimsRef(principal, given) : deps.nonce();
+        // What the brain is told: its own `_ref`, so a retry carries the same key back.
+        const shown = typeof given === "string" ? given : ref;
+        const allow = decision === "allow";
+        await writeRecord({
+          decision,
+          reasonCode,
           ref,
           requestHash,
-          subject: dispatched.name,
-          args: dispatched.arguments,
-          ruleId: verdict.rule,
-          ruleText: rule?.text ?? null,
-          inputsSummary: {
-            count: resolved.inputs.inputs.length,
-            ids: resolved.inputs.inputs.map((i) => i.id),
-          },
-          ...(amount !== undefined ? { amount } : {}),
-          ...(payee !== undefined ? { payee } : {}),
-          ...(currency !== undefined ? { currency } : {}),
-          createdAtMs: timestampMs,
-          expiresAtMs: timestampMs + deps.policy.approvalTtlMs,
-          status: "pending",
-          brain: principal.brain,
+          inputs: resolved.inputs,
+          effectHash: allow ? sha256Canonical(effectDescriptor(dispatched.name, dispatched.arguments)) : null,
+          subject: call.name,
+          timestampMs,
         });
-        return deferred(shown);
+        if (typeof given === "string") {
+          noteTenantRef(deps.ledger, tenantKey(principal), given);
+        }
+        if (decision === "defer") {
+          const rule = deps.policy.rule(verdict.rule);
+          const amount = dispatched.name === "spend" ? dispatched.arguments.amountMinor : dispatched.arguments.amount;
+          const payee = dispatched.arguments.payee;
+          const currency = dispatched.arguments.currency;
+          await approvals.append({
+            ref,
+            requestHash,
+            subject: dispatched.name,
+            args: dispatched.arguments,
+            ruleId: verdict.rule,
+            ruleText: rule?.text ?? null,
+            inputsSummary: {
+              count: resolved.inputs.inputs.length,
+              ids: resolved.inputs.inputs.map((i) => i.id),
+            },
+            ...(amount !== undefined ? { amount } : {}),
+            ...(payee !== undefined ? { payee } : {}),
+            ...(currency !== undefined ? { currency } : {}),
+            createdAtMs: timestampMs,
+            expiresAtMs: timestampMs + deps.policy.approvalTtlMs,
+            status: "pending",
+            brain: principal.brain,
+          });
+          return { kind: "done", result: deferred(shown) };
+        }
+        if (!allow) {
+          return { kind: "done", result: denied(reasonCode, shown, call) };
+        }
+        return launchInner(dispatched, principal, ref, ref);
+      });
+
+      if (plan.kind === "done") return plan.result;
+      if (plan.kind === "wait") {
+        try {
+          await plan.work;
+        } catch {
+          // The first call recorded the throw on its effect row.
+        }
+        return allowedReplay(plan.replayRef);
       }
-      if (!allow) {
-        return denied(reasonCode, shown, call);
+      try {
+        return await plan.work;
+      } finally {
+        inFlight.delete(plan.key);
       }
-      return runInner(dispatched, principal, ref);
     },
   };
 }

@@ -5,6 +5,7 @@ import {
   tenantKey,
   type EffectSigner,
   type ExplainOpts,
+  type Policy,
   type Principal,
   type RecordSigner,
   type ToolCall,
@@ -13,7 +14,13 @@ import {
 import { readFileSync } from "node:fs";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
-import { memoryBelongsToOtherTenant, memoryGet, memoryPut, readMemoryMeta } from "./tools/memory.ts";
+import {
+  memoryBelongsToOtherTenant,
+  memoryExistsForTenant,
+  memoryGet,
+  memoryPut,
+  readMemoryMeta,
+} from "./tools/memory.ts";
 import { auditExplain } from "./tools/audit.ts";
 import { messageRead, messageSend } from "./tools/message.ts";
 import { spendAuthorize } from "./tools/spend.ts";
@@ -38,6 +45,7 @@ export type ExtraTool = {
 export type BodyServices = {
   proxy: ReturnType<typeof createProxy>;
   ledger: FileLedger;
+  policy: Policy;
   policyHash: string;
   policyDocument: unknown;
   listTools: () => readonly string[];
@@ -140,6 +148,7 @@ export function createBodyServices(opts: {
       if (call.name === "memory.get") {
         const id = call.arguments.id;
         if (typeof id !== "string") return false;
+        if (memoryExistsForTenant(opts.stateDir, id, principal)) return false;
         return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal));
       }
       if (call.name === "audit.explain") {
@@ -158,6 +167,7 @@ export function createBodyServices(opts: {
   return {
     proxy,
     ledger,
+    policy,
     policyHash: policy.hash,
     policyDocument,
     listTools: () => (extraNames.length === 0 ? TOOL_NAMES : [...TOOL_NAMES, ...extraNames]),

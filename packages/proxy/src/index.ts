@@ -3,7 +3,13 @@ export { loadPolicy } from "./policy.ts";
 export { FileLedger, MemoryLedger, readLedgerTail } from "./ledger.ts";
 export { indexCoverage, listPieceFiles } from "./ledger-manifest.ts";
 export { explain } from "./explain.ts";
-export { approvePending, approvalsLogFor, enqueueApprovalCommand, loadApprovalsFromDir } from "./approvals.ts";
+export {
+  approvePending,
+  approvalsLogFor,
+  createApprovalBudgetGuard,
+  enqueueApprovalCommand,
+  loadApprovalsFromDir,
+} from "./approvals.ts";
 export { loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "./reconcile.ts";
 export { tenantKey } from "./tenant.ts";
 // The body writes checkpoints and signs its own effect attestations. Both were

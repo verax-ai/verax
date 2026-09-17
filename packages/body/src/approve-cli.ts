@@ -1,6 +1,35 @@
+import { existsSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
-import { approvePending, approvalsLogFor, enqueueApprovalCommand, FileLedger, loadApprovalsFromDir } from "@verax-ai/proxy";
+import { join } from "node:path";
+import {
+  approvePending,
+  approvalsLogFor,
+  createApprovalBudgetGuard,
+  enqueueApprovalCommand,
+  FileLedger,
+  loadApprovalsFromDir,
+  loadPolicy,
+  type Policy,
+} from "@verax-ai/proxy";
 import { loadOrCreateSigners } from "./keys.ts";
+
+function policyForApprove(stateDir: string, policyHash: string): Policy | null {
+  const fromEnv = process.env.VERAX_POLICY_FILE?.trim();
+  if (fromEnv) {
+    try {
+      return loadPolicy(readFileSync(fromEnv, "utf8"));
+    } catch {
+      // Fall through to the snapshot the body wrote for this hash.
+    }
+  }
+  const snap = join(stateDir, "policies", `${policyHash}.json`);
+  if (!existsSync(snap)) return null;
+  try {
+    return loadPolicy(JSON.parse(readFileSync(snap, "utf8")) as unknown);
+  } catch {
+    return null;
+  }
+}
 
 function operatorName(): string {
   try {
@@ -72,6 +101,7 @@ export async function runApprove(
       writeErr("approve-unknown-ref\n");
       return 78;
     }
+    const policy = policyForApprove(stateDir, defer.claims.policyHash);
     const result = await approvePending({
       ledger,
       recordSigner: signers.recordSigner,
@@ -82,6 +112,9 @@ export async function runApprove(
       via: "cli",
       policyHash: defer.claims.policyHash,
       approvals,
+      ...(policy
+        ? { budgetGuard: createApprovalBudgetGuard({ policy, approvals, now: () => Date.now() }) }
+        : {}),
     });
     if (!result.ok) {
       writeErr(`approve-${result.reason}\n`);

@@ -237,7 +237,15 @@ export function loadPolicy(json: unknown): Policy {
     rule(id: string | null) {
       if (id === null) return null;
       const found = document.rules.find((r) => r.id === id);
-      return found ? { id: found.id, text: found.text } : null;
+      return found
+        ? {
+            id: found.id,
+            text: found.text,
+            ...(found.spend?.dailyMaxMinor !== undefined
+              ? { spend: { dailyMaxMinor: found.spend.dailyMaxMinor } }
+              : {}),
+          }
+        : null;
     },
     evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision {
       if (call.name === "pay") {

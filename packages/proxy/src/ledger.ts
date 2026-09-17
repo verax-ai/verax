@@ -55,24 +55,11 @@ import type {
 } from "./types.ts";
 import type { DecisionKind, SignedDecisionRecord } from "@cedulon/core";
 import { sha256Canonical } from "./hash.ts";
+import { SerialQueue } from "./serial-queue.ts";
 
 export type PermissionCheck = "owner-only" | "not checked on this platform";
 
 const DEFAULT_WITNESS: WitnessClass = "self";
-
-/** One async tail so read-then-append cannot fork the chain. */
-class SerialQueue {
-  private tail: Promise<void> = Promise.resolve();
-
-  enqueue<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.tail.then(fn, fn);
-    this.tail = run.then(
-      () => undefined,
-      () => undefined,
-    );
-    return run;
-  }
-}
 
 function lineOf(value: unknown): string {
   return `${canonical(value)}\n`;

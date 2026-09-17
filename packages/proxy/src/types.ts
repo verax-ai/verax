@@ -49,7 +49,7 @@ export type Policy = {
   /** Document-root posture. Absent keeps today's optional `_inputs`. */
   requireInputs?: boolean;
   evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
-  rule(id: string | null): { id: string; text: string } | null;
+  rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number } } | null;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";

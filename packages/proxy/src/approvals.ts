@@ -18,7 +18,8 @@ import { signDecisionRecord } from "@cedulon/core";
 import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
-import type { ApprovalChannel, DecisionInputs, InputsLog, Ledger, RecordSigner } from "./types.ts";
+import { SerialQueue } from "./serial-queue.ts";
+import type { ApprovalChannel, DecisionInputs, InputsLog, Ledger, Policy, RecordSigner } from "./types.ts";
 
 export type ApprovalRow = {
   ref: string;
@@ -151,7 +152,70 @@ export function loadApprovalsFromDir(dir: string): ApprovalRow[] {
   }
 }
 
-export type ApproveResult = { ok: true; allowRef: string } | { ok: false; reason: string };
+export type ApproveResult = { ok: true; allowRef: string } | { ok: false; reason: string; allowRef?: string };
+
+const APPROVAL_LOCK = Symbol.for("verax.approvalLock");
+
+function approvalLockFor(ledger: object): SerialQueue {
+  const bag = ledger as { [APPROVAL_LOCK]?: SerialQueue };
+  if (!bag[APPROVAL_LOCK]) bag[APPROVAL_LOCK] = new SerialQueue();
+  return bag[APPROVAL_LOCK];
+}
+
+export function spentTodayMinorOf(
+  rows: Array<{
+    subject: string;
+    status: string;
+    createdAtMs?: number;
+    expiresAtMs: number;
+    args: Record<string, unknown>;
+  }>,
+  nowMs: number,
+  currency: string,
+  approvalTtlMs: number,
+): number {
+  const d = new Date(nowMs);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const end = start + 86_400_000;
+  let sum = 0;
+  for (const row of rows) {
+    if (row.subject !== "spend") continue;
+    if (row.status !== "pending" && row.status !== "approved") continue;
+    const created = row.createdAtMs ?? row.expiresAtMs - approvalTtlMs;
+    if (created < start || created >= end) continue;
+    if (row.args.currency !== currency) continue;
+    const amt = row.args.amountMinor;
+    if (typeof amt === "number") sum += amt;
+  }
+  return sum;
+}
+
+export function createApprovalBudgetGuard(opts: {
+  policy: Policy;
+  approvals: ApprovalsLog;
+  now: () => number;
+}): (snap: ApprovalRow) => Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }> {
+  return async (snap) => {
+    if (snap.subject !== "spend") return { ok: true };
+    const dailyMax = opts.policy.rule(snap.ruleId)?.spend?.dailyMaxMinor;
+    if (dailyMax === undefined) return { ok: true };
+    const currency = typeof snap.args.currency === "string" ? snap.args.currency : "";
+    const amount = typeof snap.args.amountMinor === "number" ? snap.args.amountMinor : 0;
+    // Sibling pending rows are not authorized yet. Counting them here would
+    // deadlock two 100-unit pendings against a later 150 cap; approved spend
+    // plus this amount is what the operator is about to commit.
+    const others = (await opts.approvals.listAll()).filter(
+      (row) => row.ref !== snap.ref && row.status === "approved",
+    );
+    const spent = spentTodayMinorOf(others, opts.now(), currency, opts.policy.approvalTtlMs);
+    if (spent + amount > dailyMax) return { ok: false, reason: "budget-exceeded" };
+    return { ok: true };
+  };
+}
+
+function alreadyResolved(allowRef?: string): ApproveResult {
+  return { ok: false, reason: "already-resolved", ...(allowRef ? { allowRef } : {}) };
+}
 
 async function hasResolves(inputsLog: InputsLog, ledger: Ledger, deferRef: string): Promise<boolean> {
   const indexed = ledger as Ledger & { lookupResolvedBy?: (ref: string) => unknown };
@@ -178,12 +242,42 @@ export async function approvePending(opts: {
   policyHash: string;
   approvals: ApprovalsLog;
   inputsLog?: InputsLog;
+  budgetGuard?: (
+    snap: ApprovalRow,
+  ) =>
+    | { ok: true }
+    | { ok: false; reason: "budget-exceeded" }
+    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }>;
+}): Promise<ApproveResult> {
+  return approvalLockFor(opts.ledger).enqueue(() => approvePendingUnlocked(opts));
+}
+
+async function approvePendingUnlocked(opts: {
+  ledger: Ledger;
+  recordSigner: RecordSigner;
+  now: () => number;
+  nonce: () => string;
+  ref: string;
+  approverId: string;
+  via: ApprovalChannel;
+  policyHash: string;
+  approvals: ApprovalsLog;
+  inputsLog?: InputsLog;
+  budgetGuard?: (
+    snap: ApprovalRow,
+  ) =>
+    | { ok: true }
+    | { ok: false; reason: "budget-exceeded" }
+    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }>;
 }): Promise<ApproveResult> {
   const inputsLog = opts.inputsLog ?? inputsLogFor(opts.ledger);
   const defer = await lookupDecisionByRef(opts.ledger, opts.ref);
   if (!defer || defer.decision !== "defer") return { ok: false, reason: "unknown-ref" };
   const snap = await opts.approvals.get(opts.ref);
-  if (snap && snap.status !== "pending") return { ok: false, reason: "already-resolved" };
+  if (snap && snap.status !== "pending") {
+    const hit = lookupResolvedBy(opts.ledger, opts.ref);
+    return alreadyResolved(snap.allowRef ?? (hit?.kind === "allow" ? hit.ref : undefined));
+  }
   const resolved = lookupResolvedBy(opts.ledger, opts.ref);
   if (resolved || (await hasResolves(inputsLog, opts.ledger, opts.ref))) {
     const hit = resolved ?? lookupResolvedBy(opts.ledger, opts.ref);
@@ -194,7 +288,7 @@ export async function approvePending(opts: {
         hit.kind === "allow" ? { allowRef: hit.ref } : undefined,
       );
     }
-    return { ok: false, reason: "already-resolved" };
+    return alreadyResolved(hit?.kind === "allow" ? hit.ref : snap?.allowRef);
   }
   if (!snap) return { ok: false, reason: "snapshot-missing" };
   const requestHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
@@ -237,6 +331,10 @@ export async function approvePending(opts: {
     noteResolution(opts.ledger, opts.ref, { ref: expireRef, kind: "expired" });
     await opts.approvals.updateStatus(opts.ref, "expired");
     return { ok: false, reason: "expired" };
+  }
+  if (opts.budgetGuard) {
+    const guarded = await opts.budgetGuard(snap);
+    if (!guarded.ok) return guarded;
   }
   const allowRef = opts.nonce();
   const prior = await inputsLog.get(opts.ref);
