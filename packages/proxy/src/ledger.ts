@@ -16,6 +16,7 @@ import {
   type EffectRow,
   type SignedEffectExtract,
 } from "@cedulon/effect-extract";
+import { readJsonlTail, type TailVisit } from "./jsonl-tail.ts";
 import { tenantKey } from "./tenant.ts";
 import type {
   DecisionInputs,
@@ -76,6 +77,21 @@ function readJsonlSync<T>(path: string): T[] {
     throw err;
   }
 }
+
+/**
+ * A ledger file read from its end through the same seam the reads above use,
+ * so a test can count what a window costs.
+ */
+export function readLedgerTail<T>(path: string, visit: (row: T) => TailVisit, chunkBytes?: number): Promise<T[]> {
+  return readJsonlTail<T>(path, visit, { open: ledgerFs.open, ...(chunkBytes === undefined ? {} : { chunkBytes }) });
+}
+
+/**
+ * How far past a window's lower edge the tail reader keeps looking before it
+ * stops. Rows are in file order; their stamps are the clock's, and a clock
+ * can be set back. A row stamped a minute before its neighbour is still seen.
+ */
+export const WINDOW_SLACK_MS = 60_000;
 
 /** Write then fsync so a crash cannot drop a committed line. */
 export async function appendDurable(path: string, line: string): Promise<void> {
@@ -599,6 +615,43 @@ export class FileLedger implements Ledger {
   counts(): { decisions: number; effects: number; lastDecisionMs: number | null } | null {
     if (!this.countsReadable) return null;
     return { decisions: this.decisionCount, effects: this.effectCount, lastDecisionMs: this.lastDecisionMs };
+  }
+
+  /**
+   * Decisions stamped in [fromMs, toMs), read from the end of the file so the
+   * cost is the window's, not the ledger's. With a limit, the newest rows of
+   * the window come back and `more` says the window went on.
+   */
+  async decisionsWindow(
+    fromMs: number,
+    toMs: number,
+    limit?: number,
+  ): Promise<{ rows: SignedDecisionRecord[]; more: boolean }> {
+    const max = limit === undefined ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(limit));
+    let taken = 0;
+    let more = false;
+    const rows = await readLedgerTail<SignedDecisionRecord>(this.decisionsPath, (row) => {
+      const ts = row.claims.timestampMs;
+      if (ts >= toMs) return "skip";
+      if (ts < fromMs) return ts < fromMs - WINDOW_SLACK_MS ? "stop" : "skip";
+      if (taken >= max) {
+        more = true;
+        return "stop";
+      }
+      taken += 1;
+      return "take";
+    });
+    return { rows, more };
+  }
+
+  /** Effects stamped in [fromMs, toMs), read from the end of the file. */
+  async effectsWindow(fromMs: number, toMs: number): Promise<LedgerEffect[]> {
+    return readLedgerTail<LedgerEffect>(this.effectsPath, (effect) => {
+      const ts = effect.row.timestampMs;
+      if (ts >= toMs) return "skip";
+      if (ts < fromMs) return ts < fromMs - WINDOW_SLACK_MS ? "stop" : "skip";
+      return "take";
+    });
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {

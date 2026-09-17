@@ -28,6 +28,9 @@ const ALLOWED = new Set([
   "checkpointsPath",
   "signEffectAttestation",
   "diskProbe",
+  // The body reads inputs.jsonl from its end for a ledger window; the reader
+  // goes through the ledgerFs seam, so it has to be this package's.
+  "readLedgerTail",
 ]);
 
 describe("B1 exports map", () => {

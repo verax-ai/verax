@@ -471,12 +471,20 @@ export async function listen(config: BodyConfig): Promise<Server> {
         if (apiLedger) {
           const from = Number(url.searchParams.get("from") ?? "0");
           const to = Number(url.searchParams.get("to") ?? String(Number.MAX_SAFE_INTEGER));
-          const decisions = (await services.ledger.decisions()).filter(
-            (d) => d.claims.timestampMs >= from && d.claims.timestampMs < to,
-          );
-          const effects = (await services.ledger.effects()).filter(
-            (e) => e.row.timestampMs >= from && e.row.timestampMs < to,
-          );
+          const limitRaw = url.searchParams.get("limit");
+          const limit = limitRaw === null ? undefined : Number(limitRaw);
+          if (!Number.isFinite(from) || !Number.isFinite(to) || (limit !== undefined && !Number.isFinite(limit))) {
+            send(res, 400, { error: "bad-window" });
+            return;
+          }
+          // The window is read from the end of the files, so a day costs a
+          // day whatever the ledger's age. With a limit, the newest rows of
+          // the window come back and `more` says the rest is there to ask for.
+          const { rows: decisions, more } = await services.ledger.decisionsWindow(from, to, limit);
+          // Effects belong to the decisions returned. When the limit cut the
+          // window, the oldest decision returned is where their window starts.
+          const effectsFrom = more && decisions.length > 0 ? decisions[0]!.claims.timestampMs : from;
+          const effects = await services.ledger.effectsWindow(effectsFrom, to);
           const hashes = [...new Set(decisions.map((d) => d.claims.policyHash))];
           send(res, 200, {
             decisions,
@@ -485,6 +493,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             policies: readPolicySnapshots(config.stateDir, hashes),
             inputs: await matchingInputs(config.stateDir, decisions),
             approvals: loadApprovalsFromDir(config.stateDir),
+            more,
           });
           return;
         }
