@@ -197,3 +197,20 @@ Remaining gaps, still open:
 - the development issuer is still not a production authorization server; `NODE_ENV=production` still exits. `/authorize` now refuses a `redirect_uri` outside `VERAX_DEV_REDIRECT_URIS` (default `http://127.0.0.1:5173/` and `http://127.0.0.1:4173/`) with `400 invalid_request`, and the in-memory `codes` map is capped at 100 (expired rows drop first, then the oldest)
 - the panel reads `authorization_servers` from `/.well-known/oauth-protected-resource` before it starts a session. If that document cannot be read, the session does not redirect: the rail shows `resource metadata unreachable` and names the last-resort issuer (`VITE_VERAX_ISSUER`, else `http://127.0.0.1:8790`). Vite proxies `/.well-known`. `verax desktop` still passes its panel port to the issuer allow-list when it starts the issuer; when it joins a running body it cannot, and `verax doctor` names the gap
 - a JWT-less fixture principal keeps the raw `_ref` as `claims.ref` so S1 tests stay pinned; production tokens always carry `iss` and are prefixed
+
+## Spike — downstream MCP (this commit)
+
+The tree carries a stdio attach helper (`packages/body/src/downstream.ts`)
+that prefixes one child's tools and a `createBodyServices({ extraTools })`
+seam so those names enter the private registry Map and `tools/call` still
+goes through the existing proxy (`docs/design/downstream.md`,
+`tests/downstream.test.ts`). `listen()` does not read a downstream spec
+and does not pass `extraTools`; HTTP `/mcp` still lists the six built-in
+tools. The default policy is unchanged. The panel is unchanged. The
+attach starts the child through the SDK stdio transport; that source does
+not write the `child_process` name, so the no-bypass scan names the SDK
+stdio client transport instead, and only `src/downstream.ts` may import
+it (`src/desktop.ts` remains the file that may name `child_process`).
+Operator decisions of 17 Sep 2026 are on the design note (connection
+document, exact-match namespace, `resultHash` only). This is a spike,
+not a release path. Unproven against a live Conarium or Tugra server.

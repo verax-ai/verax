@@ -114,6 +114,33 @@ describe("B1 no-bypass", () => {
     assert.equal(status.includes("best effort; single writer by construction"), true);
   });
 
+  it("RED: the SDK stdio client transport outside src/downstream.ts is a hit", () => {
+    // Split so this file does not trip the scan it exercises.
+    const path = ["client/", "stdio.js"].join("");
+    const name = ["StdioClient", "Transport"].join("");
+    const spec = "@modelcontextprotocol/sdk/" + path;
+    const byPath = scanNoBypass(pkg, [
+      { file: "src/index.ts", text: `import { ${name} } from "${spec}";\n` },
+    ]);
+    const byName = scanNoBypass(pkg, [{ file: "src/wiring.ts", text: `const t = new ${name}(spec);\n` }]);
+    assert.ok(
+      byPath.some((h) => h.file === "src/index.ts" && h.why === "sdk-stdio-spawn"),
+      `path-form hits=${JSON.stringify(byPath)}`,
+    );
+    assert.ok(
+      byName.some((h) => h.file === "src/wiring.ts" && h.why === "sdk-stdio-spawn"),
+      `name-form hits=${JSON.stringify(byName)}`,
+    );
+    const threat = readFileSync(join(pkg, "..", "..", "docs", "THREAT_MODEL.md"), "utf8");
+    const exception =
+      "Exception: `src/downstream.ts` may import the SDK stdio client transport (`" +
+      path +
+      "`) to start one downstream MCP server. The scan names that import, and the `" +
+      name +
+      "` name, anywhere else in packages/body.";
+    assert.equal(threat.includes(exception), true, "THREAT_MODEL names the downstream exception");
+  });
+
   it("RED: a dynamic concatenated tools import is refused", () => {
     const head = "im" + "port(";
     const red = scanNoBypass(pkg, [
