@@ -30,6 +30,11 @@ export const TOOL_NAMES = [
   "spend",
 ] as const;
 
+export type ExtraTool = {
+  name: string;
+  fn: ToolFn;
+};
+
 export type BodyServices = {
   proxy: ReturnType<typeof createProxy>;
   ledger: FileLedger;
@@ -41,7 +46,9 @@ export type BodyServices = {
 
 /**
  * Tool functions live in a Map that is not exported. The only way to
- * reach them at runtime is `proxy.call` -> `inner`.
+ * reach them at runtime is `proxy.call` -> `inner`. Extra tools (a
+ * downstream prefix) enter that Map at construction; they still pass
+ * the gate.
  */
 export function createBodyServices(opts: {
   stateDir: string;
@@ -50,7 +57,21 @@ export function createBodyServices(opts: {
   effectSigner: EffectSigner;
   now?: () => number;
   nonce?: () => string;
+  extraTools?: readonly ExtraTool[];
 }): BodyServices {
+  const extraNames: string[] = [];
+  const reserved = new Set<string>(TOOL_NAMES);
+  for (const tool of opts.extraTools ?? []) {
+    if (reserved.has(tool.name) || extraNames.includes(tool.name)) {
+      throw new Error(`downstream-name-collision:${tool.name}`);
+    }
+    // Same shape as extraToolNameOk in downstream.ts (prefix.childName).
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63}$/.test(tool.name)) {
+      throw new Error(`downstream-name-invalid:${tool.name}`);
+    }
+    extraNames.push(tool.name);
+  }
+
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
   const policyText = readFileSync(opts.policyFile, "utf8");
@@ -83,6 +104,10 @@ export function createBodyServices(opts: {
     messageSend(call, opts.stateDir, ref ?? "", principal),
   );
   registry.set("spend", (call, _principal, ref) => spendAuthorize(call, ref ?? ""));
+
+  for (const tool of opts.extraTools ?? []) {
+    registry.set(tool.name, tool.fn);
+  }
 
   const inner: ToolFn = async (call, principal, ref) => {
     const fn = registry.get(call.name);
@@ -128,7 +153,7 @@ export function createBodyServices(opts: {
     ledger,
     policyHash: policy.hash,
     policyDocument,
-    listTools: () => TOOL_NAMES,
+    listTools: () => (extraNames.length === 0 ? TOOL_NAMES : [...TOOL_NAMES, ...extraNames]),
     explainOpts,
   };
 }

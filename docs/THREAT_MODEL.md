@@ -36,6 +36,8 @@ Exception: `src/desktop.ts` may import `node:child_process` to supervise the iss
 
 The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
 
+A spike stdio attach lives in `packages/body/src/downstream.ts` and starts a child through the SDK stdio transport. That source does not write the `child_process` name, so the no-bypass scan does not see the spawn. `listen()` does not open the attach. A tool that enters through `extraTools` still goes through `createProxy`.
+
 ## retention and erasure
 
 Append-only records conflict with a right to erase. Phase 1 payloads are
