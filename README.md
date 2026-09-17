@@ -111,6 +111,13 @@ vulnerability is in [`SECURITY.md`](SECURITY.md).
   authorization server. It serves `GET /authorize` (PKCE S256) and
   `POST /token`, writes a token to `--out`, and never prints one. It listens
   on `VERAX_DEV_ISSUER_PORT` (default 8790). `NODE_ENV=production` exits.
+- `scripts/demo-box.mjs` is development only: one process that starts the
+  dev issuer and the body on loopback with a temporary ledger, mints itself a
+  short-lived token through the issuer's code flow, and speaks MCP over stdio
+  for a sandbox that cannot hold a token of its own, such as a directory's
+  build check. The body is not changed by it: every call still passes the
+  gate and is recorded, `spend` is always held, and no operator is there to
+  approve it. `NODE_ENV=production` exits. Not a deployment.
 
 ## Developing
 
