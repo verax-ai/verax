@@ -18,6 +18,7 @@ import { loadOrCreateSigners } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
+import { agentsWindow } from "./agents.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 
@@ -364,7 +365,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
     const apiInventory = url.pathname === "/api/inventory";
     const contest = req.method === "POST" && url.pathname.startsWith("/api/contest/");
     const apiApprove = req.method === "POST" && url.pathname === "/api/approve";
-    if (url.pathname !== "/mcp" && !apiLedger && !apiInventory && !contest && !apiApprove) {
+    const apiAgents = req.method === "GET" && url.pathname === "/api/agents";
+    if (url.pathname !== "/mcp" && !apiLedger && !apiInventory && !contest && !apiApprove && !apiAgents) {
       send(res, 404, { error: "not-found" });
       return;
     }
@@ -451,7 +453,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         send(res, 200, { allowRef: outcome.allowRef, approver });
         return;
       }
-      if (apiLedger || apiInventory || contest) {
+      if (apiLedger || apiInventory || contest || apiAgents) {
         // The audit doors hand out the whole ledger: every tenant's decisions, the
         // inputs documents that name their principals, and the approval snapshots
         // that carry spend arguments. `verax:read` is a brain scope, so it cannot be
@@ -466,6 +468,31 @@ export async function listen(config: BodyConfig): Promise<Server> {
             return;
           }
           send(res, 200, readInventoryFile(config.inventoryFile));
+          return;
+        }
+        if (apiAgents) {
+          // The last day unless the caller names a window; the roster's
+          // agents are on the list whether or not they acted in it.
+          const now = Date.now();
+          const fromRaw = url.searchParams.get("from");
+          const toRaw = url.searchParams.get("to");
+          const from = fromRaw === null ? now - 86_400_000 : Number(fromRaw);
+          const to = toRaw === null ? now : Number(toRaw);
+          if (!Number.isFinite(from) || !Number.isFinite(to)) {
+            send(res, 400, { error: "bad-window" });
+            return;
+          }
+          send(
+            res,
+            200,
+            await agentsWindow({
+              ledger: services.ledger,
+              stateDir: config.stateDir,
+              inventoryFile: config.inventoryFile,
+              fromMs: from,
+              toMs: to,
+            }),
+          );
           return;
         }
         if (apiLedger) {

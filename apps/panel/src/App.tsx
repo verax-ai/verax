@@ -4,7 +4,15 @@ import { Observatory, type Healthz, type LedgerError } from "./observatory/Obser
 import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
 import { mergeActions } from "./rail/merge.ts";
 import { parseLedgerRows } from "./rail/parse.ts";
-import type { PendingApproval, PolicyBundle, RailAction, RailDecision, RailEffect, RailFinding } from "./rail/types.ts";
+import type {
+  AgentsAnswer,
+  PendingApproval,
+  PolicyBundle,
+  RailAction,
+  RailDecision,
+  RailEffect,
+  RailFinding,
+} from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
 import { authorizedFetch, beginSession, sessionIssueError, sessionScopes } from "./session.ts";
 
@@ -59,6 +67,32 @@ export function App() {
   const [more, setMore] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
   const pollRef = useRef<() => Promise<void>>(async () => undefined);
+  // The agents list is the body's reading of its ledger and roster; the
+  // screen draws it, and says so when it could not be read.
+  const [agents, setAgents] = useState<AgentsAnswer | null>(null);
+  const [agentsFailed, setAgentsFailed] = useState(false);
+
+  const loadAgents = useCallback(async () => {
+    try {
+      const r = await authorizedFetch("/api/agents");
+      if (!r.ok) {
+        setAgents(null);
+        setAgentsFailed(true);
+        return;
+      }
+      const body = (await r.json()) as AgentsAnswer;
+      if (body && Array.isArray(body.agents)) {
+        setAgents(body);
+        setAgentsFailed(false);
+      } else {
+        setAgents(null);
+        setAgentsFailed(true);
+      }
+    } catch {
+      setAgents(null);
+      setAgentsFailed(true);
+    }
+  }, []);
 
   const loadInventory = useCallback(async () => {
     try {
@@ -142,6 +176,7 @@ export function App() {
     // decision landed: the sentence said eight while the list showed nine.
     // They are read together now, so the tab is one reading of one ledger.
     await loadHealth();
+    await loadAgents();
     try {
       const body = await readLedger(`from=0&to=${END_OF_TIME}&limit=${PAGE}`);
       if (!body) return;
@@ -162,7 +197,7 @@ export function App() {
       setStatus("error");
       setError({ code: "network", detail: null });
     }
-  }, [actions.length, loadHealth, loadInventory, readLedger]);
+  }, [actions.length, loadAgents, loadHealth, loadInventory, readLedger]);
 
   /**
    * What is new since the newest row held, folded into the rows on screen.
@@ -177,6 +212,7 @@ export function App() {
     }
     await loadInventory();
     await loadHealth();
+    await loadAgents();
     try {
       const newestMs = actions[0]!.record.claims.timestampMs;
       const body = await readLedger(`from=${Math.max(0, newestMs - POLL_OVERLAP_MS)}&to=${END_OF_TIME}`);
@@ -191,7 +227,7 @@ export function App() {
       setStatus("error");
       setError({ code: "network", detail: null });
     }
-  }, [actions, load, loadHealth, loadInventory, readLedger]);
+  }, [actions, load, loadAgents, loadHealth, loadInventory, readLedger]);
 
   /** The page before the oldest row on screen, appended below it. */
   const loadOlder = useCallback(async () => {
@@ -319,6 +355,8 @@ export function App() {
         nowMs={nowMs}
         more={more}
         onOlder={() => void loadOlder()}
+        agents={agents}
+        agentsFailed={agentsFailed}
         onRefresh={() => void load()}
         onShowDemo={() => {
           setActions(loadDemoActions());

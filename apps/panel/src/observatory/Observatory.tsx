@@ -6,6 +6,8 @@ import { coverageLine } from "../rail/coverage.ts";
 import { ReconcileCard, type ReconcileCardReport } from "../ReconcileCard.tsx";
 import { BlackBox } from "../blackbox/BlackBox.tsx";
 import type {
+  AgentRow,
+  AgentsAnswer,
   PendingApproval,
   RailAction,
   RailContestResult,
@@ -130,6 +132,8 @@ export function Observatory({
   nowMs = Date.now(),
   more = false,
   onOlder,
+  agents = null,
+  agentsFailed = false,
 }: {
   actions: RailAction[];
   status: ObservatoryStatus;
@@ -138,6 +142,10 @@ export function Observatory({
   /** Whether the ledger goes on past the oldest row on screen. */
   more?: boolean;
   onOlder?: () => void;
+  /** The body's list of agents (/api/agents); null until read. */
+  agents?: AgentsAnswer | null;
+  /** The list was asked for and could not be read. */
+  agentsFailed?: boolean;
   health?: Healthz;
   reconcile?: ReconcileCardReport | null;
   error?: LedgerError | null;
@@ -418,6 +426,8 @@ export function Observatory({
             pending={pending}
             canApprove={canApprove}
             onApprove={onApprove}
+            agents={agents}
+            agentsFailed={agentsFailed}
           />
         ) : null}
         {tab === "box" ? (
@@ -546,6 +556,8 @@ function StatusView({
   pending,
   canApprove,
   onApprove,
+  agents = null,
+  agentsFailed = false,
 }: {
   actions: RailAction[];
   health: Healthz;
@@ -555,6 +567,8 @@ function StatusView({
   onApprove?: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
   reconcile: ReconcileCardReport | null;
   pending: PendingApproval[];
+  agents?: AgentsAnswer | null;
+  agentsFailed?: boolean;
 }) {
   const copy = panelCopy();
   const effects = actions.filter((a) => a.effect).length;
@@ -581,6 +595,7 @@ function StatusView({
           source: pinSource ?? copy["status.pinSource.unaudited"],
         })}
       </p>
+      <AgentsTable copy={copy} agents={agents} failed={agentsFailed} />
       <section data-testid="pending-approvals" className="pending-approvals">
         <h3>{copy["pending.title"]}</h3>
         {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (
@@ -599,6 +614,74 @@ function StatusView({
       </section>
       <ReconcileCard report={reconcile} />
     </div>
+  );
+}
+
+/**
+ * One row per agent, as the body counted it: the roster's agents are on the
+ * list whether or not they acted, and an agent the ledger heard from that
+ * the roster does not name is marked as such rather than left out.
+ */
+function AgentsTable({
+  copy,
+  agents,
+  failed,
+}: {
+  copy: ReturnType<typeof panelCopy>;
+  agents: AgentsAnswer | null;
+  failed: boolean;
+}) {
+  if (failed) {
+    return (
+      <section className="agents" data-testid="agents">
+        <p className="rule-missing">{copy["agents.unmeasured"]}</p>
+      </section>
+    );
+  }
+  if (!agents) return null;
+  const hours = Math.max(1, Math.round((agents.toMs - agents.fromMs) / 3_600_000));
+  const stateWord = (row: AgentRow): string => {
+    if (!row.roster) return copy["agents.state.offRoster"];
+    const key = `agents.state.${row.roster.state}` as keyof typeof copy;
+    return copy[key] ?? row.roster.state;
+  };
+  return (
+    <section className="agents" data-testid="agents">
+      <h3>{fillCopy(copy["agents.title"], { h: String(hours), n: String(agents.agents.length) })}</h3>
+      {agents.unattributed > 0 ? (
+        <p className="muted">{fillCopy(copy["agents.unattributed"], { n: String(agents.unattributed) })}</p>
+      ) : null}
+      {agents.agents.length === 0 ? (
+        <p className="muted">{copy["agents.empty"]}</p>
+      ) : (
+        <table className="agents-table" data-testid="agents-table">
+          <thead>
+            <tr>
+              <th>{copy["agents.col.agent"]}</th>
+              <th>{copy["agents.col.group"]}</th>
+              <th>{copy["agents.col.state"]}</th>
+              <th>{copy["agents.col.decisions"]}</th>
+              <th>{copy["agents.col.denied"]}</th>
+              <th>{copy["agents.col.pending"]}</th>
+              <th>{copy["agents.col.last"]}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {agents.agents.map((row) => (
+              <tr key={row.brain} className={row.pending > 0 ? "has-pending" : undefined}>
+                <td>{row.roster?.label ?? row.brain}</td>
+                <td>{row.roster?.group ?? ""}</td>
+                <td>{stateWord(row)}</td>
+                <td>{row.decisions}</td>
+                <td>{row.denied}</td>
+                <td>{row.pending}</td>
+                <td>{row.lastMs === null ? copy.unmeasured : formatStamp(row.lastMs)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
   );
 }
 
