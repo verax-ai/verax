@@ -320,14 +320,23 @@ export async function listen(config: BodyConfig): Promise<Server> {
         send(res, 200, { ok: true });
         return;
       }
-      const decisions = await services.ledger.decisions();
-      const effects = await services.ledger.effects();
-      const last = decisions[decisions.length - 1];
+      // The ledger counts its own lines as it writes them; asking it is free.
+      // Reading both files back to count them was one second per call on a
+      // 100k-decision ledger, five times a minute for as long as a panel was open.
+      let counted = services.ledger.counts();
+      if (!counted) {
+        const decisions = await services.ledger.decisions();
+        const effects = await services.ledger.effects();
+        const last = decisions[decisions.length - 1];
+        counted = {
+          decisions: decisions.length,
+          effects: effects.length,
+          lastDecisionMs: last ? last.claims.timestampMs : null,
+        };
+      }
       send(res, 200, {
         ok: true,
-        decisions: decisions.length,
-        effects: effects.length,
-        lastDecisionMs: last ? last.claims.timestampMs : null,
+        ...counted,
         lock: services.ledger.lockStatus(),
         heartbeat: readHeartbeat(config.stateDir),
         witness: readWitnessPulse(config.stateDir),

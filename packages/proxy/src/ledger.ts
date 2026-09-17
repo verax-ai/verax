@@ -388,6 +388,7 @@ export class FileLedger implements Ledger {
   private readonly heartbeatPath: string;
   private decisionCount = 0;
   private effectCount = 0;
+  private lastDecisionMs: number | null = null;
 
   constructor(dir: string) {
     this.dir = dir;
@@ -418,6 +419,7 @@ export class FileLedger implements Ledger {
     this.decisionCount = decisions.length;
     const last = decisions[decisions.length - 1];
     this.tailHash = last ? decisionRecordHash(last) : null;
+    this.lastDecisionMs = last ? last.claims.timestampMs : null;
     const rowsByRef = new Map<string, DecisionIndexRow[]>();
     for (const rec of decisions) {
       const row = indexRowOf(rec);
@@ -557,6 +559,7 @@ export class FileLedger implements Ledger {
       await appendDurable(this.decisionsPath, line);
       await this.pulse("decisions.jsonl", line, "decision");
       this.tailHash = decisionRecordHash(signed);
+      this.lastDecisionMs = signed.claims.timestampMs;
       const row = indexRowOf(signed);
       if (row) {
         this.byRef.set(row.ref, row);
@@ -576,6 +579,7 @@ export class FileLedger implements Ledger {
       await appendDurable(this.decisionsPath, line);
       await this.pulse("decisions.jsonl", line, "decision");
       this.tailHash = decisionRecordHash(signed);
+      this.lastDecisionMs = signed.claims.timestampMs;
       const row = indexRowOf(signed);
       if (row) {
         this.byRef.set(row.ref, row);
@@ -583,6 +587,18 @@ export class FileLedger implements Ledger {
         noteCounted(this.countedAt, row);
       }
     });
+  }
+
+  /**
+   * What /healthz reports, from memory: the counts are kept on load and on
+   * every append. Rereading both files to count lines cost a second per call
+   * on a 100k-decision ledger (measured 17 Sep 2026), and the panel asks
+   * every five seconds. Null when the decision file could not be parsed on
+   * load; then the caller reads for itself and fails the way it always did.
+   */
+  counts(): { decisions: number; effects: number; lastDecisionMs: number | null } | null {
+    if (!this.countsReadable) return null;
+    return { decisions: this.decisionCount, effects: this.effectCount, lastDecisionMs: this.lastDecisionMs };
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
