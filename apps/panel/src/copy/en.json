@@ -87,6 +87,8 @@
   "records.source.agents": "Agents in the ledger: {agents}",
   "records.source.noAgents": "No agent is named in the ledger",
   "records.source.noProjects": "projects not bound",
+  "records.window": "The newest {n} records are on screen; the ledger goes on before them.",
+  "records.older": "Show older records",
   "status.allow": "allowed",
   "status.deny": "denied",
   "status.defer": "waiting",

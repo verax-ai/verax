@@ -128,11 +128,16 @@ export function Observatory({
   pending = [],
   inventory = null,
   nowMs = Date.now(),
+  more = false,
+  onOlder,
 }: {
   actions: RailAction[];
   status: ObservatoryStatus;
   demo: boolean;
   pending?: PendingApproval[];
+  /** Whether the ledger goes on past the oldest row on screen. */
+  more?: boolean;
+  onOlder?: () => void;
   health?: Healthz;
   reconcile?: ReconcileCardReport | null;
   error?: LedgerError | null;
@@ -399,6 +404,8 @@ export function Observatory({
             brains={brains}
             selected={action?.record.claims.ref ?? selected}
             onSelect={(ref) => setSelected(ref)}
+            more={more}
+            onOlder={onOlder}
           />
         ) : null}
         {tab === "status" ? (

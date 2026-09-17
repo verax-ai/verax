@@ -13,6 +13,8 @@ export function RecordList({
   brains,
   selected,
   onSelect,
+  more = false,
+  onOlder,
 }: {
   actions: RailAction[];
   status: "loading" | "ok" | "error" | "empty";
@@ -21,6 +23,9 @@ export function RecordList({
   brains: string[];
   selected: string | null;
   onSelect: (ref: string) => void;
+  /** Whether the ledger goes on past the oldest row on screen. */
+  more?: boolean;
+  onOlder?: () => void;
 }) {
   const copy = panelCopy();
   const sentence = summarySentence(copy, countRecords(actions, pending, reconcile));
@@ -72,6 +77,14 @@ export function RecordList({
           })}
         </ol>
       )}
+      {!empty && more ? (
+        <div className="records-older" data-testid="records-older">
+          <p className="muted">{fillCopy(copy["records.window"], { n: String(actions.length) })}</p>
+          <button type="button" className="focusable" onClick={() => onOlder?.()}>
+            {copy["records.older"]}
+          </button>
+        </div>
+      ) : null}
     </div>
   );
 }
