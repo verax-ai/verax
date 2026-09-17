@@ -646,3 +646,50 @@ aside {
 .agents-table tr.has-pending td {
   font-weight: 600;
 }
+
+/* Records tab: narrowing the rows on screen. */
+.records-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+  align-items: center;
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+.records-filter label {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+.records-filter select,
+.records-filter input {
+  background: transparent;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  font: inherit;
+}
+.records-filter-shown {
+  flex-basis: 100%;
+  margin: 0;
+}
+.agents-table tr.agents-group td {
+  padding-top: 0.6rem;
+  border-bottom: 0;
+}
+.agents-table tr.agents-group button {
+  background: transparent;
+  border: 0;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  padding: 0;
+  cursor: pointer;
+}
+.agents-table tr.agents-group button::before {
+  content: "▾ ";
+}
+.agents-table tr.agents-group button[aria-expanded="false"]::before {
+  content: "▸ ";
+}
