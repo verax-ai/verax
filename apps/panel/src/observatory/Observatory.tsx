@@ -631,6 +631,9 @@ function AgentsTable({
   agents: AgentsAnswer | null;
   failed: boolean;
 }) {
+  // Groups the operator closed. Keyed by group, so a poll that reorders the
+  // rows does not reopen what was closed.
+  const [folded, setFolded] = useState<Set<string>>(() => new Set());
   if (failed) {
     return (
       <section className="agents" data-testid="agents">
@@ -645,6 +648,7 @@ function AgentsTable({
     const key = `agents.state.${row.roster.state}` as keyof typeof copy;
     return copy[key] ?? row.roster.state;
   };
+  const groups = groupAgents(agents.agents, copy);
   return (
     <section className="agents" data-testid="agents">
       <h3>{fillCopy(copy["agents.title"], { h: String(hours), n: String(agents.agents.length) })}</h3>
@@ -666,23 +670,81 @@ function AgentsTable({
               <th>{copy["agents.col.last"]}</th>
             </tr>
           </thead>
-          <tbody>
-            {agents.agents.map((row) => (
-              <tr key={row.brain} className={row.pending > 0 ? "has-pending" : undefined}>
-                <td>{row.roster?.label ?? row.brain}</td>
-                <td>{row.roster?.group ?? ""}</td>
-                <td>{stateWord(row)}</td>
-                <td>{row.decisions}</td>
-                <td>{row.denied}</td>
-                <td>{row.pending}</td>
-                <td>{row.lastMs === null ? copy.unmeasured : formatStamp(row.lastMs)}</td>
-              </tr>
-            ))}
-          </tbody>
+          {groups.map((group) => {
+            const open = !folded.has(group.key);
+            return (
+              <tbody key={group.key}>
+                <tr className="agents-group">
+                  <td colSpan={7}>
+                    <button
+                      type="button"
+                      className="focusable"
+                      aria-expanded={open}
+                      onClick={() => {
+                        const next = new Set(folded);
+                        if (open) next.add(group.key);
+                        else next.delete(group.key);
+                        setFolded(next);
+                      }}
+                    >
+                      {fillCopy(copy["agents.group.line"], {
+                        group: group.label,
+                        n: String(group.rows.length),
+                        pending: String(group.rows.reduce((sum, row) => sum + row.pending, 0)),
+                      })}
+                    </button>
+                  </td>
+                </tr>
+                {open
+                  ? group.rows.map((row) => (
+                      <tr key={row.brain} className={row.pending > 0 ? "agent-row has-pending" : "agent-row"}>
+                        <td>{row.roster?.label ?? row.brain}</td>
+                        <td>{row.roster?.group ?? ""}</td>
+                        <td>{stateWord(row)}</td>
+                        <td>{row.decisions}</td>
+                        <td>{row.denied}</td>
+                        <td>{row.pending}</td>
+                        <td>{row.lastMs === null ? copy.unmeasured : formatStamp(row.lastMs)}</td>
+                      </tr>
+                    ))
+                  : null}
+              </tbody>
+            );
+          })}
         </table>
       )}
     </section>
   );
+}
+
+/**
+ * The rows folded under the roster's groups, in the order the groups first
+ * appear in the body's list (which is pending first, then most recent).
+ * An agent the roster does not name is filed under "not on the roster"; a
+ * roster agent without a group under "no group". Both are groups of their
+ * own so that folding one machine's agents away never hides them.
+ */
+function groupAgents(
+  rows: readonly AgentRow[],
+  copy: ReturnType<typeof panelCopy>,
+): { key: string; label: string; rows: AgentRow[] }[] {
+  const out = new Map<string, { key: string; label: string; rows: AgentRow[] }>();
+  for (const row of rows) {
+    const key = row.roster === null ? " off" : row.roster.group === null ? " none" : `g:${row.roster.group}`;
+    const label =
+      row.roster === null
+        ? copy["agents.state.offRoster"]
+        : row.roster.group === null
+          ? copy["agents.group.none"]
+          : row.roster.group;
+    let group = out.get(key);
+    if (!group) {
+      group = { key, label, rows: [] };
+      out.set(key, group);
+    }
+    group.rows.push(row);
+  }
+  return [...out.values()];
 }
 
 /**

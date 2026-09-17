@@ -73,13 +73,32 @@ describe("status tab agents", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
     const table = await screen.findByTestId("agents-table");
     expect(urls.some((u) => u.includes("/api/agents"))).toBe(true);
-    const rows = within(table).getAllByRole("row").slice(1);
+    const rows = [...table.querySelectorAll<HTMLElement>("tr.agent-row")];
     expect(rows.length).toBe(3);
     const cells = (row: HTMLElement) => within(row).getAllByRole("cell").map((c) => c.textContent?.trim() ?? "");
     expect(cells(rows[0]!)).toEqual(["Agent A", "This PC", "canlı", "4", "1", "1", "2023-11-14T22:03:20Z"]);
     expect(cells(rows[1]!)).toEqual(["agent-b", "", "listede yok", "2", "0", "0", "2023-11-14T21:53:20Z"]);
     expect(cells(rows[2]!)).toEqual(["Agent C", "", "izlenmiyor", "0", "0", "0", "ölçülemedi"]);
     expect(screen.getByText("Ajanlar · son 24 saat · 3 ajan")).toBeTruthy();
+  });
+
+  it("folds the rows under their roster group, and a group can be closed and opened", async () => {
+    stubFetch(() => new Response(JSON.stringify(agentsAnswer), { status: 200 }));
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelectorAll(".record-row").length).toBe(1);
+    });
+    fireEvent.click(screen.getByRole("tab", { name: "Genel durum" }));
+    const table = await screen.findByTestId("agents-table");
+    const headers = [...table.querySelectorAll<HTMLElement>("tr.agents-group button")].map((b) => b.textContent?.trim());
+    expect(headers).toEqual(["This PC · 1 ajan · 1 bekleyen", "listede yok · 1 ajan · 0 bekleyen", "grupsuz · 1 ajan · 0 bekleyen"]);
+    const thisPc = screen.getByRole("button", { name: "This PC · 1 ajan · 1 bekleyen" });
+    expect(thisPc.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.click(thisPc);
+    expect(table.querySelectorAll("tr.agent-row").length).toBe(2);
+    expect(thisPc.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(thisPc);
+    expect(table.querySelectorAll("tr.agent-row").length).toBe(3);
   });
 
   it("says the list could not be read instead of drawing an empty table", async () => {
