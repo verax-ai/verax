@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { parseInventory, type Inventory } from "@verax-ai/inventory";
 import { Observatory, type Healthz, type LedgerError } from "./observatory/Observatory.tsx";
 import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
-import { parseLedger } from "./rail/parse.ts";
-import type { PendingApproval, PolicyBundle, RailAction, RailFinding } from "./rail/types.ts";
+import { mergeActions } from "./rail/merge.ts";
+import { parseLedgerRows } from "./rail/parse.ts";
+import type { PendingApproval, PolicyBundle, RailAction, RailDecision, RailEffect, RailFinding } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
 import { authorizedFetch, beginSession, sessionIssueError, sessionScopes } from "./session.ts";
 
@@ -11,6 +12,31 @@ type RailStatus = "loading" | "ok" | "error" | "empty";
 
 const STALE_MS = 30_000;
 const REFRESH_MS = 5_000;
+/** Rows per page. The newest page is what opens; older pages come on request. */
+const PAGE = 200;
+/**
+ * How far behind the newest row held a poll starts. An effect lands a moment
+ * after its decision, and a clock can be set back between two rows; a
+ * minute of overlap catches both, and mergeActions folds the overlap away.
+ */
+const POLL_OVERLAP_MS = 60_000;
+const END_OF_TIME = 9_999_999_999_999;
+
+type LedgerBody = {
+  decisions?: unknown[];
+  effects?: unknown[];
+  policies?: Record<string, PolicyBundle["document"]>;
+  policy?: PolicyBundle;
+  inputs?: Record<string, import("./rail/types.ts").RailInputs>;
+  approvals?: PendingApproval[];
+  more?: unknown;
+};
+
+function rowsOf(body: LedgerBody): RailAction[] {
+  const decisions = Array.isArray(body.decisions) ? (body.decisions as RailDecision[]) : [];
+  const effects = Array.isArray(body.effects) ? (body.effects as RailEffect[]) : [];
+  return parseLedgerRows(decisions, effects, body.policies ?? null, body.inputs ?? null);
+}
 
 function wantDemo(): boolean {
   if (typeof window === "undefined") return false;
@@ -29,6 +55,10 @@ export function App() {
   const [pending, setPending] = useState<PendingApproval[]>([]);
   const [inventory, setInventory] = useState<Inventory | null>(null);
   const [canApprove, setCanApprove] = useState(false);
+  // Whether the ledger goes on past the oldest row on screen.
+  const [more, setMore] = useState(false);
+  const [olderBusy, setOlderBusy] = useState(false);
+  const pollRef = useRef<() => Promise<void>>(async () => undefined);
 
   const loadInventory = useCallback(async () => {
     try {
@@ -59,6 +89,37 @@ export function App() {
     }
   }, []);
 
+  /**
+   * One read of /api/ledger. Null when the screen already said what went
+   * wrong; the caller decides what a good answer replaces.
+   */
+  const readLedger = useCallback(async (query: string): Promise<LedgerBody | null> => {
+    const r = await authorizedFetch(`/api/ledger?${query}`);
+    if (!r.ok) {
+      let detail = "";
+      try {
+        const errBody = (await r.json()) as { error?: unknown };
+        if (typeof errBody.error === "string") detail = errBody.error;
+      } catch {
+        detail = "";
+      }
+      if (wantDemo()) {
+        return null;
+      }
+      setStatus("error");
+      setError({ code: "http", status: r.status, detail: detail || null });
+      return null;
+    }
+    try {
+      return (await r.json()) as LedgerBody;
+    } catch {
+      setStatus("error");
+      setError({ code: "invalid-json", detail: null });
+      return null;
+    }
+  }, []);
+
+  /** The newest page, replacing whatever the screen held. */
   const load = useCallback(async () => {
     if (wantDemo()) {
       // The sample scenario stands on its own flag, not on a failing request.
@@ -82,62 +143,74 @@ export function App() {
     // They are read together now, so the tab is one reading of one ledger.
     await loadHealth();
     try {
-      const r = await authorizedFetch("/api/ledger?from=0&to=9999999999999");
-      if (!r.ok) {
-        let detail = "";
-        try {
-          const errBody = (await r.json()) as { error?: unknown };
-          if (typeof errBody.error === "string") detail = errBody.error;
-        } catch {
-          detail = "";
-        }
-        if (wantDemo()) {
-          return;
-        }
-        setStatus("error");
-        setError({ code: "http", status: r.status, detail: detail || null });
-        return;
-      }
-      let body: {
-        decisions?: unknown[];
-        effects?: unknown[];
-        policies?: Record<string, PolicyBundle["document"]>;
-        policy?: PolicyBundle;
-        inputs?: Record<string, import("./rail/types.ts").RailInputs>;
-        approvals?: PendingApproval[];
-      };
-      try {
-        body = (await r.json()) as typeof body;
-      } catch {
-        setStatus("error");
-        setError({ code: "invalid-json", detail: null });
-        return;
-      }
-      const decisions = Array.isArray(body.decisions) ? body.decisions : [];
-      const effects = Array.isArray(body.effects) ? body.effects : [];
-      const parsed = parseLedger(
-        decisions.map((x) => JSON.stringify(x)).join("\n"),
-        effects.map((x) => JSON.stringify(x)).join("\n"),
-        body.policies ?? null,
-        body.inputs ?? null,
-      );
+      const body = await readLedger(`from=0&to=${END_OF_TIME}&limit=${PAGE}`);
+      if (!body) return;
+      const parsed = rowsOf(body);
       setLastReadMs(Date.now());
       setError(null);
       setDemo(false);
+      setMore(body.more === true);
+      setPending(Array.isArray(body.approvals) ? body.approvals : []);
       if (parsed.length === 0) {
         setActions([]);
-        setPending(Array.isArray(body.approvals) ? body.approvals : []);
         setStatus("empty");
         return;
       }
       setActions(parsed);
-      setPending(Array.isArray(body.approvals) ? body.approvals : []);
       setStatus("ok");
     } catch {
       setStatus("error");
       setError({ code: "network", detail: null });
     }
-  }, [actions.length, loadHealth, loadInventory]);
+  }, [actions.length, loadHealth, loadInventory, readLedger]);
+
+  /**
+   * What is new since the newest row held, folded into the rows on screen.
+   * Until the screen holds a row there is nothing to fold into: the newest
+   * page is read instead. The body answers a window from the end of its
+   * files, so this costs a minute of rows, not the ledger.
+   */
+  const poll = useCallback(async () => {
+    if (wantDemo() || actions.length === 0) {
+      await load();
+      return;
+    }
+    await loadInventory();
+    await loadHealth();
+    try {
+      const newestMs = actions[0]!.record.claims.timestampMs;
+      const body = await readLedger(`from=${Math.max(0, newestMs - POLL_OVERLAP_MS)}&to=${END_OF_TIME}`);
+      if (!body) return;
+      setLastReadMs(Date.now());
+      setError(null);
+      setPending(Array.isArray(body.approvals) ? body.approvals : []);
+      const fresh = rowsOf(body);
+      if (fresh.length > 0) setActions((held) => mergeActions(held, fresh));
+      setStatus("ok");
+    } catch {
+      setStatus("error");
+      setError({ code: "network", detail: null });
+    }
+  }, [actions, load, loadHealth, loadInventory, readLedger]);
+
+  /** The page before the oldest row on screen, appended below it. */
+  const loadOlder = useCallback(async () => {
+    if (actions.length === 0 || olderBusy) return;
+    setOlderBusy(true);
+    try {
+      const oldestMs = actions[actions.length - 1]!.record.claims.timestampMs;
+      const body = await readLedger(`from=0&to=${oldestMs}&limit=${PAGE}`);
+      if (!body) return;
+      setMore(body.more === true);
+      const older = rowsOf(body);
+      if (older.length > 0) setActions((held) => mergeActions(held, older));
+    } catch {
+      setStatus("error");
+      setError({ code: "network", detail: null });
+    } finally {
+      setOlderBusy(false);
+    }
+  }, [actions, olderBusy, readLedger]);
 
   useEffect(() => {
     let cancelled = false;
@@ -155,14 +228,21 @@ export function App() {
       setCanApprove(phase === "demo" || sessionScopes().has("verax:approve"));
       void load();
       id = setInterval(() => {
-        void load();
+        void pollRef.current();
       }, REFRESH_MS);
     })();
     return () => {
       cancelled = true;
       if (id) clearInterval(id);
     };
-  }, [load]);
+    // The interval is set once, at session start; it reads the latest poll
+    // through the ref rather than restarting whenever the rows change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    pollRef.current = poll;
+  }, [poll]);
 
   useEffect(() => {
     if (wantDemo()) return;
@@ -237,6 +317,8 @@ export function App() {
         pending={pending}
         inventory={inventory}
         nowMs={nowMs}
+        more={more}
+        onOlder={() => void loadOlder()}
         onRefresh={() => void load()}
         onShowDemo={() => {
           setActions(loadDemoActions());

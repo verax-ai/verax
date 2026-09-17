@@ -47,6 +47,20 @@ export function parseLedger(
     .split("\n")
     .filter((l) => l !== "")
     .map((l) => JSON.parse(l) as RailEffect);
+  return parseLedgerRows(decisions, effects, policies, inputs);
+}
+
+/**
+ * The same reading from rows already parsed. /api/ledger answers JSON, and
+ * the screen used to print each row back to a line to read it again: at
+ * 100k rows that was the ledger parsed twice, every five seconds.
+ */
+export function parseLedgerRows(
+  decisions: RailDecision[],
+  effects: RailEffect[],
+  policies?: PolicyStore | PolicyBundle | null,
+  inputs?: Record<string, RailInputs> | null,
+): RailAction[] {
   const byRef = new Map(effects.map((e) => [e.row.ref, e]));
   const store = storeOf(policies);
   return [...decisions].reverse().map((record) => {

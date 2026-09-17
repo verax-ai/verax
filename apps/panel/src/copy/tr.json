@@ -87,6 +87,8 @@
   "records.source.agents": "Defterdeki ajanlar: {agents}",
   "records.source.noAgents": "Defterde adı geçen ajan yok",
   "records.source.noProjects": "projeler bağlı değil",
+  "records.window": "Ekranda en yeni {n} kayıt var; defter bunlardan önce de sürüyor.",
+  "records.older": "Daha eskileri göster",
   "status.allow": "onaylandı",
   "status.deny": "reddedildi",
   "status.defer": "bekliyor",
