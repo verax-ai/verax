@@ -14,6 +14,17 @@ stands in front: gate, signed decision, forward, hashed effect.
 Brain-storm source: `Work/VERAX_MEGAZORD_BEYIN_FIRTINASI_20260904.md`,
 proposal C (Verax Proxy). Product decision stays with the operator.
 
+**Decisions taken (17 September 2026, operator).** Connection: a
+`VERAX_DOWNSTREAM` JSON document, stdio now, HTTP later; not a `servers:`
+block in the policy file, because that would change `policyHash` for
+every rule. Namespace: `prefix.childName`, exact-match policy rules, no
+wildcard; HTTP `tools/list` publishes the extras only once `listen()`
+wires a downstream, which is a later phase, not this spike. Receipt
+binding: the effect row keeps `resultHash` over the child's answer and
+nothing more; a Conarium receipt field is decided when the body reads a
+real Conarium receipt, not before. The no-bypass scan names the SDK stdio
+transport, and only `src/downstream.ts` may import it.
+
 ## 1. Connection
 
 **Decision (spike).** One child, stdio, described in process code as

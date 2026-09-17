@@ -36,6 +36,9 @@ const CREATE_REQUIRE = /\bcreateRequire\b/;
 const CONCAT_TOOLS = /["']\.\/to["']\s*\+\s*["']ols/;
 const CHILD = /\bchild_process\b/;
 const WORKER = /\bworker_threads\b/;
+// The SDK stdio client transport spawns a process without naming
+// child_process in this tree. Only src/downstream.ts may use it.
+const SDK_STDIO = /client\/stdio\.js|\bStdioClientTransport\b/;
 
 function lineAt(text: string, index: number): number {
   return text.slice(0, index).split(/\n/).length;
@@ -65,6 +68,8 @@ export function scanNoBypass(
     const wiring = rel === "src/wiring.ts";
     // Desktop supervises issuer/body/panel. It is not a tool-call path.
     const desktop = rel === "src/desktop.ts";
+    // The downstream spike attaches one stdio MCP server. Not a tool-call path.
+    const downstream = rel === "src/downstream.ts";
     const originalLines = text.split(/\r?\n/);
     for (const match of text.matchAll(DYNAMIC_IMPORT)) {
       const index = match.index ?? 0;
@@ -94,6 +99,7 @@ export function scanNoBypass(
       if (CONCAT_TOOLS.test(line)) push("concatenated tools path");
       if (CHILD.test(line) && !desktop) push("child_process");
       if (WORKER.test(line)) push("worker_threads");
+      if (SDK_STDIO.test(line) && !downstream) push("sdk-stdio-spawn");
     }
   }
   return hits;

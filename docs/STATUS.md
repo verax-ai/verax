@@ -201,7 +201,9 @@ goes through the existing proxy (`docs/design/downstream.md`,
 and does not pass `extraTools`; HTTP `/mcp` still lists the six built-in
 tools. The default policy is unchanged. The panel is unchanged. The
 attach starts the child through the SDK stdio transport; that source does
-not write the `child_process` name, so the no-bypass scan does not see
-the spawn (`src/desktop.ts` remains the file that may name it). This is
-a spike, not a release path. Unproven against a live Conarium or Tugra
-server.
+not write the `child_process` name, so the no-bypass scan names the SDK
+stdio client transport instead, and only `src/downstream.ts` may import
+it (`src/desktop.ts` remains the file that may name `child_process`).
+Operator decisions of 17 Sep 2026 are on the design note (connection
+document, exact-match namespace, `resultHash` only). This is a spike,
+not a release path. Unproven against a live Conarium or Tugra server.
