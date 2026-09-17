@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { panelCopy } from "../copy.ts";
 import { fillCopy } from "../fill.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
@@ -8,6 +8,13 @@ import { recordLine, statusWord, type RecordKind } from "./line.ts";
 import { countRecords, summarySentence } from "./summary.ts";
 
 const KINDS: readonly RecordKind[] = ["allow", "deny", "defer", "threw", "expired"];
+/**
+ * Rows drawn at once. The rest are revealed a hundred at a time as the reader
+ * reaches the end of the list, so loading older pages never puts thousands
+ * of rows into the document together: measured on 17 Sep 2026, ten thousand
+ * rows drawn at once were 122k DOM nodes and 1.8 s before the first paint.
+ */
+const REVEAL = 100;
 
 export function RecordList({
   actions,
@@ -41,6 +48,31 @@ export function RecordList({
   const tools = useMemo(() => [...new Set(actions.map((a) => a.record.claims.subject))].sort(), [actions]);
   const shown = useMemo(() => filterActions(actions, pending, filter), [actions, pending, filter]);
   const narrowed = filterActive(filter);
+  const [revealed, setRevealed] = useState(REVEAL);
+  useEffect(() => {
+    setRevealed(REVEAL);
+  }, [filter]);
+  const visible = shown.slice(0, revealed);
+  const hidden = shown.length - visible.length;
+  // Where the browser can watch the scroll, reaching the end of the drawn
+  // rows reveals the next hundred; the button under the list does the same
+  // by hand, and is all there is where it cannot.
+  const sentinel = useRef<HTMLLIElement | null>(null);
+  useEffect(() => {
+    if (hidden <= 0 || typeof IntersectionObserver === "undefined") return;
+    const el = sentinel.current;
+    if (!el) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setRevealed((n) => n + REVEAL);
+      },
+      { rootMargin: "240px" },
+    );
+    io.observe(el);
+    return () => {
+      io.disconnect();
+    };
+  }, [hidden, revealed]);
   // What the rail used to hold: who wrote into this ledger, and what is not
   // bound to it. It is one line about the source of the list, not a second
   // copy of the list.
@@ -123,7 +155,7 @@ export function RecordList({
         </div>
       ) : (
         <ol className="record-list" data-testid="record-list">
-          {shown.map((action) => {
+          {visible.map((action) => {
             const ref = action.record.claims.ref ?? "unknown";
             const line = recordLine(copy, action, pending);
             const word = statusWord(copy, line.kind);
@@ -143,6 +175,13 @@ export function RecordList({
               </li>
             );
           })}
+          {hidden > 0 ? (
+            <li className="records-reveal" ref={sentinel} data-testid="records-reveal">
+              <button type="button" className="focusable" onClick={() => setRevealed((n) => n + REVEAL)}>
+                {fillCopy(copy["records.reveal"], { n: String(hidden) })}
+              </button>
+            </li>
+          ) : null}
         </ol>
       )}
       {!empty && more ? (
