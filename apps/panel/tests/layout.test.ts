@@ -382,6 +382,21 @@ describe("observatory layout", () => {
             }
             if (TAB_FILES[t] === "status") {
               if (!rail) fails.push(`${view.name}/${TAB_FILES[t]}: no rail, and no other way into a record`);
+              // Seven columns that do not wrap are wider than the middle pane
+              // at every width the panel opens at. Wider is allowed; wider with
+              // no way to reach the far columns is not, so the section has to
+              // be the thing that scrolls.
+              const agents = await page.evaluate(() => {
+                const el = document.querySelector(".agents");
+                if (!el) return null;
+                const over = el.scrollWidth - el.clientWidth;
+                return { over, overflowX: getComputedStyle(el).overflowX };
+              });
+              if (agents && agents.over > 1 && agents.overflowX !== "auto" && agents.overflowX !== "scroll") {
+                fails.push(
+                  `${view.name}/${TAB_FILES[t]}: the agents table runs ${agents.over}px past its section and the section does not scroll (overflow-x: ${agents.overflowX})`,
+                );
+              }
             }
             if (TAB_FILES[t] === "box") {
               // The box takes the whole width; its way into a record is the
