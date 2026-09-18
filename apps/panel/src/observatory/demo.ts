@@ -1,6 +1,6 @@
 import { parseLedger } from "../rail/parse.ts";
 import type { PolicyStore } from "../rail/parse.ts";
-import type { PendingApproval, RailAction, RailInputs } from "../rail/types.ts";
+import type { AgentRow, AgentsAnswer, PendingApproval, RailAction, RailInputs } from "../rail/types.ts";
 import type { ReconcileCardReport } from "../ReconcileCard.tsx";
 import decisionsText from "../../../../packages/proxy/tests/fixtures/ledger-golden/decisions.jsonl?raw";
 import effectsText from "../../../../packages/proxy/tests/fixtures/ledger-golden/effects.jsonl?raw";
@@ -169,6 +169,69 @@ export function loadDemoApprovals(): PendingApproval[] {
       brain: "sample-brain",
     },
   ];
+}
+
+/**
+ * The agents table for the sample, counted off the sample itself.
+ *
+ * A body answers /api/agents by reading its ledger and its roster. The sample
+ * has no body, so the table was simply absent and the published screen showed
+ * less than the product does. These rows are the same arithmetic as
+ * `agentsWindow` in the body, applied to the rows already on screen: the brain
+ * comes from the decision's inputs document, a decision with none is
+ * unattributed rather than filed under a guessed name, and an approval that is
+ * still pending counts against its brain. Nothing here is a number the sample
+ * does not already state.
+ *
+ * `roster` stays null on every row, because the sample reads no inventory. The
+ * table then files them under its off-roster group, which is what the status
+ * rail already says in words: the sample scenario shows no inventory.
+ */
+export function demoAgents(
+  actions: readonly RailAction[],
+  pending: readonly PendingApproval[],
+): AgentsAnswer {
+  const byBrain = new Map<string, AgentRow>();
+  const rowFor = (brain: string): AgentRow => {
+    let row = byBrain.get(brain);
+    if (!row) {
+      row = { brain, decisions: 0, allowed: 0, denied: 0, deferred: 0, pending: 0, lastMs: null, roster: null };
+      byBrain.set(brain, row);
+    }
+    return row;
+  };
+
+  let unattributed = 0;
+  let fromMs: number | null = null;
+  let toMs: number | null = null;
+  for (const action of actions) {
+    const brain = action.inputs?.principal.brain;
+    if (typeof brain !== "string" || brain === "") {
+      unattributed += 1;
+      continue;
+    }
+    const row = rowFor(brain);
+    const { decision, timestampMs } = action.record.claims;
+    row.decisions += 1;
+    if (decision === "allow") row.allowed += 1;
+    else if (decision === "deny") row.denied += 1;
+    else if (decision === "defer") row.deferred += 1;
+    if (row.lastMs === null || timestampMs > row.lastMs) row.lastMs = timestampMs;
+    if (fromMs === null || timestampMs < fromMs) fromMs = timestampMs;
+    if (toMs === null || timestampMs > toMs) toMs = timestampMs;
+  }
+  for (const approval of pending) {
+    if (approval.status === "pending") rowFor(approval.brain).pending += 1;
+  }
+
+  const agents = [...byBrain.values()].sort(
+    (a, b) => b.pending - a.pending || (b.lastMs ?? -1) - (a.lastMs ?? -1) || a.brain.localeCompare(b.brain),
+  );
+  return { fromMs: fromMs ?? 0, toMs: toMs ?? 0, agents, unattributed };
+}
+
+export function loadDemoAgents(): AgentsAnswer {
+  return demoAgents(loadDemoActions(), loadDemoApprovals());
 }
 
 export function loadDemoReconcile(): ReconcileCardReport {

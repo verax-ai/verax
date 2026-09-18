@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { parseInventory, type Inventory } from "@verax-ai/inventory";
 import { Observatory, type Healthz, type LedgerError } from "./observatory/Observatory.tsx";
-import { loadDemoActions, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
+import { loadDemoActions, loadDemoAgents, loadDemoApprovals, loadDemoReconcile } from "./observatory/demo.ts";
 import { mergeActions } from "./rail/merge.ts";
 import { parseLedgerRows } from "./rail/parse.ts";
 import type {
@@ -164,6 +164,12 @@ export function App() {
         setActions(loadDemoActions());
         setPending(loadDemoApprovals());
         setReconcileReport(loadDemoReconcile());
+        // The agents table is the body's reading of its ledger. The sample has
+        // no body to ask, so it is counted off the sample's own rows rather
+        // than left out: the published screen used to show less than the
+        // product, and a visitor had no way to know why.
+        setAgents(loadDemoAgents());
+        setAgentsFailed(false);
         setDemo(true);
         setStatus("ok");
         setLastReadMs(Date.now());
@@ -362,6 +368,8 @@ export function App() {
           setActions(loadDemoActions());
           setPending(loadDemoApprovals());
           setReconcileReport(loadDemoReconcile());
+          setAgents(loadDemoAgents());
+          setAgentsFailed(false);
           setDemo(true);
         }}
         onContest={async (ref) => {

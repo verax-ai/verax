@@ -428,6 +428,7 @@ export function Observatory({
             onApprove={onApprove}
             agents={agents}
             agentsFailed={agentsFailed}
+            demo={demo}
           />
         ) : null}
         {tab === "box" ? (
@@ -558,6 +559,7 @@ function StatusView({
   onApprove,
   agents = null,
   agentsFailed = false,
+  demo = false,
 }: {
   actions: RailAction[];
   health: Healthz;
@@ -569,6 +571,7 @@ function StatusView({
   pending: PendingApproval[];
   agents?: AgentsAnswer | null;
   agentsFailed?: boolean;
+  demo?: boolean;
 }) {
   const copy = panelCopy();
   const effects = actions.filter((a) => a.effect).length;
@@ -595,7 +598,7 @@ function StatusView({
           source: pinSource ?? copy["status.pinSource.unaudited"],
         })}
       </p>
-      <AgentsTable copy={copy} agents={agents} failed={agentsFailed} />
+      <AgentsTable copy={copy} agents={agents} failed={agentsFailed} demo={demo} />
       <section data-testid="pending-approvals" className="pending-approvals">
         <h3>{copy["pending.title"]}</h3>
         {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (
@@ -626,10 +629,12 @@ function AgentsTable({
   copy,
   agents,
   failed,
+  demo = false,
 }: {
   copy: ReturnType<typeof panelCopy>;
   agents: AgentsAnswer | null;
   failed: boolean;
+  demo?: boolean;
 }) {
   // Groups the operator closed. Keyed by group, so a poll that reorders the
   // rows does not reopen what was closed.
@@ -651,7 +656,16 @@ function AgentsTable({
   const groups = groupAgents(agents.agents, copy);
   return (
     <section className="agents" data-testid="agents">
-      <h3>{fillCopy(copy["agents.title"], { h: String(hours), n: String(agents.agents.length) })}</h3>
+      <h3>
+        {/* A body answers for a window it was asked for. The sample's window is
+            whatever its fixture spans, and one golden row is stamped at the
+            epoch, so "last 496889 hours" would be arithmetic nobody asked for
+            and a sentence no reader can use. The sample says it is the sample,
+            which is the same thing the badge in the corner says. */}
+        {demo
+          ? fillCopy(copy["agents.title.sample"], { n: String(agents.agents.length) })
+          : fillCopy(copy["agents.title"], { h: String(hours), n: String(agents.agents.length) })}
+      </h3>
       {agents.unattributed > 0 ? (
         <p className="muted">{fillCopy(copy["agents.unattributed"], { n: String(agents.unattributed) })}</p>
       ) : null}
