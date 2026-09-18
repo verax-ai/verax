@@ -21,6 +21,10 @@ export type DownstreamSpec = {
 
 export type DownstreamTool = {
   name: string;
+  /** The child's own description, as `tools/list` gave it. */
+  description?: string;
+  /** The child's own input schema, republished unchanged. */
+  inputSchema?: unknown;
   fn: DownstreamToolFn;
 };
 
@@ -106,6 +110,32 @@ export function parseDownstreamJson(raw: string): DownstreamSpec {
   return spec;
 }
 
+/**
+ * The `VERAX_DOWNSTREAM` document: one child, or an array of them. An empty
+ * array is a document that attaches nothing, which is not the same as no
+ * document at all — the operator wrote it, so it is honoured.
+ */
+export function parseDownstreamDocument(raw: string): DownstreamSpec[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("downstream-json-invalid");
+  }
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  const specs: DownstreamSpec[] = [];
+  const prefixes = new Set<string>();
+  for (const item of items) {
+    const spec = parseDownstreamJson(JSON.stringify(item));
+    if (prefixes.has(spec.prefix)) {
+      throw new Error(`downstream-prefix-duplicate:${spec.prefix}`);
+    }
+    prefixes.add(spec.prefix);
+    specs.push(spec);
+  }
+  return specs;
+}
+
 // The SDK result is a union (current shape with an index signature, or the
 // legacy { toolResult } shape), so it is narrowed here rather than trusted.
 function asTextResult(raw: unknown): ToolResult {
@@ -182,6 +212,8 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
     const childName = tool.name;
     tools.push({
       name,
+      ...(typeof tool.description === "string" ? { description: tool.description } : {}),
+      ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
       fn: async (call) => {
         let raw: Awaited<ReturnType<Client["callTool"]>>;
         try {
