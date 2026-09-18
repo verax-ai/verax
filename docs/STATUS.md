@@ -3,6 +3,51 @@
 This file states what the tree carries and what stays unproven. A
 paragraph here is not a release.
 
+It has two parts. The capability matrix below is the current statement,
+and it names a released version. Everything under
+[Historical record](#historical-record) is dated: an entry describes the
+commit that added it, not the tree today, and an early phase says things
+that later phases replaced. Read the matrix first.
+
+## Capability matrix — 0.1.2
+
+Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
+`@verax-ai/inventory` 0.1.2, and in the MCP registry as
+`io.github.verax-ai/verax`. `Since` is the earliest published version
+whose tree already carried that row's guard, read off the `v0.1.1` tag
+and the `0.1.0` release commit, so a customer can tell a capability that
+has shipped for three versions from one that landed in this one. `Guard`
+names the test that fails when the row stops being true; the row states
+what that test covers, not a wider claim.
+
+| Capability | Since | What it does | What it does not do | Guard |
+| --- | --- | --- | --- | --- |
+| Policy gate | 0.1.0 | Every `tools/call` passes a fail-closed policy and leaves a signed decision record before anything runs. A refusal is recorded the same way as an allow. | Filter prompt injection. The policy sees the tool name and the token's scopes, not the argument text or a tool result. | `policy-fixtures`, `deny-no-effect` |
+| Effect record | 0.1.0 | A call that ran leaves an effect row bound to its decision by `effectHash`, including a call that threw. | Stop a tool server from writing outside the effect it declared. The row states what the body was told. | `effect-hash-contract`, `record-and-extract` |
+| Operator approval | 0.1.0; one winner 0.1.2 | A call the policy holds becomes `defer`; `verax approve` on this machine, or the panel after a passkey sign-in, resolves it, and the approver's operator id is bound into the record by hash. Since 0.1.2 four parallel approvals of one request leave one allow and the losers answer `already-resolved`. | Approve without an operator. There is no auto-approve path and no remote approver. | `approval-queue`, `admission` (d), `operator-passkey` |
+| Tenant boundary | 0.1.0; read order fixed 0.1.2 | Memory and inbox live under `tenants/<tenantKey>/`, where the key is SHA-256 of `{ iss, sub }` plus a `tenant` or `org` claim when present. Another tenant's id is answered with a signed deny and no body. `_ref` keys are per tenant. Before 0.1.2 a `memory.get` looked at the foreign record first, so a second tenant writing the same id could hide the caller's own row. | Separate two customers on one host any further: same disk, same process, same operator. Unproven until two live customers share one body. | `tenant`, `concurrency-audit` (V-05) |
+| Retry and idempotency | 0.1.0; re-evaluation 0.1.2 | Eight parallel calls carrying one `_ref` run the tool once and replay the rest. A retry is evaluated against the policy and scopes in force now, not the ones that held when the call was first approved. | Survive a crash between the allow and the effect: a retry after that gap can run a second time. Named as an open risk, not closed. | `admission` (b), `concurrency-audit` (V-06) |
+| Rate and daily bounds | 0.1.0; parallel-safe 0.1.2 | Rate and daily counters are taken inside the admission lock, so eight parallel calls under a limit of one write one allow. A counter that cannot be read fails closed. | Bound anything across processes or bodies. The counters are this body's. | `bounds`, `admission` (a), `concurrency-audit` (V-01) |
+| Spend authorization | 0.1.0; budget re-check 0.1.2 | `spend` is capped by payee, amount, currency and a daily limit, always defers, and re-checks the daily budget at approval time against today's approved total. Card CSV reconcile names matched, ghost and authorized-but-unpaid rows. | Move money. The body records an authorization; a human or another system pays. | `spend`, `reconcile`, `concurrency-audit` (V-03) |
+| Witness | 0.1.0 | `verax witness` is a second process holding its own key. When it answers, the effect row is `same-org` and a durable checkpoint is signed. When it does not, the class stays `self` and the fallback is recorded. | Be a third-party witness. The second process runs on the same host under the same operator, so it is a separate key, not a separate trust domain. `third-party` and `regulated` are type values nothing writes. | `witness-process` |
+| Halt and revoke | 0.1.0 | `verax halt` turns every further call into a signed deny. A revoked token id is refused before any record is written. | Reach a body it cannot see. Halt is a file on this state directory. | `halt-cli`, `revoke-jti` |
+| Egress allow-list | 0.1.0 | `message.send` reaches only hosts the policy names; an unlisted host is `egress-blocked` and a missing host is `egress-host-missing`. | Restrict what a downstream tool server does once a call is allowed. | `egress` |
+| Inputs document | 0.1.0 | A `_inputs` declaration is bound into the record by `inputsHash`, on deny as well as allow. `policy.requireInputs` makes a call with no declaration a signed `deny inputs-required`. | Require declarations by default: the flag is off on the shipped policy, so a call with no `_inputs` stores `inputs: []`. | `inputs-binding`, `require-inputs` |
+| Ledger rotation | 0.1.2 | The ledger closes into pieces with a chain handoff, a persistent ref index rebuilt from the pieces when it falls short, and lifetime `/healthz` counts. A window that starts inside a piece seeks by timestamp. `/api/ledger` answers at most 5,000 rows, 1,000 when no limit is asked. | Answer an unbounded read. A reader that wants more pages back with `from` / `to`. `inputs.jsonl` rows carry no stamp, so a past window's inputs are still read from the end of a piece. | `ledger-rotation`, `ledger-window`, `jsonl-tail` |
+| Disk-low refusal | 0.1.0 | When a deny cannot be appended, the call is refused with HTTP 507 and a `disk_deny_unrecorded` metric, rather than running unrecorded. | Free disk or rotate for you. | `disk-unrecorded` |
+| Panel | not published | A private app that reads one body's signed ledger: records, black box and status, over a code-flow session whose token stays in memory. | Read several bodies. A fleet view is designed in `docs/design/fleet.md` and is not implemented. | `apps/panel` suite |
+| Downstream MCP | spike | A stdio attach helper can prefix a child server's tools behind the same gate. | Ship in the served path: `listen()` does not read a downstream spec, and HTTP `/mcp` lists the six built-in tools. | `downstream` |
+
+What stays unproven for every row above: none of it has run against a
+paying customer's production traffic. The pilot drills in
+`tests/pilot-drills.test.ts` are tests, not a live body.
+
+## Historical record
+
+The entries below are dated and kept as written. "this commit" in a
+heading means the commit that added that phase. Where an entry
+contradicts the matrix above, the matrix is the current statement.
+
 ## Phase 0 — workspace skeleton
 
 The tree carries a workspace skeleton: three package stubs
