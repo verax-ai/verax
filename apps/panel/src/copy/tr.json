@@ -69,6 +69,7 @@
   "time.daysAgo": "{n} gün",
   "pending.empty": "yok",
   "agents.title": "Ajanlar · son {h} saat · {n} ajan",
+  "agents.title.sample": "Ajanlar · örnek senaryo · {n} ajan",
   "agents.unmeasured": "ajan listesi okunamadı",
   "agents.empty": "defterde de listede de ajan yok",
   "agents.unattributed": "{n} karar bir ajana bağlanamadı",

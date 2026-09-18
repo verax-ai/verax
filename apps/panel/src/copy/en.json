@@ -69,6 +69,7 @@
   "time.daysAgo": "{n}d ago",
   "pending.empty": "none",
   "agents.title": "Agents · last {h} hours · {n} agents",
+  "agents.title.sample": "Agents · sample scenario · {n} agents",
   "agents.unmeasured": "agent list could not be read",
   "agents.empty": "no agent in the ledger or on the roster",
   "agents.unattributed": "{n} decisions could not be tied to an agent",
