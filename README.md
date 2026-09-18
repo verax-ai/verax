@@ -24,7 +24,11 @@ the Cedulon record format.
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
-The body is also listed in the MCP registry as `io.github.verax-ai/verax`.
+The three packages are published together and carry the same version;
+0.1.2 is the current one. The body is also listed in the MCP registry as
+`io.github.verax-ai/verax`. What that version carries, what it does not,
+and the test holding each row up are in the capability matrix at the top
+of [`docs/STATUS.md`](docs/STATUS.md).
 
 ## Install
 
@@ -55,6 +59,11 @@ The policy decides which of these a token's scopes may call;
 | `spend` | Authorizes a payment and records it, under a cap, a payee list and a daily limit from the policy; held for an operator when the policy says so. The body does not move money. |
 
 ## What the body does beyond the gate
+
+Each line below is a row in the capability matrix in
+[`docs/STATUS.md`](docs/STATUS.md), where it is stated against a version,
+with what it does not do and the test that fails when it stops being
+true.
 
 - Approval: a held call is approved with `verax approve` on this machine, or
   from the panel after a passkey sign-in (`verax operator`); the approver's
