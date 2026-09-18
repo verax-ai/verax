@@ -630,6 +630,13 @@ aside {
 }
 
 /* Status tab: one row per agent, as the body counted it. */
+/* Seven columns that do not wrap need about 700px, and the middle pane hands
+   out less than that at every width the panel opens at. Without this the table
+   ran past the pane and the last columns could not be reached at all. The
+   section scrolls sideways instead; the rest of the status view does not. */
+.agents {
+  overflow-x: auto;
+}
 .agents-table {
   width: 100%;
   border-collapse: collapse;
