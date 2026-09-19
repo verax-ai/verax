@@ -25,10 +25,40 @@ the Cedulon record format.
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
 The three packages are published together and carry the same version;
-0.1.2 is the current one. The body is also listed in the MCP registry as
+0.1.3 is the current one. The body is also listed in the MCP registry as
 `io.github.verax-ai/verax`. What that version carries, what it does not,
 and the test holding each row up are in the capability matrix at the top
 of [`docs/STATUS.md`](docs/STATUS.md).
+
+## Read the ledger back without us
+
+A ledger only the vendor's running service can read is evidence a buyer
+rents, not evidence they hold. `verax verify` reads a state directory on
+its own — no body listening, nothing on the network — and states four
+things separately, because they fail separately:
+
+```
+$ verax verify ./verax-state
+ledger        ./verax-state
+decisions     6
+effects       4 (4 bound to a decision, 0 with none)
+signatures    6 verify, 0 do not
+chain         unbroken
+verified with the key carried in these files
+              verified against the key carried in the records themselves: this
+              shows the files are internally consistent, not that the key was
+              ever trusted. Pin a key you hold to check that.
+
+VERIFIED
+```
+
+That last pair of lines is the point. Checking a ledger against the key
+lying next to it proves the files agree with each other and nothing more —
+anything able to write the ledger could write that key too. Pass
+`--key <public.pem>` to verify against a copy you hold, and the answer says
+`a key you supplied` instead. `--json` prints the same result for a
+pipeline; the exit code is 0 when it verifies and 1 when it does not, and a
+directory with no ledger in it is never quiet success.
 
 ## Install
 

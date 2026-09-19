@@ -9,6 +9,7 @@ const pkgRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const repoRoot = join(pkgRoot, "..", "..");
 
 const ALLOWED = new Set([
+  "verifyLedger",
   "createProxy",
   "LedgerDenyUnrecorded",
   "loadPolicy",

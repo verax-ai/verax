@@ -9,6 +9,7 @@ import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
+import { runVerify } from "./verify-cli.ts";
 import { runUnlock } from "./unlock.ts";
 import { runWitness } from "./witness.ts";
 
@@ -21,6 +22,8 @@ Usage: verax <command> [options]
   approve <args>       approve a waiting request from this machine
   operator <args>      enrol an operator and manage their passkeys
   reconcile <args>     compare the ledger against a statement
+  verify <stateDir>    read a ledger back without a body: signatures, chain,
+                       effect binding, and which key answered
   witness <stateDir>   run the witness alongside a body
   halt <stateDir>      stop the body from allowing anything further
   unlock [--force] <stateDir>   clear a stale ledger lock
@@ -97,6 +100,9 @@ if (argv[0] === "doctor") {
 }
 if (argv[0] === "reconcile") {
   process.exit(runReconcile(argv));
+}
+if (argv[0] === "verify") {
+  process.exit(await runVerify(argv.slice(1)));
 }
 if (argv[0] === "desktop") {
   process.exit(await desktopMain(argv));
