@@ -18,6 +18,18 @@ import {
 } from "../packages/body/src/operator-credentials.ts";
 import { readRpConfig } from "../packages/body/src/rp-config.ts";
 
+// Off by default. With VERAX_DEV_ISSUER_TRACE=1 the issuer names each phase and
+// the time since it started, on stderr. It exists because a gate run twice saw
+// this process print its first line and never reach `listening`, and "no port"
+// cannot say which phase stalled. Three suites read this stderr for the
+// `listening` line, so the default output must not change.
+const TRACE_T0 = performance.now();
+function trace(phase) {
+  if (process.env.VERAX_DEV_ISSUER_TRACE !== "1") return;
+  process.stderr.write(`dev-issuer: trace ${phase} +${Math.round(performance.now() - TRACE_T0)}ms
+`);
+}
+
 if (process.env.NODE_ENV === "production") {
   process.stderr.write("dev-issuer refuses NODE_ENV=production\n");
   process.exit(1);
@@ -79,6 +91,7 @@ if (existsSync(privPath) && existsSync(jwkPath)) {
 }
 
 const key = await importPKCS8(privatePem, "ES256");
+trace("keys-ready");
 const port = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
 const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
 const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
@@ -119,6 +132,7 @@ async function mintAccessToken(kind, extra = {}) {
 const token = await mintAccessToken("agent");
 writeFileSync(outPath, token, { encoding: "utf8", mode: 0o600 });
 chmodSync(outPath, 0o600);
+trace("token-written");
 
 const CODE_TTL_MS = 60_000;
 const CODE_LIMIT = 100;
@@ -700,6 +714,7 @@ const server = createServer((req, res) => {
   })();
 });
 
+trace("listen-called");
 await new Promise((resolve, reject) => {
   server.once("error", reject);
   server.listen(port, "127.0.0.1", resolve);
