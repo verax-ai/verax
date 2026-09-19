@@ -36,7 +36,7 @@ what that test covers, not a wider claim.
 | Ledger rotation | 0.1.2 | The ledger closes into pieces with a chain handoff, a persistent ref index rebuilt from the pieces when it falls short, and lifetime `/healthz` counts. A window that starts inside a piece seeks by timestamp. `/api/ledger` answers at most 5,000 rows, 1,000 when no limit is asked. | Answer an unbounded read. A reader that wants more pages back with `from` / `to`. `inputs.jsonl` rows carry no stamp, so a past window's inputs are still read from the end of a piece. | `ledger-rotation`, `ledger-window`, `jsonl-tail` |
 | Disk-low refusal | 0.1.0 | When a deny cannot be appended, the call is refused with HTTP 507 and a `disk_deny_unrecorded` metric, rather than running unrecorded. | Free disk or rotate for you. | `disk-unrecorded` |
 | Panel | not published | A private app that reads one body's signed ledger: records, black box and status, over a code-flow session whose token stays in memory. A build of it on sample data is served at `verax-ai.com/panel/?demo=1`; it has no body behind it, asks none for anything, and its `BUILD.json` names the commit it was built from. | Read several bodies. A fleet view is designed in `docs/design/fleet.md` and is not implemented. The published sample is not a deployment and carries no customer ledger; because it has no body, its status tab shows the roster sentence rather than the agents table. | `apps/panel` suite |
-| Downstream MCP | unreleased | `VERAX_DOWNSTREAM` names a document of stdio child servers. `listen()` attaches them before the door opens, HTTP `tools/list` publishes their tools as `prefix.childName` carrying the child's own description and schema, and a forwarded call passes the same gate and leaves the same signed decision and effect row under that name. | Merge anything: the child stays its own server in its own process. Reach a child over HTTP — stdio only, so a remote Conarium or Tugra is not attachable yet. Match a rule by wildcard: a policy rule names the prefixed tool exactly. Come up half-attached: a child the document names but cannot open stops the body. | `downstream`, `downstream-served` |
+| Downstream MCP | unreleased | `VERAX_DOWNSTREAM` names a document of child MCP servers, each reached either by `command` (stdio, the body spawns it) or by `url` (Streamable HTTP, already running), never both. `listen()` attaches them before the door opens, HTTP `tools/list` publishes their tools as `prefix.childName` carrying the child's own description and schema, and a forwarded call passes the same gate and leaves the same signed decision and effect row under that name. Driven against a live Conarium over HTTP: four of its tools appeared behind the gate, one with a rule ran and wrote an effect row, one without a rule was denied `no-rule` and never reached the child. | Merge anything: the child stays its own server in its own process. Match a rule by wildcard: a policy rule names the prefixed tool exactly. Come up half-attached: a child the document names but cannot open stops the body. Refresh a child's tool list while running, or attach one after start. Treat the child's URL as an egress host: egress is for destinations the brain picks, and this one is the operator's document. | `downstream`, `downstream-served`, `downstream-http` |
 
 What stays unproven for every row above: none of it has run against a
 paying customer's production traffic. The pilot drills in
@@ -276,7 +276,19 @@ stdio client transport instead, and only `src/downstream.ts` may import it
 decisions of 17 Sep 2026 are on the design note (connection document,
 exact-match namespace, `resultHash` only).
 
-**Not done.** Only stdio: a Conarium or Tugra server reached over HTTP
-cannot be attached yet, and the local stdio Conarium holds a single-writer
-audit lock, so the first real attach is waiting on that transport rather
-than on this wiring. Unproven against a live Conarium or Tugra server.
+**Driven against a live Conarium (19 September 2026).** A body was started
+with `{ "prefix": "conarium", "url": "<Conarium's public demo /mcp>" }` and
+answered `tools/list` with ten tools: its own six plus `conarium.list_tables`,
+`conarium.describe_table`, `conarium.query` and `conarium.search`. A policy
+naming only `conarium.list_tables` was written. That call returned Conarium's
+own answer and left `allow conarium.list_tables` on the ledger with an effect
+row whose `resultHash` covers it; `conarium.query`, which the policy does not
+name, was refused `denied:no-rule:<ref>` and the child was never called. No
+Conarium code is in this repository and Conarium kept its own server.
+
+**Not done.** The child's tool list is read once, at attach: a child that
+gains or loses a tool while the body runs is not noticed, and a child cannot
+be attached after start. The stdio path cannot reach the local Conarium,
+which holds a single-writer audit lock a spawned copy would collide with —
+that is why the HTTP transport, not the stdio one, carried the first real
+attach. Nothing here has run against a live Tugra.

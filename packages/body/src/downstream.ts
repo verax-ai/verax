@@ -2,6 +2,7 @@ import { Readable } from "node:stream";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Principal, ToolCall, ToolResult } from "@verax-ai/proxy";
 
 export type DownstreamToolFn = (
@@ -10,12 +11,23 @@ export type DownstreamToolFn = (
   ref?: string,
 ) => Promise<ToolResult>;
 
+/**
+ * One child, reached one of two ways. `command` spawns it over stdio;
+ * `url` speaks Streamable HTTP to one already running. Exactly one of the
+ * two: a document naming both does not say which the operator meant, and a
+ * document naming neither says nothing at all.
+ */
 export type DownstreamSpec = {
   prefix: string;
-  command: string;
+  /** stdio: the process to start. */
+  command?: string;
   args?: string[];
   cwd?: string;
   env?: Record<string, string>;
+  /** HTTP: the MCP endpoint of a server already running. */
+  url?: string;
+  /** HTTP: headers the operator sends to the child, such as its own bearer. */
+  headers?: Record<string, string>;
   timeoutMs?: number;
 };
 
@@ -74,10 +86,44 @@ export function parseDownstreamJson(raw: string): DownstreamSpec {
   if (typeof rec.prefix !== "string" || !PREFIX_RE.test(rec.prefix)) {
     throw new Error("downstream-prefix-invalid");
   }
-  if (typeof rec.command !== "string" || rec.command.trim() === "") {
-    throw new Error("downstream-command-invalid");
+  const cmdVar = rec.command !== undefined;
+  const urlVar = rec.url !== undefined;
+  if (cmdVar && urlVar) throw new Error("downstream-transport-ambiguous");
+  if (!cmdVar && !urlVar) throw new Error("downstream-transport-missing");
+  const spec: DownstreamSpec = { prefix: rec.prefix };
+  if (cmdVar) {
+    if (typeof rec.command !== "string" || rec.command.trim() === "") {
+      throw new Error("downstream-command-invalid");
+    }
+    spec.command = rec.command;
+  } else {
+    if (typeof rec.url !== "string" || rec.url.trim() === "") {
+      throw new Error("downstream-url-invalid");
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(rec.url);
+    } catch {
+      throw new Error("downstream-url-invalid");
+    }
+    // Only the two schemes the SDK transport speaks. A `file:` or `ftp:` URL
+    // would be read as a fetch target by something later, so it is refused here.
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("downstream-url-invalid");
+    }
+    spec.url = rec.url;
+    if (rec.headers !== undefined) {
+      if (rec.headers === null || typeof rec.headers !== "object" || Array.isArray(rec.headers)) {
+        throw new Error("downstream-headers-invalid");
+      }
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(rec.headers as Record<string, unknown>)) {
+        if (typeof v !== "string") throw new Error("downstream-headers-invalid");
+        headers[k] = v;
+      }
+      spec.headers = headers;
+    }
   }
-  const spec: DownstreamSpec = { prefix: rec.prefix, command: rec.command };
   if (rec.args !== undefined) {
     if (!Array.isArray(rec.args) || rec.args.some((a) => typeof a !== "string")) {
       throw new Error("downstream-args-invalid");
@@ -161,19 +207,18 @@ function asTextResult(raw: unknown): ToolResult {
   };
 }
 
-async function shut(client: Client, transport: StdioClientTransport): Promise<void> {
+type ChildTransport = StdioClientTransport | StreamableHTTPClientTransport;
+
+async function shut(client: Client, transport: ChildTransport): Promise<void> {
   await client.close().catch(() => undefined);
   await transport.close().catch(() => undefined);
 }
 
-export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSession> {
-  if (!PREFIX_RE.test(spec.prefix)) {
-    throw new Error("downstream-prefix-invalid");
-  }
-  if (spec.command.trim() === "") {
+/** Spawns the child. Its stderr is drained so a chatty child cannot block it. */
+function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
+  if (spec.command === undefined || spec.command.trim() === "") {
     throw new Error("downstream-command-invalid");
   }
-  const timeoutMs = spec.timeoutMs ?? 10_000;
   // Safe inherit + operator overlay. Not process.env: that would copy
   // VERAX_* tokens the body already holds.
   const env = { ...getDefaultEnvironment(), ...(spec.env ?? {}) };
@@ -187,6 +232,33 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
   // The SDK types the pipe as Stream; only a Readable can be drained.
   const stderr = transport.stderr;
   if (stderr instanceof Readable) stderr.resume();
+  return transport;
+}
+
+/**
+ * Talks to a server already running. The headers are the operator's, from the
+ * document — the body's own bearer is never forwarded, for the same
+ * confused-deputy reason the stdio child does not inherit `VERAX_*`.
+ */
+function httpTransport(spec: DownstreamSpec): StreamableHTTPClientTransport {
+  if (spec.url === undefined) throw new Error("downstream-url-invalid");
+  return new StreamableHTTPClientTransport(new URL(spec.url), {
+    ...(spec.headers ? { requestInit: { headers: spec.headers } } : {}),
+  });
+}
+
+export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSession> {
+  if (!PREFIX_RE.test(spec.prefix)) {
+    throw new Error("downstream-prefix-invalid");
+  }
+  if (spec.command !== undefined && spec.url !== undefined) {
+    throw new Error("downstream-transport-ambiguous");
+  }
+  if (spec.command === undefined && spec.url === undefined) {
+    throw new Error("downstream-transport-missing");
+  }
+  const timeoutMs = spec.timeoutMs ?? 10_000;
+  const transport = spec.url !== undefined ? httpTransport(spec) : stdioTransport(spec);
   const client = new Client({ name: "verax-downstream", version: "0.0.0" });
   let listed: Awaited<ReturnType<Client["listTools"]>>;
   try {

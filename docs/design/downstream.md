@@ -9,8 +9,9 @@ mark **Open** stayed open unless this block says otherwise. Two decisions
 moved: the document is a **path** in `VERAX_DOWNSTREAM` and may be an
 **array** of children (§1), and HTTP `tools/list` **does** publish the
 child's own description and schema (§2) — a tool a caller cannot see is a
-tool the gate is never asked about. Still stdio only: an HTTP child, and
-with it the first real Conarium attach, is the next transport. The panel
+tool the gate is never asked about. The HTTP transport landed the same day and carried the first real attach: a
+body reached a live Conarium over `url`, published its four tools behind the
+gate, ran the one the policy named and refused the one it did not (§1). The panel
 is unchanged. Live bodies on this machine are not started from this note.
 
 The commercial line "one ledger, three places, one contract" is a
@@ -35,10 +36,17 @@ transport, and only `src/downstream.ts` may import it.
 
 ## 1. Connection
 
-**Decision (spike).** One child, stdio, described in process code as
-`{ prefix, command, args?, cwd?, env?, timeoutMs? }`. The same shape
-parses from a JSON object (`parseDownstreamJson`, later
-`VERAX_DOWNSTREAM`). The child is spawned by the body. The body's
+**Decision (spike, extended 19 Sep).** One child, described in a JSON
+document as `{ prefix, command?, args?, cwd?, env?, url?, headers?,
+timeoutMs? }`. Exactly one way in: `command` spawns the child over stdio,
+`url` speaks Streamable HTTP to one already running. Both is
+`downstream-transport-ambiguous`, neither is `downstream-transport-missing`,
+and a `url` that is not `http:` or `https:` is `downstream-url-invalid`.
+`headers` is the operator's, for a child that wants its own bearer; the
+body's token is not forwarded on either transport. The live Conarium and
+Tugra servers are reachable only this way — and the local stdio Conarium
+holds a single-writer audit lock that a spawned copy would collide with,
+so HTTP is the transport that made the first real attach possible. The child is spawned by the body. The body's
 Bearer token is not copied into the child. If the child needs a key,
 that key is the child's, named in `env` by the operator.
 
