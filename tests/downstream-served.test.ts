@@ -133,7 +133,7 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
     await withServedBody(
       {
         policyText: ECHO_POLICY,
-        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root },
+        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
       },
       async ({ mcp, token }) => {
         const listed = await rpc(mcp, await token(), "tools/list", {});
@@ -164,7 +164,7 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
     await withServedBody(
       {
         policyText: ECHO_POLICY,
-        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root },
+        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
       },
       async ({ mcp, stateDir, token }) => {
         const called = await rpc(mcp, await token(), "tools/call", {
@@ -192,7 +192,7 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
     await withServedBody(
       {
         policyText: readFileSync(defaultPolicy, "utf8"),
-        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root },
+        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
         trace: true,
       },
       async ({ mcp, stateDir, token, trace }) => {
@@ -221,7 +221,7 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
     const downstreamFile = join(stateDir, "downstream.json");
     writeFileSync(
       downstreamFile,
-      `${JSON.stringify({ prefix: "echo", command: process.execPath, args: [join(root, "tests", "fixtures", "no-such-child.mjs")] })}\n`,
+      `${JSON.stringify({ prefix: "echo", command: process.execPath, args: [join(root, "tests", "fixtures", "no-such-child.mjs")], trust: "same-user" })}\n`,
       "utf8",
     );
     const audience = "http://127.0.0.1/verax-test";
@@ -258,7 +258,7 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
     await withServedBody(
       {
         policyText: ECHO_POLICY,
-        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root },
+        downstream: { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
         trace: true,
       },
       async ({ trace }) => {
@@ -278,8 +278,8 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
       {
         policyText: ECHO_POLICY,
         downstream: [
-          { prefix: "echo", command: process.execPath, args: [fixture], cwd: root },
-          { prefix: "second", command: process.execPath, args: [fixture], cwd: root },
+          { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
+          { prefix: "second", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
         ],
       },
       async ({ mcp, token }) => {
@@ -293,8 +293,8 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
       () =>
         parseDownstreamDocument(
           JSON.stringify([
-            { prefix: "echo", command: "node" },
-            { prefix: "echo", command: "node" },
+            { prefix: "echo", command: "node", trust: "same-user" },
+            { prefix: "echo", command: "node", trust: "same-user" },
           ]),
         ),
       /downstream-prefix-duplicate:echo/,
@@ -308,7 +308,7 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
     const downstreamFile = join(stateDir, "downstream.json");
     writeFileSync(
       downstreamFile,
-      `${JSON.stringify({ prefix: "echo", command: process.execPath, args: [fixture], cwd: root })}\n`,
+      `${JSON.stringify({ prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" })}\n`,
       "utf8",
     );
     const audience = "http://127.0.0.1/verax-test";

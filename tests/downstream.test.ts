@@ -55,6 +55,7 @@ async function withEchoBody(
     command: process.execPath,
     args: [fixture],
     cwd: root,
+    trust: "same-user",
   });
   try {
     const services = createBodyServices({
@@ -139,7 +140,7 @@ describe("downstream attach", { timeout: 60_000 }, () => {
 
   it("parseDownstreamJson reads one stdio child and refuses a bad prefix", () => {
     const spec = parseDownstreamJson(
-      JSON.stringify({ prefix: "echo", command: "node", args: ["x"], timeoutMs: 5, env: { K: "v" } }),
+      JSON.stringify({ prefix: "echo", command: "node", args: ["x"], timeoutMs: 5, env: { K: "v" }, trust: "same-user" }),
     );
     assert.equal(spec.prefix, "echo");
     assert.equal(spec.command, "node");

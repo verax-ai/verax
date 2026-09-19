@@ -173,4 +173,114 @@ describe("doctor", () => {
     const tokCheck = fromTok.find((c) => c.id === "dev-token-audit");
     assert.equal(tokCheck?.level, "warn");
   });
+
+  it("adds no downstream check when VERAX_DOWNSTREAM is unset", () => {
+    const checks = runDoctor(
+      {
+        VERAX_ISSUER: "http://127.0.0.1:8790",
+        VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
+        VERAX_AUDIENCE: "http://127.0.0.1:8787",
+        VERAX_STATE_DIR: ".",
+        VERAX_POLICY_FILE: "x",
+      },
+      ["node", "cli.ts", "doctor"],
+    );
+    assert.equal(
+      checks.some((c) => c.id.startsWith("downstream")),
+      false,
+    );
+  });
+
+  it("names a trusted stdio child as warn and does not fail the exit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-doc-down-ok-"));
+    const command = "NEVER-IN-DOCTOR-OUTPUT";
+    writeFileSync(
+      join(dir, "downstream.json"),
+      `${JSON.stringify({ prefix: "kb", command, trust: "same-user" })}\n`,
+      "utf8",
+    );
+    const checks = runDoctor(
+      {
+        VERAX_ISSUER: "http://127.0.0.1:8790",
+        VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
+        VERAX_AUDIENCE: "http://127.0.0.1:8787",
+        VERAX_STATE_DIR: dir,
+        VERAX_POLICY_FILE: "x",
+        VERAX_DOWNSTREAM: join(dir, "downstream.json"),
+      },
+      ["node", "cli.ts", "doctor"],
+    );
+    const document = checks.find((c) => c.id === "downstream-document");
+    assert.equal(document?.level, "ok");
+    const stdio = checks.find((c) => c.id === "downstream-stdio:kb");
+    assert.equal(stdio?.level, "warn");
+    assert.match(stdio?.detail ?? "", /kb/);
+    assert.equal((stdio?.detail ?? "").includes(command), false);
+    assert.equal(doctorExit(checks), 0);
+  });
+
+  it("fails the document when a stdio child has no trust ack", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-doc-down-ack-"));
+    writeFileSync(
+      join(dir, "downstream.json"),
+      `${JSON.stringify({ prefix: "kb", command: "node" })}\n`,
+      "utf8",
+    );
+    const checks = runDoctor(
+      {
+        VERAX_ISSUER: "http://127.0.0.1:8790",
+        VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
+        VERAX_AUDIENCE: "http://127.0.0.1:8787",
+        VERAX_STATE_DIR: ".",
+        VERAX_POLICY_FILE: "x",
+        VERAX_DOWNSTREAM: join(dir, "downstream.json"),
+      },
+      ["node", "cli.ts", "doctor"],
+    );
+    const document = checks.find((c) => c.id === "downstream-document");
+    assert.equal(document?.level, "fail");
+    assert.equal(doctorExit(checks), 1);
+  });
+
+  it("does not name a downstream-stdio check for an HTTP child and does not print its url", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-doc-down-http-"));
+    writeFileSync(
+      join(dir, "downstream.json"),
+      `${JSON.stringify({ prefix: "kb", url: "http://127.0.0.1:9/secret-token/mcp" })}\n`,
+      "utf8",
+    );
+    const checks = runDoctor(
+      {
+        VERAX_ISSUER: "http://127.0.0.1:8790",
+        VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
+        VERAX_AUDIENCE: "http://127.0.0.1:8787",
+        VERAX_STATE_DIR: ".",
+        VERAX_POLICY_FILE: "x",
+        VERAX_DOWNSTREAM: join(dir, "downstream.json"),
+      },
+      ["node", "cli.ts", "doctor"],
+    );
+    assert.equal(
+      checks.some((c) => c.id.startsWith("downstream-stdio:")),
+      false,
+    );
+    assert.equal(JSON.stringify(checks).includes("http://"), false);
+  });
+
+  it("fails the document when VERAX_DOWNSTREAM names a missing file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-doc-down-miss-"));
+    const checks = runDoctor(
+      {
+        VERAX_ISSUER: "http://127.0.0.1:8790",
+        VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
+        VERAX_AUDIENCE: "http://127.0.0.1:8787",
+        VERAX_STATE_DIR: ".",
+        VERAX_POLICY_FILE: "x",
+        VERAX_DOWNSTREAM: join(dir, "no-such-downstream.json"),
+      },
+      ["node", "cli.ts", "doctor"],
+    );
+    const document = checks.find((c) => c.id === "downstream-document");
+    assert.equal(document?.level, "fail");
+  });
 });

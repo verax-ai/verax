@@ -78,7 +78,7 @@ async function healthz(base: string, token?: string): Promise<Record<string, unk
 describe("the body says which children it attached", { timeout: 60_000 }, () => {
   it("an operator sees the prefix, the transport and the tool names", async () => {
     await withBody(
-      { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, env: { GIZLI: SIR } },
+      { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, env: { GIZLI: SIR }, trust: "same-user" },
       async ({ base, audit }) => {
         const body = await healthz(base, await audit());
         const kids = body.downstream as Cocuk[] | undefined;
@@ -99,6 +99,7 @@ describe("the body says which children it attached", { timeout: 60_000 }, () => 
         args: [fixture],
         cwd: root,
         env: { GIZLI: SIR },
+        trust: "same-user",
       },
       async ({ base, audit }) => {
         const metin = JSON.stringify(await healthz(base, await audit()));
@@ -112,7 +113,7 @@ describe("the body says which children it attached", { timeout: 60_000 }, () => 
 
   it("an unauthenticated probe still sees liveness only", async () => {
     await withBody(
-      { prefix: "echo", command: process.execPath, args: [fixture], cwd: root },
+      { prefix: "echo", command: process.execPath, args: [fixture], cwd: root, trust: "same-user" },
       async ({ base, brain }) => {
         const acik = await healthz(base);
         assert.deepEqual(acik, { ok: true });

@@ -2,6 +2,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
+import { parseDownstreamDocument } from "./downstream.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
 export type DoctorLevel = "ok" | "warn" | "fail";
@@ -186,6 +187,33 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
         id: "dev-token-audit",
         level: "warn",
         detail: "development token scope lacks verax:audit; the panel cannot read /api/ledger or /healthz counts",
+      });
+    }
+  }
+
+  const downstreamPath = env.VERAX_DOWNSTREAM?.trim() ?? "";
+  if (downstreamPath !== "") {
+    try {
+      const specs = parseDownstreamDocument(readFileSync(downstreamPath, "utf8"));
+      const stdio = specs.filter((s) => s.command !== undefined);
+      const http = specs.filter((s) => s.url !== undefined);
+      checks.push({
+        id: "downstream-document",
+        level: "ok",
+        detail: `${specs.length} child(ren): ${stdio.length} stdio, ${http.length} http`,
+      });
+      for (const spec of stdio) {
+        checks.push({
+          id: `downstream-stdio:${spec.prefix}`,
+          level: "warn",
+          detail: `stdio child ${spec.prefix} runs as the same user as the body and can read the body's signing keys (keys/*.pem). An untrusted child should be reached over HTTP, ideally on a separate machine or under a separate operating-system user.`,
+        });
+      }
+    } catch (err) {
+      checks.push({
+        id: "downstream-document",
+        level: "fail",
+        detail: err instanceof Error ? err.message : "downstream-document-unreadable",
       });
     }
   }
