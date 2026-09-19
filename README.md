@@ -24,8 +24,9 @@ the Cedulon record format.
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
-The three packages are published together and carry the same version;
-0.1.3 is the current one. The body is also listed in the MCP registry as
+The three packages are published together and carry the same version; the
+capability matrix in [`docs/STATUS.md`](docs/STATUS.md) names the current one,
+and it is the version on npm. The body is also listed in the MCP registry as
 `io.github.verax-ai/verax`. What that version carries, what it does not,
 and the test holding each row up are in the capability matrix at the top
 of [`docs/STATUS.md`](docs/STATUS.md).
