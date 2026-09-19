@@ -91,6 +91,38 @@ describe("admission lock", () => {
     assert.equal(replays.length, 7);
   });
 
+  it("e: a retry after :threw is isError, does not start with allowed:, and does not run inner again", async () => {
+    const ledger = new MemoryLedger();
+    let inner = 0;
+    const proxy = createProxy({
+      policy: loadPolicy({
+        version: 1,
+        default: "deny",
+        rules: [{ id: "get", tool: "memory.get", requires: ["verax:read"], text: "read" }],
+      }),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["unused"]),
+      inner: async () => {
+        inner += 1;
+        throw new Error("arac patladi");
+      },
+    });
+    const call = { name: "memory.get", arguments: { id: "same", _ref: "r-b4" } };
+    await assert.rejects(() => proxy.call(call, reader));
+    const replay = await proxy.call(call, reader);
+    assert.equal(inner, 1);
+    assert.equal(replay.isError, true);
+    const text = replay.content[0]?.text ?? "";
+    assert.ok(!text.startsWith("allowed:"), text);
+    assert.equal(text, "threw:r-b4");
+    const effects = await ledger.effects();
+    const primary = effects.find((e) => e.row.effectClass !== "duplicate-effect");
+    assert.equal(primary?.row.effectClass, "memory.get:threw");
+  });
+
   it("c: an allow with no effect and no in-flight row is outcome-unknown and does not run inner", async () => {
     const ledger = new MemoryLedger();
     const policy = loadPolicy({

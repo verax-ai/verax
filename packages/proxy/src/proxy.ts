@@ -26,7 +26,7 @@ import {
 } from "./ledger.ts";
 import { spokenReason } from "./spoken-reason.ts";
 import { tenantKey } from "./tenant.ts";
-import type { DecisionInputRow, DecisionInputs, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
+import type { DecisionInputRow, DecisionInputs, Ledger, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
 
 function scopedClaimsRef(principal: Principal, raw: string): string {
   if (principal.iss || principal.tenant || principal.org) {
@@ -87,6 +87,25 @@ function allowedReplay(ref: string): ToolResult {
     content: [{ type: "text", text: `allowed:${ref}` }],
     isError: false,
   };
+}
+
+function threwReplay(ref: string): ToolResult {
+  // The tool ran and exploded. That is not a deny — the gate allowed it.
+  // `allowed:` would teach a retry library the opposite of the ledger.
+  return {
+    content: [{ type: "text", text: `threw:${ref}` }],
+    isError: true,
+  };
+}
+
+async function replayAfterEffect(ledger: Ledger, ref: string): Promise<ToolResult> {
+  const primary = (await ledger.effects()).find(
+    (e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect",
+  );
+  if (primary?.row.effectClass.endsWith(":threw")) {
+    return threwReplay(ref);
+  }
+  return allowedReplay(ref);
 }
 
 function deepFreeze<T>(value: T): T {
@@ -528,7 +547,7 @@ export function createProxy(deps: ProxyDeps) {
                   await approvals.updateStatus(scopedRef, "approved", { allowRef: allow.ref });
                 }
                 if (await hasPrimaryEffect(deps.ledger, allow.ref)) {
-                  return { kind: "done", result: allowedReplay(allow.ref) };
+                  return { kind: "done", result: await replayAfterEffect(deps.ledger, allow.ref) };
                 }
                 if (allow.subject === "spend") {
                   return {
@@ -578,7 +597,7 @@ export function createProxy(deps: ProxyDeps) {
             }
             if (existing.decision === "allow" && existing.ref) {
               if (await hasPrimaryEffect(deps.ledger, existing.ref)) {
-                return { kind: "done", result: allowedReplay(existing.ref) };
+                return { kind: "done", result: await replayAfterEffect(deps.ledger, existing.ref) };
               }
               if (existing.subject === "spend") {
                 return {
@@ -695,10 +714,12 @@ export function createProxy(deps: ProxyDeps) {
       if (plan.kind === "wait") {
         try {
           await plan.work;
+          return allowedReplay(plan.replayRef);
         } catch {
-          // The first call recorded the throw on its effect row.
+          // The first call recorded the throw on its effect row. The
+          // waiter must not call the tool again, and must not say allowed.
+          return threwReplay(plan.replayRef);
         }
-        return allowedReplay(plan.replayRef);
       }
       try {
         return await plan.work;

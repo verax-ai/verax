@@ -50,6 +50,10 @@ const PREFIX_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 const CHILD_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 /** Prefixed name a caller may put on extraTools: `prefix.childName`. */
 const EXTRA_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+// Sanity bound, not a capacity claim. A child that lists more than this is
+// hostile or broken; the body is not a registry for thousands of names.
+const MAX_CHILD_TOOLS = 256;
+const MAX_TOOL_BYTES = 64 * 1024;
 
 export class DownstreamCallError extends Error {
   readonly prefix: string;
@@ -243,8 +247,51 @@ function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
 function httpTransport(spec: DownstreamSpec): StreamableHTTPClientTransport {
   if (spec.url === undefined) throw new Error("downstream-url-invalid");
   return new StreamableHTTPClientTransport(new URL(spec.url), {
-    ...(spec.headers ? { requestInit: { headers: spec.headers } } : {}),
+    requestInit: {
+      // The child's address is the operator's document, not a place the
+      // child may name. Following a redirect would rewrite that document
+      // at run time. The egress list does not see it: egress is for hosts
+      // the brain picks.
+      redirect: "error",
+      ...(spec.headers ? { headers: spec.headers } : {}),
+    },
   });
+}
+
+/**
+ * `connect` does not take a timeout option. Race it, close the transport
+ * when the clock wins, and drop the timer so a settled attach cannot keep
+ * the process alive.
+ */
+async function connectWithDeadline(
+  client: Client,
+  transport: ChildTransport,
+  timeoutMs: number,
+  prefix: string,
+): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      timer = setTimeout(() => {
+        void shut(client, transport);
+        reject(new Error(`downstream-attach-timeout:${prefix}`));
+      }, timeoutMs);
+      client.connect(transport).then(resolve, reject);
+    });
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function attachTimeoutError(err: unknown, prefix: string): Error {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (msg.startsWith("downstream-attach-timeout:")) {
+    return err instanceof Error ? err : new Error(`downstream-attach-timeout:${prefix}`);
+  }
+  if (/timed?\s*out|timeout/i.test(msg)) {
+    return new Error(`downstream-attach-timeout:${prefix}`);
+  }
+  return err instanceof Error ? err : new Error(msg);
 }
 
 export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSession> {
@@ -262,11 +309,15 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
   const client = new Client({ name: "verax-downstream", version: "0.0.0" });
   let listed: Awaited<ReturnType<Client["listTools"]>>;
   try {
-    await client.connect(transport);
-    listed = await client.listTools();
+    await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
+    listed = await client.listTools(undefined, { timeout: timeoutMs });
   } catch (err) {
     await shut(client, transport);
-    throw err;
+    throw attachTimeoutError(err, spec.prefix);
+  }
+  if (listed.tools.length > MAX_CHILD_TOOLS) {
+    await shut(client, transport);
+    throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.tools.length}`);
   }
   const tools: DownstreamTool[] = [];
   const seen = new Set<string>();
@@ -274,6 +325,15 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
     if (!CHILD_TOOL_RE.test(tool.name)) {
       await shut(client, transport);
       throw new Error(`downstream-child-name-invalid:${tool.name}`);
+    }
+    const toolBytes = JSON.stringify({
+      name: tool.name,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+    }).length;
+    if (toolBytes > MAX_TOOL_BYTES) {
+      await shut(client, transport);
+      throw new Error(`downstream-tool-too-large:${spec.prefix}.${tool.name}:${toolBytes}`);
     }
     const name = prefixedName(spec.prefix, tool.name);
     if (seen.has(name)) {

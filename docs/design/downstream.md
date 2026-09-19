@@ -200,6 +200,13 @@ child through the SDK stdio transport. That source does not write
 the `child_process` name, so the no-bypass scan does not see the
 spawn (`src/desktop.ts` remains the file that may name it).
 
+A stdio child runs as the same user as the body. `keys/*.pem` are
+`0o600`, and that mode is not a barrier against the same UID: a
+stdio child can read the body's signing keys and sign a decision
+the gate never issued. This is a known, unclosed bound. An
+untrusted child should be reached over HTTP — a separate process,
+a separate machine, no filesystem of the body.
+
 **Why.** The threat model is a hostile brain, not a hostile
 operator. Egress exists to stop the brain picking a destination.
 An operator-started child is a process the host already chose.
