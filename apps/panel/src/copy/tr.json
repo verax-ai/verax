@@ -224,5 +224,9 @@
   "box.record.open": "Kayıtta aç",
   "box.none": "Defterde onay isteği yok.",
   "box.footnote": "Bu konsol defteri okur. Onay gövdeye gider; gövdenin cevabı olduğu gibi yazılır. İmza bu ekranda değil, kayıt incelenirken doğrulanır.",
-  "box.footnote.demo": "Örnek veri. Buradaki onay gövdeye gönderilmez."
+  "box.footnote.demo": "Örnek veri. Buradaki onay gövdeye gönderilmez.",
+  "downstream.title": "Bağlı ürünler",
+  "downstream.empty": "Bağlı ürün yok — bu gövdenin arkasında başka bir sunucu durmuyor.",
+  "downstream.row": "{prefix} · {transport} · {n} araç",
+  "downstream.note": "Adres burada yazmaz: bir çocuğun adresi kendi jetonunu taşıyabilir."
 }

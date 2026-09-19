@@ -211,13 +211,23 @@ ledger payloads (already named as undesigned in STATUS).
 
 ## 7. Panel
 
-**Decision.** Not in this phase. A forwarded allow already stores
-`subject` as the prefixed tool name. The Records / agent table can
-filter on that string (`conarium.` prefix) without a new column. Now
-that HTTP `tools/list` publishes the extras, a panel talking to a live
-`/mcp` sees them in the list; nothing in the panel says which rows came
-from a downstream server, and nothing yet says which children a body
-attached. That is the first panel job when a real child is attached.
+**Decision (done 19 Sep).** The status tab names the attached children:
+prefix, transport and how many tools the gate will accept, or a sentence
+saying none are attached. `/healthz` carries that list to an operator
+session (`verax:audit`) and to nobody else.
+
+**What it does not carry is the point.** No URL, no command, no
+arguments, no `env`, no headers. A child's URL can hold its token in the
+path — the live Conarium's does — and a command line names a path on the
+host; neither is needed to answer "what stands behind this gate". A body
+older than the field leaves it out, and the panel then draws no section
+at all, because an empty section would read as "nothing attached" when
+the truth is "this body cannot tell you".
+
+**Still open.** Nothing marks which ledger rows came from a child. The
+prefixed `subject` is the only signal, and the Records filter can already
+match it, so no new column was added for a question nobody has asked
+yet.
 
 **Why.** The task keeps the panel as a separate job. The ledger
 shape does not need a new field for a name the brain already used.

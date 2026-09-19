@@ -35,6 +35,13 @@ export type Healthz = {
   lock?: { held: boolean; pid?: number } | string | null;
   heartbeat?: { atMs: number; lastDecisionN?: number; lastEffectN?: number } | null;
   witness?: { class: string; atMs: number } | null;
+  /**
+   * Which other MCP servers stand behind this gate. The body publishes the
+   * prefix, the transport and the tool names it will accept — never the
+   * address, because a child's URL can carry its token. Absent (not empty)
+   * when the body is older than this field.
+   */
+  downstream?: { prefix: string; transport: "stdio" | "http"; tools: string[] }[];
 } | null;
 
 export type ObservatoryStatus = "loading" | "ok" | "error" | "empty";
@@ -548,6 +555,47 @@ function ApproveControl({
   );
 }
 
+/**
+ * Which other MCP servers stand behind this gate. Drawn only when the body
+ * says — an older body leaves the field out, and an empty section would read
+ * as "nothing attached" when the truth is "this body cannot tell you".
+ *
+ * The address is absent by design, not by omission: the body never publishes
+ * it, because a child's URL can carry its token.
+ */
+function DownstreamList({
+  copy,
+  children,
+}: {
+  copy: ReturnType<typeof panelCopy>;
+  children?: { prefix: string; transport: "stdio" | "http"; tools: string[] }[];
+}) {
+  if (children === undefined) return null;
+  return (
+    <section data-testid="downstream-list" className="downstream-list">
+      <h3>{copy["downstream.title"]}</h3>
+      {children.length === 0 ? (
+        <p className="muted">{copy["downstream.empty"]}</p>
+      ) : (
+        <>
+          <ul>
+            {children.map((c) => (
+              <li key={c.prefix} data-testid={`downstream-${c.prefix}`}>
+                {fillCopy(copy["downstream.row"], {
+                  prefix: c.prefix,
+                  transport: c.transport === "http" ? "HTTP" : "stdio",
+                  n: c.tools.length,
+                })}
+              </li>
+            ))}
+          </ul>
+          <p className="muted">{copy["downstream.note"]}</p>
+        </>
+      )}
+    </section>
+  );
+}
+
 function StatusView({
   actions,
   health,
@@ -599,6 +647,7 @@ function StatusView({
         })}
       </p>
       <AgentsTable copy={copy} agents={agents} failed={agentsFailed} demo={demo} />
+      <DownstreamList copy={copy} children={health?.downstream} />
       <section data-testid="pending-approvals" className="pending-approvals">
         <h3>{copy["pending.title"]}</h3>
         {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (
