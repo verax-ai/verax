@@ -12,6 +12,7 @@ import {
 } from "./approvals.ts";
 import { SerialQueue } from "./serial-queue.ts";
 import { diskProbe } from "./disk.ts";
+import { markEnded, markStarted, startedWithoutEnd } from "./in-flight-log.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import {
@@ -352,6 +353,10 @@ export function createProxy(deps: ProxyDeps) {
     allowRef: string,
     flightKey: string,
   ): AdmissionPlan {
+    // Written before the tool runs, removed after the effect is recorded. A
+    // mark that survives the process is what tells a restarted body that this
+    // ref was already started (in-flight-log.ts).
+    if (stateDir !== null) markStarted(stateDir, flightKey, dispatchedCall.name);
     const work = runInner(dispatchedCall, principal, allowRef);
     inFlight.set(flightKey, work);
     return { kind: "run", work, key: flightKey, replayRef: allowRef };
@@ -543,6 +548,27 @@ export function createProxy(deps: ProxyDeps) {
                 if (policyDeny) return { kind: "done", result: policyDeny };
                 const flying = inFlight.get(scopedRef);
                 if (flying) return { kind: "wait", work: flying, replayRef: allow.ref };
+                // An approved allow means "the operator said yes", not "it ran",
+                // so the first retry after an approval is the first run. Only a
+                // mark left on disk says a run was already started and never
+                // finished — that one cannot be run again.
+                if (stateDir !== null && startedWithoutEnd(stateDir, scopedRef)) {
+                  const unknownRef = deps.nonce();
+                  await writeRecord({
+                    decision: "deny",
+                    reasonCode: "outcome-unknown",
+                    ref: unknownRef,
+                    requestHash,
+                    inputs: {
+                      ...resolved.inputs,
+                      approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+                    },
+                    effectHash: null,
+                    subject: call.name,
+                    timestampMs,
+                  });
+                  return { kind: "done", result: denied("outcome-unknown", unknownRef) };
+                }
                 return launchInner(dispatched, principal, allow.ref, scopedRef);
               }
               return { kind: "done", result: deferred(given) };
@@ -678,6 +704,9 @@ export function createProxy(deps: ProxyDeps) {
         return await plan.work;
       } finally {
         inFlight.delete(plan.key);
+        // runInner has written its effect row by now — on the throw path too,
+        // as `<name>:threw`. The outcome is on the ledger, so the mark goes.
+        if (stateDir !== null) markEnded(stateDir, plan.key);
       }
     },
   };
