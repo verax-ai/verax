@@ -46,3 +46,6 @@ export type {
   ToolResult,
   WitnessClass,
 } from "./types.ts";
+
+export { verifyLedger } from "./verify-ledger.ts";
+export type { VerifyResult, VerifyOptions, VerifyTrust } from "./verify-ledger.ts";
