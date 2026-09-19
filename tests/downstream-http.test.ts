@@ -1,12 +1,13 @@
 import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
+import { createServer, type Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { parseDownstreamDocument } from "../packages/body/src/downstream.ts";
+import { openDownstream, parseDownstreamDocument } from "../packages/body/src/downstream.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -214,5 +215,36 @@ describe("downstream over HTTP", { timeout: 60_000 }, () => {
     const spec = parseDownstreamDocument(JSON.stringify({ prefix: "kb", url: "https://x.example/mcp" }))[0]!;
     assert.equal(spec.url, "https://x.example/mcp");
     assert.equal(spec.command, undefined);
+  });
+
+  it("a 302 to another host is refused and that host is never contacted", async () => {
+    const yonlendirilen: HttpServer[] = [];
+    let hedefIstek = 0;
+    const hedef = createServer((_req, res) => {
+      hedefIstek += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+    });
+    yonlendirilen.push(hedef);
+    await new Promise<void>((r) => hedef.listen(0, "127.0.0.1", () => r()));
+    const hedefPort = (hedef.address() as { port: number }).port;
+
+    const kacis = createServer((_req, res) => {
+      res.writeHead(302, { Location: `http://127.0.0.1:${hedefPort}/mcp` });
+      res.end();
+    });
+    yonlendirilen.push(kacis);
+    await new Promise<void>((r) => kacis.listen(0, "127.0.0.1", () => r()));
+    const kacisUrl = `http://127.0.0.1:${(kacis.address() as { port: number }).port}/mcp`;
+
+    try {
+      await assert.rejects(
+        () => openDownstream({ prefix: "kacis", url: kacisUrl, timeoutMs: 5000 }),
+        "302 child was accepted",
+      );
+      assert.equal(hedefIstek, 0, `redirect target was contacted ${hedefIstek} time(s)`);
+    } finally {
+      for (const s of yonlendirilen) await new Promise<void>((r) => s.close(() => r()));
+    }
   });
 });
