@@ -63,6 +63,8 @@ describe("6 dev-issuer.mjs", () => {
         VERAX_STATE_DIR: stateDir,
         NODE_ENV: "development",
         VERAX_DEV_ISSUER_PORT: "0",
+        // Names the phase reached if the port never appears (see the trace note below).
+        VERAX_DEV_ISSUER_TRACE: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -124,6 +126,8 @@ describe("6 dev-issuer.mjs", () => {
         VERAX_STATE_DIR: stateDir,
         NODE_ENV: "development",
         VERAX_DEV_ISSUER_PORT: "0",
+        // Names the phase reached if the port never appears (see the trace note below).
+        VERAX_DEV_ISSUER_TRACE: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -244,6 +248,8 @@ describe("6 dev-issuer.mjs", () => {
         VERAX_STATE_DIR: stateDir,
         NODE_ENV: "development",
         VERAX_DEV_ISSUER_PORT: "0",
+        // Names the phase reached if the port never appears (see the trace note below).
+        VERAX_DEV_ISSUER_TRACE: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -290,6 +296,8 @@ describe("6 dev-issuer.mjs", () => {
         VERAX_STATE_DIR: stateDir,
         NODE_ENV: "development",
         VERAX_DEV_ISSUER_PORT: "0",
+        // Names the phase reached if the port never appears (see the trace note below).
+        VERAX_DEV_ISSUER_TRACE: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -361,6 +369,8 @@ describe("6 dev-issuer.mjs", () => {
         VERAX_STATE_DIR: stateDir,
         NODE_ENV: "development",
         VERAX_DEV_ISSUER_PORT: "0",
+        // Names the phase reached if the port never appears (see the trace note below).
+        VERAX_DEV_ISSUER_TRACE: "1",
         VERAX_DEV_REDIRECT_URIS: redirect,
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -440,6 +450,8 @@ describe("6 dev-issuer.mjs", () => {
         VERAX_STATE_DIR: stateDir,
         NODE_ENV: "development",
         VERAX_DEV_ISSUER_PORT: "0",
+        // Names the phase reached if the port never appears (see the trace note below).
+        VERAX_DEV_ISSUER_TRACE: "1",
         VERAX_DEV_REDIRECT_URIS: "http://127.0.0.1:5173/",
       },
       stdio: ["ignore", "pipe", "pipe"],
@@ -474,5 +486,66 @@ describe("6 dev-issuer.mjs", () => {
     } finally {
       child.kill();
     }
+  });
+});
+
+describe("6b dev-issuer.mjs names where it is when it stalls", () => {
+  /**
+   * The gate showed a false red twice in sixteen full runs: the child printed
+   * its first line (the passkey warning) and never reached `listening` within
+   * eight seconds. Alone it gets there in about 200 ms; under the real runner
+   * it took 269 ms median and 3.3 s at worst over 24 samples, so the stall
+   * was not reproduced and the cause is not known. Between those two lines
+   * the script generates a key, writes files, signs a token and binds a port,
+   * and a failure that says only "no port" cannot say which.
+   *
+   * `VERAX_DEV_ISSUER_TRACE=1` makes the child name each phase with the time
+   * since it started. It is off by default: three other suites read this
+   * stderr for the `listening` line and none of them should see more.
+   */
+  const PHASES = ["keys-ready", "token-written", "listen-called"];
+
+  async function stderrOf(env: Record<string, string>): Promise<string> {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-dev-issuer-trace-"));
+    const outPath = join(stateDir, "token");
+    const child = spawn(process.execPath, ["--experimental-strip-types", script, "--out", outPath], {
+      env: { ...process.env, VERAX_STATE_DIR: stateDir, NODE_ENV: "development", VERAX_DEV_ISSUER_PORT: "0", ...env },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    const closed = new Promise<number>((resolve) => {
+      child.once("close", (code) => resolve(code ?? 1));
+    });
+    try {
+      const port = await listeningPort(() => stderr, 30_000);
+      assertBound(port, stderr);
+      return stderr;
+    } finally {
+      child.kill("SIGTERM");
+      await closed;
+    }
+  }
+
+  it("with the trace switch it names each phase, in order, before it listens", { timeout: 60_000 }, async () => {
+    const err = await stderrOf({ VERAX_DEV_ISSUER_TRACE: "1" });
+    let at = -1;
+    for (const phase of PHASES) {
+      // [+] and [0-9] rather than backslash escapes: this line is written through
+      // a template literal, where an unknown escape silently loses its backslash.
+      const m = new RegExp("dev-issuer: trace " + phase + " [+]([0-9]+)ms").exec(err);
+      assert.ok(m, `no trace line for ${phase}: ${err}`);
+      assert.ok(m.index > at, `${phase} came out of order: ${err}`);
+      at = m.index;
+    }
+    assert.ok(err.indexOf("dev-issuer listening") > at, `listening came before the last phase: ${err}`);
+  });
+
+  it("without the switch the output is exactly what other suites already read", { timeout: 60_000 }, async () => {
+    const err = await stderrOf({});
+    assert.doesNotMatch(err, /trace/, `trace lines leaked into the default output: ${err}`);
+    assert.match(err, LISTENING);
   });
 });
