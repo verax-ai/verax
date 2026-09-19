@@ -28,6 +28,7 @@ import {
   openDownstream,
   parseDownstreamDocument,
   type DownstreamSession,
+  type DownstreamSpec,
   type DownstreamTool,
 } from "./downstream.ts";
 
@@ -290,12 +291,37 @@ async function closeAll(sessions: readonly DownstreamSession[]): Promise<void> {
 }
 
 /**
+ * What an operator may see about the attached children: the prefix they call
+ * by, how the body reaches them, and the names it will accept.
+ *
+ * Deliberately not the address. A child's URL can carry its token in the path
+ * — the live Conarium's does — and a command line names a path on this host.
+ * Neither is needed to answer "what is standing behind this gate", so neither
+ * is published. The `tests/downstream-visible` guard asserts their absence.
+ */
+function downstreamPublic(
+  sessions: readonly DownstreamSession[],
+  specs: readonly DownstreamSpec[],
+): { prefix: string; transport: "stdio" | "http"; tools: string[] }[] {
+  return sessions.map((session) => {
+    const spec = specs.find((s) => s.prefix === session.prefix);
+    return {
+      prefix: session.prefix,
+      transport: spec?.url !== undefined ? ("http" as const) : ("stdio" as const),
+      tools: session.tools.map((t) => t.name),
+    };
+  });
+}
+
+/**
  * Opens every child the document names. One child that refuses to attach
  * closes the ones already open and throws: a half-attached body would serve a
  * tool list its operator never wrote.
  */
-async function attachDownstream(file: string | null): Promise<DownstreamSession[]> {
-  if (file === null || file.trim() === "") return [];
+async function attachDownstream(
+  file: string | null,
+): Promise<{ sessions: DownstreamSession[]; specs: DownstreamSpec[] }> {
+  if (file === null || file.trim() === "") return { sessions: [], specs: [] };
   const specs = parseDownstreamDocument(readFileSync(file, "utf8"));
   const sessions: DownstreamSession[] = [];
   for (const spec of specs) {
@@ -307,7 +333,7 @@ async function attachDownstream(file: string | null): Promise<DownstreamSession[
       throw new Error(`downstream-attach-failed:${spec.prefix}:${detail}`);
     }
   }
-  return sessions;
+  return { sessions, specs };
 }
 
 export async function listen(config: BodyConfig): Promise<Server> {
@@ -315,7 +341,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
   // The children are attached before the door opens. A named document the body
   // cannot honour stops the start: a body that serves six tools while its
   // operator wrote seven is answering for a gate it does not have.
-  const sessions = await attachDownstream(config.downstreamFile ?? null);
+  const { sessions, specs: downstreamSpecs } = await attachDownstream(config.downstreamFile ?? null);
   const extraTools = sessions.flatMap((session) => session.tools);
   let services: ReturnType<typeof createBodyServices>;
   try {
@@ -421,6 +447,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
         heartbeat: readHeartbeat(config.stateDir),
         witness: readWitnessPulse(config.stateDir),
         inventory: inventoryHealth(readInventoryFile(config.inventoryFile)),
+        // Always an array, empty when nothing is attached: a missing field
+        // would read as "this body is too old to tell you".
+        downstream: downstreamPublic(sessions, downstreamSpecs),
       });
       return;
     }

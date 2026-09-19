@@ -224,5 +224,9 @@
   "box.record.open": "Open in records",
   "box.none": "The ledger holds no approval request.",
   "box.footnote": "This console reads the ledger. An approval goes to the body, and its answer is printed as the body gave it. The signature is checked where the record is inspected, not here.",
-  "box.footnote.demo": "Sample data. An approval here is not sent to the body."
+  "box.footnote.demo": "Sample data. An approval here is not sent to the body.",
+  "downstream.title": "Attached products",
+  "downstream.empty": "No attached products — nothing else stands behind this body.",
+  "downstream.row": "{prefix} · {transport} · {n} tools",
+  "downstream.note": "The address is not shown here: a child's URL can carry its own token."
 }
