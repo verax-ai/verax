@@ -29,6 +29,12 @@ export type DownstreamSpec = {
   /** HTTP: headers the operator sends to the child, such as its own bearer. */
   headers?: Record<string, string>;
   timeoutMs?: number;
+  /**
+   * stdio only. The operator wrote that this child runs as the same user
+   * as the body and can read the body's signing keys. Required on stdio;
+   * forbidden on HTTP.
+   */
+  trust?: "same-user";
 };
 
 export type DownstreamTool = {
@@ -74,6 +80,19 @@ export function prefixedName(prefix: string, childName: string): string {
 
 export function extraToolNameOk(name: string): boolean {
   return EXTRA_NAME_RE.test(name);
+}
+
+/**
+ * The operator wrote `"trust": "same-user"` on a stdio child. Missing ack
+ * refuses start. One rule, two call sites — do not duplicate the predicate.
+ */
+function assertStdioTrusted(spec: DownstreamSpec): void {
+  if (spec.command !== undefined && spec.trust !== "same-user") {
+    // The prefix is the operator's own name for the child and names WHICH entry
+    // to fix in a document with several. Nothing else about the child goes in:
+    // not the command, the arguments or the environment.
+    throw new Error(`downstream-stdio-trust-required:${spec.prefix}`);
+  }
 }
 
 export function parseDownstreamJson(raw: string): DownstreamSpec {
@@ -157,6 +176,16 @@ export function parseDownstreamJson(raw: string): DownstreamSpec {
     }
     spec.timeoutMs = rec.timeoutMs;
   }
+  if (rec.trust !== undefined) {
+    // HTTP + any trust, or a value other than "same-user", is the same
+    // refusal: the field is not a claim about a remote host, and it is
+    // not a free-form string.
+    if (spec.url !== undefined || rec.trust !== "same-user") {
+      throw new Error("downstream-trust-invalid");
+    }
+    spec.trust = "same-user";
+  }
+  assertStdioTrusted(spec);
   return spec;
 }
 
@@ -223,6 +252,8 @@ function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
   if (spec.command === undefined || spec.command.trim() === "") {
     throw new Error("downstream-command-invalid");
   }
+  // Last check before the spawn: openDownstream can be called without parse.
+  assertStdioTrusted(spec);
   // Safe inherit + operator overlay. Not process.env: that would copy
   // VERAX_* tokens the body already holds.
   const env = { ...getDefaultEnvironment(), ...(spec.env ?? {}) };

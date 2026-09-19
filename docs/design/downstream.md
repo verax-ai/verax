@@ -38,8 +38,11 @@ transport, and only `src/downstream.ts` may import it.
 
 **Decision (spike, extended 19 Sep).** One child, described in a JSON
 document as `{ prefix, command?, args?, cwd?, env?, url?, headers?,
-timeoutMs? }`. Exactly one way in: `command` spawns the child over stdio,
-`url` speaks Streamable HTTP to one already running. Both is
+timeoutMs?, trust? }`. `trust` is required on stdio and must be
+`"same-user"`; it is forbidden on HTTP. Existing stdio documents do not
+open until that field is added — a breaking change. Exactly one way in:
+`command` spawns the child over stdio, `url` speaks Streamable HTTP to
+one already running. Both is
 `downstream-transport-ambiguous`, neither is `downstream-transport-missing`,
 and a `url` that is not `http:` or `https:` is `downstream-url-invalid`.
 `headers` is the operator's, for a child that wants its own bearer; the
@@ -200,12 +203,14 @@ child through the SDK stdio transport. That source does not write
 the `child_process` name, so the no-bypass scan does not see the
 spawn (`src/desktop.ts` remains the file that may name it).
 
-A stdio child runs as the same user as the body. `keys/*.pem` are
-`0o600`, and that mode is not a barrier against the same UID: a
-stdio child can read the body's signing keys and sign a decision
-the gate never issued. This is a known, unclosed bound. An
-untrusted child should be reached over HTTP — a separate process,
-a separate machine, no filesystem of the body.
+The bound is still open: a stdio child runs as the same user as the
+body and can read `keys/*.pem`. A stdio child now does not start
+unless the operator writes `"trust": "same-user"` on that child's
+document line; `verax doctor` names every stdio child with a `warn`.
+An untrusted child should be reached over HTTP, ideally on a
+separate machine or under a separate operating-system user. This
+moves the decision from a paragraph onto a line the operator wrote;
+it does not provide a protection. The bound is known and open.
 
 **Why.** The threat model is a hostile brain, not a hostile
 operator. Egress exists to stop the brain picking a destination.
