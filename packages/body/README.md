@@ -35,6 +35,7 @@ Bearer token the configured issuer did not sign.
 | `VERAX_POLICY_FILE` | yes | Policy the gate applies. `@verax-ai/proxy` ships `policy/default.json`, which denies what it does not name. |
 | `VERAX_BIND` | no | `host:port` to listen on. Default `127.0.0.1:8787`; anything but loopback needs `VERAX_TLS_TERMINATED=1`. |
 | `VERAX_INVENTORY_FILE` | no | Roster document the body serves. The format is `@verax-ai/inventory`. |
+| `VERAX_DOWNSTREAM` | no | Path to a JSON document naming stdio MCP servers to put behind this gate: one `{ prefix, command, args?, cwd?, env?, timeoutMs? }` or an array of them. A path and not the JSON itself, because the document may name a key in `env`. Their tools are served as `prefix.childName` and need an exact policy rule under that name; a named child that cannot be opened stops the body. |
 
 `verax doctor` names what is missing. A misconfigured body exits with code 78
 before it listens.

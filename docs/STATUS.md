@@ -36,7 +36,7 @@ what that test covers, not a wider claim.
 | Ledger rotation | 0.1.2 | The ledger closes into pieces with a chain handoff, a persistent ref index rebuilt from the pieces when it falls short, and lifetime `/healthz` counts. A window that starts inside a piece seeks by timestamp. `/api/ledger` answers at most 5,000 rows, 1,000 when no limit is asked. | Answer an unbounded read. A reader that wants more pages back with `from` / `to`. `inputs.jsonl` rows carry no stamp, so a past window's inputs are still read from the end of a piece. | `ledger-rotation`, `ledger-window`, `jsonl-tail` |
 | Disk-low refusal | 0.1.0 | When a deny cannot be appended, the call is refused with HTTP 507 and a `disk_deny_unrecorded` metric, rather than running unrecorded. | Free disk or rotate for you. | `disk-unrecorded` |
 | Panel | not published | A private app that reads one body's signed ledger: records, black box and status, over a code-flow session whose token stays in memory. A build of it on sample data is served at `verax-ai.com/panel/?demo=1`; it has no body behind it, asks none for anything, and its `BUILD.json` names the commit it was built from. | Read several bodies. A fleet view is designed in `docs/design/fleet.md` and is not implemented. The published sample is not a deployment and carries no customer ledger; because it has no body, its status tab shows the roster sentence rather than the agents table. | `apps/panel` suite |
-| Downstream MCP | spike | A stdio attach helper can prefix a child server's tools behind the same gate. | Ship in the served path: `listen()` does not read a downstream spec, and HTTP `/mcp` lists the six built-in tools. | `downstream` |
+| Downstream MCP | unreleased | `VERAX_DOWNSTREAM` names a document of stdio child servers. `listen()` attaches them before the door opens, HTTP `tools/list` publishes their tools as `prefix.childName` carrying the child's own description and schema, and a forwarded call passes the same gate and leaves the same signed decision and effect row under that name. | Merge anything: the child stays its own server in its own process. Reach a child over HTTP — stdio only, so a remote Conarium or Tugra is not attachable yet. Match a rule by wildcard: a policy rule names the prefixed tool exactly. Come up half-attached: a child the document names but cannot open stops the body. | `downstream`, `downstream-served` |
 
 What stays unproven for every row above: none of it has run against a
 paying customer's production traffic. The pilot drills in
@@ -243,19 +243,40 @@ Remaining gaps, still open:
 - the panel reads `authorization_servers` from `/.well-known/oauth-protected-resource` before it starts a session. If that document cannot be read, the session does not redirect: the rail shows `resource metadata unreachable` and names the last-resort issuer (`VITE_VERAX_ISSUER`, else `http://127.0.0.1:8790`). Vite proxies `/.well-known`. `verax desktop` still passes its panel port to the issuer allow-list when it starts the issuer; when it joins a running body it cannot, and `verax doctor` names the gap
 - a JWT-less fixture principal keeps the raw `_ref` as `claims.ref` so S1 tests stay pinned; production tokens always carry `iss` and are prefixed
 
-## Spike — downstream MCP (this commit)
+## Downstream MCP on the served path (this commit)
 
-The tree carries a stdio attach helper (`packages/body/src/downstream.ts`)
-that prefixes one child's tools and a `createBodyServices({ extraTools })`
-seam so those names enter the private registry Map and `tools/call` still
-goes through the existing proxy (`docs/design/downstream.md`,
-`tests/downstream.test.ts`). `listen()` does not read a downstream spec
-and does not pass `extraTools`; HTTP `/mcp` still lists the six built-in
-tools. The default policy is unchanged. The panel is unchanged. The
-attach starts the child through the SDK stdio transport; that source does
-not write the `child_process` name, so the no-bypass scan names the SDK
-stdio client transport instead, and only `src/downstream.ts` may import
-it (`src/desktop.ts` remains the file that may name `child_process`).
-Operator decisions of 17 Sep 2026 are on the design note (connection
-document, exact-match namespace, `resultHash` only). This is a spike,
-not a release path. Unproven against a live Conarium or Tugra server.
+`VERAX_DOWNSTREAM` is a path to a JSON document: one stdio child server, or
+an array of them, each `{ prefix, command, args?, cwd?, env?, timeoutMs? }`.
+It is a path and not the JSON itself because the document may name a key in
+`env`, and that key belongs in a file the operator controls rather than in
+the environment of the body. Unset means no downstream and the door is
+exactly what it was: the six built-in tools.
+
+`listen()` attaches every named child before it binds, passes their tools to
+`createBodyServices({ extraTools })` so the names enter the private registry
+Map, publishes them on HTTP `tools/list` as `prefix.childName` with the
+child's own description and input schema, and closes the children when the
+server closes. A child the document names but cannot open throws
+`downstream-attach-failed:<prefix>:<detail>` and the body does not come up:
+a body serving six tools while its operator wrote seven is answering for a
+gate it does not have.
+
+A forwarded call is an ordinary call. It passes the same policy gate under
+the prefixed name — an exact rule, no wildcard — leaves the same signed
+decision, and on allow writes the same effect row with `effectClass` set to
+that name and `resultHash` over the child's answer. Without a rule it is
+`denied:no-rule:<ref>` and the child is never called. The default policy is
+unchanged, so a fresh body forwards nothing until the operator writes the
+rule. The panel is unchanged.
+
+The attach starts the child through the SDK stdio transport; that source
+does not write the `child_process` name, so the no-bypass scan names the SDK
+stdio client transport instead, and only `src/downstream.ts` may import it
+(`src/desktop.ts` remains the file that may name `child_process`). Operator
+decisions of 17 Sep 2026 are on the design note (connection document,
+exact-match namespace, `resultHash` only).
+
+**Not done.** Only stdio: a Conarium or Tugra server reached over HTTP
+cannot be attached yet, and the local stdio Conarium holds a single-writer
+audit lock, so the first real attach is waiting on that transport rather
+than on this wiring. Unproven against a live Conarium or Tugra server.

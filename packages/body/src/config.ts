@@ -11,6 +11,13 @@ export type BodyConfig = {
   tlsTerminated: boolean;
   /** Path to an inventory JSON file. Missing file is absence, not a fault. */
   inventoryFile?: string | null;
+  /**
+   * Path to the `VERAX_DOWNSTREAM` document. A path, not the JSON itself: the
+   * document may name a key in `env`, and a secret does not belong in the
+   * process environment of every child the operator later starts. Unset means
+   * no downstream; a named file that cannot be attached stops the body.
+   */
+  downstreamFile?: string | null;
 };
 
 export type ConfigResult =
@@ -64,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
     return { ok: false, code: EX_CONFIG, reason: "missing VERAX_POLICY_FILE" };
   }
   const inventoryRaw = env.VERAX_INVENTORY_FILE?.trim() ?? "";
+  const downstreamRaw = env.VERAX_DOWNSTREAM?.trim() ?? "";
   return {
     ok: true,
     value: {
@@ -76,6 +84,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       policyFile,
       tlsTerminated,
       inventoryFile: inventoryRaw === "" ? null : inventoryRaw,
+      downstreamFile: downstreamRaw === "" ? null : downstreamRaw,
     },
   };
 }

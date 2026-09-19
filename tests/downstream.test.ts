@@ -76,7 +76,7 @@ async function withEchoBody(
   }
 }
 
-describe("downstream spike", { timeout: 60_000 }, () => {
+describe("downstream attach", { timeout: 60_000 }, () => {
   it("lists the prefixed tool and an allow writes a decision plus an effect row", async () => {
     await withEchoBody(ECHO_POLICY, async ({ services }) => {
       assert.ok(services.listTools().includes("echo.ping"));
@@ -207,13 +207,6 @@ describe("downstream spike", { timeout: 60_000 }, () => {
       const body = JSON.parse(textOf(result)) as { veraxKeys?: string[] };
       assert.deepEqual(body.veraxKeys, []);
     });
-  });
-
-  it("listen() does not attach extras", () => {
-    const server = readFileSync(join(root, "packages", "body", "src", "server.ts"), "utf8");
-    assert.equal(server.includes("openDownstream"), false);
-    assert.equal(server.includes("VERAX_DOWNSTREAM"), false);
-    assert.equal(server.includes("extraTools"), false);
   });
 
   it("measures median extra latency of a forwarded call (proxy-perf pattern, not a budget)", async () => {

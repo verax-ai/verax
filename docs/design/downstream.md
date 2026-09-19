@@ -1,10 +1,17 @@
-# Downstream MCP servers — design note (spike)
+# Downstream MCP servers — design note
 
-This is a design, not a release. The tree carries a stdio spike that
-prefixes one child's `tools/list` onto the body's registry Map and
-forwards `tools/call` through `createProxy`. HTTP `/mcp` still serves
-the six built-in tools; the panel is unchanged. Live bodies on this
-machine are not started from this note.
+**Status (19 September 2026).** The spike this note designed is now on
+the served path. `listen()` reads `VERAX_DOWNSTREAM`, attaches the
+children it names before binding, publishes their tools on HTTP
+`tools/list` under `prefix.childName`, and closes them with the server;
+`tests/downstream-served.test.ts` holds that up. What the sections below
+mark **Open** stayed open unless this block says otherwise. Two decisions
+moved: the document is a **path** in `VERAX_DOWNSTREAM` and may be an
+**array** of children (§1), and HTTP `tools/list` **does** publish the
+child's own description and schema (§2) — a tool a caller cannot see is a
+tool the gate is never asked about. Still stdio only: an HTTP child, and
+with it the first real Conarium attach, is the next transport. The panel
+is unchanged. Live bodies on this machine are not started from this note.
 
 The commercial line "one ledger, three places, one contract" is a
 package, not a code merge. Conarium and Tugra stay their own MCP
@@ -19,7 +26,8 @@ proposal C (Verax Proxy). Product decision stays with the operator.
 block in the policy file, because that would change `policyHash` for
 every rule. Namespace: `prefix.childName`, exact-match policy rules, no
 wildcard; HTTP `tools/list` publishes the extras only once `listen()`
-wires a downstream, which is a later phase, not this spike. Receipt
+wires a downstream — that phase landed on 19 September and the list now
+carries them. Receipt
 binding: the effect row keeps `resultHash` over the child's answer and
 nothing more; a Conarium receipt field is decided when the body reads a
 real Conarium receipt, not before. The no-bypass scan names the SDK stdio
@@ -49,8 +57,14 @@ Passing the agent's Verax token to the child (rejected). A shared
 vault that mints a child-specific token (later, if a child refuses
 stdio).
 
-**Open.** Whether `VERAX_DOWNSTREAM` is one object or an array of
-them. The spike parses one object.
+**Settled (19 Sep).** Both: `parseDownstreamDocument` reads one object
+or an array, and a prefix that appears twice refuses the document
+(`downstream-prefix-duplicate:<prefix>`). `VERAX_DOWNSTREAM` carries the
+path to that file, not its text, so a child's key stays in a file the
+operator controls.
+
+**Open.** Whether a child may be attached or dropped while the body
+runs. Today the set is fixed at `listen()`.
 
 ## 2. Namespace
 
@@ -74,9 +88,12 @@ built-in is silent. A slash (`conarium/query`) — unlike the existing
 dot style. Live merge of the child's later `tools/list` — the Map
 is not a live bus; a refresh is a later job.
 
-**Open.** Whether HTTP `tools/list` (and `TOOL_META`) should grow
-the child's description and schema, or stay the six tools until
-the panel work.
+**Settled (19 Sep).** HTTP `tools/list` grows. Each extra is published
+as the child's own description followed by one sentence naming what the
+body adds — that the call passes this gate under this name and may come
+back `denied:…` or `deferred:…` before the child sees it — and the
+child's `inputSchema` unchanged. A child that published no schema is
+listed as `{ type: "object" }` rather than left without one.
 
 ## 3. Decision record
 
@@ -156,9 +173,12 @@ child understands; not in this spike).
 ## 6. Security model (unchanged door)
 
 **Decision.** Streamable HTTP `/mcp` still refuses a call without a
-verified Bearer token. This spike does not open that door and does
-not change `listen()`: extras enter the registry Map when a caller
-passes `extraTools`, and `listen()` does not. A stdio child's
+verified Bearer token. Attaching a child does not open that door: it
+adds names behind it. `listen()` now reads the operator's document and
+passes `extraTools`, and the scope, tenant and revocation checks a
+forwarded call passes are the ones every built-in call passes. A
+child that cannot be opened stops the body rather than leaving a door
+whose tool list is shorter than the document behind it. A stdio child's
 address is an operator command line, not a host the brain supplies,
 so it does not enter the `egress` allow-list (that list is for
 brain-chosen hosts such as `message.send`'s `to`). Decision claims
@@ -183,12 +203,13 @@ ledger payloads (already named as undesigned in STATUS).
 
 ## 7. Panel
 
-**Decision.** Not in this spike. A forwarded allow already stores
+**Decision.** Not in this phase. A forwarded allow already stores
 `subject` as the prefixed tool name. The Records / agent table can
-filter on that string (`conarium.` prefix) without a new column.
-Until HTTP `tools/list` publishes the extras, a panel talking to a
-live `/mcp` will not see them to call; it will still see their
-rows if a test or a future server path wrote them.
+filter on that string (`conarium.` prefix) without a new column. Now
+that HTTP `tools/list` publishes the extras, a panel talking to a live
+`/mcp` sees them in the list; nothing in the panel says which rows came
+from a downstream server, and nothing yet says which children a body
+attached. That is the first panel job when a real child is attached.
 
 **Why.** The task keeps the panel as a separate job. The ledger
 shape does not need a new field for a name the brain already used.
@@ -196,27 +217,33 @@ shape does not need a new field for a name the brain already used.
 **Alternative.** A `downstream` tag on the decision (rejected: new
 meaning on a closed claims shape). A dedicated tab (later product).
 
-## 8. What this spike will not do
+## 8. What this does not do
 
 - Copy Conarium or Tugra code into this repository.
 - Move Conarium masking, completeness, or receipt minting into Verax.
 - Wake Hermes, OpenClaw, or NEO.
 - Touch Talamus or Mizan product surfaces.
 - Bind or restart the live body on port 8787.
-- Change the default policy.
-- Publish extra tools on HTTP `tools/list` / `TOOL_META`.
+- Change the default policy: a fresh body forwards nothing until the
+  operator writes an exact rule for the prefixed name.
+- Reach a child over HTTP. stdio only, so the live Conarium and Tugra
+  servers are not attachable from this note yet.
+- Attach or drop a child while the body runs.
 
-## Spike surface
+## Surface
 
 | Piece | Role |
 | --- | --- |
-| `packages/body/src/downstream.ts` | stdio client, prefix, forward, `parseDownstreamJson` |
-| `createBodyServices({ extraTools })` | extra names enter the private registry Map; `listen()` does not pass this |
-| `tests/downstream.test.ts` | allow + effect; deny without a rule; child fail → `:threw`; parent `VERAX_*` stays out of the child |
-| `tests/fixtures/downstream-echo.mjs` | one-tool stdio child |
+| `packages/body/src/downstream.ts` | stdio client, prefix, forward, `parseDownstreamJson`, `parseDownstreamDocument` |
+| `VERAX_DOWNSTREAM` (`config.ts`) | path to the operator's document; unset means no downstream |
+| `listen()` (`server.ts`) | attach before bind, publish on `tools/list`, close with the server, refuse to come up half-attached |
+| `createBodyServices({ extraTools })` | extra names enter the private registry Map |
+| `tests/downstream.test.ts` | attach unit: allow + effect; deny without a rule; child fail → `:threw`; parent `VERAX_*` stays out of the child |
+| `tests/downstream-served.test.ts` | served path: `tools/list` carries the child's schema; a forwarded call writes one decision and one effect; a denied call never reaches the child; a bad document stops the body; the child dies with the body; an array document attaches each child |
+| `tests/fixtures/downstream-echo.mjs` | one-tool stdio child; writes a trace when the spec's `env` names one |
 
-Mutation check used by the report: if the wrapper stops calling the
-child and returns a stub, the allow test that expects `"pong":true`
-fails.
-
-This is a spike. It is not a production path.
+Mutation checks run against these guards: dropping the extras from
+`tools/list`, not passing `extraTools`, swallowing the attach failure,
+leaving the child open at shutdown, reading the document as a single
+object, and ignoring `VERAX_DOWNSTREAM` each turned exactly the guard
+that claims them red.

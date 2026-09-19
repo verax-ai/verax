@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -23,6 +24,12 @@ import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
+import {
+  openDownstream,
+  parseDownstreamDocument,
+  type DownstreamSession,
+  type DownstreamTool,
+} from "./downstream.ts";
 
 // What a brain reads before it calls. Each description says what the tool is
 // for, what it does and does not do, what the gate may answer, and what comes
@@ -253,18 +260,81 @@ function send(res: ServerResponse, status: number, body: unknown, headers?: Reco
   res.end(text);
 }
 
+/**
+ * Republishes a child's own `tools/list` entry under its prefixed name. The
+ * description is the child's; the sentence added here says what changes by
+ * going through the body, because the answers a caller gets back
+ * (`denied:…`, `deferred:…`) are the gate's, not the child's.
+ */
+function downstreamMeta(tool: DownstreamTool): {
+  name: string;
+  description: string;
+  inputSchema: unknown;
+} {
+  const own = typeof tool.description === "string" && tool.description !== "" ? `${tool.description} ` : "";
+  return {
+    name: tool.name,
+    description:
+      own +
+      "Forwarded by this body to the downstream server that published it: the call passes the same policy gate " +
+      "and leaves the same signed decision under this name, so it may be answered with denied:<reason>:<ref> or " +
+      "deferred:approval-required:<ref> before the downstream server ever sees it.",
+    inputSchema: tool.inputSchema ?? { type: "object" },
+  };
+}
+
+async function closeAll(sessions: readonly DownstreamSession[]): Promise<void> {
+  for (const session of sessions) {
+    await session.close().catch(() => undefined);
+  }
+}
+
+/**
+ * Opens every child the document names. One child that refuses to attach
+ * closes the ones already open and throws: a half-attached body would serve a
+ * tool list its operator never wrote.
+ */
+async function attachDownstream(file: string | null): Promise<DownstreamSession[]> {
+  if (file === null || file.trim() === "") return [];
+  const specs = parseDownstreamDocument(readFileSync(file, "utf8"));
+  const sessions: DownstreamSession[] = [];
+  for (const spec of specs) {
+    try {
+      sessions.push(await openDownstream(spec));
+    } catch (err) {
+      await closeAll(sessions);
+      const detail = err instanceof Error ? err.message : "attach-failed";
+      throw new Error(`downstream-attach-failed:${spec.prefix}:${detail}`);
+    }
+  }
+  return sessions;
+}
+
 export async function listen(config: BodyConfig): Promise<Server> {
   const signers = loadOrCreateSigners(config.stateDir);
-  const services = createBodyServices({
-    stateDir: config.stateDir,
-    policyFile: config.policyFile,
-    recordSigner: signers.recordSigner,
-    effectSigner: signers.effectSigner,
-  });
+  // The children are attached before the door opens. A named document the body
+  // cannot honour stops the start: a body that serves six tools while its
+  // operator wrote seven is answering for a gate it does not have.
+  const sessions = await attachDownstream(config.downstreamFile ?? null);
+  const extraTools = sessions.flatMap((session) => session.tools);
+  let services: ReturnType<typeof createBodyServices>;
+  try {
+    services = createBodyServices({
+      stateDir: config.stateDir,
+      policyFile: config.policyFile,
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+      ...(extraTools.length > 0 ? { extraTools } : {}),
+    });
+  } catch (err) {
+    await closeAll(sessions);
+    throw err;
+  }
+  const toolMeta = [...TOOL_META, ...extraTools.map(downstreamMeta)];
   const verify = createVerifier(config.jwksUrl, config.issuer, config.audience);
 
   const attachHandlers = (mcp: McpServer) => {
-    mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_META }));
+    mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolMeta }));
     mcp.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const auth = extra?.authInfo;
       const scopes = new Set(auth?.scopes ?? []);
@@ -658,6 +728,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
   });
   server.on("close", () => {
     services.ledger.close();
+    void closeAll(sessions);
   });
   return server;
 }
