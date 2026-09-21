@@ -1,6 +1,6 @@
 {
   "name": "@verax-ai/inventory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "license": "Apache-2.0",
   "description": "Read the declared roster document a VERAX body serves and the VERAX panel lists.",
   "homepage": "https://verax-ai.com",
