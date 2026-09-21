@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 637" width="860" height="637" role="img" aria-label="verax demo: the output of one real run, played back slowly">
 <title>verax demo: the output of one real run, played back slowly</title>
 <style>
-.m{font:14px ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;white-space:pre;opacity:0}
+.m{font:14px ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;white-space:pre}
 @keyframes k{0%,2.16%{opacity:0}2.76%,97%{opacity:1}100%{opacity:0}}
 @keyframes b0{0%,7.57%{opacity:0}8.17%,97%{opacity:1}100%{opacity:0}}
 @keyframes b1{0%,15.68%{opacity:0}16.28%,97%{opacity:1}100%{opacity:0}}
@@ -12,7 +12,7 @@
 @keyframes b6{0%,64.86%{opacity:0}65.46%,97%{opacity:1}100%{opacity:0}}
 @keyframes y{0%,38.38%{opacity:0}38.98%,97%{opacity:1}100%{opacity:0}}
 @keyframes o{0%,41.08%{opacity:0}41.68%,97%{opacity:1}100%{opacity:0}}
-@media (prefers-reduced-motion:reduce){.m,.m tspan{animation:none!important;opacity:1}}
+@media (prefers-reduced-motion:reduce){.m,.m tspan{animation:none!important}}
 </style>
 <rect width="860" height="637" rx="10" fill="#0d1117"/>
 <circle cx="22" cy="20" r="6" fill="#ff5f56"/><circle cx="42" cy="20" r="6" fill="#ffbd2e"/><circle cx="62" cy="20" r="6" fill="#27c93f"/>
