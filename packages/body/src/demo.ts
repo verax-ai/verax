@@ -14,6 +14,22 @@ import { listen } from "./server.ts";
 const NOT_SHOWN =
   "Not shown here: data masking arrives with a downstream server such as Conarium; statement reconciliation needs a real statement (verax reconcile).";
 
+const NOT_SHOWN_WITH_CONARIUM =
+  "Not shown here: a real database (these are Conarium's sample rows); statement reconciliation needs a real statement (verax reconcile).";
+
+const NPX_DOWNLOAD_LINE =
+  "npx will download @conarium-ai/core from npm and run it as a child process; a cold download takes longer.\n";
+
+const CONARIUM_NPX = {
+  command: "npx",
+  args: ["-y", "--package=@conarium-ai/core@^0.2.51", "conarium", "--demo"],
+} as const;
+
+const CONARIUM_TIMEOUT_MS = 120_000;
+const CUSTOMERS_SQL = "SELECT name, email, card FROM public.customers";
+const SECRETS_SQL = "SELECT * FROM public.secrets";
+const MASKED_PII = "[MASKED_PII]";
+
 const AUDIENCE = "http://127.0.0.1/verax-demo";
 const KID = "demo";
 const TOKEN_TTL_SEC = 5 * 60;
@@ -31,6 +47,11 @@ export type DemoIo = {
   stderr: { write(s: string): unknown };
   stdin: NodeJS.ReadableStream;
   isTTY: boolean;
+};
+
+/** Test injection. The CLI never passes this; it is not read from argv or env. */
+export type DemoOpts = {
+  conariumChild?: { command: string; args: string[] };
 };
 
 type PolicyDoc = {
@@ -65,7 +86,7 @@ function shippedPolicyPath(): string {
 }
 
 /** Shipped default plus message.send egress and a spend rule, written under the temp dir. */
-function writeDemoPolicy(stateDir: string): string {
+function writeDemoPolicy(stateDir: string, withConarium: boolean): string {
   const shipped = JSON.parse(readFileSync(shippedPolicyPath(), "utf8")) as PolicyDoc;
   const document: PolicyDoc = {
     ...shipped,
@@ -92,9 +113,32 @@ function writeDemoPolicy(stateDir: string): string {
           dailyMaxMinor: 10_000,
         },
       },
+      ...(withConarium
+        ? [
+            {
+              id: "conarium-query",
+              tool: "conarium.query",
+              requires: ["verax:read"],
+              text: "A data read through Conarium needs the read scope.",
+            },
+          ]
+        : []),
     ],
   };
   const path = join(stateDir, "policy.json");
+  writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  return path;
+}
+
+function writeConariumDownstream(stateDir: string, child: { command: string; args: readonly string[] }): string {
+  const path = join(stateDir, "downstream.json");
+  const document = {
+    prefix: "conarium",
+    command: child.command,
+    args: [...child.args],
+    trust: "same-user",
+    timeoutMs: CONARIUM_TIMEOUT_MS,
+  };
   writeFileSync(path, `${JSON.stringify(document, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   return path;
 }
@@ -166,6 +210,51 @@ function parseTagged(text: string, kind: "denied" | "deferred"): { code: string;
   return m ? { code: m[1]!, ref: m[2]! } : null;
 }
 
+async function callToolCaught(
+  client: Client,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<{ isError: boolean; text: string }> {
+  try {
+    const result = await client.callTool({ name, arguments: args });
+    return { isError: result.isError === true, text: toolText(result) };
+  } catch (err) {
+    return { isError: true, text: err instanceof Error ? err.message : "fault" };
+  }
+}
+
+function customerRowsMasked(text: string): boolean {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  if (parsed === null || typeof parsed !== "object") return false;
+  const rows = (parsed as { rows?: unknown }).rows;
+  if (!Array.isArray(rows) || rows.length === 0) return false;
+  for (const row of rows) {
+    if (row === null || typeof row !== "object") return false;
+    const rec = row as Record<string, unknown>;
+    if (rec.email !== MASKED_PII || rec.card !== MASKED_PII) return false;
+  }
+  return true;
+}
+
+/**
+ * The body passes on that a downstream tool answered with an error, not what it
+ * said: the detail is the fixed word `call-failed`. A child that died or timed
+ * out carries the transport's own message there instead, and that is not an
+ * answer from Conarium.
+ */
+function childAnsweredWithError(text: string, tool: string): boolean {
+  return text.trim().endsWith(`downstream-call-failed:${tool}:call-failed`);
+}
+
+function attachFailedDetail(detail: string): boolean {
+  return /downstream-attach-failed|downstream-attach-timeout/.test(detail);
+}
+
 async function readAnswer(stdin: NodeJS.ReadableStream): Promise<string> {
   const ended = (stdin as NodeJS.ReadableStream & { readableEnded?: boolean }).readableEnded;
   if (ended) return "";
@@ -188,19 +277,22 @@ async function readAnswer(stdin: NodeJS.ReadableStream): Promise<string> {
   });
 }
 
-export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo): Promise<number> {
+export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo, opts?: DemoOpts): Promise<number> {
   if (env.NODE_ENV === "production") {
     io.stderr.write("demo refuses NODE_ENV=production\n");
     return 1;
   }
 
   const keep = argv.includes("--keep");
+  const withConarium = argv.includes("--with-conarium");
   let stateDir: string | null = null;
   let jwks: Server | null = null;
   let body: Server | null = null;
   let client: Client | null = null;
   let token = "";
   let cleaned = false;
+  let discardState = false;
+  let failed = false;
 
   const writeOut = (s: string) => {
     io.stdout.write(redact(s, token));
@@ -220,7 +312,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     body = null;
     await closeHttp(jwks);
     jwks = null;
-    if (stateDir && !keep) {
+    if (stateDir && (!keep || discardState)) {
       try {
         rmSync(stateDir, { recursive: true, force: true });
       } catch {
@@ -237,7 +329,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
 
   try {
     stateDir = mkdtempSync(join(tmpdir(), "verax-demo-"));
-    const policyFile = writeDemoPolicy(stateDir);
+    const policyFile = writeDemoPolicy(stateDir, withConarium);
 
     const { privateKey, publicKey } = await generateKeyPair("ES256");
     const jwk = { ...(await exportJWK(publicKey)), alg: "ES256", use: "sig", kid: KID };
@@ -245,6 +337,15 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     jwks = jwksBind.server;
     const issuer = jwksBind.issuer;
     const jwksUrl = `${issuer}/.well-known/jwks.json`;
+
+    let downstreamFile: string | undefined;
+    if (withConarium) {
+      const child = opts?.conariumChild ?? CONARIUM_NPX;
+      downstreamFile = writeConariumDownstream(stateDir, child);
+      if (!opts?.conariumChild) {
+        writeErr(NPX_DOWNLOAD_LINE);
+      }
+    }
 
     body = await listen({
       issuer,
@@ -255,6 +356,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       bindPort: 0,
       policyFile,
       tlsTerminated: false,
+      ...(downstreamFile !== undefined ? { downstreamFile } : {}),
     });
     const addr = body.address();
     if (!addr || typeof addr === "string") throw new Error("demo: body bind failed");
@@ -327,6 +429,46 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     }
     writeOut("\n");
 
+    if (withConarium) {
+      const customers = await callToolCaught(client, "conarium.query", { sql: CUSTOMERS_SQL });
+      if (customers.isError) throw new Error(`demo: conarium.query customers ${customers.text}`);
+      writeOut("conarium.query customers\n");
+      if (customerRowsMasked(customers.text)) {
+        writeOut("  allowed; masked by Conarium before the rows left it\n");
+        writeOut("  measured [MASKED_PII] on every email and card\n");
+      } else {
+        writeOut("  allowed; did not come out masked\n");
+        failed = true;
+      }
+      writeOut("\n");
+
+      const secrets = await callToolCaught(client, "conarium.query", { sql: SECRETS_SQL });
+      const secretsDenied = parseTagged(secrets.text, "denied");
+      writeOut("conarium.query public.secrets\n");
+      if (secretsDenied) {
+        writeOut(`  refused ${secretsDenied.code} (signed)\n`);
+        failed = true;
+      } else if (childAnsweredWithError(secrets.text, "conarium.query")) {
+        writeOut("  allowed by this gate; Conarium answered with an error and no rows\n");
+        writeOut("  recorded as a failed call\n");
+      } else if (secrets.isError) {
+        writeOut("  allowed by this gate; the call to Conarium failed before it answered\n");
+        failed = true;
+      } else {
+        writeOut("  allowed; Conarium did not refuse public.secrets\n");
+        failed = true;
+      }
+      writeOut("\n");
+
+      const listed = await callToolCaught(client, "conarium.list_tables", {});
+      const listedDenied = parseTagged(listed.text, "denied");
+      writeOut("conarium.list_tables\n");
+      if (!listedDenied) throw new Error(`demo: conarium.list_tables ${listed.text}`);
+      writeOut(`  refused ${listedDenied.code} (signed)\n`);
+      writeOut("  refused by this gate; the downstream server never saw the call\n");
+      writeOut("\n");
+    }
+
     const explained = await client.callTool({
       name: "audit.explain",
       arguments: { ref: denied.ref },
@@ -371,13 +513,18 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       writeOut("ledger   removed on exit (run with --keep to keep it and check it with verax verify)\n");
     }
     writeOut("\n");
-    writeOut(`${NOT_SHOWN}\n`);
+    writeOut(`${withConarium ? NOT_SHOWN_WITH_CONARIUM : NOT_SHOWN}\n`);
 
     await cleanup();
-    return 0;
+    return failed ? 1 : 0;
   } catch (err) {
     const detail = err instanceof Error ? err.message : "fault";
-    writeErr(`demo: ${detail}\n`);
+    if (withConarium && attachFailedDetail(detail)) {
+      discardState = true;
+      writeErr(`could not start the Conarium child (${detail}). run without --with-conarium\n`);
+    } else {
+      writeErr(`demo: ${detail}\n`);
+    }
     await cleanup();
     return 1;
   }

@@ -21,6 +21,7 @@ Usage: verax <command> [options]
   (no command)         serve MCP over Streamable HTTP at /mcp on VERAX_BIND (default 127.0.0.1:8787)
   doctor [--json]      check the configuration this process would run with
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
+       [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
   approve <args>       approve a waiting request from this machine
   operator <args>      enrol an operator and manage their passkeys
   reconcile <args>     compare the ledger against a statement
