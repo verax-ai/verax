@@ -9,10 +9,10 @@ and it names a released version. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.2.1
+## Capability matrix — 0.2.2
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.2.1, and in the MCP registry as
+`@verax-ai/inventory` 0.2.2, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that

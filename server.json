@@ -8,12 +8,12 @@
     "url": "https://github.com/verax-ai/verax",
     "source": "github"
   },
-  "version": "0.2.1",
+  "version": "0.2.2",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@verax-ai/body",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "transport": {
         "type": "streamable-http",
         "url": "http://{VERAX_BIND}/mcp"
