@@ -91,6 +91,9 @@ check(help.status === 0 && /Usage: verax/.test(help.out), "verax --help from the
 const version = run("npx", ["--no-install", "verax", "--version"], consumer);
 check(/^\d+\.\d+\.\d+/.test(version.out.trim()), "verax --version prints a version", version.out.trim().slice(0, 80));
 
+const demo = run("npx", ["--no-install", "verax", "demo"], consumer);
+check(demo.status === 0, "verax demo from the installed bin exits 0 without a TTY", demo.out.slice(0, 400));
+
 writeFileSync(join(consumer, "probe.mjs"), 'import("@verax-ai/body").then(() => console.log("imported"));\n', "utf8");
 const probe = run(process.execPath, ["probe.mjs"], consumer);
 check(probe.status === 0 && /imported/.test(probe.out), "importing @verax-ai/body in a plain Node process", probe.out.slice(0, 300));

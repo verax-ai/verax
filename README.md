@@ -16,6 +16,22 @@ By [VERAX Teknoloji](https://verax-ai.com). Sister projects:
 [Cedulon](https://github.com/dogrucanemek-alt/cedulon). Decision records use
 the Cedulon record format.
 
+## See it run
+
+```sh
+npx @verax-ai/body demo
+```
+
+Node 22.6 or newer, `@verax-ai/body` 0.2.1 or later. The command records an
+allowed memory write and read, a
+signed refuse of a message to a host off the policy list, and a payment held
+for the operator on this machine (approved when the terminal answers `y`).
+
+Not shown here: data masking arrives with a downstream server such as Conarium; statement reconciliation needs a real statement (verax reconcile).
+
+`--keep` leaves the temporary ledger on disk. `verax verify <dir>` reads it
+back without a body, as in [Read the ledger back without us](#read-the-ledger-back-without-us).
+
 ## What ships
 
 | Package | What it is |
