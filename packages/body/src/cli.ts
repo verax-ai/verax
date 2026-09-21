@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
+import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
 import { runHalt } from "./halt.ts";
@@ -19,6 +20,7 @@ Usage: verax <command> [options]
 
   (no command)         serve MCP over Streamable HTTP at /mcp on VERAX_BIND (default 127.0.0.1:8787)
   doctor [--json]      check the configuration this process would run with
+  demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
   approve <args>       approve a waiting request from this machine
   operator <args>      enrol an operator and manage their passkeys
   reconcile <args>     compare the ledger against a statement
@@ -62,6 +64,16 @@ if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
 if (argv[0] === "--version" || argv[0] === "-v") {
   process.stdout.write(`${version()}\n`);
   process.exit(0);
+}
+if (argv[0] === "demo") {
+  process.exit(
+    await runDemo(argv, process.env, {
+      stdout: process.stdout,
+      stderr: process.stderr,
+      stdin: process.stdin,
+      isTTY: Boolean(process.stdin.isTTY),
+    }),
+  );
 }
 if (argv[0] === "approve") {
   process.exit(await runApprove(argv));
