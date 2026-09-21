@@ -52,6 +52,8 @@ audit.explain of the refuse
 records  5
 effects  3
 ledger   removed on exit (run with --keep to keep it and check it with verax verify)
+
+Not shown here: data masking arrives with a downstream server such as Conarium; statement reconciliation needs a real statement (verax reconcile).
 ```
 
 Node 22.6 or newer, `@verax-ai/body` 0.2.1 or later. The command records an
@@ -59,10 +61,60 @@ allowed memory write and read, a
 signed refuse of a message to a host off the policy list, and a payment held
 for the operator on this machine (approved when the terminal answers `y`).
 
-Not shown here: data masking arrives with a downstream server such as Conarium; statement reconciliation needs a real statement (verax reconcile).
-
 `--keep` leaves the temporary ledger on disk. `verax verify <dir>` reads it
 back without a body, as in [Read the ledger back without us](#read-the-ledger-back-without-us).
+
+### With Conarium
+
+`@verax-ai/body` 0.2.2 and later accepts `--with-conarium`. 0.2.1 does not
+carry the flag. The flag has `npx` download `@conarium-ai/core` from npm and
+run it as a child process; that needs a network.
+
+Conarium masks the rows, and its sample policy denies its `public.secrets`
+table. Verax puts each call through the same gate as its own tools, keeps a
+signed record and a hash of the answer, and refuses a downstream tool the
+policy does not name before the child sees the call. When Conarium answers
+with an error, the body tells the caller that it did, not what it said.
+
+What it prints, without a terminal to answer the approval question:
+
+```text
+verax demo
+
+memory.put / memory.get
+  allowed; two signed records
+
+message.send -> ops@blocked.test
+  refused egress-blocked (signed)
+  ref 6c6e4925-b769-4a8b-8fc4-e2443613a5b6
+
+spend 100 minor USD sample-merchant
+  held
+  no terminal to ask, so it stays held (run this in a terminal to be asked)
+
+conarium.query customers
+  allowed; masked by Conarium before the rows left it
+  measured [MASKED_PII] on every email and card
+
+conarium.query public.secrets
+  allowed by this gate; Conarium answered with an error and no rows
+  recorded as a failed call
+
+conarium.list_tables
+  refused no-rule (signed)
+  refused by this gate; the downstream server never saw the call
+
+audit.explain of the refuse
+  finding none
+  trust-root own-key
+  chain and signatures read back
+
+records  8
+effects  5
+ledger   removed on exit (run with --keep to keep it and check it with verax verify)
+
+Not shown here: a real database (these are Conarium's sample rows); statement reconciliation needs a real statement (verax reconcile).
+```
 
 ## What ships
 
