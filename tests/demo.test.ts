@@ -2,9 +2,10 @@ import { strict as assert } from "node:assert";
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { Server } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { loadApprovalsFromDir } from "@verax-ai/proxy";
 import { runDemo } from "../packages/body/src/demo.ts";
@@ -14,6 +15,7 @@ const BANNED =
   /\b(secure|secures|protects|isolates|tamper-proof|compliant|compliance-ready|unique|only|first|best|guarantee|military-grade)\b/i;
 
 const DEMO_MS = 15_000;
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 type Claims = {
   decision: string;
@@ -309,5 +311,30 @@ describe("verax demo", { concurrency: 1 }, () => {
     const elapsed = Date.now() - started;
     assert.equal(code, 0, io.err());
     assert.ok(elapsed <= DEMO_MS, `elapsed=${elapsed}`);
+  });
+
+  // docs/demo.svg is a recording the README shows. It is a second copy of what
+  // the command prints, so it is held against a run: same words, same order.
+  it("T9: docs/demo.svg carries what a terminal run answered with y prints", { timeout: DEMO_MS }, async () => {
+    const io = ioFor({ isTTY: true, answer: "y" });
+    const code = await runDemo(["demo"], {}, io);
+    assert.equal(code, 0, io.err());
+
+    const words = (s: string) =>
+      s
+        .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g, "<ref>")
+        .split(/\s+/)
+        .filter((w) => w !== "")
+        .join(" ");
+    const unescape = (s: string) =>
+      s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&amp;/g, "&");
+
+    const svg = readFileSync(join(root, "docs", "demo.svg"), "utf8");
+    const shown = [...svg.matchAll(/<text\b[^>]*>(.*?)<\/text>/gs)].map((m) => unescape(m[1]!.replace(/<[^>]+>/g, "")));
+    assert.ok(shown.length > 0, "no <text> rows in docs/demo.svg");
+
+    // The answer is typed, not printed; the recording shows it after the question.
+    const printed = io.out().replace("[y/N]", "[y/N] y ");
+    assert.equal(words(shown.join("\n")), words(`$ npx @verax-ai/body demo\n${printed}`));
   });
 });

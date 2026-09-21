@@ -22,6 +22,12 @@ the Cedulon record format.
 npx @verax-ai/body demo
 ```
 
+![verax demo in a terminal: an allowed memory write, a signed refuse, and a payment held until the operator answers y](docs/demo.svg)
+
+The recording is the output of one run in a terminal where the approval
+question was answered `y`. That run took about a second; it is played back
+slowly here so it can be read.
+
 What it prints, without a terminal to answer the approval question:
 
 ```text
