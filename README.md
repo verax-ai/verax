@@ -22,6 +22,32 @@ the Cedulon record format.
 npx @verax-ai/body demo
 ```
 
+What it prints, without a terminal to answer the approval question:
+
+```text
+verax demo
+
+memory.put / memory.get
+  allowed; two signed records
+
+message.send -> ops@blocked.test
+  refused egress-blocked (signed)
+  ref 6c6e4925-b769-4a8b-8fc4-e2443613a5b6
+
+spend 100 minor USD sample-merchant
+  held
+  no terminal to ask, so it stays held (run this in a terminal to be asked)
+
+audit.explain of the refuse
+  finding none
+  trust-root own-key
+  chain and signatures read back
+
+records  5
+effects  3
+ledger   removed on exit (run with --keep to keep it and check it with verax verify)
+```
+
 Node 22.6 or newer, `@verax-ai/body` 0.2.1 or later. The command records an
 allowed memory write and read, a
 signed refuse of a message to a host off the policy list, and a payment held

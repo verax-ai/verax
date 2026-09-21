@@ -100,6 +100,7 @@ Known gaps:
 - record and effect keys live in the same process; independence is a
   declaration, not a separate witness
 - duplicate-effect retry and late-event semantics are not designed
+- reconciliation has no time limit: `verax reconcile` takes the window it is given, and nothing marks a decision as overdue when no effect row has arrived
 - no-bypass: export map only in this commit; CI scan + runtime
   registry land with the body; compiled-JS and foreign-binding paths
   are not covered
