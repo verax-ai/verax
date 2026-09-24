@@ -1,17 +1,19 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 
 import {
   installedBoundaryChecks,
   planInstall,
+  resolveTrustPath,
   restrictToOwnerWin32,
   runInstall,
   systemToolName,
   systemToolPath,
+  windowsUserCanWrite,
   type PlanOp,
 } from "../packages/body/src/install.ts";
 
@@ -48,6 +50,21 @@ const linuxOpts = {
   stateExists: false,
 };
 
+const darwinEnv = {
+  SUDO_USER: "runner",
+  VERAX_INVOKING_HOME: "/Users/runner",
+};
+
+const darwinOpts = {
+  port: 8801,
+  days: 30,
+  force: false,
+  execPath: "/usr/local/bin/node",
+  bodyVersion: "0.3.0",
+  npmCli: "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
+  stateExists: false,
+};
+
 function okPlan(platform: "win32" | "linux", env: NodeJS.ProcessEnv, opts: typeof winOpts | typeof linuxOpts) {
   const plan = planInstall(platform, env, opts);
   if (!plan.ok) throw new Error(plan.message);
@@ -59,16 +76,24 @@ function argvs(ops: PlanOp[]): string[][] {
 }
 
 describe("verax install plan", () => {
-  it("1 state ACL grants only LocalService and Administrators, or verax mode 0700", () => {
+  it("1 state ACL grants only verax-svc, Administrators, and SYSTEM, or verax mode 0700", () => {
     const win = okPlan("win32", winEnv, winOpts);
     const stateAcl = argvs(win.ops).filter((argv) => systemToolName(argv[0] ?? "") === "icacls" && argv[1] === win.stateDir && argv.includes("/grant:r"));
     assert.ok(stateAcl.length >= 1);
     for (const argv of stateAcl) {
       const text = argv.join(" ");
-      assert.match(text, /NT AUTHORITY\\LOCAL SERVICE/);
+      assert.equal(/LOCAL SERVICE/i.test(text), false);
+      assert.match(text, /verax-svc:\(OI\)\(CI\)F/);
       assert.match(text, /BUILTIN\\Administrators/);
+      assert.match(text, /NT AUTHORITY\\SYSTEM/);
       assert.equal(text.includes("Users"), false);
       assert.equal(text.includes("Everyone"), false);
+      const grants = argv.filter((arg) => arg.includes(":("));
+      for (const grant of grants) {
+        const principal = grant.split(":")[0] ?? "";
+        const allowed = principal === "verax-svc" || principal === "BUILTIN\\Administrators" || principal === "NT AUTHORITY\\SYSTEM";
+        assert.equal(allowed, true, grant);
+      }
     }
     assert.match(stateAcl[0]!.join(" "), /\/inheritance:r/);
 
@@ -125,14 +150,14 @@ describe("verax install plan", () => {
   });
 
   it("5 without elevation install exits 77 and executes nothing", async () => {
-    for (const platform of ["win32", "linux"] as const) {
+    for (const platform of ["win32", "linux", "darwin"] as const) {
       let ran = 0;
       const err: string[] = [];
       const code = await runInstall(["install", "--port", "8801"], {
         platform,
-        env: platform === "win32" ? winEnv : linuxEnv,
+        env: platform === "win32" ? winEnv : platform === "darwin" ? darwinEnv : linuxEnv,
         elevated: () => false,
-        layout: platform === "win32" ? winOpts : linuxOpts,
+        layout: platform === "win32" ? winOpts : platform === "darwin" ? darwinOpts : linuxOpts,
         stateExists: () => {
           ran += 1;
           return false;
@@ -161,8 +186,9 @@ describe("verax install plan", () => {
       aclText: [
         "BUILTIN\\Users:(OI)(CI)(RX)",
         "Everyone:(RX)",
-        "NT AUTHORITY\\LOCAL SERVICE:(OI)(CI)(F)",
+        "verax-svc:(OI)(CI)(F)",
         "BUILTIN\\Administrators:(OI)(CI)(F)",
+        "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
       ].join("\n"),
       autostart: true,
     });
@@ -327,4 +353,239 @@ describe("verax install plan", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("darwin refuses a user-owned Homebrew Node", () => {
+    const plan = planInstall("darwin", darwinEnv, {
+      ...darwinOpts,
+      execPath: "/opt/homebrew/bin/node",
+      npmCli: "/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js",
+      nodeModes: [
+        { uid: 501, mode: 0o755 },
+        { uid: 0, mode: 0o755 },
+      ],
+    });
+    if (plan.ok) throw new Error("accepted a user-owned Homebrew Node");
+    assert.equal(plan.code, 78);
+    assert.match(plan.message, /\/opt\/homebrew\/bin\/node/);
+    assert.match(plan.message, /nodejs\.org \.pkg/);
+    assert.match(plan.message, /\/usr\/local/);
+  });
+
+  it("darwin plist runs as _verax with the trusted Node and state is 0700", () => {
+    const plan = planInstall("darwin", darwinEnv, darwinOpts);
+    if (!plan.ok) throw new Error(plan.message);
+    assert.equal(plan.stateDir, "/Library/Application Support/Verax/state");
+    assert.equal(plan.tokenPath, "/Users/runner/.verax/agent.token");
+    const plist = plan.ops.find((op) => op.op === "write" && op.path === "/Library/LaunchDaemons/com.verax-ai.body.plist");
+    if (!plist || plist.op !== "write") throw new Error("missing launchd plist");
+    assert.match(plist.contents, /<key>UserName<\/key>\s*<string>_verax<\/string>/);
+    assert.match(plist.contents, /<key>GroupName<\/key>\s*<string>_verax<\/string>/);
+    assert.match(plist.contents, /<key>KeepAlive<\/key>\s*<true\/>/);
+    assert.match(plist.contents, /<string>\/usr\/local\/bin\/node<\/string>/);
+    assert.match(plist.contents, /<string>\/Library\/Verax\/code\/node_modules\/@verax-ai\/body\/dist\/cli\.js<\/string>/);
+    assert.match(plist.contents, /StandardErrorPath/);
+    assert.match(plist.contents, /\/Library\/Application Support\/Verax\/state\/body\.err/);
+    const lines = argvs(plan.ops);
+    assert.ok(lines.some((argv) => argv.includes("0700") && argv.includes(plan.stateDir) && systemToolName(argv[0] ?? "") === "chmod"));
+    assert.ok(lines.some((argv) => argv.includes("_verax:_verax") && argv.includes(plan.stateDir)));
+    for (const argv of lines) {
+      const file = argv[0] ?? "";
+      assert.equal(file.startsWith("/"), true, file);
+      if (file === darwinOpts.execPath) continue;
+      assert.equal(file, systemToolPath(systemToolName(file), "darwin"), file);
+    }
+    const pre = planInstall("darwin", darwinEnv, {
+      ...darwinOpts,
+      darwinState: { exists: true, symlink: false },
+    });
+    if (pre.ok) throw new Error("accepted a pre-created state dir");
+    assert.equal(pre.code, 78);
+    assert.match(pre.message, /\/Library\/Application Support\/Verax\/state/);
+    assert.match(pre.message, /was not created by verax install/);
+  });
+
+  it("windows password stays out of install.json, stdout, and stderr", async () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const dumped = JSON.stringify(win.ops.filter((op) => op.op === "write" || op.op === "print"));
+    assert.equal(dumped.includes("LOCAL SERVICE"), false);
+    const root = mkdtempSync(join(tmpdir(), "verax-svc-"));
+    const out: string[] = [];
+    const err: string[] = [];
+    let seen = "";
+    try {
+      await runInstall(["install", "--port", "8801"], {
+        platform: "win32",
+        env: {
+          ...winEnv,
+          ProgramData: join(root, "data"),
+          ProgramFiles: join(root, "files"),
+          USERPROFILE: join(root, "home"),
+        },
+        elevated: () => true,
+        layout: winOpts,
+        exec: (argv) => {
+          if (systemToolName(argv[0] ?? "") === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.includes("/add")) {
+            seen = argv[3] ?? "";
+            return { status: 1, stdout: "", stderr: `add failed ${seen}\n` };
+          }
+          if (systemToolName(argv[0] ?? "") === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
+            return { status: 2, stdout: "", stderr: "not found\n" };
+          }
+          if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: {
+          stdout: { write: (s: string) => out.push(s) },
+          stderr: { write: (s: string) => err.push(s) },
+        },
+      });
+      assert.equal(seen.length, 32);
+      const written = textsUnder(root);
+      const marker = join(root, "data", "Verax", "install.json");
+      if (existsSync(marker)) assert.equal(readFileSync(marker, "utf8").includes(seen), false);
+      assert.equal(out.join("").includes(seen), false);
+      assert.equal(err.join("").includes(seen), false);
+      assert.equal(written.includes(seen), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts C:\\ add-subdirectory and inherit-only modify when Program Files is admin-only", async () => {
+    const drive = [
+      "C:\\ NT AUTHORITY\\Authenticated Users:(OI)(CI)(IO)(M)",
+      "C:\\ NT AUTHORITY\\Authenticated Users:(AD)",
+    ].join("\n");
+    assert.equal(windowsUserCanWrite(drive, { path: "C:\\", ancestor: true }), false);
+    const nodejs = "C:\\Program Files\\nodejs BUILTIN\\Administrators:(OI)(CI)(F)\n  NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n";
+    assert.equal(windowsUserCanWrite(nodejs, { path: "C:\\Program Files\\nodejs", ancestor: true }), false);
+    const err: string[] = [];
+    let sawAdd = false;
+    await runInstall(["install", "--port", "8801"], {
+      platform: "win32",
+      env: winEnv,
+      elevated: () => true,
+      layout: winOpts,
+      exec: (argv) => {
+        if (systemToolName(argv[0] ?? "") === "icacls") {
+          const target = argv[1] ?? "";
+          if (/^[A-Za-z]:\\$/.test(target)) return { status: 0, stdout: `${drive}\n`, stderr: "" };
+          return { status: 0, stdout: `${target} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`, stderr: "" };
+        }
+        if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+        if (systemToolName(argv[0] ?? "") === "net" && argv.includes("/add")) {
+          sawAdd = true;
+          return { status: 1, stdout: "", stderr: "add failed\n" };
+        }
+        if (systemToolName(argv[0] ?? "") === "net") return { status: 2, stdout: "", stderr: "not found\n" };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+    });
+    assert.equal(err.join("").includes("can be changed by your user account"), false);
+    assert.equal(sawAdd, true);
+  });
+
+  it("refuses an ancestor that grants Users delete-child", async () => {
+    const text = "C:\\Program Files BUILTIN\\Users:(DC)\n";
+    assert.equal(windowsUserCanWrite(text, { path: "C:\\Program Files", ancestor: true }), true);
+    const err: string[] = [];
+    const code = await runInstall(["install", "--port", "8801"], {
+      platform: "win32",
+      env: winEnv,
+      elevated: () => true,
+      layout: winOpts,
+      exec: (argv) => {
+        if (systemToolName(argv[0] ?? "") === "icacls") {
+          const target = argv[1] ?? "";
+          if (target === "C:\\Program Files") return { status: 0, stdout: text, stderr: "" };
+          return { status: 0, stdout: `${target} BUILTIN\\Administrators:(F)\n`, stderr: "" };
+        }
+        if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+    });
+    assert.equal(code, 78);
+    assert.match(err.join(""), /can be changed by your user account/);
+    assert.match(err.join(""), /C:\\Program Files/);
+  });
+
+  it("refuses a node file that grants Users write", async () => {
+    const text = "C:\\Program Files\\nodejs\\node.exe Users:(W)\n";
+    assert.equal(windowsUserCanWrite(text, { path: "C:\\Program Files\\nodejs\\node.exe", ancestor: false }), true);
+    const err: string[] = [];
+    const code = await runInstall(["install", "--port", "8801"], {
+      platform: "win32",
+      env: winEnv,
+      elevated: () => true,
+      layout: winOpts,
+      exec: (argv) => {
+        if (systemToolName(argv[0] ?? "") === "icacls") {
+          const target = argv[1] ?? "";
+          if (target.endsWith("node.exe")) return { status: 0, stdout: text, stderr: "" };
+          return { status: 0, stdout: `${target} BUILTIN\\Administrators:(F)\n`, stderr: "" };
+        }
+        if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+    });
+    assert.equal(code, 78);
+    assert.match(err.join(""), /can be changed by your user account/);
+    assert.match(err.join(""), /node\.exe/);
+  });
+
+  it("refuses a root-owned symlink whose target lives in a user-owned directory", async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "verax-link-"));
+    const linkDir = join(root, "link");
+    const userDir = join(root, "user");
+    const target = join(userDir, "node");
+    const link = join(linkDir, "node");
+    const err: string[] = [];
+    try {
+      mkdirSync(linkDir);
+      mkdirSync(userDir);
+      writeFileSync(target, "");
+      try {
+        symlinkSync(target, link);
+      } catch (error) {
+        if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+          t.skip("no symbolic-link privilege on this Windows account; the hosted Windows runner has it");
+          return;
+        }
+        throw error;
+      }
+      const resolved = resolveTrustPath(link, process.platform === "win32" ? "win32" : "linux");
+      assert.equal(resolved, realpathSync(target));
+      assert.notEqual(resolved, link);
+      const code = await runInstall(["install", "--port", "8801"], {
+        platform: "linux",
+        env: linuxEnv,
+        elevated: () => true,
+        layout: { execPath: link, bodyVersion: "0.3.0", npmCli: target },
+        exec: () => ({ status: 0, stdout: "", stderr: "" }),
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      assert.equal(code, 78);
+      assert.match(err.join(""), /can be changed by your user account/);
+      assert.ok(err.join("").includes(resolved), err.join(""));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
+
+function textsUnder(dir: string): string {
+  if (!existsSync(dir)) return "";
+  const chunks: string[] = [];
+  for (const name of readdirSync(dir, { recursive: true })) {
+    const full = join(dir, String(name));
+    try {
+      chunks.push(readFileSync(full, "utf8"));
+    } catch {
+      // directories and unreadable entries are not secret files
+    }
+  }
+  return chunks.join("\n");
+}

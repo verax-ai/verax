@@ -66,7 +66,7 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ## Connect your agent
 
-One elevated command installs the body where your agent's shell cannot read it. On Windows that is an Administrator terminal; on Linux it is root. macOS is not covered.
+One elevated command installs the body where your agent's shell cannot read it. On Windows that is an Administrator terminal. On Linux and macOS it is root: `sudo verax install`.
 
 ```sh
 npm install -g @verax-ai/body
@@ -75,7 +75,7 @@ verax install
 
 The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs the already-trusted system Node, keeps the ledger under a service account, and writes the agent token only into your profile (`%USERPROFILE%\.verax\agent.token` or `~/.verax/agent.token`). It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org; a Node your account can rewrite is refused.
 
-Approve a held call from an elevated terminal: `verax approve` (Windows: Run as administrator; Linux: `sudo verax approve`).
+Approve a held call from an elevated terminal: `verax approve` (Windows: Run as administrator; Linux and macOS: `sudo verax approve`).
 
 To try it in your own user, which is not a boundary:
 

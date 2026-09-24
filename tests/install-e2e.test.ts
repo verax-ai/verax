@@ -10,9 +10,10 @@ const workflow = readFileSync(
 );
 
 describe("install-e2e workflow", () => {
-  it("runs the isolated install on Windows and Linux", () => {
+  it("runs the isolated install on Windows, Linux, and macOS", () => {
     assert.match(workflow, /windows-latest/);
     assert.match(workflow, /ubuntu-latest/);
+    assert.match(workflow, /macos-latest/);
     assert.match(workflow, /pull_request/);
     assert.match(workflow, /workflow_dispatch/);
     assert.match(workflow, /timeout-minutes:\s*15/);
@@ -34,6 +35,9 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /SUDO_USER/);
     assert.match(workflow, /\/opt\/verax/);
     assert.match(workflow, /\/var\/lib\/verax/);
+    assert.match(workflow, /\/Library\/Verax/);
+    assert.match(workflow, /verax-svc/);
+    assert.equal(workflow.includes("LocalService missing"), false);
     assert.match(workflow, /second run refuses a state dir the probe user pre-created/);
     assert.match(workflow, /LASTEXITCODE -ne 78/);
     assert.match(workflow, /was not created by verax install/);

@@ -1,7 +1,10 @@
 # Elevated install of the body under another account, then a probe that
 # is not that account. Windows runners are already Administrator.
-# Linux uses sudo. macOS is not in this workflow.
+# Linux and macOS use sudo. Windows runs as Administrator.
 name: install-e2e
+
+env:
+  NODE_VERSION: "22.20.0"
 
 on:
   workflow_dispatch:
@@ -18,33 +21,44 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: system Node
+      - name: official Node
         shell: pwsh
         run: |
+          $ver = $env:NODE_VERSION
+          $name = "node-v$ver-x64.msi"
+          $base = "https://nodejs.org/dist/v$ver"
+          $sums = Join-Path $env:RUNNER_TEMP "SHASUMS256.txt"
+          $msi = Join-Path $env:RUNNER_TEMP $name
+          Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile $sums
+          Invoke-WebRequest -Uri "$base/$name" -OutFile $msi
+          $line = @(Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape($name))$" })
+          if ($line.Count -ne 1) { Write-Error "SHASUMS256.txt has no $name"; exit 1 }
+          $expected = ($line[0] -split '\s+')[0].ToLower()
+          $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+          if ($expected -ne $actual) { Write-Error "sha256 mismatch for $name"; exit 1 }
+          $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart') -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
           $node = "C:\Program Files\nodejs\node.exe"
-          $need = -not (Test-Path $node)
-          if (-not $need) {
-            $ver = & $node -p "process.versions.node"
-            Write-Host "node path: $node"
-            & $node -v
-            $parts = $ver.Split('.')
-            if ([int]$parts[0] -lt 22 -or ([int]$parts[0] -eq 22 -and [int]$parts[1] -lt 6)) { $need = $true }
-          }
-          if ($need) {
-            Write-Host "image Node is missing or older than 22.6; installing the official Node.js package for all users"
-            $msi = Join-Path $env:RUNNER_TEMP "node-v22.20.0-x64.msi"
-            Invoke-WebRequest -Uri "https://nodejs.org/dist/v22.20.0/node-v22.20.0-x64.msi" -OutFile $msi
-            $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', '/norestart') -Wait -PassThru
-            if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
-            Write-Host "node path: $node"
-            & $node -v
-          }
+          $real = & $node -p "require('fs').realpathSync.native(process.execPath)"
+          Write-Host "node -v: $(& $node -v)"
+          Write-Host "realpath: $real"
+          icacls $real
           Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\nodejs"
-      - run: npm ci
-      - run: npm run build:dist
+          Add-Content -Path $env:GITHUB_ENV -Value "VERAX_NODE=$node"
+      - name: npm ci
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Error "node is not the official install"; exit 1 }
+          npm ci
+      - name: build:dist
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Error "node is not the official install"; exit 1 }
+          npm run build:dist
       - name: pack this pull request and lock the tarball directory
         shell: pwsh
         run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Error "node is not the official install"; exit 1 }
           $dir = Join-Path $env:RUNNER_TEMP "verax-tarballs"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           npm pack -w @verax-ai/inventory --pack-destination $dir
@@ -59,7 +73,7 @@ jobs:
       - name: install, probe, uninstall
         shell: pwsh
         run: |
-          node packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801
+          & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -75,11 +89,15 @@ jobs:
             if ($left.StartsWith($prefix)) { $left = $left.Substring($prefix.Length).Trim() }
             if ($left -ne "") { $principals += $left }
           }
-          $allowed = @('NT AUTHORITY\LOCAL SERVICE', 'BUILTIN\Administrators', 'NT AUTHORITY\LOCALSERVICE', 'LOCAL SERVICE', 'Administrators')
+          if ($acl -match 'LOCAL SERVICE') { Write-Error "LOCAL SERVICE present"; exit 1 }
+          $allowed = @('BUILTIN\Administrators', 'Administrators', 'NT AUTHORITY\SYSTEM', 'SYSTEM')
+          $hasSvc = $false
           foreach ($p in $principals) {
+            $isSvc = $p -eq 'verax-svc' -or $p.EndsWith('\verax-svc')
+            if ($isSvc) { $hasSvc = $true; continue }
             if ($allowed -notcontains $p) { Write-Error "unexpected principal: $p"; exit 1 }
           }
-          if ($principals -notcontains 'NT AUTHORITY\LOCAL SERVICE' -and $principals -notcontains 'LOCAL SERVICE') { Write-Error "LocalService missing"; exit 1 }
+          if (-not $hasSvc) { Write-Error "verax-svc missing"; exit 1 }
           $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
           net user veraxprobe $pass /add
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -116,7 +134,7 @@ jobs:
       - name: second run refuses a state dir the probe user pre-created
         shell: pwsh
         run: |
-          node packages/body/dist/cli.js uninstall
+          & $env:VERAX_NODE packages/body/dist/cli.js uninstall
           if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
           if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
           $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
@@ -130,15 +148,16 @@ jobs:
           '@ | Set-Content -Encoding utf8 $mk
           $pre = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$mk) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
           if ($pre.ExitCode -ne 0) { Write-Error "pre-create exit $($pre.ExitCode)"; exit $pre.ExitCode }
-          $log = & node packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+          $log = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
           if ($LASTEXITCODE -ne 78) { Write-Error "install exit $LASTEXITCODE, want 78: $log"; exit 1 }
           if ($log -notmatch 'was not created by verax install') { Write-Error "install did not name the pre-created directory: $log"; exit 1 }
       - name: uninstall
         if: always()
         shell: pwsh
         run: |
-          node packages/body/dist/cli.js uninstall
+          & $env:VERAX_NODE packages/body/dist/cli.js uninstall
           net user veraxprobe /delete
+          net user verax-svc /delete
           Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1"
           exit 0
 
@@ -149,36 +168,39 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - name: system Node
+      - name: official Node
         run: |
           set -euo pipefail
-          if [ -x /usr/bin/node ]; then NODE=/usr/bin/node
-          elif [ -x /usr/local/bin/node ]; then NODE=/usr/local/bin/node
-          else NODE=""; fi
-          need=0
-          if [ -z "$NODE" ]; then
-            need=1
-          else
-            echo "node path: $NODE"
-            "$NODE" -v
-            if ! "$NODE" -e 'const [a,b]=process.versions.node.split(".").map(Number); if (a<22 || (a===22 && b<6)) process.exit(1)'; then
-              need=1
-            fi
-          fi
-          if [ "$need" = 1 ]; then
-            echo "image Node is missing or older than 22.6; installing the official Node.js package for all users"
-            curl -fsSL https://nodejs.org/dist/v22.20.0/node-v22.20.0-linux-x64.tar.gz -o /tmp/node.tar.gz
-            sudo tar -C /usr/local --strip-components=1 -xzf /tmp/node.tar.gz
-            NODE=/usr/local/bin/node
-            echo "node path: $NODE"
-            "$NODE" -v
-          fi
-          echo "$(dirname "$NODE")" >> "$GITHUB_PATH"
-      - run: npm ci
-      - run: npm run build:dist
+          ver="$NODE_VERSION"
+          name="node-v${ver}-linux-x64.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
+          curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
+          grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && sha256sum -c -)
+          sudo mkdir -p /usr/local/lib/nodejs
+          sudo tar -C /usr/local/lib/nodejs -xzf "/tmp/${name}"
+          sudo chown -R root:root /usr/local/lib/nodejs
+          sudo chmod -R go-w /usr/local/lib/nodejs
+          node="/usr/local/lib/nodejs/node-v${ver}-linux-x64/bin/node"
+          real="$(readlink -f "$node")"
+          echo "node -v: $("$node" -v)"
+          echo "realpath: $real"
+          stat -c '%U:%G %a %n' "$real"
+          echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
+          echo "$(dirname "$node")" >> "$GITHUB_PATH"
+      - name: npm ci
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm ci
+      - name: build:dist
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm run build:dist
       - name: pack this pull request and lock the tarball directory
         run: |
           set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
           dir="${RUNNER_TEMP}/verax-tarballs"
           mkdir -p "$dir"
           npm pack -w @verax-ai/inventory --pack-destination "$dir"
@@ -191,7 +213,7 @@ jobs:
         run: |
           set -euo pipefail
           # sudo sets SUDO_USER to the invoking account (runner on this job).
-          sudo -E env "PATH=$PATH" node packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
           curl -fsS http://127.0.0.1:8801/healthz >/dev/null
           if cat /var/lib/verax/keys/record.private.pem; then echo "private key was readable"; exit 1; fi
           if echo x >> /var/lib/verax/approval-commands.jsonl; then echo "approval log was writable"; exit 1; fi
@@ -215,7 +237,100 @@ jobs:
           code=$?
           set -e
           test "$code" = "77"
-          sudo -E env "PATH=$PATH" node packages/body/dist/cli.js uninstall
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
       - name: uninstall
         if: always()
-        run: sudo -E env "PATH=$PATH" node packages/body/dist/cli.js uninstall || true
+        run: sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: official Node
+        run: |
+          set -euo pipefail
+          ver="$NODE_VERSION"
+          name="node-v${ver}.pkg"
+          curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
+          curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
+          grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && shasum -a 256 -c -)
+          sudo installer -pkg "/tmp/${name}" -target /
+          node="/usr/local/bin/node"
+          real="$("$node" -p "require('fs').realpathSync('/usr/local/bin/node')")"
+          owner="$(stat -f '%u' "$real")"
+          echo "node -v: $("$node" -v)"
+          echo "realpath: $real"
+          stat -f '%Su:%Sg %Lp %N' "$real"
+          test "$owner" = "0"
+          echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
+          echo "$(dirname "$node")" >> "$GITHUB_PATH"
+      - name: npm ci
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm ci
+      - name: build:dist
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm run build:dist
+      - name: pack this pull request and lock the tarball directory
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          dir="${RUNNER_TEMP}/verax-tarballs"
+          mkdir -p "$dir"
+          npm pack -w @verax-ai/inventory --pack-destination "$dir"
+          npm pack -w @verax-ai/proxy --pack-destination "$dir"
+          npm pack -w @verax-ai/body --pack-destination "$dir"
+          sudo chown -R root:wheel "$dir"
+          sudo chmod -R go-w,u+rX "$dir"
+          echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
+      - name: install and probe as the invoking user
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          curl -fsS http://127.0.0.1:8801/healthz >/dev/null
+          if cat "/Library/Application Support/Verax/state/keys/record.private.pem"; then echo "private key was readable"; exit 1; fi
+          if echo x >> "/Library/Application Support/Verax/state/approval-commands.jsonl"; then echo "approval log was writable"; exit 1; fi
+          if touch "/Library/Verax/code/probe-write"; then echo "code dir was writable"; exit 1; fi
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const token = readFileSync(process.env.HOME + "/.verax/agent.token", "utf8").trim();
+            const res = await fetch("http://127.0.0.1:8801/mcp", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+                authorization: "Bearer " + token,
+              },
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+            });
+            if (res.status !== 200) process.exit(1);
+          '
+          set +e
+          node packages/body/dist/cli.js approve probe-ref
+          code=$?
+          set -e
+          test "$code" = "77"
+      - name: pre-created state dir is refused
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+          sudo rm -rf "/Library/Application Support/Verax" /Library/Verax
+          sudo mkdir -p "/Library/Application Support/Verax/state"
+          set +e
+          log="$(sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801 2>&1)"
+          code=$?
+          set -e
+          test "$code" = "78"
+          printf '%s\n' "$log" | grep -q "was not created by verax install"
+      - name: uninstall
+        if: always()
+        run: |
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+          sudo /bin/launchctl bootout system/com.verax-ai.body || true
+          sudo rm -f /Library/LaunchDaemons/com.verax-ai.body.plist

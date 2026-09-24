@@ -21,12 +21,13 @@ body's own keys. Local mode does not honour `verax:approve` or
 neither is a boundary.
 
 `verax install` puts the code and the state directory out of that shell's
-reach on Windows and on Linux. The body runs as LocalService or as the
-`verax` system user; the agent token is the only credential left in the
-invoking user's profile. macOS is not covered yet. An administrator, or
-root, is outside this model: they can change the ACL, the task, or the
-unit. An elevated terminal the operator leaves open for the agent is also
-outside it. Separate the body from other Windows services running as LOCAL SERVICE.
+reach on Windows, Linux, and macOS. The body runs as the dedicated local
+user `verax-svc` on Windows, as the `verax` system user on Linux, or as
+the hidden `_verax` user on macOS. The agent token is the only credential
+left in the invoking user's profile. An administrator, or root, is outside
+this model: they can change the ACL, the task, the unit, or the launch
+daemon. An elevated terminal the operator leaves open for the agent is also
+outside it.
 
 `verax init --local` still writes a state directory the same user can
 read. That is a way to try the body, not a boundary.
