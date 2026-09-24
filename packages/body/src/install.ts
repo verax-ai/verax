@@ -45,12 +45,13 @@ const DARWIN_USER = "_verax";
 const DARWIN_LABEL = "com.verax-ai.body";
 const DARWIN_ROOT = "/Library/Verax";
 const DARWIN_CODE = "/Library/Verax/code";
+const DARWIN_STATE_PARENT = "/Library/Application Support/Verax";
 const DARWIN_STATE = "/Library/Application Support/Verax/state";
 const DARWIN_MARKER = "/Library/Verax/install.json";
 const DARWIN_PLIST = "/Library/LaunchDaemons/com.verax-ai.body.plist";
 
 const WIN32_TOOLS = ["whoami", "icacls", "schtasks", "net", "fsutil", "powershell"] as const;
-const LINUX_TOOLS = ["useradd", "chown", "chmod", "id", "getent", "stat", "systemctl"] as const;
+const LINUX_TOOLS = ["useradd", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl"] as const;
 const DARWIN_TOOLS = ["dscl", "launchctl", "chown", "chmod", "id", "stat", "plutil"] as const;
 const LINUX_TOOL_DIRS = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
 /** Fixed paths. A plan must name these even when the binary is absent on the machine that built the plan. */
@@ -591,17 +592,33 @@ export function successText(
     platform === "win32"
       ? `claude mcp add --transport http verax ${origin}/mcp --header "Authorization: Bearer $(Get-Content -Raw '${info.tokenPath}')"`
       : `claude mcp add --transport http verax ${origin}/mcp --header "Authorization: Bearer $(cat '${info.tokenPath}')"`;
-  const how = platform === "win32" ? "Run as administrator" : "sudo verax approve";
+  const mcp = [
+    "{",
+    '  "mcpServers": {',
+    '    "verax": {',
+    `      "url": "${origin}/mcp",`,
+    '      "headers": { "Authorization": "Bearer <token from your issuer>" }',
+    "    }",
+    "  }",
+    "}",
+  ].join("\n");
+  const approve =
+    platform === "win32"
+      ? "Run as administrator: verax approve"
+      : "Approve held calls from an elevated terminal: sudo verax approve";
   return [
     `code ${info.codeDir}`,
     `state ${info.stateDir}`,
+    "service is running",
     `agent token ${info.tokenPath}`,
     "",
     "Claude Code:",
     claude,
     "",
-    "Approve held calls from an elevated terminal: verax approve",
-    how,
+    "Cursor / generic mcp.json:",
+    mcp,
+    "",
+    approve,
     "",
   ].join("\n");
 }
@@ -763,7 +780,15 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0755", DARWIN_ROOT, paths.codeDir], "darwin") },
     );
   }
-  ops.push({ op: "manifest", dir: paths.codeDir }, { op: "mkdir", path: paths.stateDir, mode: 0o700 });
+  ops.push({ op: "manifest", dir: paths.codeDir });
+  if (platform === "darwin") {
+    ops.push(
+      { op: "mkdir", path: DARWIN_STATE_PARENT, mode: 0o755 },
+      { op: "argv", argv: toolArgv("chown", ["root:wheel", DARWIN_STATE_PARENT], "darwin") },
+      { op: "argv", argv: toolArgv("chmod", ["0755", DARWIN_STATE_PARENT], "darwin") },
+    );
+  }
+  ops.push({ op: "mkdir", path: paths.stateDir, mode: 0o700 });
   if (platform === "win32") {
     const markerPath = path.win32.join(path.win32.dirname(paths.stateDir), "install.json");
     const marker = installMarkerText(opts, paths, { createdAccount: true });
@@ -1342,6 +1367,20 @@ function writeManifest(dir: string): void {
   writeFileSync(path.join(dir, "MANIFEST.sha256"), `${lines.join("\n")}\n`);
 }
 
+/** Ancestors created along the way are 0755. Only `target` receives `mode`. */
+export function mkdirLeaf(target: string, mode: number): void {
+  const parent = path.dirname(target);
+  if (parent !== target && !existsSync(parent)) mkdirLeaf(parent, 0o755);
+  mkdirSync(target, { mode });
+  if (process.platform !== "win32") {
+    try {
+      chmodSync(target, mode);
+    } catch {
+      // The platform does not honour the mode bit.
+    }
+  }
+}
+
 function healthOnce(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const req = get({ host: "127.0.0.1", port, path: "/healthz", timeout: 1_000 }, (res) => {
@@ -1383,7 +1422,95 @@ function redactSecrets(detail: string, argv: readonly string[]): string {
   return out;
 }
 
-async function execute(plan: Extract<InstallPlan, { ok: true }>, exec: (argv: string[]) => ExecResult, io: InstallIo): Promise<number> {
+function parentsOf(dir: string, platform: InstallPlatform): string[] {
+  const norm = platform === "win32" ? path.win32.normalize(dir) : path.posix.normalize(dir);
+  const root = platform === "win32" ? path.win32.parse(norm).root : "/";
+  const dirs: string[] = [];
+  let current = norm;
+  for (;;) {
+    dirs.push(current);
+    if (current === root) break;
+    const parent = platform === "win32" ? path.win32.dirname(current) : path.posix.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return dirs;
+}
+
+function ownerModeLine(platform: InstallPlatform, dir: string, exec: (argv: string[]) => ExecResult): string {
+  if (platform === "win32") {
+    const ran = exec(toolArgv("powershell", [
+      "-NoProfile",
+      "-Command",
+      `(Get-Acl -LiteralPath '${dir.replaceAll("'", "''")}').Owner`,
+    ], "win32"));
+    const owner = (ran.stdout ?? "").trim().split(/\r?\n/).filter((line) => line.trim() !== "").pop() ?? (ran.stderr ?? "").trim();
+    return `${owner} ntfs ${dir}`;
+  }
+  const fmt = platform === "darwin" ? ["-f", "%Su|%p|%N", dir] : ["-c", "%U|%a|%n", dir];
+  const ran = exec(toolArgv("stat", fmt, platform));
+  const text = (ran.stdout ?? "").trim();
+  const first = text.indexOf("|");
+  const second = text.indexOf("|", first + 1);
+  if (first < 0 || second < 0) return `${(ran.stderr || text || "stat failed").trim()} ${dir}`;
+  const owner = text.slice(0, first);
+  const raw = text.slice(first + 1, second);
+  const name = text.slice(second + 1);
+  const parsed = Number.parseInt(raw, 8);
+  const mode = platform === "darwin" && Number.isFinite(parsed)
+    ? (parsed & 0o777).toString(8).padStart(4, "0")
+    : raw.padStart(4, "0");
+  return `${owner} ${mode} ${name}`;
+}
+
+function tailFile(file: string, n: number): string | null {
+  try {
+    const lines = readFileSync(file, "utf8").split(/\n/);
+    return lines.slice(-n).join("\n");
+  } catch {
+    return null;
+  }
+}
+
+function reportHealthTimeout(
+  platform: NodeJS.Platform,
+  stateDir: string,
+  exec: (argv: string[]) => ExecResult,
+  io: InstallIo,
+): void {
+  const plat: InstallPlatform = platform === "win32" ? "win32" : platform === "darwin" ? "darwin" : "linux";
+  const status =
+    plat === "darwin"
+      ? toolArgv("launchctl", ["print", `system/${DARWIN_LABEL}`], "darwin")
+      : plat === "linux"
+        ? toolArgv("systemctl", ["status", "verax", "--no-pager"], "linux")
+        : toolArgv("schtasks", ["/Query", "/TN", TASK_NAME, "/V", "/FO", "LIST"], "win32");
+  const ran = exec(status);
+  io.stderr.write(`${status.join(" ")}\n`);
+  io.stderr.write(`${ran.stdout ?? ""}${ran.stderr ?? ""}`);
+  if (!`${ran.stdout ?? ""}${ran.stderr ?? ""}`.endsWith("\n")) io.stderr.write("\n");
+  if (plat === "darwin") {
+    const errFile = path.posix.join(stateDir, "body.err");
+    const tail = tailFile(errFile, 40);
+    io.stderr.write(tail === null ? `stderr log missing: ${errFile}\n` : `${tail.endsWith("\n") ? tail : `${tail}\n`}`);
+  } else if (plat === "linux") {
+    const journal = toolArgv("journalctl", ["-u", "verax", "-n", "40", "--no-pager"], "linux");
+    const logged = exec(journal);
+    io.stderr.write(`${journal.join(" ")}\n`);
+    io.stderr.write(`${logged.stdout ?? ""}${logged.stderr ?? ""}`);
+    if (!`${logged.stdout ?? ""}${logged.stderr ?? ""}`.endsWith("\n")) io.stderr.write("\n");
+  }
+  for (const dir of parentsOf(stateDir, plat)) {
+    io.stderr.write(`${ownerModeLine(plat, dir, exec)}\n`);
+  }
+}
+
+async function execute(
+  plan: Extract<InstallPlan, { ok: true }>,
+  exec: (argv: string[]) => ExecResult,
+  io: InstallIo,
+  platform: NodeJS.Platform,
+): Promise<number> {
   let svcSid = "";
   const serviceArgv = (argv: string[]): string[] | { error: string } => {
     if (!argv.some((arg) => arg.startsWith(`${VERAX_SVC}:`))) return argv;
@@ -1400,14 +1527,7 @@ async function execute(plan: Extract<InstallPlan, { ok: true }>, exec: (argv: st
   };
   for (const step of plan.ops) {
     if (step.op === "mkdir") {
-      mkdirSync(step.path, { recursive: true, mode: step.mode ?? 0o755 });
-      if (step.mode !== undefined && process.platform !== "win32") {
-        try {
-          chmodSync(step.path, step.mode);
-        } catch {
-          // Windows does not honour the mode bit.
-        }
-      }
+      mkdirLeaf(step.path, step.mode ?? 0o755);
       continue;
     }
     if (step.op === "manifest") {
@@ -1463,7 +1583,7 @@ async function execute(plan: Extract<InstallPlan, { ok: true }>, exec: (argv: st
           ...(step.force ? ["--force"] : []),
         ],
         io,
-        { tokenPath: step.tokenPath },
+        { tokenPath: step.tokenPath, quiet: true },
       );
       if (code !== 0) return code;
       continue;
@@ -1475,6 +1595,7 @@ async function execute(plan: Extract<InstallPlan, { ok: true }>, exec: (argv: st
     if (step.op === "wait-healthz") {
       if (!(await waitHealth(step.port, step.timeoutMs))) {
         io.stderr.write(`install-health-timeout:${step.port}\n`);
+        reportHealthTimeout(platform, plan.stateDir, exec, io);
         return 1;
       }
       continue;
@@ -1883,7 +2004,7 @@ export async function runInstall(argv: readonly string[], hooks: InstallHooks = 
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io);
+  return execute(plan, exec, io, platform);
 }
 
 export async function runUninstall(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
@@ -1933,7 +2054,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io);
+  return execute(plan, exec, io, platform);
 }
 
 function hashUnder(dir: string, rel: string): string | null {

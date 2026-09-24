@@ -1,7 +1,9 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, win32 } from "node:path";
 
@@ -16,6 +18,7 @@ import {
   windowsUserCanWrite,
   type PlanOp,
 } from "../packages/body/src/install.ts";
+import { runInitLocal } from "../packages/body/src/init-local.ts";
 
 const winEnv = {
   ProgramFiles: "C:\\Program Files",
@@ -407,6 +410,15 @@ describe("verax install plan", () => {
     assert.match(plist.contents, /StandardErrorPath/);
     assert.match(plist.contents, /\/Library\/Application Support\/Verax\/state\/body\.err/);
     const lines = argvs(plan.ops);
+    const parent = "/Library/Application Support/Verax";
+    const parentMk = plan.ops.find((op) => op.op === "mkdir" && op.path === parent);
+    if (!parentMk || parentMk.op !== "mkdir") throw new Error("missing Application Support/Verax mkdir");
+    assert.equal(parentMk.mode, 0o755);
+    assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.includes("root:wheel") && argv.includes(parent)));
+    assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chmod" && argv.includes("0755") && argv.includes(parent)));
+    const stateMk = plan.ops.find((op) => op.op === "mkdir" && op.path === plan.stateDir);
+    if (!stateMk || stateMk.op !== "mkdir") throw new Error("missing state mkdir");
+    assert.equal(stateMk.mode, 0o700);
     assert.ok(lines.some((argv) => argv.includes("0700") && argv.includes(plan.stateDir) && systemToolName(argv[0] ?? "") === "chmod"));
     assert.ok(lines.some((argv) => argv.includes("_verax:_verax") && argv.includes(plan.stateDir)));
     for (const argv of lines) {
@@ -423,6 +435,110 @@ describe("verax install plan", () => {
     assert.equal(pre.code, 78);
     assert.match(pre.message, /\/Library\/Application Support\/Verax\/state/);
     assert.match(pre.message, /was not created by verax install/);
+  });
+
+  it("install summary is the running service, not init-local", async () => {
+    const cases = [
+      ["win32", winEnv, winOpts],
+      ["linux", linuxEnv, linuxOpts],
+      ["darwin", darwinEnv, darwinOpts],
+    ] as const;
+    for (const [platform, env, opts] of cases) {
+      const plan = planInstall(platform, env, opts);
+      if (!plan.ok) throw new Error(plan.message);
+      const printed = plan.ops.filter((op) => op.op === "print").map((op) => (op.op === "print" ? op.text : "")).join("\n");
+      assert.equal(printed.includes("verax serve"), false, platform);
+      assert.equal(printed.includes("A shell as the same user"), false, platform);
+      assert.match(printed, /service is running/);
+      assert.match(printed, /agent token/);
+      assert.match(printed, /Claude Code:/);
+      assert.match(printed, /mcp\.json/);
+      if (platform === "win32") assert.match(printed, /Run as administrator: verax approve/);
+      else assert.match(printed, /Approve held calls from an elevated terminal: sudo verax approve/);
+    }
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-install-quiet-"));
+    const out: string[] = [];
+    try {
+      const code = await runInitLocal(
+        ["--local", stateDir, "--port", "8801"],
+        { stdout: { write: (s: string) => out.push(s) }, stderr: { write: () => undefined } },
+        { quiet: true },
+      );
+      assert.equal(code, 0);
+      const text = out.join("");
+      assert.equal(text.includes("verax serve"), false);
+      assert.equal(text.includes("A shell as the same user"), false);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("runInstall prints the approve summary and not init-local text", async (t) => {
+    const platform = process.platform === "win32" || process.platform === "linux" || process.platform === "darwin"
+      ? process.platform
+      : null;
+    if (platform === null) {
+      t.skip("verax install does not run on this operating system");
+      return;
+    }
+    const root = mkdtempSync(join(tmpdir(), "verax-install-init-"));
+    const home = join(root, "home");
+    const env: NodeJS.ProcessEnv = platform === "win32"
+      ? { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: home }
+      : { SUDO_USER: "runner", VERAX_INVOKING_HOME: home };
+    const layout = platform === "win32"
+      ? { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli }
+      : { execPath: "/usr/bin/true", bodyVersion: "0.3.0", npmCli: "/usr/bin/true" };
+    if (platform !== "win32") {
+      const codeParent = platform === "linux" ? "/opt" : "/Library";
+      try {
+        accessSync(codeParent, constants.W_OK);
+      } catch {
+        rmSync(root, { recursive: true, force: true });
+        t.skip(`${platform} install paths are fixed; ${codeParent} is not writable from this test`);
+        return;
+      }
+    }
+    const out: string[] = [];
+    const err: string[] = [];
+    const health = createServer((req, res) => {
+      res.writeHead(req.url === "/healthz" ? 200 : 404);
+      res.end();
+    });
+    await new Promise<void>((resolve) => health.listen(0, "127.0.0.1", () => resolve()));
+    const port = (health.address() as AddressInfo).port;
+    try {
+      const code = await runInstall(["install", "--port", String(port)], {
+        platform,
+        env,
+        elevated: () => true,
+        layout,
+        exec: (argv) => {
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
+            return { status: 2, stdout: "", stderr: "not found\n" };
+          }
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "dscl" && argv.includes("-read")) return { status: 1, stdout: "", stderr: "" };
+          if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: {
+          stdout: { write: (s: string) => out.push(s) },
+          stderr: { write: (s: string) => err.push(s) },
+        },
+      });
+      assert.equal(code, 0);
+      const text = `${out.join("")}${err.join("")}`;
+      assert.equal(text.includes("verax serve"), false);
+      assert.equal(text.includes("A shell as the same user"), false);
+      if (platform === "win32") assert.match(text, /Run as administrator: verax approve/);
+      else assert.match(text, /Approve held calls from an elevated terminal: sudo verax approve/);
+    } finally {
+      await new Promise<void>((resolve) => health.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("windows password stays out of install.json, stdout, and stderr", async () => {
@@ -577,23 +693,31 @@ describe("verax install plan", () => {
         }
         throw error;
       }
-      const resolved = resolveTrustPath(link, process.platform === "win32" ? "win32" : "linux");
+      const platform = process.platform === "win32" ? "win32" : "linux";
+      const resolved = resolveTrustPath(link, platform);
       const expected =
         process.platform === "win32" ? realpathSync.native(target).toLowerCase() : realpathSync(target);
       const actual = process.platform === "win32" ? resolved.toLowerCase() : resolved;
       assert.equal(actual, expected);
       assert.notEqual(resolved, link);
       const code = await runInstall(["install", "--port", "8801"], {
-        platform: "linux",
-        env: linuxEnv,
+        platform,
+        env: platform === "win32" ? winEnv : linuxEnv,
         elevated: () => true,
         layout: { execPath: link, bodyVersion: "0.3.0", npmCli: target },
-        exec: () => ({ status: 0, stdout: "", stderr: "" }),
+        exec: (argv) => {
+          if (platform === "win32" && systemToolName(argv[0] ?? "") === "icacls") {
+            return { status: 0, stdout: `${argv[1] ?? resolved} BUILTIN\\Users:(W)\n`, stderr: "" };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        },
         io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
       });
       assert.equal(code, 78);
       assert.match(err.join(""), /can be changed by your user account/);
-      assert.ok(err.join("").includes(resolved), err.join(""));
+      const text = err.join("");
+      const needle = platform === "win32" ? resolved.toLowerCase() : resolved;
+      assert.ok((platform === "win32" ? text.toLowerCase() : text).includes(needle), text);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

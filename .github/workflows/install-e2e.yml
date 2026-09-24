@@ -37,38 +37,39 @@ jobs:
             Write-Host "existing ACL:"
             icacls $nodeExe
             Write-Host "printed existing node version and ACL"
+            Write-Host "using existing node; msiexec not run"
           } else {
             Write-Host "node.exe does not exist before msiexec: $nodeExe"
-          }
-          Write-Host "downloading SHASUMS256.txt from $base/SHASUMS256.txt to $sums"
-          Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile $sums
-          Write-Host "downloaded SHASUMS256.txt to $sums"
-          Write-Host "downloading $name from $base/$name to $msi"
-          Invoke-WebRequest -Uri "$base/$name" -OutFile $msi
-          Write-Host "downloaded $name to $msi"
-          $line = @(Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape($name))$" })
-          if ($line.Count -ne 1) { Write-Host "SHASUMS256.txt has no $name"; exit 1 }
-          $expected = ($line[0] -split '\s+')[0].ToLower()
-          $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
-          Write-Host "sha256 expected: $expected"
-          Write-Host "sha256 actual: $actual"
-          if ($expected -ne $actual) { Write-Host "sha256 mismatch for $name"; exit 1 }
-          Write-Host "sha256 match for $name"
-          $log = Join-Path $env:RUNNER_TEMP "node-msi.log"
-          Write-Host "running msiexec /i $msi /qn ALLUSERS=1 /norestart /l*v $log"
-          $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart', '/l*v', $log) -Wait -PassThru
-          Write-Host "msiexec exit code: $($proc.ExitCode)"
-          if ($proc.ExitCode -ne 0) {
-            Write-Host "msiexec failed with exit code $($proc.ExitCode)"
-            if (Test-Path -LiteralPath $log) {
-              Write-Host "last 60 lines of $log"
-              Get-Content -LiteralPath $log -Tail 60 | ForEach-Object { Write-Host $_ }
-            } else {
-              Write-Host "msi log missing: $log"
+            Write-Host "downloading SHASUMS256.txt from $base/SHASUMS256.txt to $sums"
+            Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile $sums
+            Write-Host "downloaded SHASUMS256.txt to $sums"
+            Write-Host "downloading $name from $base/$name to $msi"
+            Invoke-WebRequest -Uri "$base/$name" -OutFile $msi
+            Write-Host "downloaded $name to $msi"
+            $line = @(Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape($name))$" })
+            if ($line.Count -ne 1) { Write-Host "SHASUMS256.txt has no $name"; exit 1 }
+            $expected = ($line[0] -split '\s+')[0].ToLower()
+            $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+            Write-Host "sha256 expected: $expected"
+            Write-Host "sha256 actual: $actual"
+            if ($expected -ne $actual) { Write-Host "sha256 mismatch for $name"; exit 1 }
+            Write-Host "sha256 match for $name"
+            $log = Join-Path $env:RUNNER_TEMP "node-msi.log"
+            Write-Host "running msiexec /i $msi /qn ALLUSERS=1 /norestart /l*v $log"
+            $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart', '/l*v', $log) -Wait -PassThru
+            Write-Host "msiexec exit code: $($proc.ExitCode)"
+            if ($proc.ExitCode -ne 0) {
+              Write-Host "msiexec failed with exit code $($proc.ExitCode)"
+              if (Test-Path -LiteralPath $log) {
+                Write-Host "last 60 lines of $log"
+                Get-Content -LiteralPath $log -Tail 60 | ForEach-Object { Write-Host $_ }
+              } else {
+                Write-Host "msi log missing: $log"
+              }
+              exit $proc.ExitCode
             }
-            exit $proc.ExitCode
+            Write-Host "msiexec finished"
           }
-          Write-Host "msiexec finished"
           $node = "C:\Program Files\nodejs\node.exe"
           $real = & $node -p "require('fs').realpathSync.native(process.execPath)"
           Write-Host "node -v: $(& $node -v)"
@@ -359,6 +360,37 @@ jobs:
           code=$?
           set -e
           test "$code" = "77"
+      - name: diagnose service on failure
+        if: failure()
+        run: |
+          set +e
+          echo "launchctl print system/com.verax-ai.body"
+          sudo /bin/launchctl print system/com.verax-ai.body
+          err="/Library/Application Support/Verax/state/body.err"
+          echo "StandardErrorPath $err"
+          if [ -f "$err" ]; then
+            sudo /usr/bin/tail -n 40 "$err"
+          else
+            echo "stderr log missing: $err"
+          fi
+          dir="/Library/Application Support/Verax/state"
+          while true; do
+            line="$(sudo /usr/bin/stat -f '%Su|%p|%N' "$dir" 2>/dev/null || true)"
+            owner="${line%%|*}"
+            rest="${line#*|}"
+            mode="${rest%%|*}"
+            name="${rest#*|}"
+            if [ -n "$mode" ]; then
+              perm=$((8#$mode & 511))
+              printf '%s %04o %s\n' "$owner" "$perm" "$name"
+            else
+              echo "stat failed $dir"
+            fi
+            if [ "$dir" = "/" ]; then break; fi
+            next="${dir%/*}"
+            if [ -z "$next" ]; then next="/"; fi
+            dir="$next"
+          done
       - name: pre-created state dir is refused
         run: |
           set -euo pipefail

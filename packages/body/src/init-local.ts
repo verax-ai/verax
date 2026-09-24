@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { restrictToOwnerWin32, SystemToolError } from "./install.ts";
+import { mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -165,6 +165,8 @@ function parseInitArgs(
 export type InitLocalOpts = {
   /** Write the agent token here and leave no copy under the state directory. */
   tokenPath?: string;
+  /** Installed body prints its own summary. Skip this command's user-facing text. */
+  quiet?: boolean;
 };
 
 export async function runInitLocal(
@@ -221,9 +223,9 @@ export async function runInitLocal(
     rmSync(issuerDir, { recursive: true, force: true });
   };
   try {
-  if (createdState) mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  if (createdState) mkdirLeaf(stateDir, 0o700);
   if (process.platform === "win32") restrictToOwnerWin32(stateDir);
-  mkdirSync(issuerDir, { recursive: true, mode: 0o700 });
+  mkdirLeaf(issuerDir, 0o700);
   const keyPath = join(issuerDir, "key.pem");
   const jwksPath = join(issuerDir, "jwks.json");
   const insideToken = join(issuerDir, "agent.token");
@@ -236,7 +238,7 @@ export async function runInitLocal(
   writeFileSync(jwksPath, `${JSON.stringify({ keys: [publicJwk] })}\n`, { encoding: "utf8", mode: 0o600 });
   wrote.push(jwksPath);
   ownerOnly(jwksPath);
-  if (external) mkdirSync(dirname(tokenPath), { recursive: true, mode: 0o700 });
+  if (external) mkdirLeaf(dirname(tokenPath), 0o700);
   writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600 });
   wrote.push(tokenPath);
   ownerOnly(tokenPath);
@@ -288,7 +290,7 @@ export async function runInitLocal(
     "A held call is approved on this machine with: verax approve",
     "",
   ];
-  io.stdout.write(lines.join("\n"));
+  if (!opts.quiet) io.stdout.write(lines.join("\n"));
   return 0;
   } catch (err) {
     const externalToken = wrote.find((p) => !p.startsWith(stateDir));
