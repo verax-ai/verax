@@ -214,6 +214,8 @@ export async function runInitLocal(
   const lines = [
     ...wrote.map((p) => `wrote ${p}`),
     "",
+    "A shell as the same user can read this directory and approve its own calls, so for anything that matters run the body as another OS user or in a container, or keep the agent in a sandbox that cannot read the state directory.",
+    "",
     "Start the body:",
     `verax serve --env-file ${shQuote(envPath)}`,
     "",

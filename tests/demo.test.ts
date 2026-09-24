@@ -23,12 +23,14 @@ type Claims = {
   subject: string;
 };
 
-function ioFor(opts: { isTTY?: boolean; answer?: string } = {}) {
+function ioFor(opts: { isTTY?: boolean; answer?: string | string[] } = {}) {
   const stdout: string[] = [];
   const stderr: string[] = [];
+  const answers =
+    opts.answer === undefined ? undefined : Array.isArray(opts.answer) ? opts.answer : [opts.answer];
   const stdin =
-    opts.answer !== undefined
-      ? Readable.from([opts.answer.endsWith("\n") ? opts.answer : `${opts.answer}\n`])
+    answers !== undefined
+      ? Readable.from(answers.map((answer) => (answer.endsWith("\n") ? answer : `${answer}\n`)))
       : new Readable({
           read() {
             this.push(null);
@@ -240,8 +242,8 @@ describe("verax demo", { concurrency: 1 }, () => {
     }
   });
 
-  it("T5: TTY y binds an operator id; TTY N leaves spend held", { timeout: DEMO_MS * 2 }, async () => {
-    const yesIo = ioFor({ isTTY: true, answer: "y" });
+  it("T5: TTY y binds an operator id; TTY N leaves spend held", { timeout: DEMO_MS * 3 }, async () => {
+    const yesIo = ioFor({ isTTY: true, answer: ["y", "100"] });
     const yesCode = await runDemo(["demo", "--keep"], {}, yesIo);
     const yesDir = keepDir(yesIo.out());
     try {
@@ -264,6 +266,25 @@ describe("verax demo", { concurrency: 1 }, () => {
       assert.equal(bound!.inputs.approver!.via, "cli");
     } finally {
       removeDir(yesDir);
+    }
+
+    const wrongIo = ioFor({ isTTY: true, answer: ["y", "999"] });
+    const beforeWrong = new Set(demoDirs());
+    const wrongCode = await runDemo(["demo", "--keep"], {}, wrongIo);
+    const wrongName = demoDirs().find((name) => !beforeWrong.has(name)) ?? null;
+    const wrongDir = wrongName ? join(tmpdir(), wrongName) : null;
+    try {
+      assert.notEqual(wrongCode, 0, wrongIo.out());
+      assert.ok(wrongDir && existsSync(wrongDir), wrongIo.err());
+      const heldSpend = loadApprovalsFromDir(wrongDir!).filter((r) => r.subject === "spend");
+      assert.equal(heldSpend.length, 1, JSON.stringify(heldSpend));
+      assert.equal(heldSpend[0]!.status, "pending");
+      assert.equal(
+        readDecisions(wrongDir!).some((row) => row.decision === "allow" && row.subject === "spend"),
+        false,
+      );
+    } finally {
+      removeDir(wrongDir);
     }
 
     const noIo = ioFor({ isTTY: true, answer: "N" });
@@ -316,7 +337,7 @@ describe("verax demo", { concurrency: 1 }, () => {
   // docs/demo.svg is a recording the README shows. It is a second copy of what
   // the command prints, so it is held against a run: same words, same order.
   it("T9: docs/demo.svg carries what a terminal run answered with y prints", { timeout: DEMO_MS }, async () => {
-    const io = ioFor({ isTTY: true, answer: "y" });
+    const io = ioFor({ isTTY: true, answer: ["y", "100"] });
     const code = await runDemo(["demo"], {}, io);
     assert.equal(code, 0, io.err());
 

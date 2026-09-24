@@ -23,10 +23,11 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { findDecisionRecordChainBreak, verifyDecisionRecord } from "@cedulon/core";
+import { decisionRecordHash, findDecisionRecordChainBreak, verifyDecisionRecord } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
 
-import { readLedgerManifest } from "./ledger-manifest.ts";
+import { loadCheckpoints } from "./checkpoints.ts";
+import { indexPath, parseIndexText, readLedgerManifest } from "./ledger-manifest.ts";
 
 export type VerifyTrust = {
   /** `pinned`: the caller supplied the key. `in-ledger`: read from the records. */
@@ -47,7 +48,29 @@ export type VerifyResult = {
   effectsBound: number;
   effectsOrphaned: number;
   trust: VerifyTrust;
+  /** What `index.jsonl` still names. Missing file is not a failure. */
+  index: VerifyIndex;
+  /** What the newest checkpoint covers, and the records after it. */
+  tail: VerifyTail;
   problems: string[];
+};
+
+export type VerifyIndex = {
+  present: boolean;
+  /** Index refs that are not decisions in the ledger. */
+  missing: number;
+  line: string;
+};
+
+export type VerifyTail = {
+  line: string;
+  /** Newest signed checkpoint, or null when the file has none. */
+  checkpoint: {
+    receiptCount: number | null;
+    chainHeadHash: string | null;
+    /** True when some decision's hash is the checkpoint head. Null when the checkpoint carries no head. */
+    ledgerHoldsRecord: boolean | null;
+  } | null;
 };
 
 export type VerifyOptions = {
@@ -91,6 +114,78 @@ function readJsonl(path: string, problems: string[]): unknown[] {
   return out;
 }
 
+const INDEX_NONE = "index: none (cannot check for removed records)";
+const TAIL_NONE =
+  "tail: no checkpoint; removing the newest records with their effects is not detectable from these files";
+
+function indexStatement(dir: string, decisionRefs: ReadonlySet<string>): { index: VerifyIndex; problems: string[] } {
+  if (!existsSync(indexPath(dir))) {
+    return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [] };
+  }
+  let text = "";
+  try {
+    text = readFileSync(indexPath(dir), "utf8");
+  } catch {
+    return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [] };
+  }
+  const named = new Set<string>();
+  for (const line of parseIndexText(text)) named.add(line.ref);
+  let missing = 0;
+  for (const ref of named) {
+    if (!decisionRefs.has(ref)) missing += 1;
+  }
+  if (missing > 0) {
+    const line = `index names ${missing} record(s) the ledger no longer holds`;
+    return { index: { present: true, missing, line }, problems: [line] };
+  }
+  return {
+    index: { present: true, missing: 0, line: `index: ${named.size} ref(s), each still a decision` },
+    problems: [],
+  };
+}
+
+function tailStatement(
+  dir: string,
+  records: readonly SignedDecisionRecord[],
+): { tail: VerifyTail; problems: string[] } {
+  const rows = loadCheckpoints(dir);
+  const newest = rows.length > 0 ? rows[rows.length - 1] : null;
+  if (!newest) {
+    return { tail: { line: TAIL_NONE, checkpoint: null }, problems: [] };
+  }
+  const claims = newest.claims;
+  const receiptCount = typeof claims.receiptCount === "number" ? claims.receiptCount : null;
+  const chainHeadHash = typeof claims.chainHeadHash === "string" ? claims.chainHeadHash : null;
+  let ledgerHoldsRecord: boolean | null = null;
+  if (chainHeadHash) {
+    ledgerHoldsRecord = records.some((rec) => {
+      try {
+        return decisionRecordHash(rec) === chainHeadHash;
+      } catch {
+        return false;
+      }
+    });
+  }
+  const problems: string[] = [];
+  if (receiptCount !== null && records.length < receiptCount) {
+    problems.push(
+      `checkpoint covers ${receiptCount} record(s); the ledger holds ${records.length}`,
+    );
+  }
+  if (ledgerHoldsRecord === false) {
+    problems.push("newest checkpoint names a record the ledger no longer holds");
+  }
+  const after = receiptCount === null ? null : records.length - receiptCount;
+  const line =
+    after === null
+      ? "tail: newest checkpoint carries no record count to compare"
+      : `tail: ${after < 0 ? 0 : after} record(s) after the newest checkpoint are not covered`;
+  return {
+    tail: { line, checkpoint: { receiptCount, chainHeadHash, ledgerHoldsRecord } },
+    problems,
+  };
+}
+
 export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promise<VerifyResult> {
   const problems: string[] = [];
   const kararDosyalari = decisionFiles(dir);
@@ -105,6 +200,9 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
   // would let a deleted ledger pass as a verified one.
   if (records.length === 0) {
     problems.push("no decisions found: this directory holds no ledger to verify");
+    const emptyIndex = indexStatement(dir, new Set());
+    const emptyTail = tailStatement(dir, records);
+    problems.push(...emptyIndex.problems, ...emptyTail.problems);
     return {
       ok: false,
       directory: dir,
@@ -116,6 +214,8 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
       effectsBound: 0,
       effectsOrphaned: 0,
       trust: { source: "none", publicKeyPem: null, note: "no records, so no key was used" },
+      index: emptyIndex.index,
+      tail: emptyTail.tail,
       problems,
     };
   }
@@ -190,6 +290,10 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     }
   }
 
+  const indexed = indexStatement(dir, refler);
+  const tailed = tailStatement(dir, records);
+  problems.push(...indexed.problems, ...tailed.problems);
+
   const ok =
     problems.length === 0 && signaturesInvalid === 0 && chainBreakAt === null && effectsOrphaned === 0;
 
@@ -204,6 +308,8 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     effectsBound,
     effectsOrphaned,
     trust,
+    index: indexed.index,
+    tail: tailed.tail,
     problems,
   };
 }

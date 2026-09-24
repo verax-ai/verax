@@ -395,7 +395,13 @@ async function approvePendingUnlocked(opts: {
   return { ok: true, allowRef };
 }
 
-export type ApprovalCommand = { ref: string; approverId: string; atMs: number };
+export type ApprovalCommand = {
+  ref: string;
+  approverId: string;
+  atMs: number;
+  /** Absent on a command written before this field existed; drain applies that as `cli-script`. */
+  via?: "cli" | "cli-script";
+};
 
 export function enqueueApprovalCommand(dir: string, cmd: ApprovalCommand): void {
   appendFileSync(join(dir, "approval-commands.jsonl"), `${JSON.stringify(cmd)}\n`, {

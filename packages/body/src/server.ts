@@ -400,6 +400,12 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
+      // Local mode reads VERAX_JWKS_FILE. Any process that can read that key
+      // file can mint verax:audit, so counts are not a door here: liveness only.
+      if (config.jwksFile) {
+        send(res, 200, { ok: true });
+        return;
+      }
       const token = readBearer(req.headers.authorization);
       let canRead = false;
       if (token) {
@@ -496,6 +502,16 @@ export async function listen(config: BodyConfig): Promise<Server> {
     if (jti === "" || isRevokedJti(config.stateDir, jti)) {
       await bumpUnauthenticated(config.stateDir);
       send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+      return;
+    }
+    // Local mode: any process that can read the key file can mint
+    // verax:approve or verax:audit, so those scopes are not honoured at all.
+    // Nothing is written; the refusal is the whole answer.
+    if (
+      config.jwksFile &&
+      (verified.principal.scopes.has("verax:approve") || verified.principal.scopes.has("verax:audit"))
+    ) {
+      send(res, 403, { error: "local-mode-operator-scope" });
       return;
     }
     try {

@@ -10,6 +10,19 @@ decision, not a mood. A refusal is recorded the same way. Prompt
 injection through tool results is not filtered by policy; policy sees
 tool name and scopes only.
 
+## a brain with a shell
+
+The brain is assumed to speak MCP only. An agent that also has a shell or
+file tool running as the same OS user as the body can read the state
+directory: the keys, the local issuer key, the policy and the ledger. It
+can then mint tokens, edit the policy and rewrite the ledger with the
+body's own keys. Local mode does not honour `verax:approve` or
+`verax:audit` over HTTP, and `verax approve` asks for a terminal, but
+neither is a boundary. The boundary is the operating system: run the body
+as a different OS user, or in a container, with a state directory the
+agent cannot read; or run the agent in a sandbox that cannot read the
+state directory.
+
 ## the tool server is hostile
 
 Code behind `inner` may lie, hang, or write outside the declared effect.

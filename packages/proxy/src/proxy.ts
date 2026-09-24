@@ -432,8 +432,8 @@ export function createProxy(deps: ProxyDeps) {
             nonce: deps.nonce,
             ref: cmd.ref,
             approverId: cmd.approverId,
-            // Only `verax approve` queues a command, when the ledger is locked.
-            via: "cli",
+            // A command with no `via` is an old queue file; treat it as a script, not a person.
+            via: cmd.via === "cli" ? "cli" : "cli-script",
             policyHash: defer.policyHash,
             approvals,
             inputsLog,

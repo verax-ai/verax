@@ -52,6 +52,22 @@ export function renderVerify(r: VerifyResult): string {
     }`,
   );
   lines.push(`              ${r.trust.note}`);
+  lines.push(r.index.line);
+  if (r.tail.checkpoint) {
+    const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
+    const holds =
+      r.tail.checkpoint.ledgerHoldsRecord === null
+        ? "no head hash to look up"
+        : r.tail.checkpoint.ledgerHoldsRecord
+          ? "ledger holds that record"
+          : "ledger does not hold that record";
+    const covered =
+      r.tail.checkpoint.receiptCount === null
+        ? "no record count"
+        : `${r.tail.checkpoint.receiptCount} record(s)`;
+    lines.push(`checkpoint    newest covers ${covered}, head ${head}, ${holds}`);
+  }
+  lines.push(r.tail.line);
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");

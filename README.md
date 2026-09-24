@@ -80,6 +80,8 @@ Port 8787 taken? verax init --local ~/.verax --port 8797
 
 The token can read and write memory through the gate; it cannot approve. The shipped policy refuses `spend` until you add a rule for it; a call your policy holds waits for `verax approve` on this machine.
 
+Claude Code and Cursor also run shell commands as your user. A shell as the same user can read `~/.verax` and approve its own calls, so for anything that matters run the body as another OS user or in a container, or keep the agent in a sandbox that cannot read the state directory. See docs/THREAT_MODEL.md.
+
 ### With Conarium
 
 `@verax-ai/body` 0.2.2 and later accepts `--with-conarium`. 0.2.1 does not

@@ -113,8 +113,8 @@ export type DecisionInputs = {
   approver?: { id: string; via: ApprovalChannel | "proxy"; resolves: string };
 };
 
-/** How an operator's approval reached the ledger: `verax approve` on the machine, or the body's `/api/approve`. */
-export type ApprovalChannel = "cli" | "http";
+/** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */
+export type ApprovalChannel = "cli" | "cli-script" | "http";
 
 export type InputsLog = {
   append(ref: string, inputs: DecisionInputs): Promise<void>;

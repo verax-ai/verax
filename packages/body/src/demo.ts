@@ -266,6 +266,7 @@ async function readAnswer(stdin: NodeJS.ReadableStream): Promise<string> {
       resolve(value);
     };
     const onData = (chunk: Buffer | string) => {
+      if (typeof stdin.pause === "function") stdin.pause();
       done(String(chunk).split(/\r?\n/)[0] ?? "");
     };
     const onEnd = () => done("");
@@ -415,7 +416,10 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       writeOut("Approve this payment as the operator on this machine? [y/N]\n");
       const answer = await readAnswer(io.stdin);
       if (answer.trim().toLowerCase() === "y") {
-        const code = await runApprove(["approve", stateDir, held.ref], (s) => writeErr(s), () => undefined);
+        const code = await runApprove(["approve", stateDir, held.ref], writeErr, () => undefined, {
+          isTTY: io.isTTY,
+          ask: async () => readAnswer(io.stdin),
+        });
         if (code !== 0) throw new Error("demo: approve failed");
         approved = true;
       }
