@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
-import { accessSync, constants, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -122,11 +122,14 @@ describe("verax install plan", () => {
 
   it("3 autostart runs the trusted node and the registry cli", () => {
     const win = okPlan("win32", winEnv, winOpts);
-    const create = argvs(win.ops).find((argv) => systemToolName(argv[0] ?? "") === "schtasks" && argv.includes("/Create"));
-    assert.ok(create);
-    const tr = create!.join(" ");
+    const task = win.ops.find((op) => op.op === "argv" && op.argv.some((arg) => arg.includes("Register-ScheduledTask")));
+    if (!task || task.op !== "argv") throw new Error("missing scheduled task registration");
+    const tr = task.argv.join(" ");
+    assert.match(tr, /New-ScheduledTaskAction/);
     assert.match(tr, /C:\\Program Files\\nodejs\\node\.exe/);
     assert.match(tr, /C:\\Program Files\\Verax\\node_modules\\@verax-ai\\body\\dist\\cli\.js/);
+    assert.match(tr, /serve --env-file/);
+    assert.match(tr, /Start-ScheduledTask/);
     assert.equal(tr.includes("AppData"), false);
     assert.equal(tr.includes("\\Verax\\node.exe"), false);
 
@@ -314,7 +317,7 @@ describe("verax install plan", () => {
   it("poisoned PATH does not select whoami, icacls, or chown", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-path-"));
     const prev = process.env.PATH;
-    const planTools = new Set(["icacls", "schtasks", "useradd", "chown", "chmod", "systemctl"]);
+    const planTools = new Set(["icacls", "schtasks", "powershell", "useradd", "chown", "chmod", "systemctl"]);
     try {
       process.env.PATH = dir;
       if (process.platform === "win32") {
@@ -486,19 +489,23 @@ describe("verax install plan", () => {
     const env: NodeJS.ProcessEnv = platform === "win32"
       ? { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: home }
       : { SUDO_USER: "runner", VERAX_INVOKING_HOME: home };
+    const trustedStandIn = platform === "win32" ? undefined : ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
+      try {
+        const st = lstatSync(file);
+        return !st.isSymbolicLink() && st.uid === 0 && (st.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+    if (platform !== "win32" && trustedStandIn === undefined) {
+      rmSync(root, { recursive: true, force: true });
+      t.skip("no root-owned binary to stand in for Node");
+      return;
+    }
     const layout = platform === "win32"
       ? { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli }
-      : { execPath: "/usr/bin/true", bodyVersion: "0.3.0", npmCli: "/usr/bin/true" };
-    if (platform !== "win32") {
-      const codeParent = platform === "linux" ? "/opt" : "/Library";
-      try {
-        accessSync(codeParent, constants.W_OK);
-      } catch {
-        rmSync(root, { recursive: true, force: true });
-        t.skip(`${platform} install paths are fixed; ${codeParent} is not writable from this test`);
-        return;
-      }
-    }
+      : { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! };
+    const posixRoot = platform === "win32" ? undefined : join(root, "fsroot");
     const out: string[] = [];
     const err: string[] = [];
     const health = createServer((req, res) => {
@@ -513,6 +520,7 @@ describe("verax install plan", () => {
         env,
         elevated: () => true,
         layout,
+        posixRoot,
         exec: (argv) => {
           const tool = systemToolName(argv[0] ?? "");
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
@@ -534,7 +542,10 @@ describe("verax install plan", () => {
       assert.equal(text.includes("verax serve"), false);
       assert.equal(text.includes("A shell as the same user"), false);
       if (platform === "win32") assert.match(text, /Run as administrator: verax approve/);
-      else assert.match(text, /Approve held calls from an elevated terminal: sudo verax approve/);
+      else {
+        assert.match(text, /Approve held calls from an elevated terminal: sudo verax approve/);
+        assert.match(text, new RegExp(posixRoot!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      }
     } finally {
       await new Promise<void>((resolve) => health.close(() => resolve()));
       rmSync(root, { recursive: true, force: true });
@@ -560,9 +571,9 @@ describe("verax install plan", () => {
         },
         elevated: () => true,
         layout: winOpts,
-        exec: (argv) => {
-          if (systemToolName(argv[0] ?? "") === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.includes("/add")) {
-            seen = argv[3] ?? "";
+        exec: (argv, stdin) => {
+          if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
+            seen = (stdin ?? "").replace(/\r?\n$/, "");
             return { status: 1, stdout: "", stderr: `add failed ${seen}\n` };
           }
           if (systemToolName(argv[0] ?? "") === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
@@ -588,6 +599,66 @@ describe("verax install plan", () => {
     }
   });
 
+  it("windows password travels only in the powershell stdin field", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const secretOps = win.ops.filter((op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && op.stdin !== undefined);
+    assert.equal(secretOps.length, 2);
+    const password = secretOps[0]!.stdin!.replace(/\r?\n$/, "");
+    assert.equal(password.length, 32);
+    const account = secretOps.find((op) => op.argv.some((arg) => arg.includes("New-LocalUser")));
+    const task = secretOps.find((op) => op.argv.some((arg) => arg.includes("Register-ScheduledTask")));
+    if (!account || !task) throw new Error("account and task scripts are both required");
+    const accountScript = account.argv[account.argv.length - 1] ?? "";
+    const taskScript = task.argv[task.argv.length - 1] ?? "";
+    assert.match(accountScript, /\[Console\]::In\.ReadLine\(\)/);
+    assert.match(accountScript, /ConvertTo-SecureString -String \$plain -AsPlainText -Force/);
+    assert.match(accountScript, /Remove-LocalGroupMember -SID 'S-1-5-32-545'/);
+    assert.match(accountScript, /SeBatchLogonRight/);
+    assert.match(accountScript, /System32\\secedit\.exe/);
+    assert.match(taskScript, /New-ScheduledTaskAction/);
+    assert.match(taskScript, /-RunLevel Limited/);
+    assert.match(taskScript, /-RestartCount 3/);
+    assert.match(taskScript, /Start-ScheduledTask -TaskName 'Verax Body'/);
+    assert.equal(accountScript.includes(password), false);
+    assert.equal(taskScript.includes(password), false);
+    for (const op of win.ops) {
+      if (op.op !== "argv") continue;
+      for (const arg of op.argv) assert.equal(arg.includes(password), false, arg.slice(0, 120));
+      if (op.stdin !== undefined) assert.equal(op.stdin.replace(/\r?\n/g, ""), password);
+    }
+    assert.equal(argvs(win.ops).some((argv) => argv.includes("/RP") || argv.includes("/add")), false);
+  });
+
+  it("posixRoot relocates fixed install roots and --root is refused from argv", async () => {
+    const root = "/tmp/verax-fsroot";
+    const linux = planInstall("linux", linuxEnv, { ...linuxOpts, posixRoot: root });
+    if (!linux.ok) throw new Error(linux.message);
+    assert.equal(linux.codeDir, `${root}/opt/verax`);
+    assert.equal(linux.stateDir, `${root}/var/lib/verax`);
+    const unit = linux.ops.find((op) => op.op === "write" && op.path === `${root}/etc/systemd/system/verax.service`);
+    if (!unit || unit.op !== "write") throw new Error("systemd unit was not relocated");
+    assert.match(unit.contents, new RegExp(`ReadWritePaths=${root}/var/lib/verax`));
+    const darwin = planInstall("darwin", darwinEnv, { ...darwinOpts, posixRoot: root });
+    if (!darwin.ok) throw new Error(darwin.message);
+    assert.equal(darwin.codeDir, `${root}/Library/Verax/code`);
+    assert.equal(darwin.stateDir, `${root}/Library/Application Support/Verax/state`);
+    assert.ok(darwin.ops.some((op) => op.op === "mkdir" && op.path === `${root}/Library/Application Support/Verax`));
+    assert.ok(darwin.ops.some((op) => op.op === "write" && op.path === `${root}/Library/LaunchDaemons/com.verax-ai.body.plist`));
+    const err: string[] = [];
+    const code = await runInstall(["install", "--root", root], {
+      platform: "linux",
+      env: linuxEnv,
+      elevated: () => true,
+      layout: linuxOpts,
+      exec: () => {
+        throw new Error("argv must not reach install");
+      },
+      io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+    });
+    assert.equal(code, 78);
+    assert.match(err.join(""), /flag-unknown:--root/);
+  });
+
   it("accepts C:\\ add-subdirectory and inherit-only modify when Program Files is admin-only", async () => {
     const drive = [
       "C:\\ NT AUTHORITY\\Authenticated Users:(OI)(CI)(IO)(M)",
@@ -610,7 +681,7 @@ describe("verax install plan", () => {
           return { status: 0, stdout: `${target} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`, stderr: "" };
         }
         if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
-        if (systemToolName(argv[0] ?? "") === "net" && argv.includes("/add")) {
+        if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
           sawAdd = true;
           return { status: 1, stdout: "", stderr: "add failed\n" };
         }

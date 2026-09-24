@@ -231,6 +231,11 @@ export type PlanOpts = {
   port?: number;
   days?: number;
   force?: boolean;
+  /**
+   * Test-only. Prefixes the fixed POSIX install roots. Not read from CLI argv.
+   * Win32 ignores it.
+   */
+  posixRoot?: string;
   /** Trusted Node used to run npm and the service. It is not copied. */
   execPath: string;
   bodyVersion: string;
@@ -268,7 +273,7 @@ export type PlanOpts = {
 export type PlanOp =
   | { op: "manifest"; dir: string }
   | { op: "mkdir"; path: string; mode?: number }
-  | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string }
+  | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string }
   | { op: "write"; path: string; contents: string; mode?: number }
   | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean }
   | { op: "remove"; path: string }
@@ -281,6 +286,8 @@ export type InstallPlan =
 
 export type ExecResult = { status: number | null; stdout?: string; stderr?: string };
 
+export type ToolExec = (argv: string[], stdin?: string) => ExecResult;
+
 export type InstallIo = {
   stdout: { write(s: string): unknown };
   stderr: { write(s: string): unknown };
@@ -290,10 +297,16 @@ export type InstallHooks = {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   elevated?: () => boolean;
-  exec?: (argv: string[]) => ExecResult;
+  exec?: ToolExec;
   stateExists?: (dir: string) => boolean;
   layout?: { execPath: string; bodyVersion: string; npmCli: string };
   io?: InstallIo;
+  /**
+   * Test-only. Relocates `/opt/verax`, `/var/lib/verax`, `/etc/systemd/system`,
+   * `/Library/Verax`, `/Library/Application Support/Verax`, and
+   * `/Library/LaunchDaemons` under this directory. CLI argv cannot set it.
+   */
+  posixRoot?: string;
 };
 
 type Paths = { codeDir: string; stateDir: string; tokenPath: string };
@@ -302,22 +315,62 @@ function fail(code: number, message: string): InstallPlan {
   return { ok: false, code, message: message.endsWith("\n") ? message : `${message}\n` };
 }
 
-export function stateDirFor(platform: NodeJS.Platform | InstallPlatform, env: NodeJS.ProcessEnv = process.env): string {
+const POSIX_INSTALL_ROOTS = [
+  "/Library/Application Support/Verax",
+  "/Library/LaunchDaemons",
+  "/etc/systemd/system",
+  "/Library/Verax",
+  "/var/lib/verax",
+  "/opt/verax",
+] as const;
+
+/** Prefix a fixed POSIX install path. Longest root wins. Unset root returns `fixed`. */
+export function relocatePosixPath(fixed: string, posixRoot?: string): string {
+  const base = posixRoot?.trim().replace(/\/+$/, "") ?? "";
+  if (base === "") return fixed;
+  const hit = POSIX_INSTALL_ROOTS.find((root) => fixed === root || fixed.startsWith(`${root}/`));
+  return hit ? `${base}${fixed}` : fixed;
+}
+
+function fixedPosix(posixRoot?: string) {
+  const at = (fixed: string): string => relocatePosixPath(fixed, posixRoot);
+  return {
+    linuxCode: at("/opt/verax"),
+    linuxState: at("/var/lib/verax"),
+    systemdUnit: at("/etc/systemd/system/verax.service"),
+    darwinRoot: at(DARWIN_ROOT),
+    darwinCode: at(DARWIN_CODE),
+    darwinStateParent: at(DARWIN_STATE_PARENT),
+    darwinState: at(DARWIN_STATE),
+    darwinMarker: at(DARWIN_MARKER),
+    darwinPlist: at(DARWIN_PLIST),
+  };
+}
+
+export function stateDirFor(
+  platform: NodeJS.Platform | InstallPlatform,
+  env: NodeJS.ProcessEnv = process.env,
+  posixRoot?: string,
+): string {
   if (platform === "win32") {
     const data = env.ProgramData || "C:\\ProgramData";
     return path.win32.join(data, "Verax", "state");
   }
-  if (platform === "darwin") return DARWIN_STATE;
-  return "/var/lib/verax";
+  if (platform === "darwin") return fixedPosix(posixRoot).darwinState;
+  return fixedPosix(posixRoot).linuxState;
 }
 
-export function codeDirFor(platform: NodeJS.Platform | InstallPlatform, env: NodeJS.ProcessEnv = process.env): string {
+export function codeDirFor(
+  platform: NodeJS.Platform | InstallPlatform,
+  env: NodeJS.ProcessEnv = process.env,
+  posixRoot?: string,
+): string {
   if (platform === "win32") {
     const files = env.ProgramFiles || "C:\\Program Files";
     return path.win32.join(files, "Verax");
   }
-  if (platform === "darwin") return DARWIN_CODE;
-  return "/opt/verax";
+  if (platform === "darwin") return fixedPosix(posixRoot).darwinCode;
+  return fixedPosix(posixRoot).linuxCode;
 }
 
 function linuxHome(env: NodeJS.ProcessEnv): { home: string } | { error: string } {
@@ -339,13 +392,15 @@ function darwinHome(env: NodeJS.ProcessEnv): { home: string } | { error: string 
 function pathsFor(
   platform: InstallPlatform,
   env: NodeJS.ProcessEnv,
+  posixRoot?: string,
 ): { ok: true; paths: Paths; home: string } | { ok: false; code: number; message: string } {
   if (platform === "darwin") {
     const home = darwinHome(env);
     if ("error" in home) return { ok: false, code: EX_CONFIG, message: `${home.error}\n` };
+    const fixed = fixedPosix(posixRoot);
     const paths = {
-      codeDir: DARWIN_CODE,
-      stateDir: DARWIN_STATE,
+      codeDir: fixed.darwinCode,
+      stateDir: fixed.darwinState,
       tokenPath: path.posix.join(home.home, ".verax", "agent.token"),
     };
     return { ok: true, paths, home: home.home };
@@ -365,9 +420,10 @@ function pathsFor(
   }
   const home = linuxHome(env);
   if ("error" in home) return { ok: false, code: EX_CONFIG, message: `${home.error}\n` };
+  const fixed = fixedPosix(posixRoot);
   const paths = {
-    codeDir: "/opt/verax",
-    stateDir: "/var/lib/verax",
+    codeDir: fixed.linuxCode,
+    stateDir: fixed.linuxState,
     tokenPath: path.posix.join(home.home, ".verax", "agent.token"),
   };
   return { ok: true, paths, home: home.home };
@@ -520,13 +576,31 @@ function windowsServicePassword(): string {
     .join("");
 }
 
+function psSingle(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/** Script text has no secret. The password is the first stdin line, read by the script. */
+function powershellStdin(script: string, password: string): PlanOp {
+  return {
+    op: "argv",
+    argv: toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], "win32"),
+    stdin: `${password}\n`,
+  };
+}
+
 function windowsAccountOps(password: string, create: boolean): PlanOp[] {
-  const net = create
-    ? toolArgv("net", ["user", VERAX_SVC, password, "/add", "/passwordreq:yes"], "win32")
-    : toolArgv("net", ["user", VERAX_SVC, password], "win32");
-  const tidy = [
-    "$g = (Get-LocalGroup -SID 'S-1-5-32-545').Name",
-    "Remove-LocalGroupMember -Group $g -Member 'verax-svc' -ErrorAction SilentlyContinue",
+  const user = create
+    ? "New-LocalUser -Name 'verax-svc' -Password $sec -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description 'Verax body service account'"
+    : "Set-LocalUser -Name 'verax-svc' -Password $sec";
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$plain = [Console]::In.ReadLine()",
+    "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
+    "$sec = ConvertTo-SecureString -String $plain -AsPlainText -Force",
+    user,
+    "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member 'verax-svc' -ErrorAction SilentlyContinue",
+    "Enable-LocalUser -Name 'verax-svc'",
     "$sid = (New-Object System.Security.Principal.NTAccount('verax-svc')).Translate([System.Security.Principal.SecurityIdentifier]).Value",
     "$secedit = Join-Path $env:SystemRoot 'System32\\secedit.exe'",
     "$cfg = Join-Path $env:TEMP 'verax-rights.cfg'",
@@ -539,11 +613,22 @@ function windowsAccountOps(password: string, create: boolean): PlanOp[] {
     "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
     "Remove-Item $cfg,$db -ErrorAction SilentlyContinue",
   ].join("; ");
-  return [
-    { op: "argv", argv: net },
-    { op: "argv", argv: toolArgv("powershell", ["-NoProfile", "-Command", tidy], "win32") },
-    { op: "argv", argv: toolArgv("net", ["user", VERAX_SVC, "/active:yes"], "win32") },
-  ];
+  return [powershellStdin(script, password)];
+}
+
+function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string): PlanOp {
+  const argument = `"${cliBin}" serve --env-file "${envFile}"`;
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    "$plain = [Console]::In.ReadLine()",
+    "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
+    `$action = New-ScheduledTaskAction -Execute ${psSingle(nodeBin)} -Argument ${psSingle(argument)}`,
+    "$trigger = New-ScheduledTaskTrigger -AtStartup",
+    "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)",
+    "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger $trigger -User 'verax-svc' -Password $plain -RunLevel Limited -Settings $settings -Force",
+    "Start-ScheduledTask -TaskName 'Verax Body'",
+  ].join("; ");
+  return powershellStdin(script, password);
 }
 
 function xmlEscape(value: string): string {
@@ -640,7 +725,7 @@ function winPrincipal(env: NodeJS.ProcessEnv, profile: string): string {
   return env.USERDOMAIN?.trim() ? `${env.USERDOMAIN.trim()}\\${user}` : user;
 }
 
-function unitText(nodeBin: string, cliBin: string, envFile: string): string {
+function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: string): string {
   return [
     "[Unit]",
     "Description=Verax body",
@@ -652,7 +737,7 @@ function unitText(nodeBin: string, cliBin: string, envFile: string): string {
     `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile}`,
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
-    "ReadWritePaths=/var/lib/verax",
+    `ReadWritePaths=${stateDir}`,
     "ProtectHome=yes",
     "",
     "[Install]",
@@ -682,7 +767,9 @@ function linuxOwnedByUs(fact: { exists: boolean; symlink: boolean; owner: string
 }
 
 export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, opts: PlanOpts): InstallPlan {
-  const located = pathsFor(platform, env);
+  const posixRoot = platform === "win32" ? undefined : opts.posixRoot;
+  const fixed = fixedPosix(posixRoot);
+  const located = pathsFor(platform, env, posixRoot);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -735,7 +822,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   } else {
     const stateFact = darwinRefuses(opts.darwinState, paths.stateDir, Boolean(opts.markerExists));
     if (stateFact) return stateFact;
-    const rootFact = darwinRefuses(opts.darwinRoot, DARWIN_ROOT, Boolean(opts.markerExists));
+    const rootFact = darwinRefuses(opts.darwinRoot, fixed.darwinRoot, Boolean(opts.markerExists));
     if (rootFact) return rootFact;
   }
   if (opts.stateExists && !opts.force) return fail(EX_CONFIG, `refusing: ${paths.stateDir} already exists`);
@@ -775,17 +862,17 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (platform === "win32") ops.push(setOwner(paths.codeDir));
   if (platform === "darwin") {
     ops.push(
-      { op: "argv", argv: toolArgv("chown", ["-R", "root:wheel", DARWIN_ROOT], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["-R", "go-w", DARWIN_ROOT], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["0755", DARWIN_ROOT, paths.codeDir], "darwin") },
+      { op: "argv", argv: toolArgv("chown", ["-R", "root:wheel", fixed.darwinRoot], "darwin") },
+      { op: "argv", argv: toolArgv("chmod", ["-R", "go-w", fixed.darwinRoot], "darwin") },
+      { op: "argv", argv: toolArgv("chmod", ["0755", fixed.darwinRoot, paths.codeDir], "darwin") },
     );
   }
   ops.push({ op: "manifest", dir: paths.codeDir });
   if (platform === "darwin") {
     ops.push(
-      { op: "mkdir", path: DARWIN_STATE_PARENT, mode: 0o755 },
-      { op: "argv", argv: toolArgv("chown", ["root:wheel", DARWIN_STATE_PARENT], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["0755", DARWIN_STATE_PARENT], "darwin") },
+      { op: "mkdir", path: fixed.darwinStateParent, mode: 0o755 },
+      { op: "argv", argv: toolArgv("chown", ["root:wheel", fixed.darwinStateParent], "darwin") },
+      { op: "argv", argv: toolArgv("chmod", ["0755", fixed.darwinStateParent], "darwin") },
     );
   }
   ops.push({ op: "mkdir", path: paths.stateDir, mode: 0o700 });
@@ -815,7 +902,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     const account = opts.darwinAccount ?? { uid: 280, gid: 280, createUser: true, createGroup: true, recordUser: true, recordGroup: true };
     ops.push({
       op: "write",
-      path: DARWIN_MARKER,
+      path: fixed.darwinMarker,
       contents: installMarkerText(opts, paths, { createdUser: account.recordUser, createdGroup: account.recordGroup }),
       mode: 0o644,
     });
@@ -837,8 +924,8 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       );
     }
     ops.push(
-      { op: "argv", argv: toolArgv("chown", ["root:wheel", DARWIN_MARKER], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["0644", DARWIN_MARKER], "darwin") },
+      { op: "argv", argv: toolArgv("chown", ["root:wheel", fixed.darwinMarker], "darwin") },
+      { op: "argv", argv: toolArgv("chmod", ["0644", fixed.darwinMarker], "darwin") },
       { op: "argv", argv: toolArgv("chown", [`${DARWIN_USER}:${DARWIN_USER}`, paths.stateDir], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0700", paths.stateDir], "darwin") },
     );
@@ -860,29 +947,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
         argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
       },
     );
-    const tr = `"${opts.execPath}" "${cliBin}" serve --env-file "${envFile}"`;
-    ops.push(
-      {
-        op: "argv",
-        argv: toolArgv("schtasks", [
-          "/Create",
-          "/TN",
-          TASK_NAME,
-          "/SC",
-          "ONSTART",
-          "/RU",
-          VERAX_SVC,
-          "/RP",
-          winPassword,
-          "/TR",
-          tr,
-          "/RL",
-          "LIMITED",
-          "/F",
-        ], "win32"),
-      },
-      { op: "argv", argv: toolArgv("schtasks", ["/Run", "/TN", TASK_NAME], "win32") },
-    );
+    ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile));
   } else if (platform === "linux") {
     const sudoUser = env.SUDO_USER!.trim();
     const tokenDir = path.posix.dirname(paths.tokenPath);
@@ -893,7 +958,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0700", tokenDir], "linux") },
       { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, paths.tokenPath], "linux") },
       { op: "argv", argv: toolArgv("chmod", ["0600", paths.tokenPath], "linux") },
-      { op: "write", path: "/etc/systemd/system/verax.service", contents: unitText(opts.execPath, cliBin, envFile), mode: 0o644 },
+      { op: "write", path: fixed.systemdUnit, contents: unitText(opts.execPath, cliBin, envFile, paths.stateDir), mode: 0o644 },
       { op: "argv", argv: toolArgv("systemctl", ["daemon-reload"], "linux") },
       { op: "argv", argv: toolArgv("systemctl", ["enable", "--now", "verax"], "linux") },
     );
@@ -908,11 +973,11 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0700", tokenDir], "darwin") },
       { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, paths.tokenPath], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0600", paths.tokenPath], "darwin") },
-      { op: "write", path: DARWIN_PLIST, contents: plistText(opts.execPath, cliBin, envFile, errFile), mode: 0o644 },
-      { op: "argv", argv: toolArgv("chown", ["root:wheel", DARWIN_PLIST], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["0644", DARWIN_PLIST], "darwin") },
-      { op: "argv", argv: toolArgv("plutil", ["-lint", DARWIN_PLIST], "darwin") },
-      { op: "argv", argv: toolArgv("launchctl", ["bootstrap", "system", DARWIN_PLIST], "darwin") },
+      { op: "write", path: fixed.darwinPlist, contents: plistText(opts.execPath, cliBin, envFile, errFile), mode: 0o644 },
+      { op: "argv", argv: toolArgv("chown", ["root:wheel", fixed.darwinPlist], "darwin") },
+      { op: "argv", argv: toolArgv("chmod", ["0644", fixed.darwinPlist], "darwin") },
+      { op: "argv", argv: toolArgv("plutil", ["-lint", fixed.darwinPlist], "darwin") },
+      { op: "argv", argv: toolArgv("launchctl", ["bootstrap", "system", fixed.darwinPlist], "darwin") },
       { op: "argv", argv: toolArgv("launchctl", ["enable", `system/${DARWIN_LABEL}`], "darwin") },
     );
   }
@@ -1212,11 +1277,12 @@ export function defaultElevated(platform: NodeJS.Platform = process.platform): b
   return typeof process.getuid === "function" && process.getuid() === 0;
 }
 
-function defaultExec(argv: string[]): ExecResult {
+function defaultExec(argv: string[], stdin?: string): ExecResult {
   const head = argv[0] ?? "";
   const name = systemToolName(head);
+  const input = stdin === undefined ? {} : { input: stdin };
   if (!SYSTEM_TOOL_NAMES.has(name)) {
-    const ran = spawnSync(head, argv.slice(1), { encoding: "utf8", windowsHide: true, shell: false });
+    const ran = spawnSync(head, argv.slice(1), { encoding: "utf8", windowsHide: true, shell: false, ...input });
     return { status: ran.status, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
   }
   let file: string;
@@ -1231,6 +1297,7 @@ function defaultExec(argv: string[]): ExecResult {
     windowsHide: true,
     shell: false,
     env: systemToolEnv(),
+    ...input,
   });
   return { status: ran.status, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
 }
@@ -1416,9 +1483,11 @@ function argvSecrets(argv: readonly string[]): string[] {
   return secrets;
 }
 
-function redactSecrets(detail: string, argv: readonly string[]): string {
+function redactSecrets(detail: string, argv: readonly string[], stdin?: string): string {
   let out = detail;
   for (const secret of argvSecrets(argv)) out = out.split(secret).join("[redacted]");
+  const line = stdin?.replace(/\r?\n$/, "") ?? "";
+  if (line !== "") out = out.split(line).join("[redacted]");
   return out;
 }
 
@@ -1507,7 +1576,7 @@ function reportHealthTimeout(
 
 async function execute(
   plan: Extract<InstallPlan, { ok: true }>,
-  exec: (argv: string[]) => ExecResult,
+  exec: ToolExec,
   io: InstallIo,
   platform: NodeJS.Platform,
 ): Promise<number> {
@@ -1548,14 +1617,14 @@ async function execute(
         io.stderr.write(resolved.error.endsWith("\n") ? resolved.error : `${resolved.error}\n`);
         return EX_CONFIG;
       }
-      const ran = exec(resolved);
+      const ran = exec(resolved, step.stdin);
       if (ran.status === EX_CONFIG && !step.optional) {
-        io.stderr.write(`${redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv)}\n`);
+        io.stderr.write(`${redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin)}\n`);
         return EX_CONFIG;
       }
       if ((ran.status ?? 1) !== 0 && !step.optional) {
         if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
-        const detail = redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv);
+        const detail = redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin);
         const what = step.argv.includes("signatures")
           ? "npm audit signatures"
           : step.argv.includes("--omit=dev")
@@ -1939,7 +2008,9 @@ export async function runInstall(argv: readonly string[], hooks: InstallHooks = 
       }
     }
   }
-  const stateDir = stateDirFor(platform, plannedEnv);
+  const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
+  const fixed = fixedPosix(posixRoot);
+  const stateDir = stateDirFor(platform, plannedEnv, posixRoot);
   const exists = hooks.stateExists ? hooks.stateExists(stateDir) : existsSync(stateDir);
   let veraxRootExists = false;
   let markerExists = false;
@@ -1965,14 +2036,14 @@ export async function runInstall(argv: readonly string[], hooks: InstallHooks = 
     if (pathIsReparse(root, exec, platform)) reparsePath = root;
     else if (pathIsReparse(stateDir, exec, platform)) reparsePath = stateDir;
   } else if (platform === "linux") {
-    const codeDir = codeDirFor(platform, plannedEnv);
+    const codeDir = codeDirFor(platform, plannedEnv, posixRoot);
     linuxState = linuxFact(stateDir, exec);
     linuxCode = linuxFact(codeDir, exec);
   } else if (platform === "darwin") {
-    markerExists = ourMarker(DARWIN_MARKER);
+    markerExists = ourMarker(fixed.darwinMarker);
     darwinState = posixPresence(stateDir);
-    darwinRoot = posixPresence(DARWIN_ROOT);
-    const picked = pickDarwinAccount(exec, markerFlags(DARWIN_MARKER));
+    darwinRoot = posixPresence(fixed.darwinRoot);
+    const picked = pickDarwinAccount(exec, markerFlags(fixed.darwinMarker));
     if ("error" in picked) {
       io.stderr.write(`${picked.error}\n`);
       return EX_CONFIG;
@@ -1986,6 +2057,7 @@ export async function runInstall(argv: readonly string[], hooks: InstallHooks = 
     port: parsed.port,
     days: parsed.days,
     force: parsed.force,
+    posixRoot,
     stateExists: exists,
     veraxRootExists,
     markerExists,
