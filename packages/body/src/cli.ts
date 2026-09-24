@@ -6,6 +6,7 @@ import { runApprove } from "./approve-cli.ts";
 import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
+import { loadEnvFile, runInitLocal } from "./init-local.ts";
 import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
@@ -19,6 +20,9 @@ const HELP = `verax - the body an agent asks before it acts, and the ledger it a
 Usage: verax <command> [options]
 
   (no command)         serve MCP over Streamable HTTP at /mcp on VERAX_BIND (default 127.0.0.1:8787)
+  serve [--env-file <file>]  same as serving, after loading KEY=VALUE lines from that file
+  init --local <stateDir> [--force] [--days N] [--port N]
+                       write a loopback key, one agent token, and verax.env
   doctor [--json]      check the configuration this process would run with
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
        [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
@@ -35,9 +39,9 @@ Usage: verax <command> [options]
   --help, -h           print this
   --version, -v        print the version
 
-Serving needs VERAX_ISSUER, VERAX_JWKS_URL, VERAX_AUDIENCE, VERAX_STATE_DIR and
-VERAX_POLICY_FILE; \`verax doctor\` names what is missing. Records stay on this
-machine, under VERAX_STATE_DIR.
+Serving needs VERAX_ISSUER, one of VERAX_JWKS_URL or VERAX_JWKS_FILE, VERAX_AUDIENCE,
+VERAX_STATE_DIR and VERAX_POLICY_FILE; \`verax doctor\` names what is missing.
+Records stay on this machine, under VERAX_STATE_DIR.
 `;
 
 function version(): string {
@@ -98,6 +102,28 @@ if (argv[0] === "unlock") {
     process.exit(78);
   }
   process.exit(runUnlock(stateDir, (s) => process.stderr.write(s), { force }));
+}
+if (argv[0] === "init") {
+  process.exit(await runInitLocal(argv.slice(1)));
+}
+if (argv[0] === "serve") {
+  const fileFlag = argv.indexOf("--env-file");
+  if (fileFlag !== -1) {
+    const file = argv[fileFlag + 1];
+    if (!file || file.startsWith("-")) {
+      process.stderr.write("verax serve --env-file <file>\n");
+      process.exit(78);
+    }
+    const loaded = loadEnvFile(file);
+    if (!loaded.ok) {
+      process.stderr.write(`${loaded.reason}\n`);
+      process.exit(78);
+    }
+  }
+  await main();
+  // main() returns once the server is listening. The open socket keeps the
+  // process up; this promise stops the rest of the dispatcher from running.
+  await new Promise(() => {});
 }
 if (argv[0] === "doctor") {
   const json = argv.includes("--json");

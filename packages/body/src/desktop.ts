@@ -7,7 +7,20 @@ import { fileURLToPath } from "node:url";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
-const repoRoot = join(here, "..", "..", "..");
+
+export function resolveRepoRoot(): string {
+  return join(here, "..", "..", "..");
+}
+
+export const DESKTOP_CLONE_ONLY =
+  "verax desktop runs from a clone of github.com/verax-ai/verax; it is not in the npm package\n";
+
+export function desktopCloneError(root: string): string | null {
+  if (!existsSync(join(root, "scripts", "dev-issuer.mjs")) || !existsSync(join(root, "apps", "panel"))) {
+    return DESKTOP_CLONE_ONLY;
+  }
+  return null;
+}
 
 export type DesktopOpts = {
   stateDir: string;
@@ -256,6 +269,12 @@ export async function runDesktop(
   opts: DesktopOpts,
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
 ): Promise<number> {
+  const repoRoot = resolveRepoRoot();
+  const cloneOnly = desktopCloneError(repoRoot);
+  if (cloneOnly) {
+    writeErr(cloneOnly);
+    return 78;
+  }
   mkdirSync(opts.stateDir, { recursive: true });
   const tokenPath = join(opts.stateDir, "dev-token");
   const issuerScript = join(repoRoot, "scripts", "dev-issuer.mjs");

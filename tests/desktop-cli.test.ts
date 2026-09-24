@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { portOpen } from "../packages/body/src/desktop.ts";
+import { desktopCloneError, portOpen } from "../packages/body/src/desktop.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -75,6 +75,19 @@ function commandLines(): string {
 }
 
 describe("verax desktop CLI", () => {
+  it("names a directory that is not a clone and accepts this repository", () => {
+    const outside = mkdtempSync(join(tmpdir(), "verax-not-a-clone-"));
+    try {
+      assert.equal(
+        desktopCloneError(outside),
+        "verax desktop runs from a clone of github.com/verax-ai/verax; it is not in the npm package\n",
+      );
+      assert.equal(desktopCloneError(join(here, "..")), null);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
   it(
     "starts issuer, body and panel, then tears them down when the fake browser exits",
     { timeout: 180_000 },

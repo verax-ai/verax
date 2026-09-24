@@ -19,15 +19,19 @@ const SECRET_NAME = /^(VERAX_DEV_TOKEN|.*_(TOKEN|SECRET|KEY))$/;
 export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const issuer = Boolean(env.VERAX_ISSUER?.trim());
-  const jwks = Boolean(env.VERAX_JWKS_URL?.trim());
+  const jwksUrl = Boolean(env.VERAX_JWKS_URL?.trim());
+  const jwksFileSet = Boolean(env.VERAX_JWKS_FILE?.trim());
+  const jwks = jwksUrl || jwksFileSet;
   const audience = Boolean(env.VERAX_AUDIENCE?.trim());
+  const tripleReady = issuer && jwks && audience;
   checks.push({
     id: "issuer-jwks-audience",
-    level: issuer && jwks && audience ? "ok" : "fail",
-    detail:
-      issuer && jwks && audience
-        ? "VERAX_ISSUER, VERAX_JWKS_URL, and VERAX_AUDIENCE are set"
-        : "one of VERAX_ISSUER, VERAX_JWKS_URL, VERAX_AUDIENCE is missing",
+    level: tripleReady ? "ok" : "fail",
+    detail: tripleReady
+      ? jwksFileSet && !jwksUrl
+        ? "VERAX_ISSUER, VERAX_JWKS_FILE, and VERAX_AUDIENCE are set"
+        : "VERAX_ISSUER, VERAX_JWKS_URL, and VERAX_AUDIENCE are set"
+      : "one of VERAX_ISSUER, VERAX_JWKS_URL, VERAX_AUDIENCE is missing",
   });
 
   const loaded = loadConfig({
@@ -52,7 +56,7 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
         detail: "non-loopback bind without VERAX_TLS_TERMINATED=1",
       });
     }
-  } else if (loaded.reason.includes("non-loopback")) {
+  } else if (loaded.reason.includes("non-loopback") || loaded.reason.includes("loopback bind")) {
     checks.push({ id: "bind", level: "fail", detail: loaded.reason });
   } else {
     checks.push({ id: "bind", level: "warn", detail: "bind not judged; issuer triple incomplete" });
@@ -218,7 +222,57 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
     }
   }
 
+  checks.push(...jwksFileChecks(env, stateDir));
+
   return checks;
+}
+
+function jwksFileChecks(env: NodeJS.ProcessEnv, stateDir: string): DoctorCheck[] {
+  const file = env.VERAX_JWKS_FILE?.trim() ?? "";
+  if (file === "") return [];
+  const out: DoctorCheck[] = [];
+  let kid = "";
+  let parses = false;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8")) as { keys?: Array<{ kid?: unknown }> };
+    const first = parsed.keys?.[0];
+    if (first && typeof first.kid === "string" && first.kid !== "") {
+      parses = true;
+      kid = first.kid;
+    }
+  } catch {
+    parses = false;
+  }
+  out.push({
+    id: "jwks-file",
+    level: parses ? "ok" : "fail",
+    detail: parses ? `VERAX_JWKS_FILE ${file} parses kid ${kid}` : `VERAX_JWKS_FILE ${file} does not parse`,
+  });
+  if (stateDir === "") return out;
+  const tokenPath = join(stateDir, "local-issuer", "agent.token");
+  if (!existsSync(tokenPath)) return out;
+  const exp = expFromToken(readFileSync(tokenPath, "utf8"));
+  const weekSec = 7 * 24 * 60 * 60;
+  if (exp !== null && exp <= Math.floor(Date.now() / 1000) + weekSec) {
+    out.push({
+      id: "local-agent-token",
+      level: "warn",
+      detail: `${tokenPath} expires within 7 days`,
+    });
+  }
+  return out;
+}
+
+function expFromToken(raw: string): number | null {
+  const parts = raw.trim().split(".");
+  if (parts.length < 2) return null;
+  try {
+    const json = Buffer.from(parts[1]!, "base64url").toString("utf8");
+    const payload = JSON.parse(json) as { exp?: unknown };
+    return typeof payload.exp === "number" ? payload.exp : null;
+  } catch {
+    return null;
+  }
 }
 
 const DEFAULT_REDIRECTS = ["http://127.0.0.1:5173/", "http://127.0.0.1:4173/"];

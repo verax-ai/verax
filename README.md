@@ -64,6 +64,22 @@ for the operator on this machine (approved when the terminal answers `y`).
 `--keep` leaves the temporary ledger on disk. `verax verify <dir>` reads it
 back without a body, as in [Read the ledger back without us](#read-the-ledger-back-without-us).
 
+## Connect your agent
+
+```sh
+npm install -g @verax-ai/body
+verax init --local ~/.verax
+verax serve --env-file ~/.verax/verax.env
+```
+
+```sh
+claude mcp add --transport http verax http://127.0.0.1:8787/mcp --header "Authorization: Bearer $(cat ~/.verax/local-issuer/agent.token)"
+```
+
+Port 8787 taken? verax init --local ~/.verax --port 8797
+
+The token can read and write memory through the gate; it cannot approve. The shipped policy refuses `spend` until you add a rule for it; a call your policy holds waits for `verax approve` on this machine.
+
 ### With Conarium
 
 `@verax-ai/body` 0.2.2 and later accepts `--with-conarium`. 0.2.1 does not
@@ -120,7 +136,7 @@ Not shown here: a real database (these are Conarium's sample rows); statement re
 
 | Package | What it is |
 | --- | --- |
-| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock`, `desktop`. |
+| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock`, `desktop` (clone only). |
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
