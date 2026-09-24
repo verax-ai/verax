@@ -29,7 +29,8 @@ Bearer token the configured issuer did not sign.
 | Variable | Required | Meaning |
 | --- | --- | --- |
 | `VERAX_ISSUER` | yes | Issuer the agent's token must carry. |
-| `VERAX_JWKS_URL` | yes | Where the body fetches the keys that verify that token. |
+| `VERAX_JWKS_URL` | one of | Where the body fetches the keys that verify that token. Set this or `VERAX_JWKS_FILE`, not both. |
+| `VERAX_JWKS_FILE` | one of | Path to a JWKS JSON file read once at start, instead of fetching `VERAX_JWKS_URL`. Accepted only with a loopback bind. |
 | `VERAX_AUDIENCE` | yes | Audience the token must name, so a token minted for something else is refused. |
 | `VERAX_STATE_DIR` | yes | Directory the ledger, keys and approvals live in. It stays on this machine. |
 | `VERAX_POLICY_FILE` | yes | Policy the gate applies. `@verax-ai/proxy` ships `policy/default.json`, which denies what it does not name. |

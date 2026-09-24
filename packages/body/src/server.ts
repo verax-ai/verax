@@ -357,7 +357,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     throw err;
   }
   const toolMeta = [...TOOL_META, ...extraTools.map(downstreamMeta)];
-  const verify = createVerifier(config.jwksUrl, config.issuer, config.audience);
+  const verify = createVerifier(config.jwksUrl, config.issuer, config.audience, config.jwksFile);
 
   const attachHandlers = (mcp: McpServer) => {
     mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolMeta }));

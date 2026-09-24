@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 export const EX_CONFIG = 78;
 
 export type BodyConfig = {
@@ -9,6 +11,11 @@ export type BodyConfig = {
   bindPort: number;
   policyFile: string;
   tlsTerminated: boolean;
+  /**
+   * Path to a JWKS file read once at start. Set instead of `jwksUrl`.
+   * Loopback binds only.
+   */
+  jwksFile?: string | null;
   /** Path to an inventory JSON file. Missing file is absence, not a fault. */
   inventoryFile?: string | null;
   /**
@@ -42,11 +49,28 @@ export function isLoopbackHost(host: string): boolean {
   return LOOPBACK.has(stripped);
 }
 
+function jwksFileParses(path: string): boolean {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as { keys?: unknown };
+    return Array.isArray(parsed.keys) && parsed.keys.length > 0;
+  } catch {
+    return false;
+  }
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   const issuer = env.VERAX_ISSUER?.trim() ?? "";
   const jwksUrl = env.VERAX_JWKS_URL?.trim() ?? "";
+  const jwksFile = env.VERAX_JWKS_FILE?.trim() ?? "";
   const audience = env.VERAX_AUDIENCE?.trim() ?? "";
-  if (issuer === "" || jwksUrl === "" || audience === "") {
+  if (jwksUrl !== "" && jwksFile !== "") {
+    return {
+      ok: false,
+      code: EX_CONFIG,
+      reason: "both VERAX_JWKS_URL and VERAX_JWKS_FILE",
+    };
+  }
+  if (issuer === "" || audience === "" || (jwksUrl === "" && jwksFile === "")) {
     return {
       ok: false,
       code: EX_CONFIG,
@@ -55,11 +79,25 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   }
   const bind = parseBind(env.VERAX_BIND);
   const tlsTerminated = env.VERAX_TLS_TERMINATED === "1";
+  if (jwksFile !== "" && !isLoopbackHost(bind.host)) {
+    return {
+      ok: false,
+      code: EX_CONFIG,
+      reason: "VERAX_JWKS_FILE needs a loopback bind",
+    };
+  }
   if (!isLoopbackHost(bind.host) && !tlsTerminated) {
     return {
       ok: false,
       code: EX_CONFIG,
       reason: "non-loopback bind without VERAX_TLS_TERMINATED=1",
+    };
+  }
+  if (jwksFile !== "" && !jwksFileParses(jwksFile)) {
+    return {
+      ok: false,
+      code: EX_CONFIG,
+      reason: "VERAX_JWKS_FILE is missing or unparsable",
     };
   }
   const stateDir = env.VERAX_STATE_DIR?.trim() ?? "";
@@ -77,6 +115,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
     value: {
       issuer,
       jwksUrl,
+      jwksFile: jwksFile === "" ? null : jwksFile,
       audience,
       stateDir,
       bindHost: bind.host,

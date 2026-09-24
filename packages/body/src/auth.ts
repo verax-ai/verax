@@ -1,4 +1,5 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { readFileSync } from "node:fs";
+import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
 import type { Principal } from "@verax-ai/proxy";
 
 const ALGS = ["ES256", "EdDSA"] as const;
@@ -21,8 +22,39 @@ export function wwwAuthenticate(audience: string): string {
   return `Bearer resource_metadata="${resourceMetadataUrl(audience)}"`;
 }
 
-export function createVerifier(jwksUrl: string, issuer: string, audience: string) {
-  const jwks = createRemoteJWKSet(new URL(jwksUrl));
+function localJwks(path: string): ReturnType<typeof createLocalJWKSet> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+  } catch {
+    throw new JwksFileError();
+  }
+  if (
+    parsed === null ||
+    typeof parsed !== "object" ||
+    !Array.isArray((parsed as { keys?: unknown }).keys) ||
+    (parsed as { keys: unknown[] }).keys.length === 0
+  ) {
+    throw new JwksFileError();
+  }
+  return createLocalJWKSet(parsed as Parameters<typeof createLocalJWKSet>[0]);
+}
+
+export class JwksFileError extends Error {
+  readonly code = 78;
+  constructor(message = "VERAX_JWKS_FILE is missing or unparsable") {
+    super(message);
+    this.name = "JwksFileError";
+  }
+}
+
+export function createVerifier(
+  jwksUrl: string,
+  issuer: string,
+  audience: string,
+  jwksFile?: string | null,
+) {
+  const jwks = jwksFile ? localJwks(jwksFile) : createRemoteJWKSet(new URL(jwksUrl));
   return async (token: string): Promise<VerifiedBearer> => {
     const { payload } = await jwtVerify(token, jwks, {
       issuer,
