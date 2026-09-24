@@ -24,20 +24,51 @@ jobs:
       - name: official Node
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           $ver = $env:NODE_VERSION
           $name = "node-v$ver-x64.msi"
           $base = "https://nodejs.org/dist/v$ver"
           $sums = Join-Path $env:RUNNER_TEMP "SHASUMS256.txt"
           $msi = Join-Path $env:RUNNER_TEMP $name
+          $nodeExe = "C:\Program Files\nodejs\node.exe"
+          if (Test-Path -LiteralPath $nodeExe) {
+            Write-Host "node.exe already exists before msiexec: $nodeExe"
+            Write-Host "existing version: $(& $nodeExe -v)"
+            Write-Host "existing ACL:"
+            icacls $nodeExe
+            Write-Host "printed existing node version and ACL"
+          } else {
+            Write-Host "node.exe does not exist before msiexec: $nodeExe"
+          }
+          Write-Host "downloading SHASUMS256.txt from $base/SHASUMS256.txt to $sums"
           Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile $sums
+          Write-Host "downloaded SHASUMS256.txt to $sums"
+          Write-Host "downloading $name from $base/$name to $msi"
           Invoke-WebRequest -Uri "$base/$name" -OutFile $msi
+          Write-Host "downloaded $name to $msi"
           $line = @(Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape($name))$" })
-          if ($line.Count -ne 1) { Write-Error "SHASUMS256.txt has no $name"; exit 1 }
+          if ($line.Count -ne 1) { Write-Host "SHASUMS256.txt has no $name"; exit 1 }
           $expected = ($line[0] -split '\s+')[0].ToLower()
           $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
-          if ($expected -ne $actual) { Write-Error "sha256 mismatch for $name"; exit 1 }
-          $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart') -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
+          Write-Host "sha256 expected: $expected"
+          Write-Host "sha256 actual: $actual"
+          if ($expected -ne $actual) { Write-Host "sha256 mismatch for $name"; exit 1 }
+          Write-Host "sha256 match for $name"
+          $log = Join-Path $env:RUNNER_TEMP "node-msi.log"
+          Write-Host "running msiexec /i $msi /qn ALLUSERS=1 /norestart /l*v $log"
+          $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart', '/l*v', $log) -Wait -PassThru
+          Write-Host "msiexec exit code: $($proc.ExitCode)"
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "msiexec failed with exit code $($proc.ExitCode)"
+            if (Test-Path -LiteralPath $log) {
+              Write-Host "last 60 lines of $log"
+              Get-Content -LiteralPath $log -Tail 60 | ForEach-Object { Write-Host $_ }
+            } else {
+              Write-Host "msi log missing: $log"
+            }
+            exit $proc.ExitCode
+          }
+          Write-Host "msiexec finished"
           $node = "C:\Program Files\nodejs\node.exe"
           $real = & $node -p "require('fs').realpathSync.native(process.execPath)"
           Write-Host "node -v: $(& $node -v)"
@@ -253,18 +284,30 @@ jobs:
         run: |
           set -euo pipefail
           ver="$NODE_VERSION"
-          name="node-v${ver}.pkg"
+          arch="$(uname -m)"
+          case "$arch" in
+            arm64) ;;
+            x86_64) arch="x64" ;;
+            *) echo "unsupported arch: $arch"; exit 1 ;;
+          esac
+          name="node-v${ver}-darwin-${arch}.tar.gz"
           curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
           curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
           grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && shasum -a 256 -c -)
-          sudo installer -pkg "/tmp/${name}" -target /
-          node="/usr/local/bin/node"
-          real="$("$node" -p "require('fs').realpathSync('/usr/local/bin/node')")"
-          owner="$(stat -f '%u' "$real")"
+          sudo mkdir -p /usr/local/lib/verax-node
+          sudo tar -C /usr/local/lib/verax-node -xzf "/tmp/${name}"
+          sudo chown -R root:wheel /usr/local/lib/verax-node
+          sudo chmod -R go-w /usr/local/lib/verax-node
+          node="/usr/local/lib/verax-node/node-v${ver}-darwin-${arch}/bin/node"
+          real="$("$node" -p "require('fs').realpathSync.native(process.execPath)")"
           echo "node -v: $("$node" -v)"
           echo "realpath: $real"
-          stat -f '%Su:%Sg %Lp %N' "$real"
-          test "$owner" = "0"
+          dir="$real"
+          while [ "$dir" != "/" ]; do
+            ls -ld "$dir"
+            dir="$(dirname "$dir")"
+          done
+          ls -ld /
           echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
           echo "$(dirname "$node")" >> "$GITHUB_PATH"
       - name: npm ci

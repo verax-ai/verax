@@ -52,6 +52,8 @@ export type DemoIo = {
 /** Test injection. The CLI never passes this; it is not read from argv or env. */
 export type DemoOpts = {
   conariumChild?: { command: string; args: string[] };
+  /** mkdtemp prefix. Tests pass a unique one so parallel files do not share verax-demo-. */
+  statePrefix?: string;
 };
 
 type PolicyDoc = {
@@ -329,7 +331,8 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
   process.once("SIGTERM", onStop);
 
   try {
-    stateDir = mkdtempSync(join(tmpdir(), "verax-demo-"));
+    const statePrefix = opts?.statePrefix && opts.statePrefix.length > 0 ? opts.statePrefix : "verax-demo-";
+    stateDir = mkdtempSync(join(tmpdir(), statePrefix));
     const policyFile = writeDemoPolicy(stateDir, withConarium);
 
     const { privateKey, publicKey } = await generateKeyPair("ES256");

@@ -367,8 +367,29 @@ describe("verax install plan", () => {
     if (plan.ok) throw new Error("accepted a user-owned Homebrew Node");
     assert.equal(plan.code, 78);
     assert.match(plan.message, /\/opt\/homebrew\/bin\/node/);
-    assert.match(plan.message, /nodejs\.org \.pkg/);
-    assert.match(plan.message, /\/usr\/local/);
+    assert.match(plan.message, /\/usr\/local\/lib\/verax-node/);
+    assert.match(plan.message, /root:wheel/);
+    assert.match(plan.message, /SHASUMS256\.txt/);
+    assert.match(plan.message, new RegExp(`node-v${process.versions.node.replaceAll(".", "\\.")}-darwin-${process.arch}\\.tar\\.gz`));
+    assert.match(plan.message, /\$\(which verax\) install/);
+  });
+
+  it("linux refusal names the official tarball under /usr/local/lib/verax-node", () => {
+    const plan = planInstall("linux", linuxEnv, {
+      ...linuxOpts,
+      nodeModes: [
+        { uid: 1000, mode: 0o755 },
+        { uid: 0, mode: 0o755 },
+      ],
+    });
+    if (plan.ok) throw new Error("accepted a user-owned Node");
+    assert.equal(plan.code, 78);
+    assert.match(plan.message, /\/usr\/bin\/node/);
+    assert.match(plan.message, /\/usr\/local\/lib\/verax-node/);
+    assert.match(plan.message, /root:root/);
+    assert.match(plan.message, /sha256sum -c -/);
+    assert.match(plan.message, new RegExp(`node-v${process.versions.node.replaceAll(".", "\\.")}-linux-${process.arch}\\.tar\\.gz`));
+    assert.match(plan.message, /\$\(which verax\) install/);
   });
 
   it("darwin plist runs as _verax with the trusted Node and state is 0700", () => {
@@ -557,7 +578,10 @@ describe("verax install plan", () => {
         throw error;
       }
       const resolved = resolveTrustPath(link, process.platform === "win32" ? "win32" : "linux");
-      assert.equal(resolved, realpathSync(target));
+      const expected =
+        process.platform === "win32" ? realpathSync.native(target).toLowerCase() : realpathSync(target);
+      const actual = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+      assert.equal(actual, expected);
       assert.notEqual(resolved, link);
       const code = await runInstall(["install", "--port", "8801"], {
         platform: "linux",

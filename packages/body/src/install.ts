@@ -188,14 +188,40 @@ const USER_WRITE_PRINCIPALS = [
   "nt authority\\interactive",
 ];
 
+function officialNodeRemedy(platform: "linux" | "darwin"): string {
+  const ver = process.versions.node;
+  const arch = process.arch;
+  const os = platform === "darwin" ? "darwin" : "linux";
+  const name = `node-v${ver}-${os}-${arch}.tar.gz`;
+  const base = `https://nodejs.org/dist/v${ver}`;
+  const dest = "/usr/local/lib/verax-node";
+  const owner = platform === "darwin" ? "root:wheel" : "root:root";
+  const check =
+    platform === "darwin"
+      ? `grep ' ${name}$' SHASUMS256.txt | shasum -a 256 -c -`
+      : `grep ' ${name}$' SHASUMS256.txt | sha256sum -c -`;
+  const node = `${dest}/node-v${ver}-${os}-${arch}/bin/node`;
+  return [
+    `curl -fsSL -o ${name} ${base}/${name}`,
+    `curl -fsSL -o SHASUMS256.txt ${base}/SHASUMS256.txt`,
+    check,
+    `sudo mkdir -p ${dest}`,
+    `sudo tar -C ${dest} -xzf ${name}`,
+    `sudo chown -R ${owner} ${dest}`,
+    `sudo chmod -R go-w ${dest}`,
+    `sudo ${node} $(which verax) install`,
+  ].join("\n");
+}
+
 export function nodeTrustMessage(nodePath: string): string {
   return `Node at ${nodePath} can be changed by your user account; install Node for all users (nodejs.org installer) and run verax install from that Node`;
 }
 
 function nodeTrustMessageFor(nodePath: string, platform: InstallPlatform): string {
-  const base = nodeTrustMessage(nodePath);
-  if (platform !== "darwin") return base;
-  return `${base}. The nodejs.org .pkg installs to /usr/local, owned by root`;
+  const head = `Node at ${nodePath} can be changed by your user account`;
+  if (platform === "win32") return nodeTrustMessage(nodePath);
+  const owner = platform === "darwin" ? "root:wheel" : "root:root";
+  return `${head}. An elevated install must not run a Node your account can swap. Download the official tarball and SHASUMS256.txt, check the sha256, and extract as root into /usr/local/lib/verax-node (${owner}, go-w), then run verax install from that Node:\n${officialNodeRemedy(platform)}`;
 }
 
 export type InstallPlatform = "win32" | "linux" | "darwin";
