@@ -25,6 +25,8 @@ export type BodyConfig = {
    * no downstream; a named file that cannot be attached stops the body.
    */
   downstreamFile?: string | null;
+  /** Origins allowed to call this HTTP server. Empty means no browser origin. */
+  allowedOrigins?: readonly string[];
 };
 
 export type ConfigResult =
@@ -124,6 +126,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       tlsTerminated,
       inventoryFile: inventoryRaw === "" ? null : inventoryRaw,
       downstreamFile: downstreamRaw === "" ? null : downstreamRaw,
+      allowedOrigins: (env.VERAX_ALLOWED_ORIGINS ?? "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item !== ""),
     },
   };
 }

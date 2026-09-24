@@ -13,6 +13,7 @@ import {
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
+import { directoryAccess, stateDirFor, unreadableSentence } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
 function policyForApprove(stateDir: string, policyHash: string): Policy | null {
@@ -108,11 +109,27 @@ export async function runApprove(
   const terminal = io ?? defaultApproveIo();
   const rest = argv.slice(1).filter((a) => a !== "--from-script");
   const fromScript = argv.includes("--from-script");
-  const stateDir = rest[0];
-  const given = rest[1];
-  if (!stateDir || !given || rest.length !== 2) {
+  let stateDir = rest[0];
+  let given = rest[1];
+  if (rest.length === 1 && stateDir) {
+    const installed = stateDirFor(process.platform);
+    const access = directoryAccess(installed);
+    if (access === "unreadable") {
+      writeErr(`${unreadableSentence(installed)}\n`);
+      return 77;
+    }
+    if (access === "ok") {
+      given = stateDir;
+      stateDir = installed;
+    }
+  }
+  if (!stateDir || !given || (rest.length !== 2 && !(rest.length === 1 && stateDir && given))) {
     writeErr("verax approve <stateDir> <ref>\n");
     return 78;
+  }
+  if (directoryAccess(stateDir) === "unreadable") {
+    writeErr(`${unreadableSentence(stateDir)}\n`);
+    return 77;
   }
   // A non-interactive shell can read the state directory. Without a person
   // at a terminal, or an explicit --from-script, nothing is approved.

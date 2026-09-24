@@ -173,9 +173,11 @@ export function spentTodayMinorOf(
   nowMs: number,
   currency: string,
   approvalTtlMs: number,
+  dayOffsetMinutes = 0,
 ): number {
-  const d = new Date(nowMs);
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const shift = dayOffsetMinutes * 60_000;
+  const d = new Date(nowMs + shift);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - shift;
   const end = start + 86_400_000;
   let sum = 0;
   for (const row of rows) {
@@ -207,7 +209,8 @@ export function createApprovalBudgetGuard(opts: {
     const others = (await opts.approvals.listAll()).filter(
       (row) => row.ref !== snap.ref && row.status === "approved",
     );
-    const spent = spentTodayMinorOf(others, opts.now(), currency, opts.policy.approvalTtlMs);
+    const offset = opts.policy.rule(snap.ruleId)?.spend?.dayOffsetMinutes ?? opts.policy.dayOffsetMinutes ?? 0;
+    const spent = spentTodayMinorOf(others, opts.now(), currency, opts.policy.approvalTtlMs, offset);
     if (spent + amount > dailyMax) return { ok: false, reason: "budget-exceeded" };
     return { ok: true };
   };

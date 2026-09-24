@@ -8,6 +8,11 @@ export type PolicySpend = {
   currency: string;
   payees: readonly string[];
   dailyMaxMinor?: number;
+  /**
+   * Minutes added to `createdAtMs` before the UTC day bucket.
+   * 0 is UTC. −720..840 covers the offsets an operator's clock can sit in.
+   */
+  dayOffsetMinutes?: number;
   /** Statement stamps for this payee. Optional; never guessed. */
   descriptors?: readonly string[];
 };
@@ -128,6 +133,17 @@ function asSpend(raw: unknown, id: string): PolicySpend {
     }
     spend.dailyMaxMinor = rec.dailyMaxMinor;
   }
+  if (rec.dayOffsetMinutes !== undefined) {
+    if (
+      typeof rec.dayOffsetMinutes !== "number" ||
+      !Number.isInteger(rec.dayOffsetMinutes) ||
+      rec.dayOffsetMinutes < -720 ||
+      rec.dayOffsetMinutes > 840
+    ) {
+      throw new Error(`policy-rule-spend-day-offset:${id}`);
+    }
+    spend.dayOffsetMinutes = rec.dayOffsetMinutes;
+  }
   if (rec.descriptors !== undefined) {
     if (
       !Array.isArray(rec.descriptors) ||
@@ -197,7 +213,24 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
     }
     document.requireInputs = true;
   }
+  rejectDuplicateRules(document.rules);
   return document;
+}
+
+function rejectDuplicateRules(rules: readonly PolicyRule[]): void {
+  const seenId = new Set<string>();
+  const toolOwner = new Map<string, string>();
+  for (const rule of rules) {
+    if (seenId.has(rule.id)) {
+      throw new Error(`duplicate rule id ${rule.id} and ${rule.id}`);
+    }
+    seenId.add(rule.id);
+    const prior = toolOwner.get(rule.tool);
+    if (prior !== undefined) {
+      throw new Error(`duplicate rule for tool ${rule.tool}: ${prior} and ${rule.id}`);
+    }
+    toolOwner.set(rule.tool, rule.id);
+  }
 }
 
 function asLimits(raw: unknown): NonNullable<PolicyDocument["limits"]> {
@@ -229,8 +262,10 @@ export function loadPolicy(json: unknown): Policy {
     ...(document.limits?.ratePerMinute !== undefined ? { ratePerMinute: document.limits.ratePerMinute } : {}),
     ...(document.limits?.dailyMax !== undefined ? { dailyMax: document.limits.dailyMax } : {}),
   };
+  const spendRule = document.rules.find((rule) => rule.tool === "spend");
   return {
     hash,
+    dayOffsetMinutes: spendRule?.spend?.dayOffsetMinutes ?? 0,
     approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
     limits,
     ...(document.requireInputs ? { requireInputs: true as const } : {}),
@@ -241,8 +276,13 @@ export function loadPolicy(json: unknown): Policy {
         ? {
             id: found.id,
             text: found.text,
-            ...(found.spend?.dailyMaxMinor !== undefined
-              ? { spend: { dailyMaxMinor: found.spend.dailyMaxMinor } }
+            ...(found.spend
+              ? {
+                  spend: {
+                    ...(found.spend.dailyMaxMinor !== undefined ? { dailyMaxMinor: found.spend.dailyMaxMinor } : {}),
+                    dayOffsetMinutes: found.spend.dayOffsetMinutes ?? 0,
+                  },
+                }
               : {}),
           }
         : null;

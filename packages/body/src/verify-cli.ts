@@ -16,6 +16,7 @@
 import { readFileSync } from "node:fs";
 
 import { verifyLedger, type VerifyResult } from "@verax-ai/proxy";
+import { directoryAccess, unreadableSentence } from "./install.ts";
 
 export const EX_VERIFY_FAILED = 1;
 
@@ -109,6 +110,10 @@ export async function runVerify(
   if (!dir) {
     out(usage());
     return EX_VERIFY_FAILED;
+  }
+  if (directoryAccess(dir) === "unreadable") {
+    out(unreadableSentence(dir));
+    return 77;
   }
 
   const result = await verifyLedger(dir, publicKeyPem ? { publicKeyPem } : {});

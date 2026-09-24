@@ -6,7 +6,8 @@ import { runApprove } from "./approve-cli.ts";
 import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorExit, runDoctor } from "./doctor.ts";
-import { loadEnvFile, runInitLocal } from "./init-local.ts";
+import { envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
+import { directoryAccess, doctorStateTarget, liveInstalledChecks, runInstall, runUninstall, unreadableSentence } from "./install.ts";
 import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
@@ -23,6 +24,11 @@ Usage: verax <command> [options]
   serve [--env-file <file>]  same as serving, after loading KEY=VALUE lines from that file
   init --local <stateDir> [--force] [--days N] [--port N]
                        write a loopback key, one agent token, and verax.env
+  install [--port N] [--days N] [--force]
+                       copy this body to an administrator-owned directory and run it
+                       as another account. Needs an elevated shell.
+  uninstall [--keep-state]
+                       stop that body and remove its code. Needs an elevated shell.
   doctor [--json]      check the configuration this process would run with
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
        [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
@@ -106,6 +112,12 @@ if (argv[0] === "unlock") {
 if (argv[0] === "init") {
   process.exit(await runInitLocal(argv.slice(1)));
 }
+if (argv[0] === "install") {
+  process.exit(await runInstall(argv));
+}
+if (argv[0] === "uninstall") {
+  process.exit(await runUninstall(argv));
+}
 if (argv[0] === "serve") {
   const fileFlag = argv.indexOf("--env-file");
   if (fileFlag !== -1) {
@@ -114,9 +126,17 @@ if (argv[0] === "serve") {
       process.stderr.write("verax serve --env-file <file>\n");
       process.exit(78);
     }
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith("VERAX_")) delete process.env[key];
+    }
     const loaded = loadEnvFile(file);
     if (!loaded.ok) {
       process.stderr.write(`${loaded.reason}\n`);
+      process.exit(78);
+    }
+    const missingJwks = envFileJwksMissing(process.env);
+    if (missingJwks) {
+      process.stderr.write(`${missingJwks}\n`);
       process.exit(78);
     }
   }
@@ -127,7 +147,12 @@ if (argv[0] === "serve") {
 }
 if (argv[0] === "doctor") {
   const json = argv.includes("--json");
-  const checks = runDoctor(process.env, process.argv);
+  const target = doctorStateTarget(process.env);
+  if (target && directoryAccess(target) === "unreadable") {
+    process.stderr.write(`${unreadableSentence(target)}\n`);
+    process.exit(77);
+  }
+  const checks = [...runDoctor(process.env, process.argv), ...liveInstalledChecks()];
   if (json) {
     process.stdout.write(`${JSON.stringify({ checks })}\n`);
   } else {

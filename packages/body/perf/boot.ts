@@ -11,6 +11,7 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { systemToolPath } from "../src/install.ts";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -61,14 +62,16 @@ async function waitFor(probe: () => Promise<boolean>, ms: number): Promise<boole
 /** Resident set of a process in MB, read from the OS (Windows tasklist / ps). */
 export function rssMb(pid: number): number | null {
   if (process.platform === "win32") {
-    const out = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+    const out = spawnSync(systemToolPath("tasklist", "win32"), ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+      encoding: "utf8",
+    });
     const line = out.stdout.split(/\r?\n/).find((l) => l.includes(`"${pid}"`));
     if (!line) return null;
     const cols = line.split('","');
     const mem = cols[cols.length - 1]?.replace(/[^0-9]/g, "");
     return mem ? Math.round(Number(mem) / 1024) : null;
   }
-  const out = spawnSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
+  const out = spawnSync(systemToolPath("ps"), ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
   const kb = Number(out.stdout.trim());
   return Number.isFinite(kb) && kb > 0 ? Math.round(kb / 1024) : null;
 }

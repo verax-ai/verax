@@ -54,8 +54,10 @@ your issuer. The tools the body offers are `memory.get`, `memory.put`,
 decides which of them a token's scopes may call, and a call can be held
 until an operator on this machine approves it.
 
-Other commands: `approve`, `operator`, `reconcile`, `witness`, `halt`,
-`unlock`, `desktop`. `verax --help` lists them.
+Other commands: `install`, `uninstall`, `approve`, `operator`, `reconcile`,
+`witness`, `halt`, `unlock`, `desktop`. `verax install` needs an elevated
+shell and is the boundary against an agent that has a shell as your user;
+`verax init --local` is not that boundary. `verax --help` lists them.
 
 ## License
 

@@ -49,7 +49,9 @@ export type Policy = {
   /** Document-root posture. Absent keeps today's optional `_inputs`. */
   requireInputs?: boolean;
   evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
-  rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number } } | null;
+  /** Spend-rule day bucket. Absent means UTC, the same as `dayOffsetMinutes: 0`. */
+  dayOffsetMinutes?: number;
+  rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number; dayOffsetMinutes?: number } } | null;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";

@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { BodyConfig } from "./config.ts";
+import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import {
   approvalsLogFor,
   approvePending,
@@ -210,6 +211,33 @@ const DEFAULT_LEDGER_LIMIT = 1000;
 const MAX_LEDGER_LIMIT = 5000;
 const responseSlot = new AsyncLocalStorage<ServerResponse>();
 
+/** `malformed` falls through so `Host: [` stays the existing bad-request. */
+export function loopbackHostDecision(hostHeader: string | undefined, bindPort: number): "allow" | "deny" | "malformed" {
+  if (hostHeader === undefined || hostHeader.trim() === "") return "deny";
+  const raw = hostHeader.trim();
+  if (raw.startsWith("[") && !raw.includes("]")) return "malformed";
+  let name = raw;
+  let port: number | undefined;
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    name = raw.slice(1, end);
+    const rest = raw.slice(end + 1);
+    if (rest === "") port = undefined;
+    else if (/^:[0-9]+$/.test(rest)) port = Number(rest.slice(1));
+    else return "deny";
+  } else {
+    const colon = raw.lastIndexOf(":");
+    if (colon > 0 && /^[0-9]+$/.test(raw.slice(colon + 1))) {
+      name = raw.slice(0, colon);
+      port = Number(raw.slice(colon + 1));
+    }
+  }
+  const lowered = name.toLowerCase();
+  if (lowered !== "127.0.0.1" && lowered !== "localhost" && lowered !== "::1") return "deny";
+  if (port === undefined) return bindPort === 80 ? "allow" : "deny";
+  return port === bindPort ? "allow" : "deny";
+}
+
 function contentLengthOverLimit(req: IncomingMessage): boolean {
   const raw = req.headers["content-length"];
   if (raw === undefined) return false;
@@ -393,6 +421,25 @@ export async function listen(config: BodyConfig): Promise<Server> {
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
+      if (isLoopbackHost(config.bindHost)) {
+        const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
+        const listenPort = (server.address() as AddressInfo).port;
+        const hostDecision = loopbackHostDecision(hostHeader, listenPort);
+        if (hostDecision === "deny") {
+          send(res, 400, { error: "host-not-allowed" });
+          req.resume();
+          return;
+        }
+      }
+      if (req.headers.origin !== undefined) {
+        const origin = Array.isArray(req.headers.origin) ? (req.headers.origin[0] ?? "") : req.headers.origin;
+        const allowed = config.allowedOrigins ?? [];
+        if (!allowed.includes(origin)) {
+          send(res, 403, { error: "origin-not-allowed" });
+          req.resume();
+          return;
+        }
+      }
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
       if (req.method === "POST" && contentLengthOverLimit(req)) {
         send(res, 413, { error: "payload-too-large" });

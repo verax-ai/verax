@@ -395,7 +395,7 @@ export function createProxy(deps: ProxyDeps) {
       const approvalRows = await approvals.listAll();
       spendCtx = {
         spentTodayMinor: (currency) =>
-          spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs),
+          spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs, deps.policy.dayOffsetMinutes ?? 0),
       };
     }
     const verdict = deps.policy.evaluate(dispatchedCall, principal, spendCtx);
@@ -641,7 +641,7 @@ export function createProxy(deps: ProxyDeps) {
           const approvalRows = await approvals.listAll();
           spendCtx = {
             spentTodayMinor: (currency) =>
-              spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs),
+              spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs, deps.policy.dayOffsetMinutes ?? 0),
           };
         }
         const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);

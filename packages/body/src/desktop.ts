@@ -4,6 +4,7 @@ import { get } from "node:http";
 import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { systemToolPath } from "./install.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -179,7 +180,10 @@ export async function desktopMode(
 export function killTree(pid: number | undefined): void {
   if (pid == null) return;
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/T", "/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" });
+    spawnSync(systemToolPath("taskkill", "win32"), ["/T", "/PID", String(pid), "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
     return;
   }
   try {

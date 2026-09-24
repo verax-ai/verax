@@ -30,11 +30,14 @@ jobs:
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - name: refuse without confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
         run: |
-          test "${{ inputs.confirm }}" = "publish" || {
-            echo "confirm was '${{ inputs.confirm }}'; expected 'publish'"
+          if [ "$CONFIRM" != "publish" ]; then
+            echo "confirm did not match; expected publish"
             exit 1
-          }
+          fi
+          echo "confirm matched publish"
       - name: fetch mcp-publisher, and check it is the file we expect
         env:
           VERSION: v1.8.1

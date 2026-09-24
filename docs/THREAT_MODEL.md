@@ -18,10 +18,18 @@ directory: the keys, the local issuer key, the policy and the ledger. It
 can then mint tokens, edit the policy and rewrite the ledger with the
 body's own keys. Local mode does not honour `verax:approve` or
 `verax:audit` over HTTP, and `verax approve` asks for a terminal, but
-neither is a boundary. The boundary is the operating system: run the body
-as a different OS user, or in a container, with a state directory the
-agent cannot read; or run the agent in a sandbox that cannot read the
-state directory.
+neither is a boundary.
+
+`verax install` puts the code and the state directory out of that shell's
+reach on Windows and on Linux. The body runs as LocalService or as the
+`verax` system user; the agent token is the only credential left in the
+invoking user's profile. macOS is not covered yet. An administrator, or
+root, is outside this model: they can change the ACL, the task, or the
+unit. An elevated terminal the operator leaves open for the agent is also
+outside it. Separate the body from other Windows services running as LOCAL SERVICE.
+
+`verax init --local` still writes a state directory the same user can
+read. That is a way to try the body, not a boundary.
 
 ## the tool server is hostile
 
@@ -46,6 +54,8 @@ happened" if the only copy lives on the same host.
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
+
+Exception: `src/install.ts` may import `node:child_process` to install and remove the body under another account. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
 The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
 
