@@ -975,6 +975,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       paths.codeDir,
       "--omit=dev",
       ...npmFlags(tempDir, platform),
+      ...(env.VERAX_INSTALL_DEBUG === "1" ? ["--loglevel", "verbose"] : []),
       ...spec,
     ],
   };
@@ -1871,10 +1872,81 @@ function ownerModeLine(platform: InstallPlatform, dir: string, exec: (argv: stri
 
 function tailFile(file: string, n: number): string | null {
   try {
-    const lines = readFileSync(file, "utf8").split(/\n/);
-    return lines.slice(-n).join("\n");
+    return cappedTail(readFileSync(file, "utf8"), n);
   } catch {
     return null;
+  }
+}
+
+const NPM_FAIL_TAIL = 80;
+
+/** Last `n` lines. A trailing newline is kept and does not count as an extra line. */
+function cappedTail(text: string, n: number): string {
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  const tail = lines.slice(-n).join("\n");
+  return tail === "" ? "" : `${tail}\n`;
+}
+
+function newestNpmDebugLog(tempDir: string, platform: InstallPlatform): string | null {
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const logsDir = p.join(npmConfigPaths(tempDir, platform).cache, "_logs");
+  let names: string[];
+  try {
+    names = readdirSync(logsDir);
+  } catch {
+    return null;
+  }
+  let best: { file: string; mtime: number } | null = null;
+  for (const name of names) {
+    if (!name.endsWith("-debug-0.log")) continue;
+    const file = p.join(logsDir, name);
+    let mtime = 0;
+    try {
+      mtime = statSync(file).mtimeMs;
+    } catch {
+      continue;
+    }
+    if (!best || mtime >= best.mtime) best = { file, mtime };
+  }
+  return best?.file ?? null;
+}
+
+/**
+ * npm stdout+stderr, the newest cache debug log, then icacls of the code dir,
+ * node_modules when it exists, and the private temp. Called before that temp is removed.
+ */
+function reportNpmFailure(
+  platform: NodeJS.Platform,
+  tempDir: string | undefined,
+  argv: readonly string[],
+  ran: ExecResult,
+  exec: ToolExec,
+  io: InstallIo,
+): void {
+  const plat: InstallPlatform = platform === "win32" ? "win32" : platform === "darwin" ? "darwin" : "linux";
+  const combined = redactSecrets(`${ran.stdout ?? ""}${ran.stderr ?? ""}`, argv);
+  const tail = cappedTail(combined, NPM_FAIL_TAIL);
+  if (tail !== "") io.stderr.write(tail);
+  if (tempDir) {
+    const log = newestNpmDebugLog(tempDir, plat);
+    const logged = log ? tailFile(log, NPM_FAIL_TAIL) : null;
+    if (logged) io.stderr.write(logged.endsWith("\n") ? logged : `${logged}\n`);
+  }
+  if (plat !== "win32") return;
+  const prefixAt = argv.indexOf("--prefix");
+  const codeDir = prefixAt >= 0 ? (argv[prefixAt + 1] ?? "") : "";
+  const targets: string[] = [];
+  if (codeDir !== "") {
+    targets.push(codeDir);
+    const modules = path.win32.join(codeDir, "node_modules");
+    if (existsSync(modules)) targets.push(modules);
+  }
+  if (tempDir) targets.push(tempDir);
+  for (const dir of targets) {
+    const acl = exec(toolArgv("icacls", [dir], "win32"));
+    const text = `${acl.stdout ?? ""}${acl.stderr ?? ""}`;
+    io.stderr.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
   }
 }
 
@@ -2077,6 +2149,11 @@ async function execute(
           return finish(ran.status === EX_CONFIG ? EX_CONFIG : 1);
         }
         continue;
+      }
+      if (isNpmArgv(resolved) && (ran.status ?? 1) !== 0 && !step.optional) {
+        reportNpmFailure(platform, tempDir, resolved, ran, call, io);
+        if (ran.status !== EX_CONFIG && step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
+        return finish(ran.status === EX_CONFIG ? EX_CONFIG : 1);
       }
       if (ran.status === EX_CONFIG && !step.optional) {
         io.stderr.write(`${redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin)}\n`);

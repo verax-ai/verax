@@ -1036,6 +1036,72 @@ describe("verax install plan", () => {
     assert.match(linuxTemp.path, /^\/var\/tmp\/verax-install-tmp-[0-9a-f]{32}$/);
   });
 
+  it("an npm failure prints the debug log tail and icacls, then removes the private temp", async () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-npm-fail-"));
+    const err: string[] = [];
+    let tempPath = "";
+    let codeDir = "";
+    try {
+      const code = await runInstall(["install", "--port", "8801"], {
+        platform: "win32",
+        env: {
+          ...winEnv,
+          ProgramData: join(root, "data"),
+          ProgramFiles: join(root, "files"),
+          USERPROFILE: join(root, "home"),
+        },
+        elevated: () => true,
+        layout: winOpts,
+        exec: (argv) => {
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
+            return { status: 2, stdout: "", stderr: "not found\n" };
+          }
+          if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          if (argv[0] === winOpts.execPath && (argv[1] ?? "").replace(/\\/g, "/").endsWith("/npm-cli.js")) {
+            const configAt = argv.indexOf("--userconfig");
+            const config = configAt >= 0 ? argv[configAt + 1] : undefined;
+            if (!config) throw new Error("npm argv is missing --userconfig");
+            tempPath = win32.dirname(config);
+            codeDir = argv[argv.indexOf("--prefix") + 1] ?? "";
+            const logs = win32.join(tempPath, "cache", "_logs");
+            mkdirSync(logs, { recursive: true });
+            writeFileSync(win32.join(logs, "2000-01-01T00_00_00_000Z-debug-0.log"), "debug-old\n");
+            const dropped = "debug-dropped\n";
+            const kept = Array.from({ length: 79 }, () => "debug-kept").join("\n");
+            writeFileSync(win32.join(logs, "2026-01-02T00_00_00_000Z-debug-0.log"), `${dropped}${kept}\nEPERM-debug-tail\n`);
+            mkdirSync(win32.join(codeDir, "node_modules"), { recursive: true });
+            const early = "npm-stdout-dropped\n";
+            const mid = Array.from({ length: 90 }, () => "npm-stdout-kept").join("\n");
+            return { status: 1, stdout: `${early}${mid}\n`, stderr: "npm error code EPERM\n" };
+          }
+          if (tool === "icacls" && argv.length === 2) {
+            return { status: 0, stdout: `acl ${argv[1]}\n`, stderr: "" };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: {
+          stdout: { write: () => undefined },
+          stderr: { write: (s: string) => err.push(s) },
+        },
+      });
+      const text = err.join("");
+      assert.equal(code, 1);
+      assert.match(text, /npm error code EPERM/);
+      assert.equal(text.includes("npm-stdout-dropped"), false);
+      assert.match(text, /EPERM-debug-tail/);
+      assert.equal(text.includes("debug-dropped"), false);
+      assert.equal(text.includes("debug-old"), false);
+      assert.match(text, new RegExp(`acl ${codeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(text, new RegExp(`acl ${win32.join(codeDir, "node_modules").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.match(text, new RegExp(`acl ${tempPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.equal(existsSync(tempPath), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it("normalises SeBatchLogonRight holders to a SID set before the read-back compare", () => {
     const map = { Administrators: "S-1-5-32-544" };
     const namesAndSid = normalizeLogonHolders("Administrators,*S-1-5-32-551", map);
@@ -1108,6 +1174,15 @@ describe("verax install plan", () => {
     assert.equal(linuxNpm.env?.npm_config_registry, undefined);
     assert.equal(linuxNpm.env?.NPM_CONFIG_REGISTRY, undefined);
     assert.equal(linuxNpm.argv[linuxNpm.argv.indexOf("--registry") + 1], "https://registry.npmjs.org/");
+    const debugPlan = planInstall("win32", { ...hostile, VERAX_INSTALL_DEBUG: "1" }, winOpts);
+    if (!debugPlan.ok) throw new Error(debugPlan.message);
+    const debugInstall = debugPlan.ops.find((op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && op.argv.includes("--omit=dev"));
+    const debugAudit = debugPlan.ops.find((op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && op.argv.includes("signatures"));
+    if (!debugInstall || !debugAudit) throw new Error("missing debug npm ops");
+    assert.ok(debugInstall.argv.includes("--loglevel"));
+    assert.equal(debugInstall.argv[debugInstall.argv.indexOf("--loglevel") + 1], "verbose");
+    assert.equal(debugAudit.argv.includes("--loglevel"), false);
+    assert.equal(debugInstall.env?.VERAX_INSTALL_DEBUG, undefined);
     const bad = registryLockProblems(JSON.stringify({
       packages: { "node_modules/evil": { resolved: "https://evil.example/evil.tgz" } },
     }));

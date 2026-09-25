@@ -17,6 +17,8 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 15
+    env:
+      VERAX_INSTALL_DEBUG: "1"
     permissions:
       contents: read
     steps:
