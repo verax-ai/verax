@@ -82,17 +82,17 @@ jobs:
       - name: npm ci
         shell: pwsh
         run: |
-          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Error "node is not the official install"; exit 1 }
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
           npm ci
       - name: build:dist
         shell: pwsh
         run: |
-          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Error "node is not the official install"; exit 1 }
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
           npm run build:dist
       - name: pack this pull request and lock the tarball directory
         shell: pwsh
         run: |
-          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Error "node is not the official install"; exit 1 }
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
           $dir = Join-Path $env:RUNNER_TEMP "verax-tarballs"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           npm pack -w @verax-ai/inventory --pack-destination $dir
@@ -209,15 +209,15 @@ jobs:
             if ($left.StartsWith($prefix)) { $left = $left.Substring($prefix.Length).Trim() }
             if ($left -ne "") { $principals += $left }
           }
-          if ($acl -match 'LOCAL SERVICE') { Write-Error "LOCAL SERVICE present"; exit 1 }
+          if ($acl -match 'LOCAL SERVICE') { Write-Host "::error::LOCAL SERVICE present"; exit 1 }
           $allowed = @('BUILTIN\Administrators', 'Administrators', 'NT AUTHORITY\SYSTEM', 'SYSTEM')
           $hasSvc = $false
           foreach ($p in $principals) {
             $isSvc = $p -eq 'verax-svc' -or $p.EndsWith('\verax-svc')
             if ($isSvc) { $hasSvc = $true; continue }
-            if ($allowed -notcontains $p) { Write-Error "unexpected principal: $p"; exit 1 }
+            if ($allowed -notcontains $p) { Write-Host "::error::unexpected principal: $p"; exit 1 }
           }
-          if (-not $hasSvc) { Write-Error "verax-svc missing"; exit 1 }
+          if (-not $hasSvc) { Write-Host "::error::verax-svc missing"; exit 1 }
           $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
           New-LocalUser -Name veraxprobe -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires -AccountNeverExpires
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
@@ -249,7 +249,7 @@ jobs:
           if (res.status !== 200) process.exit(5);
           '@ | Set-Content -Encoding utf8 $script
           $p = Start-Process -FilePath $node -ArgumentList @($script) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
-          if ($p.ExitCode -ne 0) { Write-Error "probe exit $($p.ExitCode)"; exit $p.ExitCode }
+          if ($p.ExitCode -ne 0) { Write-Host "::error::probe exit $($p.ExitCode)"; exit $p.ExitCode }
       - name: diagnose tarball access on failure
         if: failure()
         shell: pwsh
@@ -362,12 +362,19 @@ jobs:
             Write-Host "step: pre-create Verax\state as veraxprobe"
             $pre = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$mk) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
             Write-Host "ExitCode=$($pre.ExitCode)"
-            if ($pre.ExitCode -ne 0) { Write-Error "pre-create exit $($pre.ExitCode)"; exit $pre.ExitCode }
+            if ($pre.ExitCode -ne 0) { Write-Host "::error::pre-create exit $($pre.ExitCode)"; exit 1 }
             Write-Host "step: install"
             $log = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
-            Write-Host "LASTEXITCODE=$LASTEXITCODE"
-            if ($LASTEXITCODE -ne 78) { Write-Error "install exit $LASTEXITCODE, want 78: $log"; exit 1 }
-            if ($log -notmatch 'was not created by verax install') { Write-Error "install did not name the pre-created directory: $log"; exit 1 }
+            $code = $LASTEXITCODE
+            Write-Host "LASTEXITCODE=$code"
+            Write-Host "---- install output ----"
+            Write-Host $log
+            Write-Host "---- end install output ----"
+            if ($code -ne 78) { Write-Host "::error::install exit $code, want 78"; exit 1 }
+            if ($log -notmatch 'was not created by verax install') { Write-Host "::error::install did not name the pre-created directory"; exit 1 }
+            Write-Host "ok: install refused the pre-created state dir"
+            $global:LASTEXITCODE = 0
+            exit 0
           } catch {
             Write-Host "FAILED at: $($_.InvocationInfo.Line.Trim())"
             Write-Host $_.Exception.Message
