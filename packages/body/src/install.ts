@@ -4,6 +4,7 @@ import {
   accessSync,
   chmodSync,
   constants,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -279,6 +280,8 @@ export type PlanOpts = {
   tarballIcacls?: string;
   /** Linux uid/mode of the tarball directory and each tarball. */
   tarballModes?: { uid: number; mode: number }[];
+  /** sha256 of each tarball at trust-check time. npm installs the private-temp copies. */
+  tarballDigests?: { file: string; sha256: string }[];
   linuxState?: { exists: boolean; symlink: boolean; owner: string };
   linuxCode?: { exists: boolean; symlink: boolean; owner: string };
   /** Windows `verax-svc`. Absent means the account is not there yet. */
@@ -299,6 +302,7 @@ export type PlanOp =
   | { op: "remove"; path: string }
   | { op: "wait-healthz"; port: number; timeoutMs: number }
   | { op: "print"; text: string }
+  | { op: "stage-tarballs"; files: { source: string; sha256: string; dest: string }[] }
   | {
       op: "private-temp";
       path: string;
@@ -338,6 +342,8 @@ export type InstallHooks = {
    * `/Library/LaunchDaemons` under this directory. CLI argv cannot set it.
    */
   posixRoot?: string;
+  /** Test-only. Replaces `copyFileSync` while staging `--from-tarballs` copies. */
+  copyFile?: (source: string, dest: string) => void;
 };
 
 type Paths = { codeDir: string; stateDir: string; tokenPath: string };
@@ -575,13 +581,13 @@ function setOwner(dir: string): PlanOp {
   return { op: "argv", argv: toolArgv("icacls", [dir, "/setowner", ADMINISTRATORS_SID, "/T", "/C"], "win32") };
 }
 
-function grantService(dir: string, tree: boolean): PlanOp {
+function grantService(dir: string, tree: boolean, rights: "F" | "RX"): PlanOp {
   const argv = toolArgv("icacls", [dir], "win32");
   if (tree) argv.push("/T");
   argv.push(
     "/inheritance:r",
     "/grant:r",
-    `${VERAX_SVC}:(OI)(CI)F`,
+    `${VERAX_SVC}:(OI)(CI)${rights}`,
     "/grant:r",
     `${ADMINISTRATORS}:(OI)(CI)F`,
     "/grant:r",
@@ -956,10 +962,20 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (opts.stateExists && !opts.force) return fail(EX_CONFIG, `refusing: ${paths.stateDir} already exists`);
   const cliBin = cliBinFor(paths.codeDir, platform);
   const envFile = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, "verax.env");
-  const spec = opts.tarballFiles && opts.tarballFiles.length > 0 ? opts.tarballFiles : [`@verax-ai/body@${opts.bodyVersion}`];
   const winPassword = platform === "win32" ? windowsServicePassword() : "";
   const winCreate = platform === "win32" && !opts.winAccount?.exists;
   const tempDir = privateTempPath(platform, env, posixRoot);
+  const pathFor = platform === "win32" ? path.win32 : path.posix;
+  const digestOf = new Map((opts.tarballDigests ?? []).map((row) => [row.file, row.sha256]));
+  const stagedTarballs =
+    opts.fromTarballs && opts.tarballFiles && opts.tarballFiles.length > 0
+      ? opts.tarballFiles.map((source) => ({
+          source,
+          sha256: digestOf.get(source) ?? "",
+          dest: pathFor.join(tempDir, pathFor.basename(source)),
+        }))
+      : [];
+  const spec = stagedTarballs.length > 0 ? stagedTarballs.map((row) => row.dest) : [`@verax-ai/body@${opts.bodyVersion}`];
   const npmFiles = npmConfigPaths(tempDir, platform);
   const npmEnv = npmSpawnEnv(platform, opts.execPath, tempDir);
   const npmInstall: PlanOp = {
@@ -990,11 +1006,12 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (platform === "win32") ops.push(...windowsAccountOps(winPassword, winCreate, tempDir));
   ops.push({ op: "mkdir", path: paths.codeDir, mode: 0o755 });
   if (platform === "win32") {
-    ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, false));
+    ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, false, "RX"));
   }
   ops.push(
     { op: "write", path: npmFiles.userconfig, contents: "", mode: 0o600 },
     { op: "write", path: npmFiles.globalconfig, contents: "", mode: 0o600 },
+    ...(stagedTarballs.length > 0 ? [{ op: "stage-tarballs" as const, files: stagedTarballs }] : []),
     npmInstall,
   );
   if (!opts.fromTarballs) ops.push(npmAudit);
@@ -1020,10 +1037,10 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     const marker = installMarkerText(opts, paths, { createdAccount: true });
     ops.push(
       setOwner(paths.stateDir),
-      grantService(paths.stateDir, false),
+      grantService(paths.stateDir, false, "F"),
       { op: "write", path: markerPath, contents: marker, mode: 0o644 },
       setOwner(markerPath),
-      grantService(markerPath, false),
+      grantService(markerPath, false, "F"),
     );
   } else if (platform === "linux") {
     ops.push(
@@ -1080,7 +1097,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (platform === "win32") {
     ops.push(
       setOwner(paths.stateDir),
-      grantService(paths.stateDir, true),
+      grantService(paths.stateDir, true, "F"),
       {
         op: "argv",
         argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
@@ -1397,13 +1414,84 @@ export function foreignAclPrincipals(text: string, stateDir?: string): string[] 
   return found;
 }
 
-function aclPrincipalNames(text: string, stateDir?: string): string[] {
-  const found: string[] = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const left = aclLeft(raw, stateDir);
-    if (left) found.push(left.toLowerCase());
+const ACL_INHERIT_FLAGS = new Set(["OI", "CI", "IO", "NP", "I"]);
+
+export type ParsedAce = { principal: string; rights: "F" | "RX" | "other"; inheritOnly: boolean };
+
+/** One icacls ACE. Inheritance flags are not rights. `(IO)` does not apply to the object. */
+export function parseIcaclsAce(line: string, dir?: string): ParsedAce | null {
+  const left = aclLeft(line, dir);
+  if (left === null) return null;
+  const mark = line.indexOf(":(");
+  const tail = mark >= 0 ? line.slice(mark) : "";
+  let inheritOnly = false;
+  const rights = new Set<string>();
+  for (const match of tail.matchAll(/\(([^)]+)\)/g)) {
+    const token = match[1]!.toUpperCase();
+    if (token === "IO") {
+      inheritOnly = true;
+      continue;
+    }
+    if (ACL_INHERIT_FLAGS.has(token)) continue;
+    for (const part of token.split(",")) {
+      const right = part.trim().toUpperCase();
+      if (right !== "" && !ACL_INHERIT_FLAGS.has(right)) rights.add(right);
+    }
   }
-  return found;
+  const trailing = /\(([^)]*)\)\s*([A-Z]+)\s*$/i.exec(tail);
+  if (trailing?.[2]) rights.add(trailing[2].toUpperCase());
+  let kind: ParsedAce["rights"] = "other";
+  if (rights.size === 1 && rights.has("F")) kind = "F";
+  else if ((rights.size === 1 && rights.has("RX")) || (rights.size === 2 && rights.has("R") && rights.has("X"))) kind = "RX";
+  return { principal: left, rights: kind, inheritOnly };
+}
+
+export function parseIcaclsAces(text: string, dir?: string): ParsedAce[] {
+  const aces: ParsedAce[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const ace = parseIcaclsAce(raw, dir);
+    if (ace && !ace.inheritOnly) aces.push(ace);
+  }
+  return aces;
+}
+
+function aclRole(principal: string, svcSid?: string): "svc" | "admin" | "system" | "other" {
+  const key = principal.trim().toLowerCase().replace(/^\*/, "");
+  const sid = svcSid?.trim().toLowerCase().replace(/^\*/, "") ?? "";
+  if (sid !== "" && key === sid) return "svc";
+  if (key === "verax-svc" || key.endsWith("\\verax-svc")) return "svc";
+  if (key === "builtin\\administrators" || key === "administrators" || key.endsWith("\\administrators") || key === "s-1-5-32-544") return "admin";
+  if (key === "nt authority\\system" || key === "system" || key.endsWith("\\system") || key === "s-1-5-18") return "system";
+  return "other";
+}
+
+/**
+ * Code dir: service RX, Administrators F, SYSTEM F, nothing else.
+ * State dir: service F, Administrators F, SYSTEM F, nothing else.
+ */
+export function verifyServiceAcl(
+  text: string,
+  kind: "code" | "state",
+  opts?: { dir?: string; svcSid?: string },
+): { ok: true; aces: ParsedAce[] } | { ok: false; aces: ParsedAce[]; detail: string } {
+  const aces = parseIcaclsAces(text, opts?.dir);
+  const expectedSvc = kind === "code" ? "RX" : "F";
+  const label = kind === "code" ? "code" : "state";
+  const parsed = aces.map((ace) => `${ace.principal} ${ace.rights}`).join("\n");
+  const fail = (why: string): { ok: false; aces: ParsedAce[]; detail: string } => ({
+    ok: false,
+    aces,
+    detail: `${label} ACL mismatch: ${why}\n${parsed}`,
+  });
+  const roles = aces.map((ace) => ({ ace, role: aclRole(ace.principal, opts?.svcSid) }));
+  if (roles.some((row) => row.role === "other")) return fail("unexpected principal");
+  const svc = roles.filter((row) => row.role === "svc");
+  const admin = roles.filter((row) => row.role === "admin");
+  const system = roles.filter((row) => row.role === "system");
+  if (svc.length !== 1 || admin.length !== 1 || system.length !== 1) return fail("expected svc, Administrators, and SYSTEM");
+  if (svc[0]!.ace.rights !== expectedSvc) return fail(`svc rights are ${svc[0]!.ace.rights}, expected ${expectedSvc}`);
+  if (admin[0]!.ace.rights !== "F" || system[0]!.ace.rights !== "F") return fail("Administrators and SYSTEM must be F");
+  return { ok: true, aces };
 }
 
 export function manifestMismatches(manifest: string, hashOf: (rel: string) => string | null): string[] {
@@ -1441,6 +1529,10 @@ export function installedBoundaryChecks(input: {
   manifest: string | null;
   hashOf: (rel: string) => string | null;
   aclText?: string;
+  /** Windows icacls of the code directory. Same verifier as the state ACL, with svc RX. */
+  codeAclText?: string;
+  /** Service SID, so a read-back ACE named `*S-1-...` matches verax-svc. */
+  svcSid?: string;
   mode?: number;
   owner?: string;
   /** Group name of the state directory. macOS expects `_verax`. */
@@ -1470,25 +1562,25 @@ export function installedBoundaryChecks(input: {
     }
   }
   if (input.aclText !== undefined) {
-    const foreign = foreignAclPrincipals(input.aclText, input.stateDir);
-    const named = aclPrincipalNames(input.aclText, input.stateDir);
-    const hasSvc = named.some((p) => p === "verax-svc" || p.endsWith("\\verax-svc"));
-    const hasAdmin = named.some((p) => p === "administrators" || p.endsWith("\\administrators"));
-    const hasSystem = named.some((p) => p === "system" || p.endsWith("\\system") || p === "s-1-5-18" || p === "*s-1-5-18");
-    if (foreign.length === 0 && hasSvc && hasAdmin && hasSystem) {
+    const verdict = verifyServiceAcl(input.aclText, "state", { dir: input.stateDir, svcSid: input.svcSid });
+    if (verdict.ok) {
       checks.push({ id: "install-acl", level: "ok", detail: "state ACL names only verax-svc, Administrators, and SYSTEM" });
     } else {
-      for (const principal of foreign) {
-        checks.push({ id: "install-acl", level: "fail", detail: `state ACL names ${principal}` });
-      }
-      if (!hasSvc || !hasAdmin || !hasSystem) {
-        checks.push({
-          id: "install-acl",
-          level: "fail",
-          detail: "state ACL is missing verax-svc, Administrators, or SYSTEM",
-        });
+      checks.push({ id: "install-acl", level: "fail", detail: verdict.detail });
+      for (const ace of verdict.aces) {
+        if (aclRole(ace.principal, input.svcSid) === "other") {
+          checks.push({ id: "install-acl", level: "fail", detail: `state ACL names ${ace.principal}` });
+        }
       }
     }
+  }
+  if (input.codeAclText !== undefined) {
+    const verdict = verifyServiceAcl(input.codeAclText, "code", { dir: input.codeDir, svcSid: input.svcSid });
+    checks.push(
+      verdict.ok
+        ? { id: "install-code-acl", level: "ok", detail: "code ACL is verax-svc RX, Administrators F, and SYSTEM F" }
+        : { id: "install-code-acl", level: "fail", detail: verdict.detail },
+    );
   }
   if (input.mode !== undefined) {
     const bits = input.mode & 0o777;
@@ -1913,8 +2005,9 @@ function newestNpmDebugLog(tempDir: string, platform: InstallPlatform): string |
 }
 
 /**
- * npm stdout+stderr, the newest cache debug log, then icacls of the code dir,
- * node_modules when it exists, and the private temp. Called before that temp is removed.
+ * npm stdout+stderr, the newest cache debug log, then the code dir,
+ * node_modules when it exists, and the private temp. Windows prints icacls.
+ * POSIX prints `ls -ld` and the stat owner/mode line. Called before that temp is removed.
  */
 function reportNpmFailure(
   platform: NodeJS.Platform,
@@ -1933,20 +2026,28 @@ function reportNpmFailure(
     const logged = log ? tailFile(log, NPM_FAIL_TAIL) : null;
     if (logged) io.stderr.write(logged.endsWith("\n") ? logged : `${logged}\n`);
   }
-  if (plat !== "win32") return;
   const prefixAt = argv.indexOf("--prefix");
   const codeDir = prefixAt >= 0 ? (argv[prefixAt + 1] ?? "") : "";
+  const pathFor = plat === "win32" ? path.win32 : path.posix;
   const targets: string[] = [];
   if (codeDir !== "") {
     targets.push(codeDir);
-    const modules = path.win32.join(codeDir, "node_modules");
+    const modules = pathFor.join(codeDir, "node_modules");
     if (existsSync(modules)) targets.push(modules);
   }
   if (tempDir) targets.push(tempDir);
   for (const dir of targets) {
-    const acl = exec(toolArgv("icacls", [dir], "win32"));
-    const text = `${acl.stdout ?? ""}${acl.stderr ?? ""}`;
-    io.stderr.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+    if (plat === "win32") {
+      const acl = exec(toolArgv("icacls", [dir], "win32"));
+      const text = `${acl.stdout ?? ""}${acl.stderr ?? ""}`;
+      io.stderr.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+      continue;
+    }
+    const lsBin = plat === "darwin" ? "/bin/ls" : systemToolPath("ls", plat);
+    const ls = exec([lsBin, "-ld", dir]);
+    const lsText = `${ls.stdout ?? ""}${ls.stderr ?? ""}`;
+    io.stderr.write(lsText.endsWith("\n") || lsText === "" ? lsText : `${lsText}\n`);
+    io.stderr.write(`${ownerModeLine(plat, dir, exec)}\n`);
   }
 }
 
@@ -2071,11 +2172,71 @@ function removeEmptyDirs(dirs: readonly string[]): void {
   }
 }
 
+const COPY_ATTEMPTS = 10;
+const COPY_WAIT_MS = 500;
+const COPY_RETRY_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
+function waitMs(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Copy each trusted tarball into the private temp. Retry sharing violations. The copy's sha256 must match the trust-check hash. */
+export function stageTarballCopies(
+  files: readonly { source: string; sha256: string; dest: string }[],
+  copyFile: (source: string, dest: string) => void,
+  io: { stderr: { write: (chunk: string) => void } },
+  pauseMs = COPY_WAIT_MS,
+): { ok: true } | { ok: false; error: string } {
+  for (const file of files) {
+    let retries = 0;
+    let copied = false;
+    let last = "copy failed";
+    for (let attempt = 1; attempt <= COPY_ATTEMPTS; attempt += 1) {
+      try {
+        copyFile(file.source, file.dest);
+        copied = true;
+        break;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code ?? "";
+        last = (err as Error).message || code || "copy failed";
+        if (!COPY_RETRY_CODES.has(code) || attempt === COPY_ATTEMPTS) {
+          return { ok: false, error: `copy failed: ${file.source}: ${last}\n` };
+        }
+        retries += 1;
+        waitMs(pauseMs);
+      }
+    }
+    if (!copied) return { ok: false, error: `copy failed: ${file.source}: ${last}\n` };
+    if (retries > 0) io.stderr.write(`retried ${file.source}\n`);
+    let got = "";
+    try {
+      got = createHash("sha256").update(readFileSync(file.dest)).digest("hex");
+    } catch {
+      return { ok: false, error: `copy failed: ${file.dest} cannot be read\n` };
+    }
+    if (got.toLowerCase() !== file.sha256.toLowerCase()) {
+      return { ok: false, error: `${file.source} changed after the trust check\n` };
+    }
+  }
+  return { ok: true };
+}
+
+function serviceGrantKind(argv: readonly string[]): "code" | "state" | null {
+  for (const arg of argv) {
+    const match = /^\*S-1-[0-9-]+:\(OI\)\(CI\)(RX|F)$/.exec(arg);
+    if (!match) continue;
+    return match[1] === "RX" ? "code" : "state";
+  }
+  return null;
+}
+
 async function execute(
   plan: Extract<InstallPlan, { ok: true }>,
   exec: ToolExec,
   io: InstallIo,
   platform: NodeJS.Platform,
+  copyFile: (source: string, dest: string) => void = copyFileSync,
 ): Promise<number> {
   const tempStep = plan.ops.find((op): op is Extract<PlanOp, { op: "private-temp" }> => op.op === "private-temp");
   const tempDir = tempStep?.path;
@@ -2115,6 +2276,14 @@ async function execute(
       }
       createdParents.push(...applied.parents);
       createdTemps.push(step.path);
+      continue;
+    }
+    if (step.op === "stage-tarballs") {
+      const staged = stageTarballCopies(step.files, copyFile, io);
+      if (!staged.ok) {
+        io.stderr.write(staged.error.endsWith("\n") ? staged.error : `${staged.error}\n`);
+        return finish(EX_CONFIG);
+      }
       continue;
     }
     if (step.op === "mkdir") {
@@ -2169,6 +2338,18 @@ async function execute(
             : (step.argv[0] ?? "command");
         io.stderr.write(`${what} failed${detail ? `: ${detail.split("\n")[0]}` : ""}\n`);
         return finish(1);
+      }
+      const grantKind = platform === "win32" ? serviceGrantKind(resolved) : null;
+      if (grantKind) {
+        const target = resolved[1] ?? "";
+        const read = call(toolArgv("icacls", [target], "win32"));
+        const text = `${read.stdout ?? ""}\n${read.stderr ?? ""}`;
+        const verdict = verifyServiceAcl(text, grantKind, { dir: target, svcSid });
+        if ((read.status ?? 1) !== 0 || !verdict.ok) {
+          const detail = verdict.ok ? (text.trim() || "icacls failed") : verdict.detail;
+          io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
+          return finish(EX_CONFIG);
+        }
       }
       const expected = registryBodyVersion(resolved);
       if (expected && resolved.includes("install") && resolved.includes("--prefix")) {
@@ -2459,7 +2640,7 @@ function collectTarballs(
   platform: NodeJS.Platform,
   exec: (argv: string[]) => ExecResult,
   io: InstallIo,
-): { dir: string; files: string[]; icacls?: string; modes?: { uid: number; mode: number }[] } | { error: true; code: number } {
+): { dir: string; files: string[]; digests: { file: string; sha256: string }[]; icacls?: string; modes?: { uid: number; mode: number }[] } | { error: true; code: number } {
   const dir = path.resolve(dirArg);
   let names: string[];
   try {
@@ -2487,7 +2668,14 @@ function collectTarballs(
         return { error: true, code: EX_CONFIG };
       }
     }
-    return { dir, files, icacls: chunks.join("\n") };
+    let digests: { file: string; sha256: string }[];
+    try {
+      digests = files.map((file) => ({ file, sha256: hashFile(file) }));
+    } catch {
+      io.stderr.write(`--from-tarballs ${dir} could not be hashed\n`);
+      return { error: true, code: EX_CONFIG };
+    }
+    return { dir, files, digests, icacls: chunks.join("\n") };
   }
   if (platform === "linux" || platform === "darwin") {
     const modes: { uid: number; mode: number }[] = [];
@@ -2499,7 +2687,14 @@ function collectTarballs(
       const st = statSync(file);
       modes.push({ uid: st.uid, mode: st.mode });
     }
-    return { dir, files, modes };
+    let digests: { file: string; sha256: string }[];
+    try {
+      digests = files.map((file) => ({ file, sha256: hashFile(file) }));
+    } catch {
+      io.stderr.write(`--from-tarballs ${dir} could not be hashed\n`);
+      return { error: true, code: EX_CONFIG };
+    }
+    return { dir, files, digests, modes };
   }
   io.stderr.write("--from-tarballs is not supported on this operating system\n");
   return { error: true, code: EX_CONFIG };
@@ -2620,14 +2815,14 @@ export async function runInstall(argv: readonly string[], hooks: InstallHooks = 
     darwinState,
     darwinRoot,
     ...(packed && !("error" in packed)
-      ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballIcacls: packed.icacls, tarballModes: packed.modes }
+      ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballDigests: packed.digests, tarballIcacls: packed.icacls, tarballModes: packed.modes }
       : {}),
   });
   if (!plan.ok) {
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io, platform);
+  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync);
 }
 
 export async function runUninstall(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
@@ -2677,7 +2872,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io, platform);
+  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync);
 }
 
 function hashUnder(dir: string, rel: string): string | null {
@@ -2705,6 +2900,7 @@ export function liveInstalledChecks(
   }
   if (platform === "win32") {
     const acl = exec(toolArgv("icacls", [stateDir], "win32"));
+    const codeAcl = exec(toolArgv("icacls", [codeDir], "win32"));
     const task = exec(toolArgv("schtasks", ["/Query", "/TN", TASK_NAME], "win32"));
     const ownerOf = (dir: string): string => {
       const literal = dir.replaceAll("'", "''");
@@ -2718,6 +2914,7 @@ export function liveInstalledChecks(
       manifest,
       hashOf: (rel) => hashUnder(codeDir, rel),
       aclText: `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`,
+      codeAclText: `${codeAcl.stdout ?? ""}\n${codeAcl.stderr ?? ""}`,
       winOwners: { state: ownerOf(stateDir), code: ownerOf(codeDir) },
       markerPresent: ourMarker(marker),
       installSource: markerSource(marker),

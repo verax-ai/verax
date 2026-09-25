@@ -2,11 +2,12 @@ import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join, win32 } from "node:path";
+import { dirname, join, win32 } from "node:path";
 
 import {
   installedBoundaryChecks,
@@ -19,6 +20,8 @@ import {
   resolveTrustPath,
   restrictToOwnerWin32,
   runInstall,
+  stageTarballCopies,
+  verifyServiceAcl,
   systemToolEnv,
   systemToolName,
   systemToolPath,
@@ -86,6 +89,23 @@ function argvs(ops: PlanOp[]): string[][] {
 }
 
 /** npm `install --prefix <codeDir>` stands in for a real registry install. */
+/**
+ * Read-back icacls text. Only the code dir, state dir, and install marker carry verax-svc.
+ * Node and ancestor reads stay Administrators + SYSTEM so the invoking SID is not a write ACE.
+ */
+function winServiceAcl(dir: string): string {
+  const base = dir.replace(/[\\/]+$/, "");
+  const code = /[/\\]Verax$/i.test(base);
+  const state = /[/\\]state$/i.test(base) || /install\.json$/i.test(base);
+  if (!code && !state) return `${dir} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`;
+  const rights = code ? "RX" : "F";
+  return [
+    `${dir} *S-1-5-21-1:(OI)(CI)(${rights})`,
+    "BUILTIN\\Administrators:(OI)(CI)(F)",
+    "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+  ].join("\n");
+}
+
 function stageRegistryInstall(argv: readonly string[], version: string): void {
   if (!argv.includes("install") || !argv.includes("--prefix")) return;
   const codeDir = argv[argv.indexOf("--prefix") + 1];
@@ -566,6 +586,7 @@ describe("verax install plan", () => {
           if (tool === "id") return { status: 1, stdout: "", stderr: "" };
           if (tool === "dscl" && argv.includes("-read")) return { status: 1, stdout: "", stderr: "" };
           if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "icacls" && argv.length === 2) return { status: 0, stdout: winServiceAcl(argv[1] ?? ""), stderr: "" };
           stageRegistryInstall(argv, layout.bodyVersion);
           return { status: 0, stdout: "", stderr: "" };
         },
@@ -636,6 +657,7 @@ describe("verax install plan", () => {
           if (tool === "id") return { status: 1, stdout: "", stderr: "" };
           if (tool === "dscl" && argv.includes("-read")) return { status: 1, stdout: "", stderr: "" };
           if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "icacls" && argv.length === 2) return { status: 0, stdout: winServiceAcl(argv[1] ?? ""), stderr: "" };
           stageRegistryInstall(argv, "0.0.1");
           return { status: 0, stdout: "", stderr: "" };
         },
@@ -1036,22 +1058,41 @@ describe("verax install plan", () => {
     assert.match(linuxTemp.path, /^\/var\/tmp\/verax-install-tmp-[0-9a-f]{32}$/);
   });
 
-  it("an npm failure prints the debug log tail and icacls, then removes the private temp", async () => {
+  it("an npm failure prints the debug log tail and icacls, then removes the private temp", async (t) => {
     const root = mkdtempSync(join(tmpdir(), "verax-npm-fail-"));
     const err: string[] = [];
     let tempPath = "";
     let codeDir = "";
+    const posix = process.platform === "linux" || process.platform === "darwin" ? process.platform : null;
+    const trustedStandIn = posix === null ? undefined : ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
+      try {
+        const st = lstatSync(file);
+        return !st.isSymbolicLink() && st.uid === 0 && (st.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+    if (posix !== null && trustedStandIn === undefined) {
+      rmSync(root, { recursive: true, force: true });
+      t.skip("no root-owned binary to stand in for Node");
+      return;
+    }
     try {
       const code = await runInstall(["install", "--port", "8801"], {
-        platform: "win32",
-        env: {
-          ...winEnv,
-          ProgramData: join(root, "data"),
-          ProgramFiles: join(root, "files"),
-          USERPROFILE: join(root, "home"),
-        },
+        platform: posix ?? "win32",
+        env: posix
+          ? { SUDO_USER: "runner", VERAX_INVOKING_HOME: join(root, "home") }
+          : {
+              ...winEnv,
+              ProgramData: join(root, "data"),
+              ProgramFiles: join(root, "files"),
+              USERPROFILE: join(root, "home"),
+            },
         elevated: () => true,
-        layout: winOpts,
+        layout: posix
+          ? { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! }
+          : winOpts,
+        posixRoot: posix ? join(root, "fsroot") : undefined,
         exec: (argv) => {
           const tool = systemToolName(argv[0] ?? "");
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
@@ -1059,26 +1100,31 @@ describe("verax install plan", () => {
             return { status: 2, stdout: "", stderr: "not found\n" };
           }
           if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
-          if (argv[0] === winOpts.execPath && (argv[1] ?? "").replace(/\\/g, "/").endsWith("/npm-cli.js")) {
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          const npmCli = posix ? trustedStandIn! : winOpts.npmCli;
+          if (argv[0] === (posix ? trustedStandIn : winOpts.execPath) && argv[1] === npmCli) {
             const configAt = argv.indexOf("--userconfig");
             const config = configAt >= 0 ? argv[configAt + 1] : undefined;
             if (!config) throw new Error("npm argv is missing --userconfig");
-            tempPath = win32.dirname(config);
+            tempPath = dirname(config);
             codeDir = argv[argv.indexOf("--prefix") + 1] ?? "";
-            const logs = win32.join(tempPath, "cache", "_logs");
+            const logs = join(tempPath, "cache", "_logs");
             mkdirSync(logs, { recursive: true });
-            writeFileSync(win32.join(logs, "2000-01-01T00_00_00_000Z-debug-0.log"), "debug-old\n");
+            writeFileSync(join(logs, "2000-01-01T00_00_00_000Z-debug-0.log"), "debug-old\n");
             const dropped = "debug-dropped\n";
             const kept = Array.from({ length: 79 }, () => "debug-kept").join("\n");
-            writeFileSync(win32.join(logs, "2026-01-02T00_00_00_000Z-debug-0.log"), `${dropped}${kept}\nEPERM-debug-tail\n`);
-            mkdirSync(win32.join(codeDir, "node_modules"), { recursive: true });
+            writeFileSync(join(logs, "2026-01-02T00_00_00_000Z-debug-0.log"), `${dropped}${kept}\nEPERM-debug-tail\n`);
+            mkdirSync(join(codeDir, "node_modules"), { recursive: true });
             const early = "npm-stdout-dropped\n";
             const mid = Array.from({ length: 90 }, () => "npm-stdout-kept").join("\n");
             return { status: 1, stdout: `${early}${mid}\n`, stderr: "npm error code EPERM\n" };
           }
           if (tool === "icacls" && argv.length === 2) {
+            if (tempPath === "") return { status: 0, stdout: winServiceAcl(argv[1] ?? ""), stderr: "" };
             return { status: 0, stdout: `acl ${argv[1]}\n`, stderr: "" };
           }
+          if (tool === "ls") return { status: 0, stdout: `drwxr-xr-x ${argv[argv.length - 1] ?? ""}\n`, stderr: "" };
+          if (tool === "stat") return { status: 0, stdout: `root|755|${argv[argv.length - 1] ?? ""}\n`, stderr: "" };
           return { status: 0, stdout: "", stderr: "" };
         },
         io: {
@@ -1093,13 +1139,130 @@ describe("verax install plan", () => {
       assert.match(text, /EPERM-debug-tail/);
       assert.equal(text.includes("debug-dropped"), false);
       assert.equal(text.includes("debug-old"), false);
-      assert.match(text, new RegExp(`acl ${codeDir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(text, new RegExp(`acl ${win32.join(codeDir, "node_modules").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-      assert.match(text, new RegExp(`acl ${tempPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      if (posix) {
+        assert.match(text, new RegExp(`drwxr-xr-x ${escape(codeDir)}`));
+        assert.match(text, new RegExp(`root 0755 ${escape(codeDir)}`));
+        assert.match(text, new RegExp(`drwxr-xr-x ${escape(join(codeDir, "node_modules"))}`));
+        assert.match(text, new RegExp(`root 0755 ${escape(tempPath)}`));
+      } else {
+        assert.match(text, new RegExp(`acl ${escape(codeDir)}`));
+        assert.match(text, new RegExp(`acl ${escape(win32.join(codeDir, "node_modules"))}`));
+        assert.match(text, new RegExp(`acl ${escape(tempPath)}`));
+      }
       assert.equal(existsSync(tempPath), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("code dir grants verax-svc RX and state dir grants F", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const code = argvs(win.ops).find((argv) => systemToolName(argv[0] ?? "") === "icacls" && argv[1] === win.codeDir && argv.includes("/grant:r"));
+    const state = argvs(win.ops).find((argv) => systemToolName(argv[0] ?? "") === "icacls" && argv[1] === win.stateDir && argv.includes("/grant:r"));
+    if (!code || !state) throw new Error("missing service grants");
+    assert.ok(code.includes("verax-svc:(OI)(CI)RX"));
+    assert.equal(code.includes("verax-svc:(OI)(CI)F"), false);
+    assert.ok(state.includes("verax-svc:(OI)(CI)F"));
+  });
+
+  it("code ACL verifier refuses svc F, a missing service, and an extra Users ACE", () => {
+    const dir = "C:\\Program Files\\Verax";
+    const exact = [
+      `${dir} *S-1-5-21-1:(OI)(CI)(RX)`,
+      "BUILTIN\\Administrators:(OI)(CI)(F)",
+      "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+    ].join("\n");
+    const full = verifyServiceAcl(exact.replace("(RX)", "(F)"), "code", { dir, svcSid: "S-1-5-21-1" });
+    assert.equal(full.ok, false);
+    if (!full.ok) assert.match(full.detail, /\*S-1-5-21-1 F/);
+    const missing = verifyServiceAcl(
+      ["BUILTIN\\Administrators:(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"].join("\n"),
+      "code",
+      { dir },
+    );
+    assert.equal(missing.ok, false);
+    const extra = verifyServiceAcl(`${exact}\nBUILTIN\\Users:(OI)(CI)(RX)`, "code", { dir, svcSid: "S-1-5-21-1" });
+    assert.equal(extra.ok, false);
+    if (!extra.ok) assert.match(extra.detail, /BUILTIN\\Users/);
+    assert.equal(verifyServiceAcl(exact, "code", { dir, svcSid: "S-1-5-21-1" }).ok, true);
+  });
+
+  it("a tarball copy that fails twice with EPERM then succeeds proceeds and says it retried", () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-tgz-retry-"));
+    const source = join(root, "verax-ai-proxy-0.3.0.tgz");
+    const dest = join(root, "copy.tgz");
+    writeFileSync(source, "tarball-bytes");
+    const sha256 = createHash("sha256").update("tarball-bytes").digest("hex");
+    const err: string[] = [];
+    let attempts = 0;
+    try {
+      const staged = stageTarballCopies(
+        [{ source, sha256, dest }],
+        (src, dst) => {
+          attempts += 1;
+          if (attempts <= 2) {
+            const error = new Error("open") as NodeJS.ErrnoException;
+            error.code = "EPERM";
+            throw error;
+          }
+          copyFileSync(src, dst);
+        },
+        { stderr: { write: (chunk) => err.push(chunk) } },
+        0,
+      );
+      assert.equal(staged.ok, true);
+      assert.equal(attempts, 3);
+      assert.match(err.join(""), new RegExp(`retried ${source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+      assert.equal(readFileSync(dest, "utf8"), "tarball-bytes");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a tarball whose bytes change between the trust check and the copy is refused", () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-tgz-swap-"));
+    const source = join(root, "verax-ai-body-0.3.0.tgz");
+    const dest = join(root, "copy.tgz");
+    writeFileSync(source, "trusted-bytes");
+    const sha256 = createHash("sha256").update("trusted-bytes").digest("hex");
+    try {
+      const staged = stageTarballCopies(
+        [{ source, sha256, dest }],
+        (_src, dst) => {
+          writeFileSync(dst, "swapped-bytes");
+        },
+        { stderr: { write: () => undefined } },
+        0,
+      );
+      assert.equal(staged.ok, false);
+      if (staged.ok) return;
+      assert.match(staged.error, /changed after the trust check/);
+      assert.match(staged.error, /verax-ai-body-0\.3\.0\.tgz/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("from-tarballs npm install uses the private-temp copies", () => {
+    const source = "C:\\pack\\verax-ai-proxy-0.3.0.tgz";
+    const plan = planInstall("win32", winEnv, {
+      ...winOpts,
+      fromTarballs: "C:\\pack",
+      tarballFiles: [source],
+      tarballDigests: [{ file: source, sha256: "abc" }],
+      tarballIcacls: "C:\\pack BUILTIN\\Administrators:(F)\n",
+    });
+    if (!plan.ok) throw new Error(plan.message);
+    const stage = plan.ops.find((op) => op.op === "stage-tarballs");
+    if (!stage || stage.op !== "stage-tarballs") throw new Error("missing tarball copy");
+    assert.equal(stage.files[0]?.source, source);
+    assert.equal(stage.files[0]?.sha256, "abc");
+    assert.match(stage.files[0]?.dest ?? "", /\\install-tmp-[0-9a-f]{32}\\verax-ai-proxy-0\.3\.0\.tgz$/);
+    const install = argvs(plan.ops).find((argv) => argv.includes("--omit=dev"));
+    assert.equal(install?.includes(source), false);
+    assert.ok(install?.includes(stage.files[0]!.dest));
+    assert.equal(argvs(plan.ops).some((argv) => argv.includes("signatures")), false);
   });
 
   it("normalises SeBatchLogonRight holders to a SID set before the read-back compare", () => {
