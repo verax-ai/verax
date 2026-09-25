@@ -1,4 +1,4 @@
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawnSync, type SpawnSyncReturns, type StdioOptions } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import {
   accessSync,
@@ -52,7 +52,7 @@ const DARWIN_MARKER = "/Library/Verax/install.json";
 const DARWIN_PLIST = "/Library/LaunchDaemons/com.verax-ai.body.plist";
 
 const WIN32_TOOLS = ["whoami", "icacls", "schtasks", "net", "fsutil", "powershell"] as const;
-const LINUX_TOOLS = ["useradd", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl"] as const;
+const LINUX_TOOLS = ["useradd", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl", "getenforce", "ps", "ausearch"] as const;
 const DARWIN_TOOLS = ["dscl", "launchctl", "chown", "chmod", "id", "stat", "plutil"] as const;
 const LINUX_TOOL_DIRS = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
 /** Fixed paths. A plan must name these even when the binary is absent on the machine that built the plan. */
@@ -461,6 +461,8 @@ export type InstallHooks = {
   posixRoot?: string;
   /** Test-only. Replaces `copyFileSync` while staging `--from-tarballs` copies. */
   copyFile?: (source: string, dest: string) => void;
+  /** Test-only. Caps the post-start /healthz wait. CLI argv cannot set it. */
+  healthTimeoutMs?: number;
 };
 
 type Paths = { codeDir: string; stateDir: string; tokenPath: string };
@@ -1299,6 +1301,8 @@ function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: st
     "Type=simple",
     "User=verax",
     `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile} --log-file ${logFile}`,
+    "# V8's JIT needs execmem. Without a domain transition the process stays in init_t, which cannot map executable memory. The leading - is ignored where SELinux is absent or the context cannot be set.",
+    "SELinuxContext=-system_u:system_r:unconfined_service_t:s0",
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     `ReadWritePaths=${stateDir}`,
@@ -2166,6 +2170,9 @@ function defaultExec(argv: string[], stdin?: string, env?: NodeJS.ProcessEnv, cw
     const message = err instanceof Error ? err.message : "system tool missing";
     return { status: EX_CONFIG, stderr: `${message}\n` };
   }
+  // ausearch reads stdin when it is not a tty and is not given --input-logs, and then it hangs.
+  // Close stdin. Callers still pass --input-logs and never pass an input string.
+  const stdinClosed: { stdio?: StdioOptions } = name === "ausearch" && stdin === undefined ? { stdio: ["ignore", "pipe", "pipe"] } : {};
   const ran = spawnSync(file, argv.slice(1), {
     encoding: "utf8",
     windowsHide: true,
@@ -2173,6 +2180,7 @@ function defaultExec(argv: string[], stdin?: string, env?: NodeJS.ProcessEnv, cw
     env: spawnEnv ?? systemToolEnv(),
     ...place,
     ...input,
+    ...stdinClosed,
   });
   return { status: ran.status, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
 }
@@ -2542,6 +2550,90 @@ function writeListenerTool(
   io.stderr.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
 }
 
+/** `getenforce` through the injected exec. A missing binary or a non-zero status is no SELinux. */
+function selinuxMode(exec: (argv: string[]) => ExecResult): string | null {
+  const ran = exec(toolArgv("getenforce", [], "linux"));
+  if ((ran.status ?? 1) !== 0) return null;
+  const mode = (ran.stdout ?? "").trim();
+  return mode === "" ? null : mode;
+}
+
+function serviceMainPid(exec: (argv: string[]) => ExecResult): string | null {
+  const ran = exec(toolArgv("systemctl", ["show", "verax", "-p", "MainPID", "--value"], "linux"));
+  const pid = (ran.stdout ?? "").trim();
+  if ((ran.status ?? 1) !== 0 || !/^[1-9]\d*$/.test(pid)) return null;
+  return pid;
+}
+
+/** Live label from `ps`, then `/proc/<pid>/attr/current` when ps has nothing. */
+function serviceSelinuxLabel(exec: (argv: string[]) => ExecResult): string | null {
+  const pid = serviceMainPid(exec);
+  if (pid === null) return null;
+  const ran = exec(toolArgv("ps", ["-o", "label=", "-p", pid], "linux"));
+  const label = (ran.stdout ?? "").trim();
+  if ((ran.status ?? 1) === 0 && label.includes(":")) return label;
+  try {
+    const text = readFileSync(`/proc/${pid}/attr/current`, "utf8").replace(/\0/g, "").trim();
+    return text.includes(":") ? text : null;
+  } catch {
+    return null;
+  }
+}
+
+function selinuxType(label: string): string {
+  return label.split(":")[2] ?? "";
+}
+
+function labelFromAudit(text: string): string | null {
+  const match = /scontext=([^\s]+)/.exec(text);
+  const label = match?.[1] ?? "";
+  return label.includes(":") ? label : null;
+}
+
+function hasExecmemDenial(text: string): boolean {
+  return /denied\s*\{[^}\n]*execmem/i.test(text);
+}
+
+const EXECMEM_DENIAL_SENTENCE = "SELinux denied execmem to node, so the process could not map executable memory.";
+
+function writeSelinuxSuccess(exec: (argv: string[]) => ExecResult, io: InstallIo): void {
+  if (selinuxMode(exec) !== "Enforcing") return;
+  const label = serviceSelinuxLabel(exec);
+  io.stdout.write(label ? `SELinux context ${label}\n` : "SELinux is Enforcing\n");
+}
+
+/**
+ * Enforcing only. The process often exits before we can read its pid, so the
+ * audit `scontext` is the fallback. ausearch is one argv and no stdin.
+ */
+function writeSelinuxFailure(exec: (argv: string[]) => ExecResult, io: InstallIo, journalText: string): void {
+  if (selinuxMode(exec) !== "Enforcing") return;
+  const audit = exec(toolArgv("ausearch", ["--input-logs", "-m", "avc"], "linux"));
+  const auditText = `${audit.stdout ?? ""}${audit.stderr ?? ""}`;
+  const label = serviceSelinuxLabel(exec) ?? labelFromAudit(journalText) ?? labelFromAudit(auditText);
+  io.stderr.write(label ? `SELinux context ${label}\n` : "SELinux is Enforcing\n");
+  if (hasExecmemDenial(journalText) || hasExecmemDenial(auditText)) {
+    io.stderr.write(`${EXECMEM_DENIAL_SENTENCE}\n`);
+  }
+}
+
+/** Linux doctor line: the SELinux mode, and when enforcing the service domain. `init_t` is a warning. */
+export function linuxSelinuxCheck(
+  exec: (argv: string[]) => ExecResult = defaultExec,
+): { id: string; level: "ok" | "warn"; detail: string } {
+  const mode = selinuxMode(exec);
+  if (mode === null) return { id: "selinux", level: "ok", detail: "SELinux is not present" };
+  if (mode !== "Enforcing") return { id: "selinux", level: "ok", detail: `SELinux is ${mode}` };
+  const label = serviceSelinuxLabel(exec);
+  if (label === null) return { id: "selinux", level: "ok", detail: "SELinux is Enforcing; service domain is unknown" };
+  const domain = selinuxType(label);
+  return {
+    id: "selinux",
+    level: domain === "init_t" ? "warn" : "ok",
+    detail: `SELinux is Enforcing; service domain is ${domain === "" ? label : domain}`,
+  };
+}
+
 function reportHealthTimeout(
   platform: NodeJS.Platform,
   stateDir: string,
@@ -2567,9 +2659,11 @@ function reportHealthTimeout(
   } else if (plat === "linux") {
     const journal = toolArgv("journalctl", ["-u", "verax", "-n", "40", "--no-pager"], "linux");
     const logged = exec(journal);
+    const journalText = `${logged.stdout ?? ""}${logged.stderr ?? ""}`;
     io.stderr.write(`${journal.join(" ")}\n`);
-    io.stderr.write(`${logged.stdout ?? ""}${logged.stderr ?? ""}`);
-    if (!`${logged.stdout ?? ""}${logged.stderr ?? ""}`.endsWith("\n")) io.stderr.write("\n");
+    io.stderr.write(journalText);
+    if (!journalText.endsWith("\n")) io.stderr.write("\n");
+    writeSelinuxFailure(exec, io, journalText);
   }
   const logPath = (plat === "win32" ? path.win32 : path.posix).join(stateDir, "body.log");
   const bodyTail = tailFile(logPath, 60);
@@ -2887,6 +2981,7 @@ async function execute(
   platform: NodeJS.Platform,
   copyFile: (source: string, dest: string) => void = copyFileSync,
   installEnv?: NodeJS.ProcessEnv,
+  healthTimeoutMs?: number,
 ): Promise<number> {
   const tempStep = plan.ops.find((op): op is Extract<PlanOp, { op: "private-temp" }> => op.op === "private-temp");
   const tempDir = tempStep?.path;
@@ -3074,11 +3169,12 @@ async function execute(
       continue;
     }
     if (step.op === "wait-healthz") {
-      if (!(await waitHealth(step.port, step.timeoutMs, io))) {
+      if (!(await waitHealth(step.port, healthTimeoutMs ?? step.timeoutMs, io))) {
         io.stderr.write(`install-health-timeout:${step.port}\n`);
         reportHealthTimeout(platform, plan.stateDir, step.port, call, io);
         return finish(1);
       }
+      if (platform === "linux") writeSelinuxSuccess(call, io);
       continue;
     }
     io.stdout.write(step.text.endsWith("\n") ? step.text : `${step.text}\n`);
@@ -3745,7 +3841,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv);
+  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv, hooks.healthTimeoutMs);
 }
 
 /** A non-zero tool result that means the install artifact is already gone. */

@@ -19,6 +19,7 @@ import {
   LOGON_HOLDER_COMPARE,
   logonHolderMismatchLines,
   normalizeLogonHolders,
+  linuxSelinuxCheck,
   planInstall,
   PS_ERROR_MARK,
   registryLockProblems,
@@ -96,6 +97,16 @@ function getentAnswer(argv: readonly string[], home: string): { status: number; 
   // macOS asks Directory Services for the same thing.
   if (tool.endsWith("dscl") && argv.includes("NFSHomeDirectory")) {
     return { status: 0, stdout: `NFSHomeDirectory: ${home}\n`, stderr: "" };
+  }
+  // A clean macOS: no _verax user or group yet, and the usual ids are taken.
+  if (tool.endsWith("dscl") && argv.includes("-read") && argv.some((a) => /^\/(Users|Groups)\/_verax$/.test(a))) {
+    return { status: 56, stdout: "", stderr: "<dscl_cmd> DS Error: -14136 (eDSRecordNotFound)\n" };
+  }
+  if (tool.endsWith("dscl") && argv.includes("-list") && argv.includes("UniqueID")) {
+    return { status: 0, stdout: "root 0\nrunner 501\n", stderr: "" };
+  }
+  if (tool.endsWith("dscl") && argv.includes("-list") && argv.includes("PrimaryGroupID")) {
+    return { status: 0, stdout: "wheel 0\nstaff 20\n", stderr: "" };
   }
   return null;
 }
@@ -311,6 +322,96 @@ describe("verax install plan", () => {
     ]) {
       assert.equal(unit.contents.includes(line), true, line);
     }
+    assert.match(unit.contents, /^SELinuxContext=-system_u:system_r:unconfined_service_t:s0$/m);
+    assert.match(unit.contents, /execmem/);
+    assert.match(unit.contents, /init_t/);
+  });
+
+  it("linux install under SELinux enforcing names an execmem denial when health fails", async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "verax-selinux-"));
+    const home = join(root, "home").replaceAll("\\", "/");
+    const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
+    const standIn = ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
+      try {
+        const st = lstatSync(file);
+        return !st.isSymbolicLink() && st.uid === 0 && (st.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+    const err: string[] = [];
+    const ausearch: { argv: readonly string[]; stdin: string | undefined }[] = [];
+    let getenforcePath = "";
+    try {
+      if (standIn === undefined) {
+        t.skip("no root-owned binary to stand in for Node");
+        return;
+      }
+      const code = await runInstall(["install", "--port", "8809"], {
+        platform: "linux",
+        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        elevated: () => true,
+        layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
+        posixRoot,
+        healthTimeoutMs: 1,
+        exec: (argv, stdin) => {
+          const passwd = getentAnswer(argv, home);
+          if (passwd) return passwd;
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "getenforce") {
+            getenforcePath = argv[0] ?? "";
+            return { status: 0, stdout: "Enforcing\n", stderr: "" };
+          }
+          if (tool === "ausearch") {
+            ausearch.push({ argv, stdin });
+            return {
+              status: 0,
+              stdout: 'avc: denied { execmem } for comm="node" scontext=system_u:system_r:init_t:s0\n',
+              stderr: "",
+            };
+          }
+          if (tool === "ps") return { status: 0, stdout: "system_u:system_r:init_t:s0\n", stderr: "" };
+          if (tool === "systemctl" && argv.includes("MainPID")) return { status: 0, stdout: "4242\n", stderr: "" };
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          stageRegistryInstall(argv, "0.3.0");
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: {
+          stdout: { write: () => undefined },
+          stderr: { write: (s: string) => err.push(s) },
+        },
+      });
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.match(text, /install-health-timeout:8809/);
+      assert.match(text, /SELinux denied execmem to node, so the process could not map executable memory\./);
+      assert.match(text, /SELinux context system_u:system_r:init_t:s0/);
+      assert.match(getenforcePath, /[/\\]getenforce$/);
+      assert.ok(getenforcePath.startsWith("/"), getenforcePath);
+      assert.equal(ausearch.length, 1);
+      assert.ok(ausearch[0]!.argv.includes("--input-logs"));
+      assert.equal(ausearch[0]!.stdin, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it("doctor prints the SELinux mode", () => {
+    const enforcing = linuxSelinuxCheck((argv) => {
+      const tool = systemToolName(argv[0] ?? "");
+      if (tool === "getenforce") return { status: 0, stdout: "Enforcing\n", stderr: "" };
+      if (tool === "systemctl") return { status: 0, stdout: "7\n", stderr: "" };
+      if (tool === "ps") return { status: 0, stdout: "system_u:system_r:init_t:s0\n", stderr: "" };
+      return { status: 1, stdout: "", stderr: "" };
+    });
+    const line = `${enforcing.level}\t${enforcing.id}\t${enforcing.detail}`;
+    assert.equal(enforcing.level, "warn");
+    assert.equal(line, "warn\tselinux\tSELinux is Enforcing; service domain is init_t");
+    const permissive = linuxSelinuxCheck((argv) => {
+      if (systemToolName(argv[0] ?? "") === "getenforce") return { status: 0, stdout: "Permissive\n", stderr: "" };
+      return { status: 1, stdout: "", stderr: "" };
+    });
+    assert.equal(`${permissive.level}\t${permissive.id}\t${permissive.detail}`, "ok\tselinux\tSELinux is Permissive");
   });
 
   it("5 without elevation install exits 77 and executes nothing", async () => {
