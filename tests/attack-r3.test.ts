@@ -42,6 +42,28 @@ const linuxOpts = {
 const adminAcl = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
 const ATTACKER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 
+function sddlBatchPaths(line: string): string[] | null {
+  const matched = line.match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/);
+  if (!matched?.[1]) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(matched[1], "base64").toString("utf8")) as unknown;
+    if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) return null;
+    return parsed as string[];
+  } catch {
+    return null;
+  }
+}
+
+function sddlJson(paths: readonly string[], sddlFor: (target: string) => string): string {
+  const out: Record<string, string> = {};
+  for (const target of paths) out[target] = sddlFor(target);
+  return JSON.stringify(out);
+}
+
+function sameWinPath(a: string, b: string): boolean {
+  return a.replace(/[\\/]+$/, "").toLowerCase() === b.replace(/[\\/]+$/, "").toLowerCase();
+}
+
 function planText(plan: { ok: true; ops: unknown[] } | { ok: false; message: string }): string {
   return plan.ok ? JSON.stringify(plan.ops) : "";
 }
@@ -68,9 +90,14 @@ describe("attack R3", () => {
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
         return { status: 1, stdout: "", stderr: "The user name could not be found." };
       }
+      const attacker = `O:${ATTACKER_SID}G:${ATTACKER_SID}D:(A;OICI;FA;;;${ATTACKER_SID})(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`;
+      const paths = sddlBatchPaths(line);
+      if (paths) {
+        return { status: 0, stdout: sddlJson(paths, (file) => (sameWinPath(file, verax) ? attacker : adminAcl)), stderr: "" };
+      }
       // The attacker made the root: a standard user owns it and holds full control. Everything else is admin-only.
       if (line.includes("Get-Acl") && line.includes(`${verax}'`)) {
-        return { status: 0, stdout: `O:${ATTACKER_SID}G:${ATTACKER_SID}D:(A;OICI;FA;;;${ATTACKER_SID})(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`, stderr: "" };
+        return { status: 0, stdout: attacker, stderr: "" };
       }
       return { status: 0, stdout: adminAcl, stderr: "" };
     };
@@ -109,12 +136,23 @@ describe("attack R3", () => {
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
         return { status: 1, stdout: "", stderr: "The user name could not be found." };
       }
+      const dirtyAcl = `${adminAcl}(A;OICI;FA;;;${ATTACKER_SID})`;
+      const paths = sddlBatchPaths(line);
+      if (paths) {
+        if (paths.some((file) => sameWinPath(file, verax))) rootReads += 1;
+        const dirty = rootReads >= 2;
+        return {
+          status: 0,
+          stdout: sddlJson(paths, (file) => (sameWinPath(file, verax) && dirty ? dirtyAcl : adminAcl)),
+          stderr: "",
+        };
+      }
       if (line.includes("Get-Acl") && line.includes(`${verax}'`)) {
         rootReads += 1;
         // Clean when the plan reads it; a user write ACE by the time the lock re-reads it.
         return rootReads === 1
           ? { status: 0, stdout: adminAcl, stderr: "" }
-          : { status: 0, stdout: `${adminAcl}(A;OICI;FA;;;${ATTACKER_SID})`, stderr: "" };
+          : { status: 0, stdout: dirtyAcl, stderr: "" };
       }
       return { status: 0, stdout: adminAcl, stderr: "" };
     };
@@ -220,6 +258,8 @@ describe("attack R3", () => {
       if (argv.join(" ").includes("reparsepoint")) return { status: 1, stdout: "", stderr: "" };
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) return { status: 1, stdout: "", stderr: "not found" };
       if (/whoami/i.test(argv[0] ?? "")) return { status: 0, stdout: "S-1-5-21-1001\n", stderr: "" };
+      const paths = sddlBatchPaths(argv.join("\n"));
+      if (paths) return { status: 0, stdout: sddlJson(paths, () => adminAcl), stderr: "" };
       return { status: 0, stdout: adminAcl, stderr: "" };
     };
     try {

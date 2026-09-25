@@ -641,6 +641,94 @@ export function windowsSddlArgv(target: string): string[] {
   ], "win32");
 }
 
+function uniquePaths(paths: readonly string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const file of paths) {
+    if (seen.has(file)) continue;
+    seen.add(file);
+    out.push(file);
+  }
+  return out;
+}
+
+/**
+ * One PowerShell process reads every path. The command carries a base64 UTF-8 JSON
+ * array, never a raw path. Stdout is one JSON object: `{ "<path>": "<sddl>" | { "error": "<msg>" } }`.
+ */
+export function windowsSddlBatchArgv(paths: readonly string[]): string[] {
+  const payload = Buffer.from(JSON.stringify(uniquePaths(paths)), "utf8").toString("base64");
+  const script = `$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+$raw = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${payload}'))
+$paths = @($raw | ConvertFrom-Json | ForEach-Object { $_ })
+$result = @{}
+foreach ($p in $paths) {
+  $key = [string]$p
+  try {
+    $acl = Get-Acl -LiteralPath $key
+    $result[$key] = [string]$acl.Sddl
+  } catch {
+    $err = @{ error = [string]$_.Exception.Message }
+    $result[$key] = $err
+  }
+}
+$result | ConvertTo-Json -Compress -Depth 4`;
+  return toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], "win32");
+}
+
+type SddlHit = { status: number; text: string };
+
+function sddlHit(value: unknown): SddlHit {
+  if (typeof value === "string") return { status: 0, text: `${value}\n` };
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const error = (value as { error?: unknown }).error;
+    if (typeof error === "string") return { status: 1, text: `${error}\n` };
+  }
+  return { status: 1, text: "" };
+}
+
+/** Null when stdout is not the batch object. A missing or failed path is fail-closed inside the map. */
+function parseSddlBatch(stdout: string, paths: readonly string[]): Map<string, SddlHit> | null {
+  const start = stdout.indexOf("{");
+  const end = stdout.lastIndexOf("}");
+  if (start < 0 || end < start) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  const map = new Map<string, SddlHit>();
+  for (const file of paths) map.set(file, sddlHit(obj[file]));
+  return map;
+}
+
+function sddlOrMiss(map: Map<string, SddlHit>, file: string): SddlHit {
+  return map.get(file) ?? { status: 1, text: "" };
+}
+
+/** One process for every path. A failed process fails every path closed, with the tool text kept for the refusal. */
+function readSddlBatch(exec: ToolExec, paths: readonly string[]): Map<string, SddlHit> {
+  const wanted = uniquePaths(paths);
+  const map = new Map<string, SddlHit>();
+  if (wanted.length === 0) return map;
+  const ran = exec(windowsSddlBatchArgv(wanted));
+  const combined = `${ran.stdout ?? ""}\n${ran.stderr ?? ""}`;
+  if ((ran.status ?? 1) !== 0) {
+    for (const file of wanted) map.set(file, { status: 1, text: combined });
+    return map;
+  }
+  const parsed = parseSddlBatch(ran.stdout ?? "", wanted);
+  if (parsed === null) {
+    for (const file of wanted) map.set(file, { status: 1, text: combined });
+    return map;
+  }
+  return parsed;
+}
+
 export function canonicalSid(token: string): string | null {
   const raw = token.trim().replace(/^\*/, "");
   if (raw === "") return null;
@@ -2914,20 +3002,20 @@ async function execute(
       const grantKind = platform === "win32" ? serviceGrantKind(resolved) : null;
       if (grantKind) {
         const target = resolved[1] ?? "";
-        const read = call(windowsSddlArgv(target));
-        const text = `${read.stdout ?? ""}\n${read.stderr ?? ""}`;
+        const files = serviceAclFiles(target, grantKind).filter((file) => existsSync(file));
+        const readBack = readSddlBatch(call, [target, ...files]);
+        const read = sddlOrMiss(readBack, target);
+        const text = read.text;
         const verdict = verifyServiceAcl(text, grantKind, { dir: target, svcSid });
-        if ((read.status ?? 1) !== 0 || !verdict.ok) {
+        if (read.status !== 0 || !verdict.ok) {
           const detail = verdict.ok ? (text.trim() || "icacls failed") : verdict.detail;
           io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
           return finish(EX_CONFIG);
         }
-        for (const file of serviceAclFiles(target, grantKind)) {
-          if (!existsSync(file)) continue;
-          const fileRead = call(windowsSddlArgv(file));
-          const fileText = `${fileRead.stdout ?? ""}\n${fileRead.stderr ?? ""}`;
-          const fileVerdict = verifyServiceAcl(fileText, grantKind, { dir: file, svcSid, file });
-          if ((fileRead.status ?? 1) !== 0 || !fileVerdict.ok) {
+        for (const file of files) {
+          const fileRead = sddlOrMiss(readBack, file);
+          const fileVerdict = verifyServiceAcl(fileRead.text, grantKind, { dir: file, svcSid, file });
+          if (fileRead.status !== 0 || !fileVerdict.ok) {
             const detail = fileVerdict.ok ? `empty ACL on ${file}` : fileVerdict.detail;
             io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
             return finish(EX_CONFIG);
@@ -2935,12 +3023,12 @@ async function execute(
         }
       }
       if (platform === "win32" && resolved.includes("/setowner") && resolved.includes("/T") && (resolved[1] ?? "") === plan.stateDir) {
-        for (const file of serviceAclFiles(plan.stateDir, "state")) {
-          if (!existsSync(file)) continue;
-          const fileRead = call(windowsSddlArgv(file));
-          const fileText = `${fileRead.stdout ?? ""}\n${fileRead.stderr ?? ""}`;
-          const fileVerdict = verifyServiceAcl(fileText, "state", { dir: file, svcSid, file });
-          if ((fileRead.status ?? 1) !== 0 || !fileVerdict.ok) {
+        const files = serviceAclFiles(plan.stateDir, "state").filter((file) => existsSync(file));
+        const readBack = readSddlBatch(call, files);
+        for (const file of files) {
+          const fileRead = sddlOrMiss(readBack, file);
+          const fileVerdict = verifyServiceAcl(fileRead.text, "state", { dir: file, svcSid, file });
+          if (fileRead.status !== 0 || !fileVerdict.ok) {
             const detail = fileVerdict.ok ? `empty ACL on ${file}` : fileVerdict.detail;
             io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
             return finish(EX_CONFIG);
@@ -3391,35 +3479,46 @@ function markerSource(file: string): string | undefined {
   }
 }
 
-function collectTarballs(
-  dirArg: string,
-  platform: NodeJS.Platform,
-  exec: (argv: string[]) => ExecResult,
-  io: InstallIo,
-): { dir: string; files: string[]; digests: { file: string; sha256: string }[]; icacls?: string; modes?: { uid: number; mode: number }[] } | { error: true; code: number } {
+function listedTarballTargets(dirArg: string): { dir: string; files: string[] } | { dir: string; missing: true } | { dir: string; empty: true } {
   const dir = path.resolve(dirArg);
   let names: string[];
   try {
     names = readdirSync(dir).filter((name) => name.endsWith(".tgz"));
   } catch {
-    io.stderr.write(`--from-tarballs ${dir} is not a directory\n`);
-    return { error: true, code: EX_CONFIG };
+    return { dir, missing: true };
   }
   const files = orderTarballs(names.map((name) => path.join(dir, name)));
-  if (files.length === 0) {
-    io.stderr.write(`--from-tarballs ${dir} has no tarballs\n`);
+  if (files.length === 0) return { dir, empty: true };
+  return { dir, files };
+}
+
+function collectTarballs(
+  dirArg: string,
+  platform: NodeJS.Platform,
+  exec: (argv: string[]) => ExecResult,
+  io: InstallIo,
+  sddl: Map<string, SddlHit> | null = null,
+): { dir: string; files: string[]; digests: { file: string; sha256: string }[]; icacls?: string; modes?: { uid: number; mode: number }[] } | { error: true; code: number } {
+  const listed = listedTarballTargets(dirArg);
+  if ("missing" in listed) {
+    io.stderr.write(`--from-tarballs ${listed.dir} is not a directory\n`);
     return { error: true, code: EX_CONFIG };
   }
+  if ("empty" in listed) {
+    io.stderr.write(`--from-tarballs ${listed.dir} has no tarballs\n`);
+    return { error: true, code: EX_CONFIG };
+  }
+  const { dir, files } = listed;
   const targets = [dir, ...files];
   if (platform === "win32") {
     const sid = invokingSid(exec);
     const chunks: string[] = [];
     for (const file of targets) {
-      const acl = exec(windowsSddlArgv(file));
-      const text = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
+      const acl = sddl?.get(file) ?? { status: 1, text: "" };
+      const text = acl.text;
       chunks.push(text);
       const ancestor = file === dir;
-      if ((acl.status ?? 1) !== 0 || windowsUserCanWrite(text, { path: file, userSid: sid, ancestor })) {
+      if (acl.status !== 0 || windowsUserCanWrite(text, { path: file, userSid: sid, ancestor })) {
         io.stderr.write(`${refuseAcl(text, tarballTrustMessage(file))}\n`);
         return { error: true, code: EX_CONFIG };
       }
@@ -3499,32 +3598,50 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     return EX_CONFIG;
   }
   const layout = discovered;
-  if (platform === "win32" || platform === "linux" || platform === "darwin") {
-    const plat = platform as InstallPlatform;
-    const files = [...trustTargets(layout.execPath, plat), ...trustTargets(layout.npmCli, plat)];
+  const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
+  const fixed = fixedPosix(posixRoot);
+  const stateDir = stateDirFor(platform, plannedEnv, posixRoot);
+  const exists = hooks.stateExists ? hooks.stateExists(stateDir) : existsSync(stateDir);
+  const trustPlat = platform === "win32" || platform === "linux" || platform === "darwin" ? platform as InstallPlatform : null;
+  const trustFiles = trustPlat ? [...trustTargets(layout.execPath, trustPlat), ...trustTargets(layout.npmCli, trustPlat)] : [];
+  let sddlPlan: Map<string, SddlHit> | null = null;
+  if (platform === "win32") {
+    const root = path.win32.dirname(stateDir);
+    let rootExists = false;
+    try {
+      lstatSync(root);
+      rootExists = true;
+    } catch {
+      rootExists = false;
+    }
+    const preview = parsed.fromTarballs ? listedTarballTargets(parsed.fromTarballs) : undefined;
+    const tarballPaths = preview && "files" in preview ? [preview.dir, ...preview.files] : [];
+    sddlPlan = readSddlBatch(exec, [
+      ...trustFiles.map((file) => file.path),
+      ...(rootExists ? [root] : []),
+      ...tarballPaths,
+    ]);
+  }
+  if (trustPlat) {
     if (platform === "win32") {
       const sid = invokingSid(exec);
-      for (const file of files) {
-        const acl = exec(windowsSddlArgv(file.path));
-        const text = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
-        if ((acl.status ?? 1) !== 0 || windowsUserCanWrite(text, { path: file.path, userSid: sid, ancestor: file.ancestor })) {
-          io.stderr.write(`${refuseAcl(text, nodeTrustMessage(file.path))}\n`);
+      const cache = sddlPlan ?? new Map<string, SddlHit>();
+      for (const file of trustFiles) {
+        const acl = sddlOrMiss(cache, file.path);
+        if (acl.status !== 0 || windowsUserCanWrite(acl.text, { path: file.path, userSid: sid, ancestor: file.ancestor })) {
+          io.stderr.write(`${refuseAcl(acl.text, nodeTrustMessage(file.path))}\n`);
           return EX_CONFIG;
         }
       }
     } else {
-      for (const file of files) {
+      for (const file of trustFiles) {
         if (posixEntryUntrusted(file.path)) {
-          io.stderr.write(`${nodeTrustMessageFor(file.path, plat)}\n`);
+          io.stderr.write(`${nodeTrustMessageFor(file.path, trustPlat)}\n`);
           return EX_CONFIG;
         }
       }
     }
   }
-  const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
-  const fixed = fixedPosix(posixRoot);
-  const stateDir = stateDirFor(platform, plannedEnv, posixRoot);
-  const exists = hooks.stateExists ? hooks.stateExists(stateDir) : existsSync(stateDir);
   let veraxRootExists = false;
   let markerExists = false;
   let reparsePath: string | undefined;
@@ -3552,8 +3669,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     if (pathIsReparse(root, exec, platform)) reparsePath = root;
     else if (pathIsReparse(stateDir, exec, platform)) reparsePath = stateDir;
     if (veraxRootExists) {
-      const acl = exec(windowsSddlArgv(root));
-      const text = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
+      const text = sddlOrMiss(sddlPlan ?? new Map(), root).text;
       winRootAcl = text;
       winRootOwner = sddlOwner(text) ?? "";
     }
@@ -3597,7 +3713,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       profileImagePath = image;
     }
   }
-  const packed = parsed.fromTarballs ? collectTarballs(parsed.fromTarballs, platform, exec, io) : undefined;
+  const packed = parsed.fromTarballs ? collectTarballs(parsed.fromTarballs, platform, exec, io, sddlPlan) : undefined;
   if (packed && "error" in packed) return packed.code;
   const plan = planInstall(platform as InstallPlatform, plannedEnv, {
     ...layout,
@@ -3901,20 +4017,19 @@ export function liveInstalledChecks(
     manifest = null;
   }
   if (platform === "win32") {
-    const acl = exec(windowsSddlArgv(stateDir));
-    const codeAcl = exec(windowsSddlArgv(codeDir));
-    const fileAcls = [
+    const rootDir = path.win32.dirname(stateDir);
+    const rows = [
       ...serviceAclFiles(stateDir, "state").map((file) => ({ path: file, kind: "state" as const })),
       ...serviceAclFiles(codeDir, "code").map((file) => ({ path: file, kind: "code" as const })),
-    ].flatMap((file) => {
-      if (!existsSync(file.path)) return [];
-      const read = exec(windowsSddlArgv(file.path));
-      return [{ path: file.path, kind: file.kind, text: `${read.stdout ?? ""}\n${read.stderr ?? ""}` }];
-    });
+    ].filter((file) => existsSync(file.path));
+    const readBack = readSddlBatch(exec, [stateDir, codeDir, rootDir, ...rows.map((file) => file.path)]);
+    const textOf = (file: string): string => sddlOrMiss(readBack, file).text;
+    const fileAcls = rows.map((file) => ({ path: file.path, kind: file.kind, text: textOf(file.path) }));
     const task = exec(toolArgv("schtasks", ["/Query", "/TN", TASK_NAME], "win32"));
-    const ownerOf = (dir: string): string => sddlOwner(`${exec(windowsSddlArgv(dir)).stdout ?? ""}`) ?? "";
-    const rootDir = path.win32.dirname(stateDir);
-    const rootAcl = exec(windowsSddlArgv(rootDir));
+    const ownerOf = (dir: string): string => sddlOwner(textOf(dir)) ?? "";
+    const acl = { stdout: textOf(stateDir), stderr: "" };
+    const codeAcl = { stdout: textOf(codeDir), stderr: "" };
+    const rootAcl = { stdout: textOf(rootDir), stderr: "" };
     const marker = path.win32.join(rootDir, "install.json");
     return installedBoundaryChecks({
       codeDir,
