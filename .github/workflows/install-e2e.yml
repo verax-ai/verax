@@ -104,6 +104,90 @@ jobs:
           icacls $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /T
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "VERAX_TARBALLS=$dir"
+      - name: diagnose tarball access
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Write-Host "=== 1. token groups ==="
+          try {
+            $capture = $false
+            $shown = 0
+            foreach ($line in @(whoami /groups /fo list)) {
+              if ($line -match '^\s*Group Name:\s*(.*)$') {
+                $g = $Matches[1]
+                $capture = ($g -like '*Mandatory Label*' -or $g -like '*BUILTIN\Administrators*')
+                if ($capture) { $shown++ }
+              }
+              if ($capture) { Write-Host $line }
+              if ($capture -and [string]::IsNullOrWhiteSpace($line)) { $capture = $false }
+            }
+            if ($shown -eq 0) {
+              Write-Host "no Mandatory Label or BUILTIN\Administrators group block matched"
+              whoami /groups /fo list
+            }
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "=== 2. acl, owner, attributes ==="
+          $dir = $env:VERAX_TARBALLS
+          Write-Host "tarball dir: $dir"
+          try {
+            icacls $dir
+            Write-Host ("Owner: " + (Get-Acl -LiteralPath $dir).Owner)
+            Get-Item -LiteralPath $dir | Format-List Attributes | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          $tarballs = @()
+          try {
+            $tarballs = @(Get-ChildItem -LiteralPath $dir -Filter *.tgz -File | Sort-Object Name)
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "tarball count: $($tarballs.Count)"
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "tarball: $path"
+            try {
+              icacls $path
+              Write-Host ("Owner: " + (Get-Acl -LiteralPath $path).Owner)
+              Get-Item -LiteralPath $path | Format-List Attributes | Out-String -Width 4096 | Write-Host
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 3. read each tarball ==="
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "pwsh ReadAllBytes: $path"
+            try {
+              $n = [IO.File]::ReadAllBytes($path).Length
+              Write-Host "OK $n bytes"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+            Write-Host "node ReadFileSync: $path"
+            try {
+              & $env:VERAX_NODE -e "require('fs').readFileSync(process.argv[1]);console.log('ok')" $path
+              Write-Host "node exit: $LASTEXITCODE"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 4. defender ==="
+          try {
+            Get-MpComputerStatus -ErrorAction Stop | Select-Object RealTimeProtectionEnabled, AMRunningMode | Format-List | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          try {
+            $cfa = Get-MpPreference -ErrorAction Stop | Select-Object -ExpandProperty EnableControlledFolderAccess
+            Write-Host "EnableControlledFolderAccess: $cfa"
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          exit 0
       - name: install, probe, uninstall
         shell: pwsh
         run: |
@@ -165,6 +249,91 @@ jobs:
           '@ | Set-Content -Encoding utf8 $script
           $p = Start-Process -FilePath $node -ArgumentList @($script) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
           if ($p.ExitCode -ne 0) { Write-Error "probe exit $($p.ExitCode)"; exit $p.ExitCode }
+      - name: diagnose tarball access on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Write-Host "=== 1. token groups ==="
+          try {
+            $capture = $false
+            $shown = 0
+            foreach ($line in @(whoami /groups /fo list)) {
+              if ($line -match '^\s*Group Name:\s*(.*)$') {
+                $g = $Matches[1]
+                $capture = ($g -like '*Mandatory Label*' -or $g -like '*BUILTIN\Administrators*')
+                if ($capture) { $shown++ }
+              }
+              if ($capture) { Write-Host $line }
+              if ($capture -and [string]::IsNullOrWhiteSpace($line)) { $capture = $false }
+            }
+            if ($shown -eq 0) {
+              Write-Host "no Mandatory Label or BUILTIN\Administrators group block matched"
+              whoami /groups /fo list
+            }
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "=== 2. acl, owner, attributes ==="
+          $dir = $env:VERAX_TARBALLS
+          Write-Host "tarball dir: $dir"
+          try {
+            icacls $dir
+            Write-Host ("Owner: " + (Get-Acl -LiteralPath $dir).Owner)
+            Get-Item -LiteralPath $dir | Format-List Attributes | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          $tarballs = @()
+          try {
+            $tarballs = @(Get-ChildItem -LiteralPath $dir -Filter *.tgz -File | Sort-Object Name)
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "tarball count: $($tarballs.Count)"
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "tarball: $path"
+            try {
+              icacls $path
+              Write-Host ("Owner: " + (Get-Acl -LiteralPath $path).Owner)
+              Get-Item -LiteralPath $path | Format-List Attributes | Out-String -Width 4096 | Write-Host
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 3. read each tarball ==="
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "pwsh ReadAllBytes: $path"
+            try {
+              $n = [IO.File]::ReadAllBytes($path).Length
+              Write-Host "OK $n bytes"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+            Write-Host "node ReadFileSync: $path"
+            try {
+              & $env:VERAX_NODE -e "require('fs').readFileSync(process.argv[1]);console.log('ok')" $path
+              Write-Host "node exit: $LASTEXITCODE"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 4. defender ==="
+          try {
+            Get-MpComputerStatus -ErrorAction Stop | Select-Object RealTimeProtectionEnabled, AMRunningMode | Format-List | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          try {
+            $cfa = Get-MpPreference -ErrorAction Stop | Select-Object -ExpandProperty EnableControlledFolderAccess
+            Write-Host "EnableControlledFolderAccess: $cfa"
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          exit 0
       - name: second run refuses a state dir the probe user pre-created
         shell: pwsh
         run: |

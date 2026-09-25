@@ -43,4 +43,29 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /was not created by verax install/);
     assert.match(workflow, /Verax\\state/);
   });
+
+  it("prints tarball access evidence on Windows before install and again if that install fails", () => {
+    const before = workflow.indexOf("- name: diagnose tarball access\n");
+    const install = workflow.indexOf("- name: install, probe, uninstall\n");
+    const after = workflow.indexOf("- name: diagnose tarball access on failure\n");
+    const second = workflow.indexOf("- name: second run refuses a state dir the probe user pre-created\n");
+    assert.ok(before > 0 && before < install, "diagnose step is not before the Windows install");
+    assert.ok(install < after && after < second, "failure diagnose step is not between the Windows install and the second run");
+    const failure = workflow.slice(after, second);
+    assert.match(failure, /if:\s*failure\(\)/);
+    for (const chunk of [workflow.slice(before, install), failure]) {
+      assert.match(chunk, /whoami \/groups \/fo list/);
+      assert.match(chunk, /Mandatory Label/);
+      assert.match(chunk, /BUILTIN\\Administrators/);
+      assert.match(chunk, /icacls/);
+      assert.match(chunk, /Get-Acl/);
+      assert.match(chunk, /Format-List Attributes/);
+      assert.match(chunk, /\[IO\.File\]::ReadAllBytes/);
+      assert.match(chunk, /\$env:VERAX_NODE -e "require\('fs'\)\.readFileSync\(process\.argv\[1\]\);console\.log\('ok'\)"/);
+      assert.match(chunk, /Get-MpComputerStatus/);
+      assert.match(chunk, /RealTimeProtectionEnabled/);
+      assert.match(chunk, /AMRunningMode/);
+      assert.match(chunk, /EnableControlledFolderAccess/);
+    }
+  });
 });
