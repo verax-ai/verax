@@ -13,6 +13,9 @@ const ALLOWED = new Set([
   "createProxy",
   "LedgerDenyUnrecorded",
   "loadPolicy",
+  // approve-cli escapes the same marks the spend gate refuses. The class
+  // lives here so body does not grow a second copy or a new dependency.
+  "TERMINAL_CONTROL_CLASS",
   "FileLedger",
   "MemoryLedger",
   "explain",

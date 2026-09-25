@@ -10,6 +10,7 @@ import {
   FileLedger,
   loadApprovalsFromDir,
   loadPolicy,
+  TERMINAL_CONTROL_CLASS,
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
@@ -69,15 +70,13 @@ function minorUnits(row: ApprovalRow): number | null {
   return typeof fromArgs === "number" ? fromArgs : null;
 }
 
-const HELD_CONTROL = /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
 
 /** A control in a stored row must not redraw the prompt, or smuggle a second `payee=`. */
 function escapeHeld(value: string): string {
   const tainted = HELD_CONTROL.test(value);
-  const pattern = tainted
-    ? /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069=]/g
-    : HELD_CONTROL;
-  return value.replace(pattern, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+  const pattern = tainted ? new RegExp(`[${TERMINAL_CONTROL_CLASS}=]`, "gu") : HELD_CONTROL;
+  return value.replace(pattern, (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`);
 }
 
 function heldLine(row: ApprovalRow): string {

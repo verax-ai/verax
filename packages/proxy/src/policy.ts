@@ -157,8 +157,14 @@ function asSpend(raw: unknown, id: string): PolicySpend {
   return spend;
 }
 
-/** C0, DEL, and the bidi/isolate marks that redraw a terminal line. */
-const SPEND_CONTROL = /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+/**
+ * One class for the spend gate and the approve prompt: every control (Cc,
+ * C0 and C1), every format character (Cf: bidi, ZWJ/ZWNJ, U+FEFF), and the
+ * line and paragraph separators (Zl, Zp).
+ */
+export const TERMINAL_CONTROL_CLASS = "\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}";
+
+const SPEND_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
 
 function spendArgsInvalid(args: Record<string, unknown>): boolean {
   const keys = Object.keys(args);

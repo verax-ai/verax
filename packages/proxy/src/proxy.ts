@@ -163,6 +163,19 @@ function readRef(args: Record<string, unknown>): string | "invalid" | null {
   return raw;
 }
 
+/**
+ * The input-validity fold a new decision uses. A cited input that is missing,
+ * mismatched, or outside validFromMs..validUntilMs is a deny for that reason.
+ * An approved retry calls this same function before inner; it does not grow a second copy.
+ */
+function applyInputValidity(
+  inputReason: string | null,
+  verdict: { decision: "allow" | "deny" | "defer"; reasonCode: string },
+): { decision: "allow" | "deny" | "defer"; reasonCode: string } {
+  if (inputReason !== null) return { decision: "deny", reasonCode: inputReason };
+  return verdict;
+}
+
 function toolCallOf(call: ToolCall): ToolCall {
   const args = { ...call.arguments };
   delete args._inputs;
@@ -588,6 +601,27 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("outcome-unknown", unknownRef) };
                 }
+                const gated = applyInputValidity(resolved.reasonCode, {
+                  decision: "allow",
+                  reasonCode: "approved-by-operator",
+                });
+                if (gated.decision !== "allow") {
+                  const denyRef = deps.nonce();
+                  await writeRecord({
+                    decision: "deny",
+                    reasonCode: gated.reasonCode,
+                    ref: denyRef,
+                    requestHash,
+                    inputs: {
+                      ...resolved.inputs,
+                      approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+                    },
+                    effectHash: null,
+                    subject: call.name,
+                    timestampMs,
+                  });
+                  return { kind: "done", result: denied(gated.reasonCode, denyRef) };
+                }
                 return launchInner(dispatched, principal, allow.ref, scopedRef);
               }
               return { kind: "done", result: deferred(given) };
@@ -645,8 +679,9 @@ export function createProxy(deps: ProxyDeps) {
           };
         }
         const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);
-        let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
-        let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
+        const admitted = applyInputValidity(resolved.reasonCode, verdict);
+        let reasonCode = admitted.reasonCode;
+        let decision = admitted.decision;
         const bound = rateBound(timestampMs, decision === "allow" || decision === "defer");
         if (bound) {
           decision = "deny";
