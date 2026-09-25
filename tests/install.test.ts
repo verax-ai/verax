@@ -1366,7 +1366,7 @@ describe("verax install plan", () => {
         },
       });
       const text = err.join("");
-      assert.equal(code, 1);
+      assert.equal(code, 1, text);
       assert.match(text, /npm error code EPERM/);
       assert.equal(text.includes("npm-stdout-dropped"), false);
       assert.match(text, /EPERM-debug-tail/);
@@ -2133,7 +2133,9 @@ describe("verax uninstall", () => {
     const missing = `${root}\\Yok'Olan Klasör [x]\\y`;
     const paths = [root, files, missing];
     const argv = windowsSddlBatchArgv(paths);
-    const r = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8" });
+    // The same clean environment the installer gives system tools. An inherited PowerShell 7
+    // PSModulePath makes Windows PowerShell 5.1 fail to load Get-Acl's module.
+    const r = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env: systemToolEnv("win32") });
     assert.equal(r.status, 0, r.stderr);
     const map = JSON.parse(r.stdout) as Record<string, unknown>;
     assert.deepEqual(Object.keys(map).sort(), [...paths].sort());
