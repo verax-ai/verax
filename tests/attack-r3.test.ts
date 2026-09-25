@@ -46,7 +46,7 @@ function planText(plan: { ok: true; ops: unknown[] } | { ok: false; message: str
 }
 
 describe("attack R3", () => {
-  it("R3-1 a user-written install.json does not authorise a pre-created Verax root", async () => {
+  it("R3-1 a user-written install.json does not authorise a pre-created Verax root", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
     const root = mkdtempSync(join(tmpdir(), "verax-r3-marker-"));
     const data = join(root, "data");
     const files = join(root, "files");
@@ -161,7 +161,7 @@ describe("attack R3", () => {
     assert.equal(npmrc.exclusive, true);
   });
 
-  it("W1 a raced child in a fresh root is refused and removed", async () => {
+  it("W1 a raced child in a fresh root is refused and removed", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
     const root = mkdtempSync(join(tmpdir(), "verax-w1-race-"));
     const data = join(root, "data");
     const verax = join(data, "Verax");

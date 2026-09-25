@@ -85,6 +85,13 @@ const darwinOpts = {
   stateExists: false,
 };
 
+/** `getent passwd runner` for a Linux runInstall mock: the plan confirms VERAX_INVOKING_HOME against it. */
+function getentAnswer(argv: readonly string[], home: string): { status: number; stdout: string; stderr: string } | null {
+  if (!(argv[0] ?? "").endsWith("getent") || argv[1] !== "passwd") return null;
+  return { status: 0, stdout: `${argv[2]}:x:1000:1000::${home}:/bin/bash
+`, stderr: "" };
+}
+
 function okPlan(platform: "win32" | "linux", env: NodeJS.ProcessEnv, opts: Parameters<typeof planInstall>[2]) {
   const plan = planInstall(platform, env, opts);
   if (!plan.ok) throw new Error(plan.message);
@@ -646,6 +653,8 @@ describe("verax install plan", () => {
         layout,
         posixRoot,
         exec: (argv) => {
+          const passwd = getentAnswer(argv, home);
+          if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
@@ -717,6 +726,8 @@ describe("verax install plan", () => {
         layout,
         posixRoot,
         exec: (argv) => {
+          const passwd = getentAnswer(argv, home);
+          if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
@@ -973,6 +984,8 @@ describe("verax install plan", () => {
         elevated: () => true,
         layout: { execPath: link, bodyVersion: "0.3.0", npmCli: target },
         exec: (argv) => {
+          const passwd = getentAnswer(argv, linuxEnv.VERAX_INVOKING_HOME);
+          if (passwd) return passwd;
           if (platform === "win32" && systemToolName(argv[0] ?? "") === "icacls") {
             return { status: 0, stdout: `${argv[1] ?? resolved} BUILTIN\\Users:(W)\n`, stderr: "" };
           }
@@ -1162,6 +1175,8 @@ describe("verax install plan", () => {
           : winOpts,
         posixRoot: posix ? join(root, "fsroot") : undefined,
         exec: (argv) => {
+          const passwd = getentAnswer(argv, join(root, "home"));
+          if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
