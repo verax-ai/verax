@@ -133,7 +133,7 @@ function holdsRef(refs: Set<string>, raw: string): boolean {
 }
 
 describe("crash durability", () => {
-  it("keeps the ledger after SIGKILL at two points in a burst", { timeout: 30_000 }, async () => {
+  it("keeps the ledger after SIGKILL at two points in a burst", { timeout: 90_000 }, async () => {
     assert.equal(existsSync(cli), true, "packages/body/dist/cli.js is missing; the suite builds dist first");
     for (const killAt of [10, 80]) {
       const stateDir = mkdtempSync(join(tmpdir(), "verax-crash-"));

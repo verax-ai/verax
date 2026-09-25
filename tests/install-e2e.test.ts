@@ -100,4 +100,18 @@ describe("install-e2e workflow", () => {
       assert.match(chunk, /EnableControlledFolderAccess/);
     }
   });
+
+  it("linux installs again after uninstall and checks healthz", () => {
+    const linux = workflow.slice(workflow.indexOf("\n  linux:\n"), workflow.indexOf("\n  macos:\n"));
+    const reinstallAt = linux.indexOf("- name: reinstall after uninstall\n");
+    assert.ok(reinstallAt > linux.indexOf("cli.js uninstall"), "reinstall must follow an uninstall");
+    const step = linux.slice(reinstallAt, linux.indexOf("\n      - name: ", reinstallAt + 1));
+    assert.match(step, /cli\.js install --from-tarballs "\$VERAX_TARBALLS" --port 8801/);
+    assert.match(step, /curl -fsS http:\/\/127\.0\.0\.1:8801\/healthz/);
+    assert.match(step, /cli\.js uninstall/);
+    assert.equal(step.includes("Write-Error"), false);
+    assert.equal(step.includes("Write-Host"), false);
+    const installs = linux.split(/\r?\n/).filter((line) => line.includes("cli.js install"));
+    assert.equal(installs.length, 2);
+  });
 });

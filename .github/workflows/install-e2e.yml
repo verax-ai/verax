@@ -637,6 +637,12 @@ jobs:
           set -e
           test "$code" = "77"
           sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+      - name: reinstall after uninstall
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          curl -fsS http://127.0.0.1:8801/healthz >/dev/null
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
       - name: uninstall
         if: always()
         run: sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true

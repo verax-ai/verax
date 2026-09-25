@@ -21,6 +21,7 @@ import {
   normalizeLogonHolders,
   linuxSelinuxCheck,
   planInstall,
+  planUninstall,
   PS_ERROR_MARK,
   registryLockProblems,
   resolveTrustPath,
@@ -391,6 +392,87 @@ describe("verax install plan", () => {
       assert.equal(ausearch.length, 1);
       assert.ok(ausearch[0]!.argv.includes("--input-logs"));
       assert.equal(ausearch[0]!.stdin, undefined);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it("a failed linux install removes the verax account it created, so the next install is not refused", async (t) => {
+    const standIn = [process.execPath, "/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
+      try {
+        const st = lstatSync(file);
+        return !st.isSymbolicLink() && st.uid === 0 && (st.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+    if (standIn === undefined) {
+      t.skip("no root-owned binary to stand in for Node");
+      return;
+    }
+    const root = mkdtempSync(join(tmpdir(), "verax-linux-rollback-"));
+    const home = join(root, "home").replaceAll("\\", "/");
+    const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
+    let user = false;
+    let group = false;
+    const calls: string[][] = [];
+    const exec = (argv: string[]) => {
+      calls.push([...argv]);
+      const passwd = getentAnswer(argv, home);
+      if (passwd) return passwd;
+      const tool = systemToolName(argv[0] ?? "");
+      if (tool === "id" && argv.includes("verax")) {
+        return { status: user ? 0 : 1, stdout: user ? "uid=999(verax)\n" : "", stderr: user ? "" : "id: 'verax': no such user\n" };
+      }
+      if (tool === "useradd") {
+        user = true;
+        group = true;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (tool === "userdel") {
+        user = false;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (tool === "groupdel") {
+        group = false;
+        return { status: 0, stdout: "", stderr: "" };
+      }
+      if (tool === "getent" && argv[1] === "group") {
+        return { status: group ? 0 : 2, stdout: group ? "verax:x:999:\n" : "", stderr: group ? "" : "getent: group verax does not exist\n" };
+      }
+      if (tool === "stat") return { status: 0, stdout: "root\n", stderr: "" };
+      stageRegistryInstall(argv, "0.3.0");
+      return { status: 0, stdout: "", stderr: "" };
+    };
+    const run = async (err: string[]) => runInstall(["install", "--port", "8809"], {
+      platform: "linux",
+      env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+      elevated: () => true,
+      layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
+      posixRoot,
+      healthTimeoutMs: 1,
+      exec,
+      io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+    });
+    try {
+      const firstErr: string[] = [];
+      const first = await run(firstErr);
+      const firstText = firstErr.join("");
+      assert.equal(first, 1, firstText);
+      assert.match(firstText, /install-health-timeout:8809/);
+      const userdel = calls.find((argv) => systemToolName(argv[0] ?? "") === "userdel");
+      assert.ok(userdel, firstText);
+      assert.equal(userdel[0], systemToolPath("userdel", "linux"));
+      assert.deepEqual(userdel.slice(1), ["verax"]);
+      assert.ok(calls.some((argv) => systemToolName(argv[0] ?? "") === "groupdel"), "useradd's group was left behind");
+      assert.equal(user, false);
+      assert.equal(group, false);
+      // The marker lives in the code dir. Once that dir is gone, a leftover login is refused.
+      const codeDir = `${posixRoot}/opt/verax`;
+      if (existsSync(codeDir)) rmSync(codeDir, { recursive: true, force: true });
+      const secondErr: string[] = [];
+      await run(secondErr);
+      assert.equal(secondErr.join("").includes("verax already exists and was not created by verax install"), false, secondErr.join(""));
     } finally {
       rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
@@ -2318,6 +2400,89 @@ describe("verax uninstall", () => {
       assert.ok(covered.some((file) => file.replace(/[\\/]+$/, "").toLowerCase() === verax.toLowerCase()));
     } finally {
       rmSync(refused, { recursive: true, force: true });
+    }
+  });
+
+  it("linux uninstall plan userdel follows the marker, and a marker that does not claim the account does not", async () => {
+    const claimed = planUninstall("linux", linuxEnv, { keepState: false, removeLinuxUser: true, removeLinuxGroup: true });
+    if (!claimed.ok) throw new Error(claimed.message);
+    const userdelAt = claimed.ops.findIndex((op) => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "userdel");
+    const groupdelAt = claimed.ops.findIndex((op) => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "groupdel");
+    const codeAt = claimed.ops.findIndex((op) => op.op === "remove" && op.path === "/opt/verax");
+    assert.ok(codeAt >= 0 && userdelAt > codeAt, "userdel runs after the code dir, which holds the marker");
+    assert.ok(groupdelAt > userdelAt);
+    const userdelOp = claimed.ops[userdelAt];
+    const groupdelOp = claimed.ops[groupdelAt];
+    if (!userdelOp || userdelOp.op !== "argv" || !groupdelOp || groupdelOp.op !== "argv") throw new Error("missing account removal");
+    assert.equal(userdelOp.optional, true);
+    assert.equal(groupdelOp.optional, true);
+    assert.equal(userdelOp.argv[0], systemToolPath("userdel", "linux"));
+    assert.deepEqual(userdelOp.argv.slice(1), ["verax"]);
+    assert.equal(groupdelOp.argv[0], systemToolPath("groupdel", "linux"));
+    assert.deepEqual(groupdelOp.argv.slice(1), ["verax"]);
+    const plain = planUninstall("linux", linuxEnv, { keepState: false });
+    if (!plain.ok) throw new Error(plain.message);
+    assert.equal(plain.ops.some((op) => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "userdel"), false);
+    assert.equal(plain.ops.some((op) => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "groupdel"), false);
+
+    const root = mkdtempSync(join(tmpdir(), "verax-linux-uninst-"));
+    const posixRoot = root.replaceAll("\\", "/");
+    const markerPath = `${posixRoot}/opt/verax/install.json`;
+    const uninstall = async (body: string | null) => {
+      if (body === null) {
+        rmSync(`${posixRoot}/opt/verax`, { recursive: true, force: true });
+      } else {
+        mkdirSync(dirname(markerPath), { recursive: true });
+        writeFileSync(markerPath, body);
+      }
+      const seen: string[][] = [];
+      const out: string[] = [];
+      const err: string[] = [];
+      const code = await runUninstall(["uninstall"], {
+        platform: "linux",
+        env: linuxEnv,
+        posixRoot,
+        elevated: () => true,
+        exec: (argv) => {
+          seen.push([...argv]);
+          const passwd = getentAnswer(argv, linuxEnv.VERAX_INVOKING_HOME);
+          if (passwd) return passwd;
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "id") return { status: 0, stdout: "uid=999(verax)\n", stderr: "" };
+          if (tool === "getent" && argv[1] === "group") return { status: 0, stdout: "verax:x:999:\n", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: {
+          stdout: { write: (s: string) => out.push(s) },
+          stderr: { write: (s: string) => err.push(s) },
+        },
+      });
+      return { code, seen, out: out.join(""), err: err.join("") };
+    };
+    try {
+      const withUser = await uninstall(`${JSON.stringify({ createdUser: true })}\n`);
+      assert.equal(withUser.code, 0, withUser.err);
+      const userdel = withUser.seen.find((argv) => systemToolName(argv[0] ?? "") === "userdel");
+      assert.ok(userdel, withUser.err);
+      assert.equal(userdel[0], systemToolPath("userdel", "linux"));
+      assert.deepEqual(userdel.slice(1), ["verax"]);
+      assert.equal(withUser.seen.some((argv) => systemToolName(argv[0] ?? "") === "groupdel"), false);
+      assert.match(withUser.out, /removed: account verax/);
+
+      const without = await uninstall(`${JSON.stringify({ version: "0.3.0" })}\n`);
+      assert.equal(without.code, 0, without.err);
+      assert.equal(without.seen.some((argv) => systemToolName(argv[0] ?? "") === "userdel"), false);
+      assert.equal(without.seen.some((argv) => systemToolName(argv[0] ?? "") === "groupdel"), false);
+      assert.equal(without.out.includes("account verax"), false);
+
+      const withGroup = await uninstall(`${JSON.stringify({ createdUser: true, createdGroup: true })}\n`);
+      assert.equal(withGroup.code, 0, withGroup.err);
+      const userAt = withGroup.seen.findIndex((argv) => systemToolName(argv[0] ?? "") === "userdel");
+      const groupAt = withGroup.seen.findIndex((argv) => systemToolName(argv[0] ?? "") === "groupdel");
+      assert.ok(userAt >= 0 && groupAt > userAt, withGroup.err);
+      assert.equal(withGroup.seen[groupAt]![0], systemToolPath("groupdel", "linux"));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

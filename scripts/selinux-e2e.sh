@@ -40,7 +40,9 @@ log "source at $COMMIT"
 rm -rf ~/verax && git clone -q https://github.com/verax-ai/verax.git ~/verax && cd ~/verax && git checkout -q "$COMMIT"
 git log --oneline -1
 npm ci --silent >/dev/null 2>&1 && npm run build:dist >/dev/null 2>&1 || { echo "FAIL build"; exit 4; }
-dir=/tmp/verax-tarballs; rm -rf "$dir"; mkdir -p "$dir"
+dir=/tmp/verax-tarballs
+sudo rm -rf "$dir"
+mkdir -p "$dir"
 for p in inventory proxy body; do npm pack -w "@verax-ai/$p" --pack-destination "$dir" >/dev/null; done
 sudo chown -R root:root "$dir"; sudo chmod -R a-w,u+rX "$dir"
 export VERAX_TARBALLS="$dir"
@@ -83,7 +85,9 @@ log "uninstall"
 sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall; uc=$?
 check "uninstall exits 0" "test $uc -eq 0"
 check "service unit removed" "! test -e /etc/systemd/system/verax.service"
-echo "note: verax account after uninstall: $(id verax 2>&1)"
+echo "verax account after uninstall: $(id verax 2>&1 || true)"
+check "verax account is gone" "! id verax >/dev/null 2>&1"
+check "verax group is gone" "! getent group verax >/dev/null 2>&1"
 
 log "RESULT"
 if [ $fail -eq 0 ]; then echo "ALL PASS on $(grep PRETTY_NAME /etc/os-release | cut -d= -f2) with SELinux $(getenforce)"; else echo "SOME CHECKS FAILED"; fi

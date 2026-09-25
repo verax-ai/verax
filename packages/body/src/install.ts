@@ -52,7 +52,7 @@ const DARWIN_MARKER = "/Library/Verax/install.json";
 const DARWIN_PLIST = "/Library/LaunchDaemons/com.verax-ai.body.plist";
 
 const WIN32_TOOLS = ["whoami", "icacls", "schtasks", "net", "fsutil", "powershell"] as const;
-const LINUX_TOOLS = ["useradd", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl", "getenforce", "ps", "ausearch"] as const;
+const LINUX_TOOLS = ["useradd", "userdel", "groupdel", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl", "getenforce", "ps", "ausearch"] as const;
 const DARWIN_TOOLS = ["dscl", "launchctl", "chown", "chmod", "id", "stat", "plutil"] as const;
 const LINUX_TOOL_DIRS = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
 /** Fixed paths. A plan must name these even when the binary is absent on the machine that built the plan. */
@@ -392,8 +392,8 @@ export type PlanOpts = {
   linuxCode?: { exists: boolean; symlink: boolean; owner: string };
   /** Windows `verax-svc`. Absent means the account is not there yet. */
   winAccount?: { exists: boolean; createdByUs: boolean };
-  /** Linux login `verax`. Absent means the account is not there yet. */
-  linuxAccount?: { exists: boolean; createdByUs: boolean };
+  /** Linux login `verax`. Absent means the account is not there yet. `createdGroup` is the marker's claim that this install's useradd made the group. */
+  linuxAccount?: { exists: boolean; createdByUs: boolean; createdGroup?: boolean };
   /** Owner name of an existing `%ProgramData%\\Verax`. */
   winRootOwner?: string;
   /** icacls text of an existing `%ProgramData%\\Verax`. */
@@ -1500,7 +1500,11 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       {
         op: "write",
         path: path.posix.join(paths.codeDir, "install.json"),
-        contents: installMarkerText(opts, paths, { createdUser: true }),
+        contents: installMarkerText(opts, paths, {
+          createdUser: true,
+          // useradd without -N creates the matching group. A later uninstall removes it only when the marker says so.
+          createdGroup: !opts.linuxAccount?.exists || Boolean(opts.linuxAccount?.createdGroup),
+        }),
         mode: 0o644,
       },
       ...(!opts.linuxAccount?.exists
@@ -1798,9 +1802,19 @@ function bareSidAccount(ops: PlanOp[]): string | null {
 export function planUninstall(
   platform: InstallPlatform,
   env: NodeJS.ProcessEnv,
-  opts: { keepState: boolean; removeWinAccount?: boolean; removeDarwinUser?: boolean; removeDarwinGroup?: boolean },
+  opts: {
+    keepState: boolean;
+    removeWinAccount?: boolean;
+    removeDarwinUser?: boolean;
+    removeDarwinGroup?: boolean;
+    /** Linux `verax` login. Set only when the marker says `createdUser`. */
+    removeLinuxUser?: boolean;
+    /** Linux `verax` group. Set only when the marker says `createdGroup`. */
+    removeLinuxGroup?: boolean;
+    posixRoot?: string;
+  },
 ): InstallPlan {
-  const located = pathsFor(platform, env);
+  const located = pathsFor(platform, env, opts.posixRoot);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -1834,6 +1848,12 @@ export function planUninstall(
   if (!opts.keepState) ops.push({ op: "remove", path: paths.stateDir });
   if (platform === "win32" && opts.removeWinAccount) {
     ops.push({ op: "argv", argv: toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32"), optional: true });
+  }
+  if (platform === "linux" && opts.removeLinuxUser) {
+    ops.push({ op: "argv", argv: toolArgv("userdel", ["verax"], "linux"), optional: true });
+  }
+  if (platform === "linux" && opts.removeLinuxGroup) {
+    ops.push({ op: "argv", argv: toolArgv("groupdel", ["verax"], "linux"), optional: true });
   }
   if (platform === "darwin" && opts.removeDarwinUser) {
     ops.push(dscl(["-delete", `/Users/${DARWIN_USER}`]));
@@ -2974,6 +2994,82 @@ function serviceGrantKind(argv: readonly string[]): "code" | "state" | null {
   return null;
 }
 
+type CreatedThisRun = {
+  linuxUser: boolean;
+  linuxGroup: boolean;
+  linuxService: boolean;
+  darwinUser: boolean;
+  darwinGroup: boolean;
+  darwinService: boolean;
+  winAccount: boolean;
+  winTask: boolean;
+  codeDir: boolean;
+  stateDir: boolean;
+  serviceFile: string;
+};
+
+function rememberCreatedAccount(created: CreatedThisRun, argv: readonly string[]): void {
+  const tool = systemToolName(argv[0] ?? "");
+  if (tool === "useradd" && argv[argv.length - 1] === "verax") {
+    created.linuxUser = true;
+    if (!argv.includes("-N") && !argv.includes("--no-user-group")) created.linuxGroup = true;
+  }
+  if (tool === "dscl" && argv.includes("-create")) {
+    if (argv.includes(`/Users/${DARWIN_USER}`)) created.darwinUser = true;
+    if (argv.includes(`/Groups/${DARWIN_USER}`)) created.darwinGroup = true;
+  }
+  if (tool === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) created.winAccount = true;
+  if (tool === "powershell" && argv.some((arg) => arg.includes("Register-ScheduledTask"))) created.winTask = true;
+  if (tool === "launchctl" && argv.includes("bootstrap")) created.darwinService = true;
+  if (tool === "systemctl" && argv.includes("enable") && argv.includes("--now")) created.linuxService = true;
+}
+
+function removeRollbackPath(target: string, io: InstallIo): void {
+  try {
+    rmSync(target, { recursive: true, force: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "remove failed";
+    io.stderr.write(`rm exit 1: ${message}\n`);
+  }
+}
+
+/**
+ * Drop what this run created after a failed install.
+ * The Linux marker lives in the code dir, so rolling that dir back forgets
+ * `createdUser` unless the login useradd just made is removed too.
+ * macOS `_verax` and Windows `verax-svc` follow the same rule: only an account
+ * this run created is removed.
+ */
+function rollbackCreatedThisRun(
+  created: CreatedThisRun,
+  plan: { codeDir: string; stateDir: string },
+  call: ToolExec,
+  io: InstallIo,
+): void {
+  const ignore = (argv: string[]): void => {
+    call(argv);
+  };
+  const best = (argv: string[]): void => {
+    const ran = call(argv);
+    if ((ran.status ?? 1) === 0 || toolAlreadyAbsent(ran)) return;
+    reportToolFailure(io, argv, ran);
+  };
+  if (created.linuxService || created.linuxUser) ignore(toolArgv("systemctl", ["disable", "--now", "verax"], "linux"));
+  if (created.darwinService) ignore(toolArgv("launchctl", ["bootout", `system/${DARWIN_LABEL}`], "darwin"));
+  if (created.winTask) {
+    ignore(toolArgv("schtasks", ["/End", "/TN", TASK_NAME], "win32"));
+    ignore(toolArgv("schtasks", ["/Delete", "/TN", TASK_NAME, "/F"], "win32"));
+  }
+  if (created.linuxUser) best(toolArgv("userdel", ["verax"], "linux"));
+  if (created.linuxGroup) best(toolArgv("groupdel", ["verax"], "linux"));
+  if (created.darwinUser) best(toolArgv("dscl", [".", "-delete", `/Users/${DARWIN_USER}`], "darwin"));
+  if (created.darwinGroup) best(toolArgv("dscl", [".", "-delete", `/Groups/${DARWIN_USER}`], "darwin"));
+  if (created.winAccount) best(toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32"));
+  if (created.serviceFile !== "") removeRollbackPath(created.serviceFile, io);
+  if (created.stateDir) removeRollbackPath(plan.stateDir, io);
+  if (created.codeDir) removeRollbackPath(plan.codeDir, io);
+}
+
 async function execute(
   plan: Extract<InstallPlan, { ok: true }>,
   exec: ToolExec,
@@ -3006,6 +3102,19 @@ async function execute(
   };
   const createdTemps: string[] = [];
   const createdParents: string[] = [];
+  const created: CreatedThisRun = {
+    linuxUser: false,
+    linuxGroup: false,
+    linuxService: false,
+    darwinUser: false,
+    darwinGroup: false,
+    darwinService: false,
+    winAccount: false,
+    winTask: false,
+    codeDir: false,
+    stateDir: false,
+    serviceFile: "",
+  };
   let status = 0;
   const finish = (code: number): number => {
     status = code;
@@ -3032,7 +3141,10 @@ async function execute(
       continue;
     }
     if (step.op === "mkdir") {
+      const existed = existsSync(step.path);
       mkdirLeaf(step.path, step.mode ?? 0o755);
+      if (!existed && step.path === plan.codeDir) created.codeDir = true;
+      if (!existed && step.path === plan.stateDir) created.stateDir = true;
       continue;
     }
     if (step.op === "manifest") {
@@ -3065,6 +3177,7 @@ async function execute(
           if (ran.status === EX_CONFIG) return finish(EX_CONFIG);
           return finish(1);
         }
+        if (!failed) rememberCreatedAccount(created, resolved);
         continue;
       }
       if (isNpmArgv(resolved) && (ran.status ?? 1) !== 0 && !step.optional) {
@@ -3140,11 +3253,15 @@ async function execute(
           return finish(1);
         }
       }
+      rememberCreatedAccount(created, resolved);
       continue;
     }
     if (step.op === "write") {
+      const service = step.path.endsWith("/verax.service") || step.path.endsWith("/com.verax-ai.body.plist");
+      const priorService = service && existsSync(step.path);
       mkdirSync(path.dirname(step.path), { recursive: true });
       writeFileSync(step.path, step.contents, { encoding: "utf8", mode: step.mode ?? 0o644, flag: step.exclusive ? "wx" : "w" });
+      if (service && !priorService) created.serviceFile = step.path;
       continue;
     }
     if (step.op === "init") {
@@ -3180,7 +3297,11 @@ async function execute(
     io.stdout.write(step.text.endsWith("\n") ? step.text : `${step.text}\n`);
   }
   return finish(0);
+  } catch (err) {
+    if (status === 0) status = 1;
+    throw err;
   } finally {
+    if (status !== 0) rollbackCreatedThisRun(created, plan, call, io);
     for (const dir of createdTemps) rmSync(dir, { recursive: true, force: true });
     if (status !== 0) removeEmptyDirs(createdParents);
   }
@@ -3774,7 +3895,8 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     linuxState = linuxFact(stateDir, exec);
     linuxCode = linuxFact(codeDir, exec);
     const probed = exec(toolArgv("id", ["verax"], "linux"));
-    linuxAccount = { exists: probed.status === 0, createdByUs: markerFlags(path.posix.join(codeDir, "install.json")).createdUser };
+    const prior = markerFlags(path.posix.join(codeDir, "install.json"));
+    linuxAccount = { exists: probed.status === 0, createdByUs: prior.createdUser, createdGroup: prior.createdGroup };
   } else if (platform === "darwin") {
     markerExists = ourMarker(fixed.darwinMarker);
     darwinState = posixPresence(stateDir);
@@ -3887,7 +4009,14 @@ function executeUninstall(
   plan: Extract<InstallPlan, { ok: true }>,
   exec: ToolExec,
   io: InstallIo,
-  opts: { keepState: boolean; removeWinAccount: boolean; removeDarwinUser: boolean; removeDarwinGroup: boolean },
+  opts: {
+    keepState: boolean;
+    removeWinAccount: boolean;
+    removeDarwinUser: boolean;
+    removeDarwinGroup: boolean;
+    removeLinuxUser: boolean;
+    removeLinuxGroup: boolean;
+  },
 ): number {
   const lines: string[] = [];
   let any = false;
@@ -4020,6 +4149,38 @@ function executeUninstall(
       return failed;
     }
   }
+  if (platform === "linux" && opts.removeLinuxUser) {
+    const queryArgv = toolArgv("id", ["verax"], "linux");
+    const query = exec(queryArgv);
+    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+      reportToolFailure(io, queryArgv, query);
+      writeLines();
+      return query.status ?? 1;
+    }
+    const failed = note(query.status === 0, "account verax", () =>
+      runUninstallTool(exec, io, toolArgv("userdel", ["verax"], "linux")),
+    );
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  }
+  if (platform === "linux" && opts.removeLinuxGroup) {
+    const queryArgv = toolArgv("getent", ["group", "verax"], "linux");
+    const query = exec(queryArgv);
+    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+      reportToolFailure(io, queryArgv, query);
+      writeLines();
+      return query.status ?? 1;
+    }
+    const failed = note(query.status === 0, "group verax", () =>
+      runUninstallTool(exec, io, toolArgv("groupdel", ["verax"], "linux")),
+    );
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  }
 
   if (!any) {
     io.stdout.write("nothing to remove\n");
@@ -4065,17 +4226,23 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     return EX_CONFIG;
   }
   const plannedEnv = resolvedEnv.env;
+  const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
+  const fixed = fixedPosix(posixRoot);
+  // Linux install.json lives in the code dir. Read it before that dir is removed.
   const markerFile = platform === "win32"
     ? path.win32.join(path.win32.dirname(stateDirFor(platform, plannedEnv)), "install.json")
     : platform === "darwin"
-      ? DARWIN_MARKER
-      : "";
-  const flags = markerFile === "" ? { createdAccount: false, createdUser: false, createdGroup: false } : markerFlags(markerFile);
+      ? fixed.darwinMarker
+      : path.posix.join(fixed.linuxCode, "install.json");
+  const flags = markerFlags(markerFile);
   const plan = planUninstall(platform as InstallPlatform, plannedEnv, {
     keepState: parsed.keepState,
     removeWinAccount: flags.createdAccount,
     removeDarwinUser: flags.createdUser,
     removeDarwinGroup: flags.createdGroup,
+    removeLinuxUser: flags.createdUser,
+    removeLinuxGroup: flags.createdGroup,
+    posixRoot,
   });
   if (!plan.ok) {
     io.stderr.write(plan.message);
@@ -4086,6 +4253,8 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     removeWinAccount: flags.createdAccount,
     removeDarwinUser: flags.createdUser,
     removeDarwinGroup: flags.createdGroup,
+    removeLinuxUser: flags.createdUser,
+    removeLinuxGroup: flags.createdGroup,
   });
 }
 
