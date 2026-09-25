@@ -1301,8 +1301,6 @@ function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: st
     "Type=simple",
     "User=verax",
     `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile} --log-file ${logFile}`,
-    "# V8's JIT needs execmem. Without a domain transition the process stays in init_t, which cannot map executable memory. The leading - is ignored where SELinux is absent or the context cannot be set.",
-    "SELinuxContext=-system_u:system_r:unconfined_service_t:s0",
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     `ReadWritePaths=${stateDir}`,
@@ -2604,6 +2602,42 @@ function selinuxType(label: string): string {
   return label.split(":")[2] ?? "";
 }
 
+/** systemd can only domain-transition from these entrypoint types. `lib_t` is not one of them. */
+const SELINUX_NODE_TYPES = new Set(["bin_t", "usr_t"]);
+
+function selinuxNodeFix(node: string): string {
+  return `Either install Node from your distribution (dnf install nodejs), or label this one: sudo semanage fcontext -a -t bin_t '${node}' && sudo restorecon -v '${node}'`;
+}
+
+function selinuxNodeSentence(node: string, type: string): string {
+  return `SELinux is enforcing and ${node} is labelled ${type}; systemd services can only start Node labelled bin_t or usr_t. ${selinuxNodeFix(node)}`;
+}
+
+/** `stat -c %C` through the injected exec. Empty when the tool fails or prints no type. */
+function selinuxFileType(exec: (argv: string[]) => ExecResult, file: string): string {
+  const ran = exec(toolArgv("stat", ["-c", "%C", file], "linux"));
+  if ((ran.status ?? 1) !== 0) return "";
+  const token = (ran.stdout ?? "").trim().split(/\s+/)[0] ?? "";
+  return selinuxType(token);
+}
+
+/**
+ * Enforcing only, and only before install creates anything.
+ * Permissive, Disabled, and a missing getenforce are not a check.
+ * Returns the refusal line, or null when the Node label may start a service.
+ */
+export function linuxSelinuxNodeRefusal(
+  exec: (argv: string[]) => ExecResult,
+  nodePath: string,
+): string | null {
+  if (selinuxMode(exec) !== "Enforcing") return null;
+  const node = resolveTrustPath(nodePath, "linux");
+  const type = selinuxFileType(exec, node);
+  const labelled = type === "" ? "unknown" : type;
+  if (SELINUX_NODE_TYPES.has(labelled)) return null;
+  return `refusing: ${selinuxNodeSentence(node, labelled)}\n`;
+}
+
 function labelFromAudit(text: string): string | null {
   const match = /scontext=([^\s]+)/.exec(text);
   const label = match?.[1] ?? "";
@@ -2651,6 +2685,29 @@ export function linuxSelinuxCheck(
     id: "selinux",
     level: domain === "init_t" ? "warn" : "ok",
     detail: `SELinux is Enforcing; service domain is ${domain === "" ? label : domain}`,
+  };
+}
+
+/**
+ * Linux doctor line for the Node binary this process runs.
+ * Enforcing prints the type and warns when it is not `bin_t` or `usr_t`.
+ * Any other mode is not a check.
+ */
+export function linuxNodeLabelCheck(
+  exec: (argv: string[]) => ExecResult = defaultExec,
+  nodePath: string = process.execPath,
+): { id: string; level: "ok" | "warn"; detail: string } | null {
+  if (selinuxMode(exec) !== "Enforcing") return null;
+  const node = resolveTrustPath(nodePath, "linux");
+  const type = selinuxFileType(exec, node);
+  const labelled = type === "" ? "unknown" : type;
+  if (SELINUX_NODE_TYPES.has(labelled)) {
+    return { id: "selinux-node", level: "ok", detail: `SELinux is Enforcing; Node ${node} is labelled ${labelled}` };
+  }
+  return {
+    id: "selinux-node",
+    level: "warn",
+    detail: `SELinux is Enforcing; Node ${node} is labelled ${labelled}; systemd services can only start Node labelled bin_t or usr_t. ${selinuxNodeFix(node)}`,
   };
 }
 
@@ -3857,6 +3914,13 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
           return EX_CONFIG;
         }
       }
+    }
+  }
+  if (platform === "linux") {
+    const refusal = linuxSelinuxNodeRefusal(exec, layout.execPath);
+    if (refusal) {
+      io.stderr.write(refusal);
+      return EX_CONFIG;
     }
   }
   let veraxRootExists = false;

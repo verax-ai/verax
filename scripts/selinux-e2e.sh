@@ -8,6 +8,10 @@
 # CI cannot run it: containers have no SELinux.
 #
 # Mirrors .github/workflows/install-e2e.yml (linux job), then records SELinux evidence.
+# A tarball Node under /usr/local/lib is lib_t. Install must refuse that (exit 78)
+# before anything is created. The printed semanage + restorecon remedy is applied
+# next; the full install, a reinstall, and uninstall then run. The fcontext rule
+# is removed on the way out so the VM is left as found.
 set -uo pipefail
 COMMIT="${1:?commit sha}"
 VER=22.20.0
@@ -46,6 +50,39 @@ mkdir -p "$dir"
 for p in inventory proxy body; do npm pack -w "@verax-ai/$p" --pack-destination "$dir" >/dev/null; done
 sudo chown -R root:root "$dir"; sudo chmod -R a-w,u+rX "$dir"
 export VERAX_TARBALLS="$dir"
+NODE_REAL="$(readlink -f "$VERAX_NODE")"
+fcontext_added=0
+cleanup_label() {
+  if [ "${fcontext_added:-0}" != 1 ]; then
+    return 0
+  fi
+  echo "restore file context: semanage fcontext -d $NODE_REAL"
+  sudo semanage fcontext -d "$NODE_REAL" || true
+  sudo restorecon -v "$NODE_REAL" || true
+  fcontext_added=0
+}
+trap cleanup_label EXIT
+
+log "install refuses a lib_t Node"
+refuse_log=/tmp/verax-selinux-refuse.txt
+sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801 >"$refuse_log" 2>&1
+refuse_code=$?
+echo "refuse exit=$refuse_code"
+cat "$refuse_log"
+check "lib_t Node is refused with exit 78" "test $refuse_code -eq 78"
+check "refusal names lib_t" "grep -F 'labelled lib_t' '$refuse_log'"
+check "refusal prints the semanage remedy" "grep -F \"semanage fcontext -a -t bin_t '$NODE_REAL'\" '$refuse_log'"
+check "refused install left no unit" "! test -e /etc/systemd/system/verax.service"
+check "refused install left no code dir" "! test -e /opt/verax"
+
+log "label Node bin_t"
+if ! sudo semanage fcontext -l >/dev/null 2>&1; then
+  sudo dnf -y install policycoreutils-python-utils
+fi
+sudo semanage fcontext -a -t bin_t "$NODE_REAL" || { echo "FAIL  semanage fcontext"; exit 5; }
+fcontext_added=1
+sudo restorecon -v "$NODE_REAL" || { echo "FAIL  restorecon"; exit 5; }
+
 sudo ausearch --input-logs -m avc -ts recent </dev/null >/dev/null 2>&1; start_ts="$(date '+%m/%d/%Y %H:%M:%S')"
 
 log "install (sudo, as the invoking user $(id -un))"
@@ -88,6 +125,18 @@ check "service unit removed" "! test -e /etc/systemd/system/verax.service"
 echo "verax account after uninstall: $(id verax 2>&1 || true)"
 check "verax account is gone" "! id verax >/dev/null 2>&1"
 check "verax group is gone" "! getent group verax >/dev/null 2>&1"
+
+log "reinstall after uninstall"
+sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+reinstall_code=$?
+echo "reinstall exit=$reinstall_code"
+check "reinstall exits 0" "test $reinstall_code -eq 0"
+sleep 3
+check "reinstall answers /healthz" "curl -fsS http://127.0.0.1:8801/healthz >/dev/null"
+sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall; uc2=$?
+check "second uninstall exits 0" "test $uc2 -eq 0"
+check "service unit removed after reinstall" "! test -e /etc/systemd/system/verax.service"
+check "verax account is gone after reinstall" "! id verax >/dev/null 2>&1"
 
 log "RESULT"
 if [ $fail -eq 0 ]; then echo "ALL PASS on $(grep PRETTY_NAME /etc/os-release | cut -d= -f2) with SELinux $(getenforce)"; else echo "SOME CHECKS FAILED"; fi

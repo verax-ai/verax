@@ -152,6 +152,7 @@ describe("platform report", () => {
     assert.equal(derived.platform, "Linux (ubuntu-24.04-arm)");
     assert.equal(derived.architecture, "arm64");
     assert.equal(derivePlatform("macos (macos-13)", ["macos-13"]).architecture, "x64");
+    assert.equal(derivePlatform("macos (macos-15-intel)", ["macos-15-intel"]).architecture, "x64");
     assert.equal(derivePlatform("macos (macos-15)", ["macos-15"]).architecture, "arm64");
     assert.equal(derivePlatform("windows (localized)", ["windows-latest"]).platform, "Windows (windows-latest)");
     assert.equal(derivePlatform("installed (ubuntu-latest)", ["ubuntu-latest"]).architecture, "x64");

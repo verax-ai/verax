@@ -695,8 +695,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Apple Silicon and Intel.
-        os: [macos-15, macos-13]
+        # Apple Silicon (macos-15) and Intel (macos-15-intel). macos-13 was retired in December 2025 and never started.
+        os: [macos-15, macos-15-intel]
     permissions:
       contents: read
     steps:

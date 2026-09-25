@@ -73,7 +73,7 @@ npm install -g @verax-ai/body
 verax install
 ```
 
-The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs the already-trusted system Node, keeps the ledger under a service account, and writes the agent token only into your profile (`%USERPROFILE%\.verax\agent.token` or `~/.verax/agent.token`). It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org; a Node your account can rewrite is refused. On SELinux systems the service runs in `unconfined_service_t` (the standard domain for third-party services). Verax's isolation there, as elsewhere, is the service account and file permissions, not an SELinux policy of its own.
+The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs the already-trusted system Node, keeps the ledger under a service account, and writes the agent token only into your profile (`%USERPROFILE%\.verax\agent.token` or `~/.verax/agent.token`). It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org; a Node your account can rewrite is refused. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. Isolation is the service account and file permissions.
 
 Approve a held call from an elevated terminal: `verax approve` (Windows: Run as administrator; Linux and macOS: `sudo verax approve`).
 

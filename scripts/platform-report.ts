@@ -94,7 +94,7 @@ export function derivePlatform(jobName: string, labels: readonly string[]): { pl
   if (/\bwindows\b/.test(haystack) || haystack.includes("windows-")) {
     return { platform: named("Windows"), architecture: "x64" };
   }
-  if (haystack.includes("macos-13")) {
+  if (haystack.includes("macos-13") || haystack.includes("macos-15-intel")) {
     return { platform: named("macOS"), architecture: "x64" };
   }
   if (/\bmacos\b/.test(haystack) || haystack.includes("darwin")) {

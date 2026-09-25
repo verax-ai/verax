@@ -8,7 +8,7 @@ import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
 import { envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
-import { directoryAccess, doctorStateTarget, linuxSelinuxCheck, liveInstalledChecks, runInstall, runUninstall, unreadableSentence } from "./install.ts";
+import { directoryAccess, doctorStateTarget, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, runInstall, runUninstall, unreadableSentence } from "./install.ts";
 import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
@@ -169,10 +169,12 @@ if (argv[0] === "doctor") {
     process.stderr.write(`${unreadableSentence(target)}\n`);
     process.exit(77);
   }
+  const nodeLabel = process.platform === "linux" ? linuxNodeLabelCheck() : null;
   const checks = [
     ...runDoctor(process.env, process.argv),
     ...liveInstalledChecks(),
     ...(process.platform === "linux" ? [linuxSelinuxCheck()] : []),
+    ...(nodeLabel ? [nodeLabel] : []),
   ];
   const bodyLog = target ? doctorBodyLog(target) : "";
   if (json) {

@@ -19,7 +19,9 @@ import {
   LOGON_HOLDER_COMPARE,
   logonHolderMismatchLines,
   normalizeLogonHolders,
+  linuxNodeLabelCheck,
   linuxSelinuxCheck,
+  linuxSelinuxNodeRefusal,
   planInstall,
   planUninstall,
   PS_ERROR_MARK,
@@ -323,9 +325,7 @@ describe("verax install plan", () => {
     ]) {
       assert.equal(unit.contents.includes(line), true, line);
     }
-    assert.match(unit.contents, /^SELinuxContext=-system_u:system_r:unconfined_service_t:s0$/m);
-    assert.match(unit.contents, /execmem/);
-    assert.match(unit.contents, /init_t/);
+    assert.equal(unit.contents.includes("SELinuxContext="), false);
   });
 
   it("linux install under SELinux enforcing names an execmem denial when health fails", async (t) => {
@@ -362,6 +362,9 @@ describe("verax install plan", () => {
           if (tool === "getenforce") {
             getenforcePath = argv[0] ?? "";
             return { status: 0, stdout: "Enforcing\n", stderr: "" };
+          }
+          if (tool === "stat" && argv.includes("%C")) {
+            return { status: 0, stdout: "system_u:object_r:bin_t:s0\n", stderr: "" };
           }
           if (tool === "ausearch") {
             ausearch.push({ argv, stdin });
@@ -494,6 +497,189 @@ describe("verax install plan", () => {
       return { status: 1, stdout: "", stderr: "" };
     });
     assert.equal(`${permissive.level}\t${permissive.id}\t${permissive.detail}`, "ok\tselinux\tSELinux is Permissive");
+  });
+
+  function rootOwnedStandIn(): string | undefined {
+    return [process.execPath, "/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
+      try {
+        const st = lstatSync(file);
+        return !st.isSymbolicLink() && st.uid === 0 && (st.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  function selinuxLabelExec(mode: string, type: string) {
+    return (argv: string[]) => {
+      const tool = systemToolName(argv[0] ?? "");
+      if (tool === "getenforce") return { status: 0, stdout: `${mode}\n`, stderr: "" };
+      if (tool === "stat" && argv.includes("%C")) return { status: 0, stdout: `system_u:object_r:${type}:s0\n`, stderr: "" };
+      return { status: 1, stdout: "", stderr: "" };
+    };
+  }
+
+  it("enforcing SELinux refuses a lib_t Node before anything is created", async () => {
+    const node = "/verax-no-such-node/bin/node";
+    let statArgv: string[] = [];
+    const message = linuxSelinuxNodeRefusal((argv) => {
+      const tool = systemToolName(argv[0] ?? "");
+      if (tool === "stat" && argv.includes("%C")) statArgv = [...argv];
+      return selinuxLabelExec("Enforcing", "lib_t")(argv);
+    }, node);
+    assert.equal(
+      message,
+      `refusing: SELinux is enforcing and ${node} is labelled lib_t; systemd services can only start Node labelled bin_t or usr_t. Either install Node from your distribution (dnf install nodejs), or label this one: sudo semanage fcontext -a -t bin_t '${node}' && sudo restorecon -v '${node}'\n`,
+    );
+    assert.match(statArgv[0] ?? "", /^\/(?:usr\/sbin|usr\/bin|sbin|bin)\/stat$/);
+    assert.deepEqual(statArgv.slice(1), ["-c", "%C", node]);
+
+    const standIn = rootOwnedStandIn();
+    if (standIn === undefined) return;
+    const root = mkdtempSync(join(tmpdir(), "verax-selinux-libt-"));
+    const home = join(root, "home").replaceAll("\\", "/");
+    const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
+    const calls: string[][] = [];
+    const err: string[] = [];
+    try {
+      const code = await runInstall(["install", "--port", "8809"], {
+        platform: "linux",
+        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        elevated: () => true,
+        layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
+        posixRoot,
+        exec: (argv) => {
+          calls.push([...argv]);
+          const passwd = getentAnswer(argv, home);
+          if (passwd) return passwd;
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "getenforce") return { status: 0, stdout: "Enforcing\n", stderr: "" };
+          if (tool === "stat" && argv.includes("%C")) return { status: 0, stdout: "system_u:object_r:lib_t:s0\n", stderr: "" };
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      const text = err.join("");
+      const resolved = resolveTrustPath(standIn, "linux");
+      assert.equal(code, 78, text);
+      assert.ok(text.includes(`refusing: SELinux is enforcing and ${resolved} is labelled lib_t`), text);
+      assert.match(text, /semanage fcontext -a -t bin_t/);
+      assert.match(text, /dnf install nodejs/);
+      assert.equal(calls.some((argv) => systemToolName(argv[0] ?? "") === "useradd"), false, text);
+      assert.equal(calls.some((argv) => systemToolName(argv[0] ?? "") === "mkdir"), false, text);
+      assert.equal(existsSync(`${posixRoot}/opt/verax`), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it("enforcing SELinux lets a bin_t Node proceed", async () => {
+    assert.equal(linuxSelinuxNodeRefusal(selinuxLabelExec("Enforcing", "bin_t"), "/usr/bin/node"), null);
+    assert.equal(linuxSelinuxNodeRefusal(selinuxLabelExec("Enforcing", "usr_t"), "/usr/bin/node"), null);
+    const standIn = rootOwnedStandIn();
+    if (standIn === undefined) return;
+    const root = mkdtempSync(join(tmpdir(), "verax-selinux-bint-"));
+    const home = join(root, "home").replaceAll("\\", "/");
+    const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
+    const calls: string[][] = [];
+    const err: string[] = [];
+    try {
+      const code = await runInstall(["install", "--port", "8809"], {
+        platform: "linux",
+        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        elevated: () => true,
+        layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
+        posixRoot,
+        healthTimeoutMs: 1,
+        exec: (argv) => {
+          calls.push([...argv]);
+          const passwd = getentAnswer(argv, home);
+          if (passwd) return passwd;
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "getenforce") return { status: 0, stdout: "Enforcing\n", stderr: "" };
+          if (tool === "stat" && argv.includes("%C")) return { status: 0, stdout: "system_u:object_r:bin_t:s0\n", stderr: "" };
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "stat") return { status: 0, stdout: "root\n", stderr: "" };
+          stageRegistryInstall(argv, "0.3.0");
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.equal(text.includes("labelled lib_t"), false, text);
+      assert.match(text, /install-health-timeout:8809/);
+      const labelAt = calls.findIndex((argv) => systemToolName(argv[0] ?? "") === "stat" && argv.includes("%C"));
+      const useraddAt = calls.findIndex((argv) => systemToolName(argv[0] ?? "") === "useradd");
+      assert.ok(labelAt >= 0, text);
+      assert.ok(useraddAt > labelAt, "bin_t must be read before the account is created");
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it("permissive SELinux does not check a lib_t Node", async () => {
+    assert.equal(linuxSelinuxNodeRefusal(selinuxLabelExec("Permissive", "lib_t"), "/usr/local/lib/nodejs/bin/node"), null);
+    assert.equal(linuxSelinuxNodeRefusal(selinuxLabelExec("Disabled", "lib_t"), "/usr/local/lib/nodejs/bin/node"), null);
+    assert.equal(
+      linuxSelinuxNodeRefusal(() => ({ status: 1, stdout: "", stderr: "" }), "/usr/local/lib/nodejs/bin/node"),
+      null,
+    );
+    const standIn = rootOwnedStandIn();
+    if (standIn === undefined) return;
+    const root = mkdtempSync(join(tmpdir(), "verax-selinux-permissive-"));
+    const home = join(root, "home").replaceAll("\\", "/");
+    const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
+    const calls: string[][] = [];
+    const err: string[] = [];
+    try {
+      const code = await runInstall(["install", "--port", "8809"], {
+        platform: "linux",
+        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        elevated: () => true,
+        layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
+        posixRoot,
+        healthTimeoutMs: 1,
+        exec: (argv) => {
+          calls.push([...argv]);
+          const passwd = getentAnswer(argv, home);
+          if (passwd) return passwd;
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "getenforce") return { status: 0, stdout: "Permissive\n", stderr: "" };
+          if (tool === "stat" && argv.includes("%C")) return { status: 0, stdout: "system_u:object_r:lib_t:s0\n", stderr: "" };
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "stat") return { status: 0, stdout: "root\n", stderr: "" };
+          stageRegistryInstall(argv, "0.3.0");
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.equal(text.includes("refusing: SELinux is enforcing"), false, text);
+      const enforceAt = calls.findIndex((argv) => systemToolName(argv[0] ?? "") === "getenforce");
+      const useraddAt = calls.findIndex((argv) => systemToolName(argv[0] ?? "") === "useradd");
+      assert.ok(enforceAt >= 0 && useraddAt > enforceAt);
+      assert.equal(calls.some((argv) => argv.includes("%C")), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
+  });
+
+  it("doctor warns when enforcing SELinux sees a lib_t Node", () => {
+    const node = "/verax-no-such-node/bin/node";
+    const warned = linuxNodeLabelCheck(selinuxLabelExec("Enforcing", "lib_t"), node);
+    assert.ok(warned);
+    assert.equal(warned.level, "warn");
+    assert.equal(warned.id, "selinux-node");
+    assert.ok(warned.detail.includes(`Node ${node} is labelled lib_t`));
+    assert.ok(warned.detail.includes("dnf install nodejs"));
+    assert.ok(warned.detail.includes(`semanage fcontext -a -t bin_t '${node}'`));
+    const ok = linuxNodeLabelCheck(selinuxLabelExec("Enforcing", "bin_t"), "/usr/bin/node");
+    assert.equal(ok?.level, "ok");
+    assert.match(ok?.detail ?? "", /labelled bin_t/);
+    assert.equal(linuxNodeLabelCheck(selinuxLabelExec("Permissive", "lib_t"), node), null);
   });
 
   it("5 without elevation install exits 77 and executes nothing", async () => {

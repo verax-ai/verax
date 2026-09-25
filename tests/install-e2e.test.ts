@@ -14,7 +14,7 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /windows-latest/);
     // Two Ubuntu releases plus ARM, and Apple Silicon plus Intel macOS.
     assert.match(workflow, /os: \[ubuntu-24\.04, ubuntu-22\.04, ubuntu-24\.04-arm\]/);
-    assert.match(workflow, /os: \[macos-15, macos-13\]/);
+    assert.match(workflow, /os: \[macos-15, macos-15-intel\]/);
     assert.match(workflow, /aarch64\) arch="arm64"/);
     assert.equal(/linux-x64/.test(workflow), false, "Linux Node must follow the runner architecture");
     assert.match(workflow, /pull_request/);
