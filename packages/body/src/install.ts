@@ -581,19 +581,54 @@ function setOwner(dir: string): PlanOp {
   return { op: "argv", argv: toolArgv("icacls", [dir, "/setowner", ADMINISTRATORS_SID, "/T", "/C"], "win32") };
 }
 
-function grantService(dir: string, tree: boolean, rights: "F" | "RX"): PlanOp {
-  const argv = toolArgv("icacls", [dir], "win32");
-  if (tree) argv.push("/T");
-  argv.push(
+/**
+ * Directory grant only. `(OI)(CI)` on a directory propagates to children.
+ * Never combine this with `/T`: `/inheritance:r /T` strips every child, and `(OI)(CI)`
+ * does not apply to a file, so each file is left with an empty DACL.
+ * `principal` is `verax-svc` in the plan; execute rewrites it to `*S-1-...`.
+ */
+export function windowsDirGrantArgs(dir: string, principal: string, rights: "F" | "RX"): string[] {
+  return [
+    dir,
     "/inheritance:r",
     "/grant:r",
-    `${VERAX_SVC}:(OI)(CI)${rights}`,
+    `${principal}:(OI)(CI)${rights}`,
     "/grant:r",
     `${ADMINISTRATORS}:(OI)(CI)F`,
     "/grant:r",
     `${SYSTEM_ACCOUNT}:(OI)(CI)F`,
-  );
-  return { op: "argv", argv };
+  ];
+}
+
+/** Children inherit the directory DACL. `/reset` carries no `(OI)` or `(CI)` grant. */
+export function windowsResetInheritArgs(dir: string): string[] {
+  return [`${dir}\\*`, "/reset", "/T", "/C"];
+}
+
+function grantService(dir: string, rights: "F" | "RX"): PlanOp {
+  return { op: "argv", argv: toolArgv("icacls", windowsDirGrantArgs(dir, VERAX_SVC, rights), "win32") };
+}
+
+function resetInherit(dir: string): PlanOp {
+  return { op: "argv", argv: toolArgv("icacls", windowsResetInheritArgs(dir), "win32") };
+}
+
+/** A file ACE has no `(OI)` or `(CI)`. Those flags are only legal on a directory. */
+function grantFile(file: string, principal: string, rights: "F" | "R"): PlanOp {
+  const ace = rights === "R" ? `${principal}:(R)` : `${principal}:${rights}`;
+  return {
+    op: "argv",
+    argv: toolArgv("icacls", [
+      file,
+      "/inheritance:r",
+      "/grant:r",
+      ace,
+      "/grant:r",
+      `${ADMINISTRATORS}:F`,
+      "/grant:r",
+      `${SYSTEM_ACCOUNT}:F`,
+    ], "win32"),
+  };
 }
 
 /** 32 characters drawn from 32 random bytes. Mixed case and a digit, no shell metacharacters. */
@@ -1006,7 +1041,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (platform === "win32") ops.push(...windowsAccountOps(winPassword, winCreate, tempDir));
   ops.push({ op: "mkdir", path: paths.codeDir, mode: 0o755 });
   if (platform === "win32") {
-    ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, false, "RX"));
+    ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, "RX"), resetInherit(paths.codeDir));
   }
   ops.push(
     { op: "write", path: npmFiles.userconfig, contents: "", mode: 0o600 },
@@ -1015,7 +1050,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     npmInstall,
   );
   if (!opts.fromTarballs) ops.push(npmAudit);
-  if (platform === "win32") ops.push(setOwner(paths.codeDir));
+  if (platform === "win32") ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, "RX"), resetInherit(paths.codeDir));
   if (platform === "darwin") {
     ops.push(
       { op: "argv", argv: toolArgv("chown", ["-R", "root:wheel", fixed.darwinRoot], "darwin") },
@@ -1037,10 +1072,11 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     const marker = installMarkerText(opts, paths, { createdAccount: true });
     ops.push(
       setOwner(paths.stateDir),
-      grantService(paths.stateDir, false, "F"),
+      grantService(paths.stateDir, "F"),
+      resetInherit(paths.stateDir),
       { op: "write", path: markerPath, contents: marker, mode: 0o644 },
       setOwner(markerPath),
-      grantService(markerPath, false, "F"),
+      grantFile(markerPath, VERAX_SVC, "F"),
     );
   } else if (platform === "linux") {
     ops.push(
@@ -1097,7 +1133,8 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (platform === "win32") {
     ops.push(
       setOwner(paths.stateDir),
-      grantService(paths.stateDir, true, "F"),
+      grantService(paths.stateDir, "F"),
+      resetInherit(paths.stateDir),
       {
         op: "argv",
         argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
@@ -1474,17 +1511,18 @@ function aclRole(principal: string, svcSid?: string): "svc" | "admin" | "system"
 export function verifyServiceAcl(
   text: string,
   kind: "code" | "state",
-  opts?: { dir?: string; svcSid?: string },
+  opts?: { dir?: string; svcSid?: string; file?: string },
 ): { ok: true; aces: ParsedAce[] } | { ok: false; aces: ParsedAce[]; detail: string } {
   const aces = parseIcaclsAces(text, opts?.dir);
   const expectedSvc = kind === "code" ? "RX" : "F";
-  const label = kind === "code" ? "code" : "state";
+  const label = opts?.file ?? (kind === "code" ? "code" : "state");
   const parsed = aces.map((ace) => `${ace.principal} ${ace.rights}`).join("\n");
   const fail = (why: string): { ok: false; aces: ParsedAce[]; detail: string } => ({
     ok: false,
     aces,
     detail: `${label} ACL mismatch: ${why}\n${parsed}`,
   });
+  if (aces.length === 0) return fail(opts?.file ? `empty ACL on ${opts.file}` : "empty ACL");
   const roles = aces.map((ace) => ({ ace, role: aclRole(ace.principal, opts?.svcSid) }));
   if (roles.some((row) => row.role === "other")) return fail("unexpected principal");
   const svc = roles.filter((row) => row.role === "svc");
@@ -1533,6 +1571,8 @@ export function installedBoundaryChecks(input: {
   aclText?: string;
   /** Windows icacls of the code directory. Same verifier as the state ACL, with svc RX. */
   codeAclText?: string;
+  /** icacls of files inside the state or code tree. Inherited ACEs count. An empty DACL fails, naming the file. */
+  fileAcls?: { path: string; text: string; kind: "code" | "state" }[];
   /** Service SID, so a read-back ACE named `*S-1-...` matches verax-svc. */
   svcSid?: string;
   mode?: number;
@@ -1582,6 +1622,15 @@ export function installedBoundaryChecks(input: {
       verdict.ok
         ? { id: "install-code-acl", level: "ok", detail: "code ACL is verax-svc RX, Administrators F, and SYSTEM F" }
         : { id: "install-code-acl", level: "fail", detail: verdict.detail },
+    );
+  }
+  for (const file of input.fileAcls ?? []) {
+    const verdict = verifyServiceAcl(file.text, file.kind, { dir: file.path, svcSid: input.svcSid, file: file.path });
+    const id = file.kind === "code" ? "install-code-acl" : "install-acl";
+    checks.push(
+      verdict.ok
+        ? { id, level: "ok", detail: `${file.path} ACL names only verax-svc, Administrators, and SYSTEM` }
+        : { id, level: "fail", detail: verdict.detail },
     );
   }
   if (input.mode !== undefined) {
@@ -2140,9 +2189,11 @@ function applyPrivateTemp(
       "/grant:r",
       `${SYSTEM_ACCOUNT}:(OI)(CI)F`,
     ], "win32"), undefined, systemToolEnv("win32", step.path));
-    if ((owner.status ?? 1) !== 0 || (grant.status ?? 1) !== 0) {
+    const reset = exec(toolArgv("icacls", windowsResetInheritArgs(step.path), "win32"), undefined, systemToolEnv("win32", step.path));
+    const resetOk = (reset.status ?? 1) === 0 || directoryIsEmpty(step.path);
+    if ((owner.status ?? 1) !== 0 || (grant.status ?? 1) !== 0 || !resetOk) {
       rmSync(step.path, { recursive: true, force: true });
-      const detail = (owner.stderr || owner.stdout || grant.stderr || grant.stdout || "icacls failed").trim();
+      const detail = (owner.stderr || owner.stdout || grant.stderr || grant.stdout || reset.stderr || reset.stdout || "icacls failed").trim();
       return { error: `icacls failed: ${detail}\n` };
     }
     return { parents };
@@ -2265,6 +2316,46 @@ export function stageTarballCopies(
   return { ok: true };
 }
 
+function directoryIsEmpty(dir: string): boolean {
+  try {
+    return readdirSync(dir).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/** `icacls <dir>\* /reset /T /C`. Null when this argv is not that reset. */
+function inheritResetDir(argv: readonly string[]): string | null {
+  if (!argv.includes("/reset")) return null;
+  const star = argv.find((arg) => arg.endsWith("\\*") || arg.endsWith("/*"));
+  return star ? star.slice(0, -2) : null;
+}
+
+/** Files whose DACL must match the directory grant. Missing files are skipped by the caller. */
+export function serviceAclFiles(root: string, kind: "code" | "state"): string[] {
+  if (kind === "code") {
+    return [path.win32.join(root, "node_modules", "@verax-ai", "body", "package.json")];
+  }
+  const files = [
+    path.win32.join(root, "local-issuer", "key.pem"),
+    path.win32.join(root, "verax.env"),
+  ];
+  const keysDir = path.win32.join(root, "keys");
+  try {
+    for (const name of readdirSync(keysDir)) {
+      const full = path.win32.join(keysDir, name);
+      try {
+        if (statSync(full).isFile()) files.push(full);
+      } catch {
+        // A name that vanished between listing and stat is not an ACL to check.
+      }
+    }
+  } catch {
+    // No keys directory yet.
+  }
+  return files;
+}
+
 function serviceGrantKind(argv: readonly string[]): "code" | "state" | null {
   for (const arg of argv) {
     const match = /^\*S-1-[0-9-]+:\(OI\)\(CI\)(RX|F)$/.exec(arg);
@@ -2372,6 +2463,8 @@ async function execute(
         return finish(EX_CONFIG);
       }
       if ((ran.status ?? 1) !== 0 && !step.optional) {
+        const resetDir = inheritResetDir(resolved);
+        if (resetDir !== null && directoryIsEmpty(resetDir)) continue;
         if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
         const detail = redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin);
         const what = step.argv.includes("signatures")
@@ -2392,6 +2485,17 @@ async function execute(
           const detail = verdict.ok ? (text.trim() || "icacls failed") : verdict.detail;
           io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
           return finish(EX_CONFIG);
+        }
+        for (const file of serviceAclFiles(target, grantKind)) {
+          if (!existsSync(file)) continue;
+          const fileRead = call(toolArgv("icacls", [file], "win32"));
+          const fileText = `${fileRead.stdout ?? ""}\n${fileRead.stderr ?? ""}`;
+          const fileVerdict = verifyServiceAcl(fileText, grantKind, { dir: file, svcSid, file });
+          if ((fileRead.status ?? 1) !== 0 || !fileVerdict.ok) {
+            const detail = fileVerdict.ok ? `empty ACL on ${file}` : fileVerdict.detail;
+            io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
+            return finish(EX_CONFIG);
+          }
         }
       }
       const expected = registryBodyVersion(resolved);
@@ -2940,6 +3044,14 @@ export function liveInstalledChecks(
   if (platform === "win32") {
     const acl = exec(toolArgv("icacls", [stateDir], "win32"));
     const codeAcl = exec(toolArgv("icacls", [codeDir], "win32"));
+    const fileAcls = [
+      ...serviceAclFiles(stateDir, "state").map((file) => ({ path: file, kind: "state" as const })),
+      ...serviceAclFiles(codeDir, "code").map((file) => ({ path: file, kind: "code" as const })),
+    ].flatMap((file) => {
+      if (!existsSync(file.path)) return [];
+      const read = exec(toolArgv("icacls", [file.path], "win32"));
+      return [{ path: file.path, kind: file.kind, text: `${read.stdout ?? ""}\n${read.stderr ?? ""}` }];
+    });
     const task = exec(toolArgv("schtasks", ["/Query", "/TN", TASK_NAME], "win32"));
     const ownerOf = (dir: string): string => {
       const literal = dir.replaceAll("'", "''");
@@ -2954,6 +3066,7 @@ export function liveInstalledChecks(
       hashOf: (rel) => hashUnder(codeDir, rel),
       aclText: `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`,
       codeAclText: `${codeAcl.stdout ?? ""}\n${codeAcl.stderr ?? ""}`,
+      fileAcls,
       winOwners: { state: ownerOf(stateDir), code: ownerOf(codeDir) },
       markerPresent: ourMarker(marker),
       installSource: markerSource(marker),

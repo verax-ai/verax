@@ -11,6 +11,8 @@ import { dirname, join, win32 } from "node:path";
 
 import {
   installedBoundaryChecks,
+  windowsDirGrantArgs,
+  windowsResetInheritArgs,
   LOGON_HOLDER_COMPARE,
   logonHolderMismatchLines,
   normalizeLogonHolders,
@@ -96,8 +98,9 @@ function argvs(ops: PlanOp[]): string[][] {
  */
 function winServiceAcl(dir: string): string {
   const base = dir.replace(/[\\/]+$/, "");
-  const code = /[/\\]Verax$/i.test(base);
-  const state = /[/\\]state$/i.test(base) || /install\.json$/i.test(base);
+  const codeFile = /[/\\]node_modules[/\\]@verax-ai[/\\]body[/\\]package\.json$/i.test(base);
+  const code = codeFile || /[/\\]Verax$/i.test(base);
+  const state = /[/\\]state([/\\]|$)/i.test(base) || /install\.json$/i.test(base);
   if (!code && !state) return `${dir} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`;
   const rights = code ? "RX" : "F";
   return [
@@ -1152,6 +1155,126 @@ describe("verax install plan", () => {
         assert.match(text, new RegExp(`acl ${escape(tempPath)}`));
       }
       assert.equal(existsSync(tempPath), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a directory grant never combines /T with (OI) or (CI), and a reset follows each one", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const icacls = argvs(win.ops).filter((argv) => systemToolName(argv[0] ?? "") === "icacls");
+    for (const argv of icacls) {
+      const text = argv.join(" ");
+      const grant = /\/grant/.test(text) && (/\(OI\)/.test(text) || /\(CI\)/.test(text));
+      if (grant) assert.equal(argv.includes("/T"), false, text);
+    }
+    const treeGrants = icacls.filter((argv) => argv.includes("/grant:r") && argv.some((arg) => /\(OI\)|\(CI\)/.test(arg)));
+    assert.ok(treeGrants.length >= 1);
+    for (const grant of treeGrants) {
+      const dir = grant[1] ?? "";
+      const at = icacls.indexOf(grant);
+      const next = icacls[at + 1];
+      assert.ok(next, dir);
+      assert.equal(next[1], `${dir}\\*`);
+      assert.ok(next.includes("/reset") && next.includes("/T") && next.includes("/C"));
+      assert.equal(next.some((arg) => /\(OI\)|\(CI\)/.test(arg)), false);
+    }
+  });
+
+  it("file icacls targets never carry (OI) or (CI)", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const files = new Set([win.tokenPath, win32.join(win32.dirname(win.stateDir), "install.json")]);
+    for (const argv of argvs(win.ops)) {
+      if (systemToolName(argv[0] ?? "") !== "icacls") continue;
+      if (!files.has(argv[1] ?? "")) continue;
+      assert.equal(argv.some((arg) => /\(OI\)|\(CI\)/.test(arg)), false, argv.join(" "));
+      if (argv.includes("/grant") || argv.includes("/grant:r")) {
+        assert.ok(argv.some((arg) => /:(F|\(R\))$/.test(arg)), argv.join(" "));
+      }
+    }
+  });
+
+  it("the ACL verifier refuses an empty file DACL and a DACL missing the service account", () => {
+    const file = "C:\\ProgramData\\Verax\\state\\local-issuer\\key.pem";
+    const empty = verifyServiceAcl("Successfully processed 1 files", "state", { dir: file, file });
+    assert.equal(empty.ok, false);
+    if (!empty.ok) assert.match(empty.detail, new RegExp(`empty ACL on ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    const noSvc = verifyServiceAcl(
+      ["BUILTIN\\Administrators:(I)(F)", "NT AUTHORITY\\SYSTEM:(I)(F)"].join("\n"),
+      "state",
+      { dir: file, file },
+    );
+    assert.equal(noSvc.ok, false);
+    if (!noSvc.ok) assert.match(noSvc.detail, /expected svc/);
+    const inherited = verifyServiceAcl(
+      [
+        `${file} *S-1-5-21-1:(I)(F)`,
+        "BUILTIN\\Administrators:(I)(F)",
+        "NT AUTHORITY\\SYSTEM:(I)(F)",
+      ].join("\n"),
+      "state",
+      { dir: file, file, svcSid: "S-1-5-21-1" },
+    );
+    assert.equal(inherited.ok, true);
+    const checks = installedBoundaryChecks({
+      codeDir: "C:\\Program Files\\Verax",
+      stateDir: "C:\\ProgramData\\Verax\\state",
+      manifest: null,
+      hashOf: () => null,
+      fileAcls: [{ path: file, text: "", kind: "state" }],
+      autostart: true,
+    });
+    assert.ok(checks.some((check) => check.level === "fail" && check.detail.includes(file)));
+  });
+
+  it("dir grant plus reset leaves a child file readable with inherited ACEs", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows icacls inheritance is checked on a Windows dev machine");
+      return;
+    }
+    const root = mkdtempSync(join(tmpdir(), "verax-acl-reset-"));
+    const file = join(root, "key.pem");
+    try {
+      writeFileSync(file, "pem");
+      const who = spawnSync(systemToolPath("whoami", "win32"), ["/user", "/fo", "csv", "/nh"], {
+        encoding: "utf8",
+        windowsHide: true,
+        shell: false,
+      });
+      const sid = /S-1-[0-9-]+/.exec(who.stdout ?? "")?.[0];
+      assert.ok(sid, who.stderr || who.stdout);
+      const icacls = systemToolPath("icacls", "win32");
+      const grant = spawnSync(icacls, windowsDirGrantArgs(root, `*${sid}`, "F"), {
+        encoding: "utf8",
+        windowsHide: true,
+        shell: false,
+      });
+      assert.equal(grant.status, 0, `${grant.stdout}\n${grant.stderr}`);
+      const reset = spawnSync(icacls, windowsResetInheritArgs(root), {
+        encoding: "utf8",
+        windowsHide: true,
+        shell: false,
+      });
+      assert.equal(reset.status, 0, `${reset.stdout}\n${reset.stderr}`);
+      assert.equal(readFileSync(file, "utf8"), "pem");
+      const listed = spawnSync(icacls, [file], { encoding: "utf8", windowsHide: true, shell: false });
+      assert.equal(listed.status, 0, listed.stderr);
+      assert.match(listed.stdout ?? "", /\(I\)/);
+      const named = spawnSync(
+        systemToolPath("powershell", "win32"),
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(New-Object Security.Principal.SecurityIdentifier '${sid}').Translate([Security.Principal.NTAccount]).Value`,
+        ],
+        { encoding: "utf8", windowsHide: true, shell: false, env: systemToolEnv("win32") },
+      );
+      assert.equal(named.status, 0, `${named.stdout}\n${named.stderr}`);
+      const account = (named.stdout ?? "").trim();
+      assert.ok(account, named.stderr || named.stdout);
+      const escaped = account.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      assert.match(listed.stdout ?? "", new RegExp(`${escaped}:\\(I\\)`));
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

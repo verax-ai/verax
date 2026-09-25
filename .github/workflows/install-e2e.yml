@@ -101,7 +101,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm pack -w @verax-ai/body --pack-destination $dir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          icacls $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" /T
+          icacls $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls "$dir\*" /reset /T /C
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "VERAX_TARBALLS=$dir"
       - name: diagnose tarball access
