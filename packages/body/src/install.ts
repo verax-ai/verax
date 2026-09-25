@@ -288,6 +288,16 @@ export type PlanOpts = {
   linuxCode?: { exists: boolean; symlink: boolean; owner: string };
   /** Windows `verax-svc`. Absent means the account is not there yet. */
   winAccount?: { exists: boolean; createdByUs: boolean };
+  /** Linux login `verax`. Absent means the account is not there yet. */
+  linuxAccount?: { exists: boolean; createdByUs: boolean };
+  /** Owner name of an existing `%ProgramData%\\Verax`. */
+  winRootOwner?: string;
+  /** icacls text of an existing `%ProgramData%\\Verax`. */
+  winRootAcl?: string;
+  /** `ProfileImagePath` for the invoking SID. A different `USERPROFILE` is refused. */
+  profileImagePath?: string;
+  /** Home from `getent` or `dscl`. `VERAX_INVOKING_HOME` must match it. */
+  invokingHome?: string;
   /** macOS `_verax` uid/gid chosen from the free 200–400 range. */
   darwinAccount?: { uid: number; gid: number; createUser: boolean; createGroup: boolean; recordUser: boolean; recordGroup: boolean };
   darwinState?: { exists: boolean; symlink: boolean };
@@ -299,7 +309,8 @@ export type PlanOp =
   | { op: "manifest"; dir: string }
   | { op: "mkdir"; path: string; mode?: number }
   | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string }
-  | { op: "write"; path: string; contents: string; mode?: number }
+  | { op: "write"; path: string; contents: string; mode?: number; exclusive?: boolean }
+  | { op: "lock-root"; path: string; create: boolean }
   | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean; noOwnerGrant: boolean }
   | { op: "remove"; path: string }
   | { op: "wait-healthz"; port: number; timeoutMs: number }
@@ -412,18 +423,29 @@ export function codeDirFor(
   return fixedPosix(posixRoot).linuxCode;
 }
 
-function linuxHome(env: NodeJS.ProcessEnv): { home: string } | { error: string } {
+function linuxHome(env: NodeJS.ProcessEnv, resolved?: string): { home: string } | { error: string } {
   const user = env.SUDO_USER?.trim() ?? "";
   if (user === "") return { error: "verax install needs SUDO_USER to find the invoking user's home" };
-  if (env.VERAX_INVOKING_HOME?.trim()) return { home: env.VERAX_INVOKING_HOME.trim() };
-  if (user === "root") return { home: "/root" };
-  return { home: `/home/${user}` };
+  const passwd = resolved?.trim() || (user === "root" ? "/root" : `/home/${user}`);
+  const given = env.VERAX_INVOKING_HOME?.trim() ?? "";
+  if (given !== "" && given !== passwd) {
+    return { error: `refusing: VERAX_INVOKING_HOME ${given} is not the home ${passwd}` };
+  }
+  return { home: passwd };
 }
 
-function darwinHome(env: NodeJS.ProcessEnv): { home: string } | { error: string } {
+function darwinHome(env: NodeJS.ProcessEnv, resolved?: string): { home: string } | { error: string } {
   const user = env.SUDO_USER?.trim() ?? "";
   if (user === "") return { error: "verax install needs SUDO_USER to find the invoking user's home" };
-  if (env.VERAX_INVOKING_HOME?.trim()) return { home: env.VERAX_INVOKING_HOME.trim() };
+  const given = env.VERAX_INVOKING_HOME?.trim() ?? "";
+  const passwd = resolved?.trim() ?? "";
+  if (passwd !== "") {
+    if (given !== "" && given !== passwd) {
+      return { error: `refusing: VERAX_INVOKING_HOME ${given} is not the home ${passwd}` };
+    }
+    return { home: passwd };
+  }
+  if (given !== "") return { home: given };
   if (user === "root") return { home: "/var/root" };
   return { error: "verax install needs the invoking user's home from dscl" };
 }
@@ -432,9 +454,10 @@ function pathsFor(
   platform: InstallPlatform,
   env: NodeJS.ProcessEnv,
   posixRoot?: string,
+  invokingHome?: string,
 ): { ok: true; paths: Paths; home: string } | { ok: false; code: number; message: string } {
   if (platform === "darwin") {
-    const home = darwinHome(env);
+    const home = darwinHome(env, invokingHome);
     if ("error" in home) return { ok: false, code: EX_CONFIG, message: `${home.error}\n` };
     const fixed = fixedPosix(posixRoot);
     const paths = {
@@ -457,7 +480,7 @@ function pathsFor(
   if (platform !== "linux") {
     return { ok: false, code: EX_CONFIG, message: "verax install does not run on this operating system\n" };
   }
-  const home = linuxHome(env);
+  const home = linuxHome(env, invokingHome);
   if ("error" in home) return { ok: false, code: EX_CONFIG, message: `${home.error}\n` };
   const fixed = fixedPosix(posixRoot);
   const paths = {
@@ -753,9 +776,9 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     "$sec = ConvertTo-SecureString -String $plain -AsPlainText -Force",
     user,
-    "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member 'verax-svc' -ErrorAction SilentlyContinue",
+    "$sid = (Get-LocalUser -Name 'verax-svc').SID.Value",
+    "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member $sid -ErrorAction SilentlyContinue",
     "Enable-LocalUser -Name 'verax-svc'",
-    "$sid = (New-Object System.Security.Principal.NTAccount('verax-svc')).Translate([System.Security.Principal.SecurityIdentifier]).Value",
     "$star = '*' + $sid",
     "$secedit = Join-Path $env:SystemRoot 'System32\\secedit.exe'",
     `$cfg = ${cfg}`,
@@ -796,7 +819,8 @@ function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFil
     `$action = New-ScheduledTaskAction -Execute ${psSingle(nodeBin)} -Argument ${psSingle(argument)}`,
     "$trigger = New-ScheduledTaskTrigger -AtStartup",
     "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)",
-    "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger $trigger -User 'verax-svc' -Password $plain -RunLevel Limited -Settings $settings -Force",
+    "$sid = (Get-LocalUser -Name 'verax-svc').SID.Value",
+    "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger $trigger -User $sid -Password $plain -RunLevel Limited -Settings $settings -Force",
     "Start-ScheduledTask -TaskName 'Verax Body'",
   ].join("; ");
   return powershellStdin(script, password, tempDir);
@@ -891,9 +915,17 @@ function bounds(opts: PlanOpts): { port: number; days: number } | { error: strin
   return { port, days };
 }
 
-function winPrincipal(env: NodeJS.ProcessEnv, profile: string): string {
-  const user = env.USERNAME?.trim() || path.win32.basename(profile);
-  return env.USERDOMAIN?.trim() ? `${env.USERDOMAIN.trim()}\\${user}` : user;
+/** Well-known groups. `whoami` must not hand the token ACE to one of these. */
+const GROUP_TOKEN_SIDS = new Set(["S-1-1-0", "S-1-5-11", "S-1-5-32-545"]);
+
+function tokenPrincipalFor(userSid: string | undefined): { principal: string } | { error: string } | null {
+  const sid = userSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
+  if (sid === "") return null;
+  if (GROUP_TOKEN_SIDS.has(sid)) {
+    return { error: `refusing token principal ${sid}: a well-known group is not the invoking user` };
+  }
+  if (!/^S-1-[0-9-]+$/.test(sid)) return { error: `refusing token principal ${sid}` };
+  return { principal: `*${sid}` };
 }
 
 function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: string, logFile: string): string {
@@ -940,7 +972,7 @@ function linuxOwnedByUs(fact: { exists: boolean; symlink: boolean; owner: string
 export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, opts: PlanOpts): InstallPlan {
   const posixRoot = platform === "win32" ? undefined : opts.posixRoot;
   const fixed = fixedPosix(posixRoot);
-  const located = pathsFor(platform, env, posixRoot);
+  const located = pathsFor(platform, env, posixRoot, opts.invokingHome);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -975,8 +1007,15 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   const { paths } = located;
   if (opts.reparsePath) return fail(EX_CONFIG, `refusing: ${opts.reparsePath} is a reparse point`);
   if (platform === "win32") {
+    const profile = env.USERPROFILE?.trim() ?? "";
+    const fromSid = opts.profileImagePath?.trim() ?? "";
+    if (fromSid !== "" && profile !== fromSid) {
+      return fail(EX_CONFIG, `refusing: USERPROFILE ${profile} is not ProfileImagePath ${fromSid}`);
+    }
     const root = path.win32.dirname(paths.stateDir);
-    if (opts.veraxRootExists && !opts.markerExists) {
+    const ownerBad = opts.winRootOwner !== undefined && !adminOrSystem(opts.winRootOwner);
+    const aclBad = opts.winRootAcl !== undefined && rootDaclRejected(opts.winRootAcl);
+    if (opts.veraxRootExists && (!opts.markerExists || ownerBad || aclBad)) {
       return fail(EX_CONFIG, `refusing: ${root} was not created by verax install`);
     }
     if (opts.stateExists && !opts.markerExists) {
@@ -986,6 +1025,9 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       return fail(EX_CONFIG, `refusing: ${VERAX_SVC} already exists and was not created by verax install`);
     }
   } else if (platform === "linux") {
+    if (opts.linuxAccount?.exists && !opts.linuxAccount.createdByUs) {
+      return fail(EX_CONFIG, "refusing: verax already exists and was not created by verax install");
+    }
     const stateOwn = linuxOwnedByUs(opts.linuxState, paths.stateDir);
     if (stateOwn) return stateOwn;
     const codeOwn = linuxOwnedByUs(opts.linuxCode, paths.codeDir);
@@ -1040,15 +1082,21 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     env: npmEnv,
     argv: [opts.execPath, opts.npmCli, "audit", "signatures", "--prefix", paths.codeDir, ...npmFlags(tempDir, platform)],
   };
-  const ops: PlanOp[] = [privateTempPlan(platform, tempDir)];
+  const tokenWho = platform === "win32" ? tokenPrincipalFor(opts.userSid) : null;
+  if (tokenWho && "error" in tokenWho) return fail(EX_CONFIG, tokenWho.error);
+  const ops: PlanOp[] = [];
+  if (platform === "win32") {
+    ops.push({ op: "lock-root", path: path.win32.dirname(paths.stateDir), create: !opts.veraxRootExists });
+  }
+  ops.push(privateTempPlan(platform, tempDir));
   if (platform === "win32") ops.push(...windowsAccountOps(winPassword, winCreate, tempDir));
   ops.push({ op: "mkdir", path: paths.codeDir, mode: 0o755 });
   if (platform === "win32") {
     ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, "RX"), resetInherit(paths.codeDir));
   }
   ops.push(
-    { op: "write", path: npmFiles.userconfig, contents: "", mode: 0o600 },
-    { op: "write", path: npmFiles.globalconfig, contents: "", mode: 0o600 },
+    { op: "write", path: npmFiles.userconfig, contents: "", mode: 0o600, exclusive: true },
+    { op: "write", path: npmFiles.globalconfig, contents: "", mode: 0o600, exclusive: true },
     ...(stagedTarballs.length > 0 ? [{ op: "stage-tarballs" as const, files: stagedTarballs }] : []),
     npmInstall,
   );
@@ -1086,10 +1134,12 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       {
         op: "write",
         path: path.posix.join(paths.codeDir, "install.json"),
-        contents: installMarkerText(opts, paths),
+        contents: installMarkerText(opts, paths, { createdUser: true }),
         mode: 0o644,
       },
-      { op: "argv", argv: toolArgv("useradd", ["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "verax"], "linux") },
+      ...(!opts.linuxAccount?.exists
+        ? [{ op: "argv" as const, argv: toolArgv("useradd", ["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "verax"], "linux") }]
+        : []),
       { op: "argv", argv: toolArgv("chown", ["verax:verax", paths.stateDir], "linux") },
       { op: "argv", argv: toolArgv("chmod", ["0700", paths.stateDir], "linux") },
     );
@@ -1140,7 +1190,11 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       setOwner(paths.stateDir),
       {
         op: "argv",
-        argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
+        argv: toolArgv("icacls", [
+          paths.tokenPath,
+          "/inheritance:r",
+          ...(tokenWho && "principal" in tokenWho ? ["/grant:r", `${tokenWho.principal}:(R)`] : []),
+        ], "win32"),
       },
     );
     ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile, logFile, tempDir));
@@ -1555,15 +1609,23 @@ export function manifestMismatches(manifest: string, hashOf: (rel: string) => st
 export type BoundaryCheck = { id: string; level: "ok" | "fail"; detail: string };
 
 function adminOrSystem(owner: string): boolean {
-  const n = owner.trim().toLowerCase();
+  const n = owner.trim().toLowerCase().replace(/^\*/, "");
   return (
     n === "builtin\\administrators" ||
     n === "administrators" ||
     n === "nt authority\\system" ||
     n === "system" ||
     n.endsWith("\\administrators") ||
-    n.endsWith("\\system")
+    n.endsWith("\\system") ||
+    n === "s-1-5-32-544" ||
+    n === "s-1-5-18"
   );
+}
+
+/** True when the Verax root DACL lets Users, CREATOR OWNER, Everyone, or Authenticated Users write. */
+function rootDaclRejected(text: string): boolean {
+  if (windowsUserCanWrite(text)) return true;
+  return /creator owner/i.test(text);
 }
 
 export function installedBoundaryChecks(input: {
@@ -1586,6 +1648,9 @@ export function installedBoundaryChecks(input: {
   codeMode?: number;
   /** Windows owner names for the state and code directories. */
   winOwners?: { state?: string; code?: string };
+  /** icacls of `%ProgramData%\\Verax`. A Users or CREATOR OWNER write ACE fails. */
+  rootAclText?: string;
+  rootDir?: string;
   markerPresent?: boolean;
   /** `install.json` `source`. `tarballs` is release testing, not the registry. */
   installSource?: string;
@@ -1683,6 +1748,14 @@ export function installedBoundaryChecks(input: {
         checks.push({ id: "install-owner", level: "ok", detail: `${label} owner ${owner}` });
       }
     }
+  }
+  if (input.rootAclText !== undefined) {
+    const bad = rootDaclRejected(input.rootAclText);
+    checks.push(
+      bad
+        ? { id: "install-root-acl", level: "fail", detail: `root ACL grants write to a non-administrator on ${input.rootDir ?? "the Verax root"}` }
+        : { id: "install-root-acl", level: "ok", detail: "root ACL names only Administrators and SYSTEM" },
+    );
   }
   if (input.markerPresent === false) {
     checks.push({ id: "install-marker", level: "fail", detail: "install.json is missing" });
@@ -2375,6 +2448,61 @@ export function stageTarballCopies(
   return { ok: true };
 }
 
+function applyLockRoot(
+  step: Extract<PlanOp, { op: "lock-root" }>,
+  exec: ToolExec,
+): { error: string } | { ok: true } {
+  const root = step.path;
+  if (step.create) {
+    const parent = path.win32.dirname(root);
+    if (parent !== root && !existsSync(parent)) mkdirSync(parent, { recursive: true });
+    try {
+      mkdirSync(root);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "EEXIST") {
+        return { error: `refusing: ${root} was not created by verax install\n` };
+      }
+      const message = err instanceof Error ? err.message : "mkdir failed";
+      return { error: `refusing: ${root} ${message}\n` };
+    }
+  }
+  const env = systemToolEnv("win32");
+  const owner = exec(toolArgv("icacls", [root, "/setowner", ADMINISTRATORS_SID], "win32"), undefined, env);
+  const grant = exec(toolArgv("icacls", [
+    root,
+    "/inheritance:r",
+    "/grant:r",
+    `${ADMINISTRATORS_SID}:(OI)(CI)F`,
+    "/grant:r",
+    `${SYSTEM_SID}:(OI)(CI)F`,
+  ], "win32"), undefined, env);
+  if ((owner.status ?? 1) !== 0 || (grant.status ?? 1) !== 0) {
+    if (step.create) rmSync(root, { recursive: true, force: true });
+    const detail = (owner.stderr || owner.stdout || grant.stderr || grant.stdout || "icacls failed").trim();
+    return { error: `icacls failed: ${detail}\n` };
+  }
+  if (step.create) {
+    let names: string[] = [];
+    try {
+      names = readdirSync(root);
+    } catch {
+      names = ["unreadable"];
+    }
+    if (names.length > 0) {
+      const child = path.win32.join(root, names[0] ?? "");
+      rmSync(root, { recursive: true, force: true });
+      return { error: `refusing: ${child} appeared in ${root}\n` };
+    }
+  }
+  const read = exec(toolArgv("icacls", [root], "win32"), undefined, env);
+  const text = `${read.stdout ?? ""}\n${read.stderr ?? ""}`;
+  if ((read.status ?? 1) !== 0 || rootDaclRejected(text)) {
+    if (step.create) rmSync(root, { recursive: true, force: true });
+    return { error: `refusing: ${root} was not created by verax install\n` };
+  }
+  return { ok: true };
+}
+
 function directoryIsEmpty(dir: string): boolean {
   try {
     return readdirSync(dir).length === 0;
@@ -2446,7 +2574,7 @@ async function execute(
       const ran = call(toolArgv("powershell", [
         "-NoProfile",
         "-Command",
-        "(New-Object System.Security.Principal.NTAccount('verax-svc')).Translate([System.Security.Principal.SecurityIdentifier]).Value",
+        "(Get-LocalUser -Name 'verax-svc').SID.Value",
       ], "win32"));
       svcSid = (ran.stdout ?? "").match(/S-1-[0-9-]+/)?.[0] ?? "";
       if (svcSid === "") return { error: "verax-svc has no SID\n" };
@@ -2488,15 +2616,15 @@ async function execute(
       writeManifest(step.dir);
       continue;
     }
-    if (step.op === "argv") {
-      if (systemToolName(step.argv[0] ?? "") === "useradd") {
-        const id = call(toolArgv("id", [step.argv[step.argv.length - 1] ?? "verax"], "linux"));
-        if ((id.status ?? 1) === EX_CONFIG && !step.optional) {
-          io.stderr.write(`${(id.stderr || id.stdout || "").trim()}\n`);
-          return finish(EX_CONFIG);
-        }
-        if (id.status === 0) continue;
+    if (step.op === "lock-root") {
+      const applied = applyLockRoot(step, call);
+      if ("error" in applied) {
+        io.stderr.write(applied.error.endsWith("\n") ? applied.error : `${applied.error}\n`);
+        return finish(EX_CONFIG);
       }
+      continue;
+    }
+    if (step.op === "argv") {
       const resolved = serviceArgv(step.argv);
       if ("error" in resolved) {
         io.stderr.write(resolved.error.endsWith("\n") ? resolved.error : `${resolved.error}\n`);
@@ -2593,7 +2721,7 @@ async function execute(
     }
     if (step.op === "write") {
       mkdirSync(path.dirname(step.path), { recursive: true });
-      writeFileSync(step.path, step.contents, { encoding: "utf8", mode: step.mode ?? 0o644 });
+      writeFileSync(step.path, step.contents, { encoding: "utf8", mode: step.mode ?? 0o644, flag: step.exclusive ? "wx" : "w" });
       continue;
     }
     if (step.op === "init") {
@@ -2634,21 +2762,39 @@ async function execute(
   }
 }
 
-function invokingEnv(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exec: (argv: string[]) => ExecResult): NodeJS.ProcessEnv {
+function invokingEnv(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  exec: (argv: string[]) => ExecResult,
+): { env: NodeJS.ProcessEnv; invokingHome?: string } | { error: string } {
+  const given = env.VERAX_INVOKING_HOME?.trim() ?? "";
   if (platform === "linux") {
-    if (env.VERAX_INVOKING_HOME?.trim() || !env.SUDO_USER?.trim()) return env;
-    const looked = exec(toolArgv("getent", ["passwd", env.SUDO_USER.trim()], "linux"));
+    const user = env.SUDO_USER?.trim() ?? "";
+    if (user === "") return { env };
+    const looked = exec(toolArgv("getent", ["passwd", user], "linux"));
     const home = (looked.stdout ?? "").split(":")[5]?.trim() ?? "";
-    if (looked.status === 0 && home !== "") return { ...env, VERAX_INVOKING_HOME: home };
-    return env;
+    if (looked.status === 0 && home !== "") {
+      if (given !== "" && given !== home) {
+        return { error: `refusing: VERAX_INVOKING_HOME ${given} is not the home ${home}` };
+      }
+      return { env: { ...env, VERAX_INVOKING_HOME: home }, invokingHome: home };
+    }
+    return { error: `verax install could not read the home of ${user} from getent` };
   }
   if (platform === "darwin") {
-    if (env.VERAX_INVOKING_HOME?.trim() || !env.SUDO_USER?.trim()) return env;
-    const looked = exec(toolArgv("dscl", [".", "-read", `/Users/${env.SUDO_USER.trim()}`, "NFSHomeDirectory"], "darwin"));
+    const user = env.SUDO_USER?.trim() ?? "";
+    if (user === "") return { env };
+    const looked = exec(toolArgv("dscl", [".", "-read", `/Users/${user}`, "NFSHomeDirectory"], "darwin"));
     const home = (looked.stdout ?? "").match(/NFSHomeDirectory:\s*(\S+)/)?.[1] ?? "";
-    if (looked.status === 0 && home !== "") return { ...env, VERAX_INVOKING_HOME: home };
+    if (looked.status === 0 && home !== "") {
+      if (given !== "" && given !== home) {
+        return { error: `refusing: VERAX_INVOKING_HOME ${given} is not the home ${home}` };
+      }
+      return { env: { ...env, VERAX_INVOKING_HOME: home }, invokingHome: home };
+    }
+    return { error: `verax install could not read the home of ${user} from dscl` };
   }
-  return env;
+  return { env };
 }
 
 function installMarkerText(
@@ -3100,7 +3246,13 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     return EX_CONFIG;
   }
   const exec = hooks.exec ?? defaultExec;
-  const plannedEnv = invokingEnv(platform, env, exec);
+  const resolvedEnv = invokingEnv(platform, env, exec);
+  if ("error" in resolvedEnv) {
+    io.stderr.write(`${resolvedEnv.error}\n`);
+    return EX_CONFIG;
+  }
+  const plannedEnv = resolvedEnv.env;
+  const invokingHome = resolvedEnv.invokingHome;
   const discovered = hooks.layout ?? discoverLayout(process.execPath, platform);
   if ("error" in discovered) {
     io.stderr.write(`${discovered.error}\n`);
@@ -3139,6 +3291,9 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
   let linuxState: PlanOpts["linuxState"];
   let linuxCode: PlanOpts["linuxCode"];
   let winAccount: PlanOpts["winAccount"];
+  let linuxAccount: PlanOpts["linuxAccount"];
+  let winRootOwner: string | undefined;
+  let winRootAcl: string | undefined;
   let darwinAccount: PlanOpts["darwinAccount"];
   let darwinState: PlanOpts["darwinState"];
   let darwinRoot: PlanOpts["darwinRoot"];
@@ -3156,10 +3311,19 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     }
     if (pathIsReparse(root, exec, platform)) reparsePath = root;
     else if (pathIsReparse(stateDir, exec, platform)) reparsePath = stateDir;
+    if (veraxRootExists) {
+      const literal = root.replaceAll("'", "''");
+      const owned = exec(toolArgv("powershell", ["-NoProfile", "-Command", `(Get-Acl -LiteralPath '${literal}').Owner`], "win32"));
+      winRootOwner = (owned.stdout ?? "").trim();
+      const acl = exec(toolArgv("icacls", [root], "win32"));
+      winRootAcl = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
+    }
   } else if (platform === "linux") {
     const codeDir = codeDirFor(platform, plannedEnv, posixRoot);
     linuxState = linuxFact(stateDir, exec);
     linuxCode = linuxFact(codeDir, exec);
+    const probed = exec(toolArgv("id", ["verax"], "linux"));
+    linuxAccount = { exists: probed.status === 0, createdByUs: markerFlags(path.posix.join(codeDir, "install.json")).createdUser };
   } else if (platform === "darwin") {
     markerExists = ourMarker(fixed.darwinMarker);
     darwinState = posixPresence(stateDir);
@@ -3170,6 +3334,29 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       return EX_CONFIG;
     }
     darwinAccount = picked;
+  }
+  let userSid = platform === "win32" ? invokingSid(exec) : undefined;
+  let profileImagePath: string | undefined;
+  if (platform === "win32" && userSid) {
+    const sid = userSid.toUpperCase();
+    if (GROUP_TOKEN_SIDS.has(sid)) {
+      io.stderr.write(`refusing token principal ${sid}: a well-known group is not the invoking user\n`);
+      return EX_CONFIG;
+    }
+    const looked = exec(toolArgv("powershell", [
+      "-NoProfile",
+      "-Command",
+      `(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\${sid}').ProfileImagePath`,
+    ], "win32"));
+    const image = (looked.stdout ?? "").trim().split(/\r?\n/).filter((line) => line.trim() !== "").pop() ?? "";
+    if (/^[A-Za-z]:\\/.test(image)) {
+      const profile = plannedEnv.USERPROFILE?.trim() ?? "";
+      if (profile !== "" && profile !== image) {
+        io.stderr.write(`refusing: USERPROFILE ${profile} is not ProfileImagePath ${image}\n`);
+        return EX_CONFIG;
+      }
+      profileImagePath = image;
+    }
   }
   const packed = parsed.fromTarballs ? collectTarballs(parsed.fromTarballs, platform, exec, io) : undefined;
   if (packed && "error" in packed) return packed.code;
@@ -3186,6 +3373,12 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     linuxState,
     linuxCode,
     winAccount,
+    linuxAccount,
+    winRootOwner,
+    winRootAcl,
+    userSid,
+    profileImagePath,
+    invokingHome,
     darwinAccount,
     darwinState,
     darwinRoot,
@@ -3415,7 +3608,12 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     return EX_CONFIG;
   }
   const exec = hooks.exec ?? defaultExec;
-  const plannedEnv = invokingEnv(platform, env, exec);
+  const resolvedEnv = invokingEnv(platform, env, exec);
+  if ("error" in resolvedEnv) {
+    io.stderr.write(`${resolvedEnv.error}\n`);
+    return EX_CONFIG;
+  }
+  const plannedEnv = resolvedEnv.env;
   const markerFile = platform === "win32"
     ? path.win32.join(path.win32.dirname(stateDirFor(platform, plannedEnv)), "install.json")
     : platform === "darwin"
@@ -3480,7 +3678,9 @@ export function liveInstalledChecks(
       const ran = exec(toolArgv("powershell", ["-NoProfile", "-Command", `(Get-Acl -LiteralPath '${literal}').Owner`], "win32"));
       return (ran.stdout ?? "").trim();
     };
-    const marker = path.win32.join(path.win32.dirname(stateDir), "install.json");
+    const rootDir = path.win32.dirname(stateDir);
+    const rootAcl = exec(toolArgv("icacls", [rootDir], "win32"));
+    const marker = path.win32.join(rootDir, "install.json");
     return installedBoundaryChecks({
       codeDir,
       stateDir,
@@ -3490,6 +3690,8 @@ export function liveInstalledChecks(
       codeAclText: `${codeAcl.stdout ?? ""}\n${codeAcl.stderr ?? ""}`,
       fileAcls,
       winOwners: { state: ownerOf(stateDir), code: ownerOf(codeDir) },
+      rootDir,
+      rootAclText: `${rootAcl.stdout ?? ""}\n${rootAcl.stderr ?? ""}`,
       markerPresent: ourMarker(marker),
       installSource: markerSource(marker),
       autostart: task.status === 0,

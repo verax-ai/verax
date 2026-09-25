@@ -197,6 +197,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rootAcl = icacls "$env:ProgramData\Verax" | Out-String
+          Write-Host $rootAcl
+          foreach ($banned in @('BUILTIN\Users', 'CREATOR OWNER', 'Everyone', 'Authenticated Users')) {
+            if ($rootAcl.Contains($banned)) { Write-Host "::error::ProgramData\Verax ACL contains $banned"; exit 1 }
+          }
           $acl = icacls "$env:ProgramData\Verax\state" | Out-String
           $principals = @()
           foreach ($line in ($acl -split "`n")) {

@@ -44,6 +44,12 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /\$code -ne 78/);
     assert.match(workflow, /was not created by verax install/);
     assert.match(workflow, /Verax\\state/);
+    assert.match(workflow, /icacls "\$env:ProgramData\\Verax" \| Out-String/);
+    assert.match(workflow, /Write-Host \$rootAcl/);
+    assert.match(workflow, /BUILTIN\\Users/);
+    assert.match(workflow, /CREATOR OWNER/);
+    assert.match(workflow, /Authenticated Users/);
+    assert.match(workflow, /Write-Host "::error::ProgramData\\Verax ACL contains \$banned"; exit 1/);
   });
 
   it("reports step failures where the job log shows them", () => {

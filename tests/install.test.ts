@@ -85,7 +85,7 @@ const darwinOpts = {
   stateExists: false,
 };
 
-function okPlan(platform: "win32" | "linux", env: NodeJS.ProcessEnv, opts: typeof winOpts | typeof linuxOpts) {
+function okPlan(platform: "win32" | "linux", env: NodeJS.ProcessEnv, opts: Parameters<typeof planInstall>[2]) {
   const plan = planInstall(platform, env, opts);
   if (!plan.ok) throw new Error(plan.message);
   return plan;
@@ -177,19 +177,22 @@ describe("verax install plan", () => {
   });
 
   it("install init carries no owner grant, and only the token icacls names the invoking user", () => {
-    const win = okPlan("win32", winEnv, winOpts);
+    const sid = "S-1-5-21-1001";
+    const win = okPlan("win32", { ...winEnv, USERNAME: "Everyone", USERDOMAIN: "" }, { ...winOpts, userSid: sid });
     const init = win.ops.find((op) => op.op === "init");
     assert.ok(init && init.op === "init");
     assert.equal(init.noOwnerGrant, true);
-    const user = `${winEnv.USERDOMAIN}\\${winEnv.USERNAME}`;
     for (const argv of argvs(win.ops)) {
       if (systemToolName(argv[0] ?? "") !== "icacls") continue;
-      const grantsUser = argv.some((arg) => arg.includes(user) || arg.includes(`${winEnv.USERNAME}:`));
+      const grantsUser = argv.some((arg) => arg.includes(`*${sid}:(R)`));
+      const grantsName = argv.some((arg) => /Everyone:\(R\)/.test(arg) || arg.includes("USERNAME"));
       if (argv[1] === win.tokenPath) {
         assert.equal(grantsUser, true, argv.join(" "));
+        assert.equal(grantsName, false, argv.join(" "));
         continue;
       }
       assert.equal(grantsUser, false, argv.join(" "));
+      assert.equal(grantsName, false, argv.join(" "));
     }
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     const linuxInit = linux.ops.find((op) => op.op === "init");
@@ -376,13 +379,15 @@ describe("verax install plan", () => {
   });
 
   it("refuses a grant or setowner argument that starts with a bare SID", () => {
-    const refused = planInstall("win32", { ...winEnv, USERNAME: "S-1-5-21-1003", USERDOMAIN: "" }, winOpts);
-    if (refused.ok) throw new Error("accepted a bare SID grant");
+    const refused = planInstall("win32", winEnv, { ...winOpts, userSid: "S-1-1-0" });
+    if (refused.ok) throw new Error("accepted a well-known group as the token principal");
     assert.equal(refused.code, 78);
-    assert.match(refused.message, /S-1-5-21-1003:\(R\)/);
-    assert.match(refused.message, /leading \*/);
+    assert.match(refused.message, /S-1-1-0/);
+    assert.match(refused.message, /token principal/);
 
-    const win = okPlan("win32", winEnv, winOpts);
+    const win = okPlan("win32", winEnv, { ...winOpts, userSid: "S-1-5-21-1003" });
+    const tokenGrant = argvs(win.ops).find((argv) => argv[1] === win.tokenPath);
+    assert.ok(tokenGrant?.includes("*S-1-5-21-1003:(R)"));
     for (const argv of argvs(win.ops)) {
       if (systemToolName(argv[0] ?? "") !== "icacls") continue;
       for (let i = 0; i < argv.length; i += 1) {
