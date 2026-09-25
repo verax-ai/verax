@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
@@ -10,9 +11,12 @@ import { join, win32 } from "node:path";
 import {
   installedBoundaryChecks,
   planInstall,
+  PS_ERROR_MARK,
+  registryLockProblems,
   resolveTrustPath,
   restrictToOwnerWin32,
   runInstall,
+  systemToolEnv,
   systemToolName,
   systemToolPath,
   windowsUserCanWrite,
@@ -76,6 +80,26 @@ function okPlan(platform: "win32" | "linux", env: NodeJS.ProcessEnv, opts: typeo
 
 function argvs(ops: PlanOp[]): string[][] {
   return ops.filter((op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv").map((op) => op.argv);
+}
+
+/** npm `install --prefix <codeDir>` stands in for a real registry install. */
+function stageRegistryInstall(argv: readonly string[], version: string): void {
+  if (!argv.includes("install") || !argv.includes("--prefix")) return;
+  const codeDir = argv[argv.indexOf("--prefix") + 1];
+  if (!codeDir) return;
+  const pkgDir = join(codeDir, "node_modules", "@verax-ai", "body");
+  mkdirSync(pkgDir, { recursive: true });
+  writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "@verax-ai/body", version }));
+  writeFileSync(
+    join(codeDir, "package-lock.json"),
+    JSON.stringify({
+      packages: {
+        "node_modules/@verax-ai/body": {
+          resolved: `https://registry.npmjs.org/@verax-ai/body/-/body-${version}.tgz`,
+        },
+      },
+    }),
+  );
 }
 
 describe("verax install plan", () => {
@@ -222,6 +246,8 @@ describe("verax install plan", () => {
     assert.equal(dumped.includes("copy-tree"), false);
     assert.equal(dumped.includes("stage-deps"), false);
     assert.equal(dumped.includes("AppData"), false);
+    const temp = win.ops.find((op) => op.op === "private-temp");
+    if (!temp || temp.op !== "private-temp") throw new Error("missing private temp");
     const install = argvs(win.ops).find((argv) => argv.includes("--omit=dev"));
     const audit = argvs(win.ops).find((argv) => argv.includes("signatures"));
     if (!install || !audit) throw new Error("missing npm install or npm audit signatures");
@@ -232,9 +258,16 @@ describe("verax install plan", () => {
       "--prefix",
       win.codeDir,
       "--omit=dev",
+      "--userconfig",
+      win32.join(temp.path, "empty-npmrc"),
+      "--globalconfig",
+      win32.join(temp.path, "empty-globalrc"),
+      "--registry",
+      "https://registry.npmjs.org/",
       "--ignore-scripts",
       "--no-audit",
       "--no-fund",
+      "--no-update-notifier",
       "@verax-ai/body@0.3.0",
     ]);
     assert.ok(audit.includes("audit"));
@@ -530,6 +563,7 @@ describe("verax install plan", () => {
           if (tool === "id") return { status: 1, stdout: "", stderr: "" };
           if (tool === "dscl" && argv.includes("-read")) return { status: 1, stdout: "", stderr: "" };
           if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          stageRegistryInstall(argv, layout.bodyVersion);
           return { status: 0, stdout: "", stderr: "" };
         },
         io: {
@@ -548,6 +582,68 @@ describe("verax install plan", () => {
       }
     } finally {
       await new Promise<void>((resolve) => health.close(() => resolve()));
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("runInstall rejects a registry body whose version is not the running body", async (t) => {
+    const platform = process.platform === "win32" || process.platform === "linux" || process.platform === "darwin"
+      ? process.platform
+      : null;
+    if (platform === null) {
+      t.skip("verax install does not run on this operating system");
+      return;
+    }
+    const root = mkdtempSync(join(tmpdir(), "verax-install-version-"));
+    const home = join(root, "home");
+    const env: NodeJS.ProcessEnv = platform === "win32"
+      ? { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: home }
+      : { SUDO_USER: "runner", VERAX_INVOKING_HOME: home };
+    const trustedStandIn = platform === "win32" ? undefined : ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
+      try {
+        const st = lstatSync(file);
+        return !st.isSymbolicLink() && st.uid === 0 && (st.mode & 0o022) === 0;
+      } catch {
+        return false;
+      }
+    });
+    if (platform !== "win32" && trustedStandIn === undefined) {
+      rmSync(root, { recursive: true, force: true });
+      t.skip("no root-owned binary to stand in for Node");
+      return;
+    }
+    const layout = platform === "win32"
+      ? { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli }
+      : { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! };
+    const posixRoot = platform === "win32" ? undefined : join(root, "fsroot");
+    const err: string[] = [];
+    try {
+      const code = await runInstall(["install", "--port", "8801"], {
+        platform,
+        env,
+        elevated: () => true,
+        layout,
+        posixRoot,
+        exec: (argv) => {
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
+            return { status: 2, stdout: "", stderr: "not found\n" };
+          }
+          if (tool === "id") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "dscl" && argv.includes("-read")) return { status: 1, stdout: "", stderr: "" };
+          if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          stageRegistryInstall(argv, "0.0.1");
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: {
+          stdout: { write: () => undefined },
+          stderr: { write: (s: string) => err.push(s) },
+        },
+      });
+      assert.notEqual(code, 0);
+      assert.match(err.join(""), new RegExp(`installed @verax-ai/body version 0\\.0\\.1 is not ${layout.bodyVersion}`));
+    } finally {
       rmSync(root, { recursive: true, force: true });
     }
   });
@@ -580,6 +676,7 @@ describe("verax install plan", () => {
             return { status: 2, stdout: "", stderr: "not found\n" };
           }
           if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (systemToolName(argv[0] ?? "") === "fsutil") return { status: 1, stdout: "", stderr: "" };
           return { status: 0, stdout: "", stderr: "" };
         },
         io: {
@@ -669,9 +766,11 @@ describe("verax install plan", () => {
     assert.equal(windowsUserCanWrite(nodejs, { path: "C:\\Program Files\\nodejs", ancestor: true }), false);
     const err: string[] = [];
     let sawAdd = false;
+    const root = mkdtempSync(join(tmpdir(), "verax-ancestor-ok-"));
+    try {
     await runInstall(["install", "--port", "8801"], {
       platform: "win32",
-      env: winEnv,
+      env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
       elevated: () => true,
       layout: winOpts,
       exec: (argv) => {
@@ -686,12 +785,16 @@ describe("verax install plan", () => {
           return { status: 1, stdout: "", stderr: "add failed\n" };
         }
         if (systemToolName(argv[0] ?? "") === "net") return { status: 2, stdout: "", stderr: "not found\n" };
+        if (systemToolName(argv[0] ?? "") === "fsutil") return { status: 1, stdout: "", stderr: "" };
         return { status: 0, stdout: "", stderr: "" };
       },
       io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
     });
     assert.equal(err.join("").includes("can be changed by your user account"), false);
     assert.equal(sawAdd, true);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("refuses an ancestor that grants Users delete-child", async () => {
@@ -793,6 +896,225 @@ describe("verax install plan", () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it("powershell ops carry PATHEXT and never the caller PATH", () => {
+    const poisoned = { ...winEnv, PATH: "C:\\evil", Path: "C:\\evil", PATHEXT: ".TXT" };
+    const win = okPlan("win32", poisoned, winOpts);
+    const scripts = win.ops.filter(
+      (op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "powershell",
+    );
+    assert.ok(scripts.length >= 1);
+    for (const op of scripts) {
+      assert.match(op.env?.PATHEXT ?? "", /\.EXE/i);
+      assert.equal(op.env?.PATH, undefined);
+      assert.equal(op.env?.Path, undefined);
+      assert.match(op.env?.ComSpec ?? "", /\\System32\\cmd\.exe$/i);
+      assert.match(op.env?.SystemDrive ?? "", /^[A-Za-z]:$/);
+      assert.ok(op.env?.SystemRoot);
+      assert.ok(op.env?.windir);
+    }
+    const built = systemToolEnv("win32");
+    assert.equal(built.PATH, undefined);
+    assert.match(built.PATHEXT ?? "", /\.EXE/i);
+  });
+
+  it("generated powershell scripts stop on errors and check every native call", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const scripts = win.ops.filter(
+      (op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "powershell",
+    );
+    assert.ok(scripts.length >= 1);
+    for (const op of scripts) {
+      const text = op.argv[op.argv.length - 1] ?? "";
+      assert.ok(text.startsWith("$ErrorActionPreference = 'Stop'"));
+      assert.match(text, /Set-StrictMode -Version 3/);
+      assert.match(text, /catch\s*\{[^}]*exit\s+[1-9]/);
+      const native = [...text.matchAll(/& \$(\w+)/g)];
+      for (const call of native) {
+        const after = text.slice((call.index ?? 0) + call[0].length);
+        const next = after.slice(0, after.indexOf("& $") === -1 ? after.length : after.indexOf("& $"));
+        assert.match(next, /\$LASTEXITCODE -ne 0/);
+        assert.match(next, new RegExp(`${call[1]} exited \\$LASTEXITCODE`));
+      }
+    }
+  });
+
+  it("a powershell script failure prints stderr and stops, including a zero exit with an error marker", async () => {
+    const err: string[] = [];
+    let continued = false;
+    let password = "";
+    const root = mkdtempSync(join(tmpdir(), "verax-ps-fail-"));
+    let code = 1;
+    try {
+    code = await runInstall(["install", "--port", "8801"], {
+      platform: "win32",
+      env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+      elevated: () => true,
+      layout: winOpts,
+      exec: (argv, stdin) => {
+        if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
+          password = stdin ?? "";
+          return { status: 0, stdout: stdin ?? "", stderr: `${PS_ERROR_MARK} secedit exited 1\n` };
+        }
+        if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("Register-ScheduledTask"))) {
+          continued = true;
+        }
+        if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+        if (systemToolName(argv[0] ?? "") === "net") return { status: 2, stdout: "", stderr: "not found\n" };
+        if (systemToolName(argv[0] ?? "") === "fsutil") return { status: 1, stdout: "", stderr: "" };
+        if (systemToolName(argv[0] ?? "") === "icacls") {
+          const target = argv[1] ?? "";
+          return { status: 0, stdout: `${target} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`, stderr: "" };
+        }
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+    });
+    assert.equal(code, 1);
+    assert.equal(continued, false);
+    assert.ok(password.length >= 32);
+    const written = err.join("");
+    assert.match(written, new RegExp(PS_ERROR_MARK));
+    assert.equal(written.includes(password), false);
+    assert.equal(written.includes("New-LocalUser"), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("private install temp is admin-only under ProgramData and precedes every script", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const scripts = win.ops.filter(
+      (op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "powershell",
+    );
+    assert.ok(scripts.length >= 1);
+    const firstScript = win.ops.findIndex(
+      (op) => op.op === "argv" && systemToolName(op.op === "argv" ? op.argv[0] ?? "" : "") === "powershell",
+    );
+    const tempAt = win.ops.findIndex((op) => op.op === "private-temp");
+    assert.ok(tempAt >= 0 && firstScript > tempAt);
+    const temp = win.ops[tempAt];
+    if (!temp || temp.op !== "private-temp") throw new Error("missing private temp");
+    assert.match(temp.path, /^C:\\ProgramData\\Verax\\install-tmp-[0-9a-f]{32}$/);
+    assert.deepEqual(temp.acl, ["BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"]);
+    assert.equal(temp.inheritance, "removed");
+    assert.equal(temp.owner, "*S-1-5-32-544");
+    for (const op of scripts) {
+      assert.equal(op.env?.TEMP, temp.path);
+      assert.equal(op.env?.TMP, temp.path);
+      assert.match(op.env?.TEMP ?? "", /\\ProgramData\\Verax\\/);
+      assert.equal((op.env?.TEMP ?? "").includes("AppData"), false);
+    }
+    const account = scripts.find((op) => (op.argv[op.argv.length - 1] ?? "").includes("SeBatchLogonRight"));
+    if (!account) throw new Error("missing secedit script");
+    const text = account.argv[account.argv.length - 1] ?? "";
+    assert.equal(text.includes("$env:TEMP"), false);
+    assert.match(text, /verax-rights\.cfg/);
+    assert.match(text, /verax-rights-after\.cfg/);
+    assert.match(text, /secedit \/export/);
+    assert.match(text, /previous holders plus the service account/);
+    const linux = okPlan("linux", linuxEnv, linuxOpts);
+    const linuxTemp = linux.ops.find((op) => op.op === "private-temp");
+    if (!linuxTemp || linuxTemp.op !== "private-temp") throw new Error("missing posix private temp");
+    assert.equal(linuxTemp.mode, 0o700);
+    assert.match(linuxTemp.path, /^\/var\/tmp\/verax-install-tmp-[0-9a-f]{32}$/);
+  });
+
+  it("npm install drops the caller npm config and refuses a foreign lock resolution", () => {
+    const hostile = {
+      ...winEnv,
+      HOME: "C:\\Users\\evil",
+      npm_config_registry: "https://evil.example",
+      NPM_CONFIG_REGISTRY: "https://evil.example",
+    };
+    const win = okPlan("win32", hostile, winOpts);
+    const temp = win.ops.find((op) => op.op === "private-temp");
+    if (!temp || temp.op !== "private-temp") throw new Error("missing private temp");
+    const allowed = new Set([
+      "SystemRoot",
+      "windir",
+      "PATHEXT",
+      "ComSpec",
+      "SystemDrive",
+      "PATH",
+      "HOME",
+      "USERPROFILE",
+      "APPDATA",
+      "LOCALAPPDATA",
+      "TEMP",
+      "TMP",
+      "npm_config_cache",
+    ]);
+    const npmOps = win.ops.filter(
+      (op): op is Extract<PlanOp, { op: "argv" }> =>
+        op.op === "argv" && (op.argv.includes("--omit=dev") || op.argv.includes("signatures")),
+    );
+    assert.equal(npmOps.length, 2);
+    for (const op of npmOps) {
+      for (const key of Object.keys(op.env ?? {})) assert.equal(allowed.has(key), true, key);
+      assert.equal(op.env?.npm_config_registry, undefined);
+      assert.equal(op.env?.NPM_CONFIG_REGISTRY, undefined);
+      assert.equal(op.env?.HOME, temp.path);
+      assert.equal(op.env?.USERPROFILE, temp.path);
+      assert.equal(op.env?.APPDATA, temp.path);
+      assert.equal(op.env?.LOCALAPPDATA, temp.path);
+      assert.equal(op.env?.TEMP, temp.path);
+      assert.equal(op.env?.TMP, temp.path);
+      assert.equal(op.env?.npm_config_cache, win32.join(temp.path, "cache"));
+      assert.match(op.env?.PATH ?? "", /nodejs/);
+      assert.equal(op.cwd, temp.path);
+      assert.ok(op.argv.includes("--userconfig"));
+      assert.equal(op.argv[op.argv.indexOf("--userconfig") + 1], win32.join(temp.path, "empty-npmrc"));
+      assert.equal(op.argv[op.argv.indexOf("--globalconfig") + 1], win32.join(temp.path, "empty-globalrc"));
+      assert.equal(op.argv[op.argv.indexOf("--registry") + 1], "https://registry.npmjs.org/");
+    }
+    assert.ok(win.ops.some((op) => op.op === "write" && op.path === win32.join(temp.path, "empty-npmrc") && op.contents === ""));
+    const linuxHostile = { ...linuxEnv, HOME: "/home/evil", npm_config_registry: "https://evil.example", NPM_CONFIG_REGISTRY: "https://evil.example" };
+    const linux = okPlan("linux", linuxHostile, linuxOpts);
+    const linuxTemp = linux.ops.find((op) => op.op === "private-temp");
+    if (!linuxTemp || linuxTemp.op !== "private-temp") throw new Error("missing posix private temp");
+    const linuxNpm = linux.ops.find((op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && op.argv.includes("--omit=dev"));
+    if (!linuxNpm) throw new Error("missing linux npm install");
+    assert.equal(linuxNpm.env?.HOME, linuxTemp.path);
+    assert.equal(linuxNpm.env?.npm_config_registry, undefined);
+    assert.equal(linuxNpm.env?.NPM_CONFIG_REGISTRY, undefined);
+    assert.equal(linuxNpm.argv[linuxNpm.argv.indexOf("--registry") + 1], "https://registry.npmjs.org/");
+    const bad = registryLockProblems(JSON.stringify({
+      packages: { "node_modules/evil": { resolved: "https://evil.example/evil.tgz" } },
+    }));
+    assert.deepEqual(bad, ["https://evil.example/evil.tgz"]);
+    const good = registryLockProblems(JSON.stringify({
+      packages: { "node_modules/@verax-ai/body": { resolved: "https://registry.npmjs.org/@verax-ai/body/-/body-0.3.0.tgz" } },
+    }));
+    assert.deepEqual(good, []);
+  });
+
+  it(
+    "powershell with the product env runs whoami and rejects a missing exe",
+    { skip: process.platform === "win32" ? false : "spawns the real powershell.exe" },
+    () => {
+      const env = systemToolEnv("win32");
+      const ps = systemToolPath("powershell", "win32");
+      const ok = spawnSync(
+        ps,
+        ["-NoProfile", "-NonInteractive", "-Command", "& (Join-Path $env:SystemRoot 'System32\\whoami.exe')"],
+        { encoding: "utf8", windowsHide: true, shell: false, env },
+      );
+      assert.equal(ok.status, 0, ok.stderr);
+      assert.match(`${ok.stdout}`, /\S/);
+      const missing = spawnSync(
+        ps,
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          "try { & (Join-Path $env:SystemRoot 'System32\\verax-no-such.exe') } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }",
+        ],
+        { encoding: "utf8", windowsHide: true, shell: false, env },
+      );
+      assert.notEqual(missing.status, 0);
+    },
+  );
 });
 
 function textsUnder(dir: string): string {

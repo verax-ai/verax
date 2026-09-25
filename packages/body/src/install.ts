@@ -136,17 +136,37 @@ export function requireSystemTool(tool: string, platform: NodeJS.Platform = proc
   return resolved;
 }
 
-/** Env for system-tool spawns. The caller's PATH is not copied. */
-export function systemToolEnv(platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
+/** Windows default. Without `.EXE`, PowerShell treats a native binary as a document and a pipeline exits 0. */
+const WIN32_PATHEXT = ".COM;.EXE;.BAT;.CMD;.VBS;.VBE;.JS;.JSE;.WSF;.WSH;.MSC";
+
+/** Stderr lines from a generated PowerShell script. A line with this prefix is a failed step even when the process exits 0. */
+export const PS_ERROR_MARK = "verax-ps-error:";
+
+/**
+ * Env for system-tool spawns. The caller's PATH is not copied.
+ * TEMP/TMP are set only to `tempDir`. The caller's TEMP is a user-writable
+ * AppData directory and must not receive install files.
+ */
+export function systemToolEnv(platform: NodeJS.Platform = process.platform, tempDir?: string): NodeJS.ProcessEnv {
   if (platform === "win32") {
-    const env: NodeJS.ProcessEnv = {};
-    if (process.env.SystemRoot) env.SystemRoot = process.env.SystemRoot;
-    if (process.env.windir) env.windir = process.env.windir;
-    if (process.env.TEMP) env.TEMP = process.env.TEMP;
-    if (process.env.TMP) env.TMP = process.env.TMP;
+    const root = process.env.SystemRoot?.trim() || "C:\\Windows";
+    const drive = path.win32.parse(root).root.replace(/[\\/]+$/, "") || "C:";
+    const env: NodeJS.ProcessEnv = {
+      SystemRoot: process.env.SystemRoot ?? root,
+      windir: process.env.windir ?? root,
+      PATHEXT: WIN32_PATHEXT,
+      ComSpec: path.win32.join(root, "System32", "cmd.exe"),
+      SystemDrive: drive,
+    };
+    if (tempDir) {
+      env.TEMP = tempDir;
+      env.TMP = tempDir;
+    }
     return env;
   }
-  return { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" };
+  const env: NodeJS.ProcessEnv = { PATH: "/usr/sbin:/usr/bin:/sbin:/bin" };
+  if (tempDir) env.TMPDIR = tempDir;
+  return env;
 }
 
 function toolArgv(tool: string, args: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
@@ -273,12 +293,23 @@ export type PlanOpts = {
 export type PlanOp =
   | { op: "manifest"; dir: string }
   | { op: "mkdir"; path: string; mode?: number }
-  | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string }
+  | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string }
   | { op: "write"; path: string; contents: string; mode?: number }
   | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean }
   | { op: "remove"; path: string }
   | { op: "wait-healthz"; port: number; timeoutMs: number }
-  | { op: "print"; text: string };
+  | { op: "print"; text: string }
+  | {
+      op: "private-temp";
+      path: string;
+      /** Win32 DACL after inheritance is removed. POSIX omits this. */
+      acl?: readonly string[];
+      inheritance?: "removed";
+      /** Win32 owner SID, starred for icacls (`*S-1-5-32-544`). */
+      owner?: string;
+      /** POSIX directory mode. Root creates it. */
+      mode?: number;
+    };
 
 export type InstallPlan =
   | { ok: false; code: number; message: string }
@@ -286,7 +317,7 @@ export type InstallPlan =
 
 export type ExecResult = { status: number | null; stdout?: string; stderr?: string };
 
-export type ToolExec = (argv: string[], stdin?: string) => ExecResult;
+export type ToolExec = (argv: string[], stdin?: string, env?: NodeJS.ProcessEnv, cwd?: string) => ExecResult;
 
 export type InstallIo = {
   stdout: { write(s: string): unknown };
@@ -581,20 +612,36 @@ function psSingle(value: string): string {
 }
 
 /** Script text has no secret. The password is the first stdin line, read by the script. */
-function powershellStdin(script: string, password: string): PlanOp {
+function powershellStdin(body: string, password: string, tempDir: string): PlanOp {
   return {
     op: "argv",
-    argv: toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], "win32"),
+    argv: toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", powerShellScript(body)], "win32"),
     stdin: `${password}\n`,
+    env: systemToolEnv("win32", tempDir),
   };
 }
 
-function windowsAccountOps(password: string, create: boolean): PlanOp[] {
+/** Terminating errors exit 1. Native calls still need an explicit `$LASTEXITCODE` check. */
+export function powerShellScript(body: string): string {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "Set-StrictMode -Version 3",
+    `try { ${body} } catch { [Console]::Error.WriteLine("${PS_ERROR_MARK} $($_.Exception.Message)"); [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`,
+  ].join("; ");
+}
+
+function psNative(command: string, tool: string): string {
+  return `${command}; if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("${PS_ERROR_MARK} ${tool} exited $LASTEXITCODE"); exit $LASTEXITCODE }`;
+}
+
+function windowsAccountOps(password: string, create: boolean, tempDir: string): PlanOp[] {
   const user = create
     ? "New-LocalUser -Name 'verax-svc' -Password $sec -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description 'Verax body service account'"
     : "Set-LocalUser -Name 'verax-svc' -Password $sec";
+  const cfg = psSingle(path.win32.join(tempDir, "verax-rights.cfg"));
+  const db = psSingle(path.win32.join(tempDir, "verax-rights.sdb"));
+  const after = psSingle(path.win32.join(tempDir, "verax-rights-after.cfg"));
   const script = [
-    "$ErrorActionPreference = 'Stop'",
     "$plain = [Console]::In.ReadLine()",
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     "$sec = ConvertTo-SecureString -String $plain -AsPlainText -Force",
@@ -602,24 +649,43 @@ function windowsAccountOps(password: string, create: boolean): PlanOp[] {
     "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member 'verax-svc' -ErrorAction SilentlyContinue",
     "Enable-LocalUser -Name 'verax-svc'",
     "$sid = (New-Object System.Security.Principal.NTAccount('verax-svc')).Translate([System.Security.Principal.SecurityIdentifier]).Value",
+    "$star = '*' + $sid",
     "$secedit = Join-Path $env:SystemRoot 'System32\\secedit.exe'",
-    "$cfg = Join-Path $env:TEMP 'verax-rights.cfg'",
-    "$db = Join-Path $env:TEMP 'verax-rights.sdb'",
-    "& $secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null",
-    "$c = Get-Content $cfg -Raw",
-    "if ($c -match 'SeBatchLogonRight\\s*=\\s*(.*)') { $cur = $Matches[1].Trim(); if ($cur -notlike \"*$sid*\") { $c = $c -replace 'SeBatchLogonRight\\s*=\\s*.*', \"SeBatchLogonRight = $cur,*$sid\" } } else { $c += \"`r`nSeBatchLogonRight = *$sid`r`n\" }",
-    "Set-Content -Path $cfg -Value $c -Encoding unicode",
-    "& $secedit /configure /db $db /cfg $cfg /areas USER_RIGHTS | Out-Null",
-    "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }",
-    "Remove-Item $cfg,$db -ErrorAction SilentlyContinue",
+    `$cfg = ${cfg}`,
+    `$db = ${db}`,
+    `$after = ${after}`,
+    psNative("& $secedit /export /cfg $cfg /areas USER_RIGHTS | Out-Null", "secedit"),
+    "$raw = [IO.File]::ReadAllText($cfg)",
+    "$flat = [regex]::Replace($raw, '\\\\[ \\t]*\\r?\\n', '')",
+    "$prev = @()",
+    "if ($flat -match 'SeBatchLogonRight\\s*=\\s*([^\\r\\n]*)') { $prev = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }",
+    "$want = [System.Collections.Generic.List[string]]::new()",
+    "foreach ($h in $prev) { $want.Add($h) }",
+    "if (-not ($want -contains $star)) { $want.Add($star) }",
+    "$line = 'SeBatchLogonRight = ' + ($want -join ',')",
+    "if ($flat -match 'SeBatchLogonRight\\s*=') { $edited = [regex]::Replace($flat, 'SeBatchLogonRight\\s*=\\s*[^\\r\\n]*', $line, 1) } else { $edited = $flat.TrimEnd() + \"`r`n\" + $line + \"`r`n\" }",
+    "[IO.File]::WriteAllText($cfg, $edited, [Text.Encoding]::Unicode)",
+    psNative("& $secedit /configure /db $db /cfg $cfg /areas USER_RIGHTS | Out-Null", "secedit"),
+    psNative("& $secedit /export /cfg $after /areas USER_RIGHTS | Out-Null", "secedit"),
+    "$gotText = [regex]::Replace([IO.File]::ReadAllText($after), '\\\\[ \\t]*\\r?\\n', '')",
+    "$got = @()",
+    "if ($gotText -match 'SeBatchLogonRight\\s*=\\s*([^\\r\\n]*)') { $got = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }",
+    "$wantSet = @($want | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)",
+    "$gotSet = @($got | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)",
+    "if ($wantSet.Count -ne $gotSet.Count) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
+    "for ($i = 0; $i -lt $wantSet.Count; $i++) { if ($wantSet[$i] -ne $gotSet[$i]) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' } }",
+    "$beforeOther = @([regex]::Matches($flat, '(?m)^\\s*(Se\\w+)\\s*=\\s*([^\\r\\n]*)') | Where-Object { $_.Groups[1].Value -ne 'SeBatchLogonRight' } | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() + '=' + (($_.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ',') } | Sort-Object)",
+    "$afterOther = @([regex]::Matches($gotText, '(?m)^\\s*(Se\\w+)\\s*=\\s*([^\\r\\n]*)') | Where-Object { $_.Groups[1].Value -ne 'SeBatchLogonRight' } | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() + '=' + (($_.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ',') } | Sort-Object)",
+    "if ($beforeOther.Count -ne $afterOther.Count) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
+    "for ($i = 0; $i -lt $beforeOther.Count; $i++) { if ($beforeOther[$i] -ne $afterOther[$i]) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' } }",
+    "Remove-Item $cfg,$db,$after -ErrorAction SilentlyContinue",
   ].join("; ");
-  return [powershellStdin(script, password)];
+  return [powershellStdin(script, password, tempDir)];
 }
 
-function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string): PlanOp {
+function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string, tempDir: string): PlanOp {
   const argument = `"${cliBin}" serve --env-file "${envFile}"`;
   const script = [
-    "$ErrorActionPreference = 'Stop'",
     "$plain = [Console]::In.ReadLine()",
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     `$action = New-ScheduledTaskAction -Execute ${psSingle(nodeBin)} -Argument ${psSingle(argument)}`,
@@ -628,7 +694,7 @@ function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFil
     "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger $trigger -User 'verax-svc' -Password $plain -RunLevel Limited -Settings $settings -Force",
     "Start-ScheduledTask -TaskName 'Verax Body'",
   ].join("; ");
-  return powershellStdin(script, password);
+  return powershellStdin(script, password, tempDir);
 }
 
 function xmlEscape(value: string): string {
@@ -829,9 +895,16 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   const cliBin = cliBinFor(paths.codeDir, platform);
   const envFile = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, "verax.env");
   const spec = opts.tarballFiles && opts.tarballFiles.length > 0 ? opts.tarballFiles : [`@verax-ai/body@${opts.bodyVersion}`];
+  const winPassword = platform === "win32" ? windowsServicePassword() : "";
+  const winCreate = platform === "win32" && !opts.winAccount?.exists;
+  const tempDir = privateTempPath(platform, env, posixRoot);
+  const npmFiles = npmConfigPaths(tempDir, platform);
+  const npmEnv = npmSpawnEnv(platform, opts.execPath, tempDir);
   const npmInstall: PlanOp = {
     op: "argv",
     rollbackDir: paths.codeDir,
+    cwd: tempDir,
+    env: npmEnv,
     argv: [
       opts.execPath,
       opts.npmCli,
@@ -839,25 +912,28 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       "--prefix",
       paths.codeDir,
       "--omit=dev",
-      "--ignore-scripts",
-      "--no-audit",
-      "--no-fund",
+      ...npmFlags(tempDir, platform),
       ...spec,
     ],
   };
   const npmAudit: PlanOp = {
     op: "argv",
     rollbackDir: paths.codeDir,
-    argv: [opts.execPath, opts.npmCli, "audit", "signatures", "--prefix", paths.codeDir],
+    cwd: tempDir,
+    env: npmEnv,
+    argv: [opts.execPath, opts.npmCli, "audit", "signatures", "--prefix", paths.codeDir, ...npmFlags(tempDir, platform)],
   };
-  const winPassword = platform === "win32" ? windowsServicePassword() : "";
-  const winCreate = platform === "win32" && !opts.winAccount?.exists;
-  const ops: PlanOp[] = platform === "win32" ? windowsAccountOps(winPassword, winCreate) : [];
+  const ops: PlanOp[] = [privateTempPlan(platform, tempDir)];
+  if (platform === "win32") ops.push(...windowsAccountOps(winPassword, winCreate, tempDir));
   ops.push({ op: "mkdir", path: paths.codeDir, mode: 0o755 });
   if (platform === "win32") {
     ops.push(setOwner(paths.codeDir), grantService(paths.codeDir, false));
   }
-  ops.push(npmInstall);
+  ops.push(
+    { op: "write", path: npmFiles.userconfig, contents: "", mode: 0o600 },
+    { op: "write", path: npmFiles.globalconfig, contents: "", mode: 0o600 },
+    npmInstall,
+  );
   if (!opts.fromTarballs) ops.push(npmAudit);
   if (platform === "win32") ops.push(setOwner(paths.codeDir));
   if (platform === "darwin") {
@@ -947,7 +1023,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
         argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
       },
     );
-    ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile));
+    ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile, tempDir));
   } else if (platform === "linux") {
     const sudoUser = env.SUDO_USER!.trim();
     const tokenDir = path.posix.dirname(paths.tokenPath);
@@ -988,9 +1064,177 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       text: successText(platform, { ...paths, port: limited.port }),
     },
   );
+  if (platform === "win32") tagWinTemp(ops, tempDir);
   const bare = bareSidAccount(ops);
   if (bare) return fail(EX_CONFIG, `refusing icacls account ${bare}: a SID needs a leading *`);
   return { ok: true, ops, ...paths };
+}
+
+const PRIVATE_TEMP_ACL = [ADMINISTRATORS, SYSTEM_ACCOUNT] as const;
+
+/** Admin-only install scratch. Never the caller's TEMP. */
+function privateTempPath(platform: InstallPlatform, env: NodeJS.ProcessEnv, posixRoot?: string): string {
+  const id = randomBytes(16).toString("hex");
+  if (platform === "win32") {
+    const data = env.ProgramData || "C:\\ProgramData";
+    return path.win32.join(data, "Verax", `install-tmp-${id}`);
+  }
+  const prefix = posixRoot?.trim().replace(/\/+$/, "") ?? "";
+  if (platform === "darwin") {
+    const root = prefix ? `${prefix}${DARWIN_ROOT}` : DARWIN_ROOT;
+    return `${root}/.install-tmp-${id}`;
+  }
+  const parent = prefix ? `${prefix}/var/tmp` : "/var/tmp";
+  return `${parent}/verax-install-tmp-${id}`;
+}
+
+const NPM_REGISTRY = "https://registry.npmjs.org/";
+
+function npmConfigPaths(tempDir: string, platform: InstallPlatform): { userconfig: string; globalconfig: string; cache: string } {
+  const p = platform === "win32" ? path.win32 : path.posix;
+  return {
+    userconfig: p.join(tempDir, "empty-npmrc"),
+    globalconfig: p.join(tempDir, "empty-globalrc"),
+    cache: p.join(tempDir, "cache"),
+  };
+}
+
+/** Flags on every npm invocation. userconfig and globalconfig are empty files in the private temp. */
+function npmFlags(tempDir: string, platform: InstallPlatform): string[] {
+  const files = npmConfigPaths(tempDir, platform);
+  return [
+    "--userconfig",
+    files.userconfig,
+    "--globalconfig",
+    files.globalconfig,
+    "--registry",
+    NPM_REGISTRY,
+    "--ignore-scripts",
+    "--no-audit",
+    "--no-fund",
+    "--no-update-notifier",
+  ];
+}
+
+/**
+ * Fresh env for npm. Nothing is copied from the caller: no HOME, no npm_config_*, no NPM_CONFIG_*.
+ * HOME and the Windows profile dirs are the private temp, so ~/.npmrc is never read.
+ */
+export function npmSpawnEnv(platform: InstallPlatform, execPath: string, tempDir: string): NodeJS.ProcessEnv {
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const nodeDir = p.dirname(execPath);
+  const cache = npmConfigPaths(tempDir, platform).cache;
+  if (platform === "win32") {
+    const base = systemToolEnv("win32", tempDir);
+    const root = base.SystemRoot || "C:\\Windows";
+    return {
+      SystemRoot: base.SystemRoot,
+      windir: base.windir,
+      PATHEXT: base.PATHEXT,
+      ComSpec: base.ComSpec,
+      SystemDrive: base.SystemDrive,
+      PATH: [nodeDir, path.win32.join(root, "System32"), root].join(";"),
+      HOME: tempDir,
+      USERPROFILE: tempDir,
+      APPDATA: tempDir,
+      LOCALAPPDATA: tempDir,
+      TEMP: tempDir,
+      TMP: tempDir,
+      npm_config_cache: cache,
+    };
+  }
+  return {
+    PATH: [nodeDir, "/usr/sbin", "/usr/bin", "/sbin", "/bin"].join(":"),
+    HOME: tempDir,
+    USERPROFILE: tempDir,
+    APPDATA: tempDir,
+    LOCALAPPDATA: tempDir,
+    TEMP: tempDir,
+    TMP: tempDir,
+    TMPDIR: tempDir,
+    npm_config_cache: cache,
+  };
+}
+
+/** `resolved` tarball URLs that are not the public npm registry. */
+export function registryLockProblems(lockText: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(lockText);
+  } catch {
+    return ["package-lock.json is not JSON"];
+  }
+  const bad: string[] = [];
+  const walk = (value: unknown): void => {
+    if (!value || typeof value !== "object") return;
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item);
+      return;
+    }
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (key === "resolved" && typeof child === "string") {
+        if (!child.startsWith(NPM_REGISTRY)) bad.push(child);
+      } else {
+        walk(child);
+      }
+    }
+  };
+  walk(parsed);
+  if (bad.length === 0 && !lockText.includes(`"resolved"`)) return ["package-lock.json has no resolved tarball URL"];
+  return bad;
+}
+
+function registryBodyVersion(argv: readonly string[]): string | null {
+  const spec = argv.find((arg) => arg.startsWith("@verax-ai/body@"));
+  if (!spec) return null;
+  const version = spec.slice("@verax-ai/body@".length).trim();
+  return version === "" ? null : version;
+}
+
+function verifyRegistryInstall(codeDir: string, bodyVersion: string): string | null {
+  const pkgPath = path.join(codeDir, "node_modules", "@verax-ai", "body", "package.json");
+  const lockPath = path.join(codeDir, "package-lock.json");
+  let version = "";
+  let lockText = "";
+  try {
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+    version = typeof pkg.version === "string" ? pkg.version : "";
+    lockText = readFileSync(lockPath, "utf8");
+  } catch {
+    return `installed body at ${pkgPath} cannot be read`;
+  }
+  if (version !== bodyVersion) return `installed @verax-ai/body version ${version || "missing"} is not ${bodyVersion}`;
+  const bad = registryLockProblems(lockText);
+  if (bad.length > 0) return `package-lock.json resolved URL is not ${NPM_REGISTRY}: ${bad[0]}`;
+  return null;
+}
+
+function isNpmArgv(argv: readonly string[]): boolean {
+  return argv.some((arg) => arg.replace(/\\/g, "/").endsWith("/npm-cli.js"));
+}
+
+function privateTempPlan(platform: InstallPlatform, dir: string): PlanOp {
+  if (platform === "win32") {
+    return {
+      op: "private-temp",
+      path: dir,
+      acl: PRIVATE_TEMP_ACL,
+      inheritance: "removed",
+      owner: ADMINISTRATORS_SID,
+    };
+  }
+  return { op: "private-temp", path: dir, mode: 0o700 };
+}
+
+/** Every Windows tool argv during install uses the private temp, not the caller's TEMP. */
+function tagWinTemp(ops: PlanOp[], tempDir: string): void {
+  for (const op of ops) {
+    if (op.op !== "argv") continue;
+    const name = systemToolName(op.argv[0] ?? "");
+    const temp = { TEMP: tempDir, TMP: tempDir };
+    if (SYSTEM_TOOL_NAMES.has(name)) op.env = { ...systemToolEnv("win32", tempDir), ...op.env, ...temp };
+    else op.env = { ...op.env, ...temp };
+  }
 }
 
 /** icacls treats a bare `S-1-...` as an account name. A SID is `*S-1-...` or a name. */
@@ -1277,12 +1521,32 @@ export function defaultElevated(platform: NodeJS.Platform = process.platform): b
   return typeof process.getuid === "function" && process.getuid() === 0;
 }
 
-function defaultExec(argv: string[], stdin?: string): ExecResult {
+/** System tools take the planned env whole. Other commands keep the process env, with the caller's TEMP removed. */
+function spawnEnvFor(name: string, planned?: NodeJS.ProcessEnv): NodeJS.ProcessEnv | undefined {
+  if (!planned) return undefined;
+  if (SYSTEM_TOOL_NAMES.has(name)) return planned;
+  const merged: NodeJS.ProcessEnv = { ...process.env };
+  delete merged.TEMP;
+  delete merged.TMP;
+  delete merged.TMPDIR;
+  return { ...merged, ...planned };
+}
+
+function defaultExec(argv: string[], stdin?: string, env?: NodeJS.ProcessEnv, cwd?: string): ExecResult {
   const head = argv[0] ?? "";
   const name = systemToolName(head);
   const input = stdin === undefined ? {} : { input: stdin };
+  const place = cwd ? { cwd } : {};
+  const spawnEnv = isNpmArgv(argv) ? (env ?? {}) : spawnEnvFor(name, env);
   if (!SYSTEM_TOOL_NAMES.has(name)) {
-    const ran = spawnSync(head, argv.slice(1), { encoding: "utf8", windowsHide: true, shell: false, ...input });
+    const ran = spawnSync(head, argv.slice(1), {
+      encoding: "utf8",
+      windowsHide: true,
+      shell: false,
+      ...(spawnEnv ? { env: spawnEnv } : {}),
+      ...place,
+      ...input,
+    });
     return { status: ran.status, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
   }
   let file: string;
@@ -1296,7 +1560,8 @@ function defaultExec(argv: string[], stdin?: string): ExecResult {
     encoding: "utf8",
     windowsHide: true,
     shell: false,
-    env: systemToolEnv(),
+    env: spawnEnv ?? systemToolEnv(),
+    ...place,
     ...input,
   });
   return { status: ran.status, stdout: ran.stdout ?? "", stderr: ran.stderr ?? "" };
@@ -1483,6 +1748,16 @@ function argvSecrets(argv: readonly string[]): string[] {
   return secrets;
 }
 
+function stderrHasErrorMark(stderr: string): boolean {
+  return stderr.split(/\r?\n/).some((line) => line.startsWith(PS_ERROR_MARK));
+}
+
+function powershellScriptStep(argv: readonly string[], stdin?: string): boolean {
+  if (systemToolName(argv[0] ?? "") !== "powershell") return false;
+  if (stdin !== undefined) return true;
+  return argv.some((arg) => arg.includes("$ErrorActionPreference = 'Stop'"));
+}
+
 function redactSecrets(detail: string, argv: readonly string[], stdin?: string): string {
   let out = detail;
   for (const secret of argvSecrets(argv)) out = out.split(secret).join("[redacted]");
@@ -1574,17 +1849,112 @@ function reportHealthTimeout(
   }
 }
 
+function mkdirNewChain(dir: string, platform: InstallPlatform): string[] {
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const root = platform === "win32" ? path.win32.parse(dir).root : "/";
+  const missing: string[] = [];
+  let cur = dir;
+  while (cur !== root && !existsSync(cur)) {
+    missing.push(cur);
+    const parent = p.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  const created: string[] = [];
+  for (const next of missing.reverse()) {
+    mkdirSync(next, { mode: 0o755 });
+    created.push(next);
+  }
+  return created;
+}
+
+/**
+ * Create the install scratch directory, refuse a planted path or reparse point,
+ * and lock the Windows DACL to Administrators + SYSTEM before any file is written.
+ * Returns an error sentence, or the parent directories this call created.
+ */
+function applyPrivateTemp(
+  step: Extract<PlanOp, { op: "private-temp" }>,
+  exec: ToolExec,
+  platform: NodeJS.Platform,
+): { error: string } | { parents: string[] } {
+  const plat: InstallPlatform = platform === "win32" ? "win32" : platform === "darwin" ? "darwin" : "linux";
+  const parent = plat === "win32" ? path.win32.dirname(step.path) : path.posix.dirname(step.path);
+  if (existsSync(parent) && pathIsReparse(parent, exec, platform)) {
+    return { error: `refusing: ${parent} is a reparse point\n` };
+  }
+  if (existsSync(step.path) || pathIsReparse(step.path, exec, platform)) {
+    const why = pathIsReparse(step.path, exec, platform) ? "is a reparse point" : "already exists";
+    return { error: `refusing: ${step.path} ${why}\n` };
+  }
+  const parents = existsSync(parent) ? [] : mkdirNewChain(parent, plat);
+  mkdirSync(step.path, { mode: step.mode ?? 0o700 });
+  if (pathIsReparse(step.path, exec, platform)) {
+    rmSync(step.path, { recursive: true, force: true });
+    return { error: `refusing: ${step.path} is a reparse point\n` };
+  }
+  if (plat === "win32") {
+    const owner = exec(toolArgv("icacls", [step.path, "/setowner", step.owner ?? ADMINISTRATORS_SID], "win32"), undefined, systemToolEnv("win32", step.path));
+    const grant = exec(toolArgv("icacls", [
+      step.path,
+      "/inheritance:r",
+      "/grant:r",
+      `${ADMINISTRATORS}:(OI)(CI)F`,
+      "/grant:r",
+      `${SYSTEM_ACCOUNT}:(OI)(CI)F`,
+    ], "win32"), undefined, systemToolEnv("win32", step.path));
+    if ((owner.status ?? 1) !== 0 || (grant.status ?? 1) !== 0) {
+      rmSync(step.path, { recursive: true, force: true });
+      const detail = (owner.stderr || owner.stdout || grant.stderr || grant.stdout || "icacls failed").trim();
+      return { error: `icacls failed: ${detail}\n` };
+    }
+    return { parents };
+  }
+  try {
+    chmodSync(step.path, 0o700);
+  } catch {
+    // Windows does not honour the mode bit. POSIX install is already root.
+  }
+  const spec = plat === "darwin" ? "darwin" : "linux";
+  const ownerName = plat === "darwin" ? "root:wheel" : "root:root";
+  const chowned = exec(toolArgv("chown", [ownerName, step.path], spec));
+  const chmodded = exec(toolArgv("chmod", ["0700", step.path], spec));
+  if ((chowned.status ?? 1) !== 0 || (chmodded.status ?? 1) !== 0) {
+    rmSync(step.path, { recursive: true, force: true });
+    const detail = (chowned.stderr || chmodded.stderr || "chown failed").trim();
+    return { error: `${detail || "private temp ownership failed"}\n` };
+  }
+  return { parents };
+}
+
+function removeEmptyDirs(dirs: readonly string[]): void {
+  for (const dir of [...dirs].reverse()) {
+    try {
+      if (readdirSync(dir).length === 0) rmSync(dir, { recursive: false, force: true });
+    } catch {
+      // Already gone, or not empty because a later step wrote there.
+    }
+  }
+}
+
 async function execute(
   plan: Extract<InstallPlan, { ok: true }>,
   exec: ToolExec,
   io: InstallIo,
   platform: NodeJS.Platform,
 ): Promise<number> {
+  const tempStep = plan.ops.find((op): op is Extract<PlanOp, { op: "private-temp" }> => op.op === "private-temp");
+  const tempDir = tempStep?.path;
+  const call: ToolExec = (argv, stdin, env, cwd) => {
+    if (env) return exec(argv, stdin, env, cwd);
+    if (!tempDir) return exec(argv, stdin, undefined, cwd);
+    return exec(argv, stdin, systemToolEnv(platform, tempDir), cwd);
+  };
   let svcSid = "";
   const serviceArgv = (argv: string[]): string[] | { error: string } => {
     if (!argv.some((arg) => arg.startsWith(`${VERAX_SVC}:`))) return argv;
     if (svcSid === "") {
-      const ran = exec(toolArgv("powershell", [
+      const ran = call(toolArgv("powershell", [
         "-NoProfile",
         "-Command",
         "(New-Object System.Security.Principal.NTAccount('verax-svc')).Translate([System.Security.Principal.SecurityIdentifier]).Value",
@@ -1594,7 +1964,25 @@ async function execute(
     }
     return argv.map((arg) => (arg.startsWith(`${VERAX_SVC}:`) ? `*${svcSid}${arg.slice(VERAX_SVC.length)}` : arg));
   };
+  const createdTemps: string[] = [];
+  const createdParents: string[] = [];
+  let status = 0;
+  const finish = (code: number): number => {
+    status = code;
+    return code;
+  };
+  try {
   for (const step of plan.ops) {
+    if (step.op === "private-temp") {
+      const applied = applyPrivateTemp(step, call, platform);
+      if ("error" in applied) {
+        io.stderr.write(applied.error.endsWith("\n") ? applied.error : `${applied.error}\n`);
+        return finish(EX_CONFIG);
+      }
+      createdParents.push(...applied.parents);
+      createdTemps.push(step.path);
+      continue;
+    }
     if (step.op === "mkdir") {
       mkdirLeaf(step.path, step.mode ?? 0o755);
       continue;
@@ -1605,22 +1993,32 @@ async function execute(
     }
     if (step.op === "argv") {
       if (systemToolName(step.argv[0] ?? "") === "useradd") {
-        const id = exec(toolArgv("id", [step.argv[step.argv.length - 1] ?? "verax"], "linux"));
+        const id = call(toolArgv("id", [step.argv[step.argv.length - 1] ?? "verax"], "linux"));
         if ((id.status ?? 1) === EX_CONFIG && !step.optional) {
           io.stderr.write(`${(id.stderr || id.stdout || "").trim()}\n`);
-          return EX_CONFIG;
+          return finish(EX_CONFIG);
         }
         if (id.status === 0) continue;
       }
       const resolved = serviceArgv(step.argv);
       if ("error" in resolved) {
         io.stderr.write(resolved.error.endsWith("\n") ? resolved.error : `${resolved.error}\n`);
-        return EX_CONFIG;
+        return finish(EX_CONFIG);
       }
-      const ran = exec(resolved, step.stdin);
+      const ran = call(resolved, step.stdin, step.env, step.cwd);
+      if (powershellScriptStep(resolved, step.stdin)) {
+        const failed = (ran.status ?? 1) !== 0 || stderrHasErrorMark(ran.stderr ?? "");
+        if (failed && !step.optional) {
+          if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
+          const detail = redactSecrets(ran.stderr ?? "", step.argv, step.stdin);
+          if (detail !== "") io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
+          return finish(ran.status === EX_CONFIG ? EX_CONFIG : 1);
+        }
+        continue;
+      }
       if (ran.status === EX_CONFIG && !step.optional) {
         io.stderr.write(`${redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin)}\n`);
-        return EX_CONFIG;
+        return finish(EX_CONFIG);
       }
       if ((ran.status ?? 1) !== 0 && !step.optional) {
         if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
@@ -1631,7 +2029,17 @@ async function execute(
             ? "npm install"
             : (step.argv[0] ?? "command");
         io.stderr.write(`${what} failed${detail ? `: ${detail.split("\n")[0]}` : ""}\n`);
-        return 1;
+        return finish(1);
+      }
+      const expected = registryBodyVersion(resolved);
+      if (expected && resolved.includes("install") && resolved.includes("--prefix")) {
+        const codeDir = resolved[resolved.indexOf("--prefix") + 1] ?? "";
+        const problem = verifyRegistryInstall(codeDir, expected);
+        if (problem) {
+          if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
+          io.stderr.write(`${problem}\n`);
+          return finish(1);
+        }
       }
       continue;
     }
@@ -1654,7 +2062,7 @@ async function execute(
         io,
         { tokenPath: step.tokenPath, quiet: true },
       );
-      if (code !== 0) return code;
+      if (code !== 0) return finish(code);
       continue;
     }
     if (step.op === "remove") {
@@ -1664,14 +2072,18 @@ async function execute(
     if (step.op === "wait-healthz") {
       if (!(await waitHealth(step.port, step.timeoutMs))) {
         io.stderr.write(`install-health-timeout:${step.port}\n`);
-        reportHealthTimeout(platform, plan.stateDir, exec, io);
-        return 1;
+        reportHealthTimeout(platform, plan.stateDir, call, io);
+        return finish(1);
       }
       continue;
     }
     io.stdout.write(step.text.endsWith("\n") ? step.text : `${step.text}\n`);
   }
-  return 0;
+  return finish(0);
+  } finally {
+    for (const dir of createdTemps) rmSync(dir, { recursive: true, force: true });
+    if (status !== 0) removeEmptyDirs(createdParents);
+  }
 }
 
 function invokingEnv(platform: NodeJS.Platform, env: NodeJS.ProcessEnv, exec: (argv: string[]) => ExecResult): NodeJS.ProcessEnv {
