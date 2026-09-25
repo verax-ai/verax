@@ -298,7 +298,7 @@ export type PlanOp =
   | { op: "mkdir"; path: string; mode?: number }
   | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string }
   | { op: "write"; path: string; contents: string; mode?: number }
-  | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean }
+  | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean; noOwnerGrant: boolean }
   | { op: "remove"; path: string }
   | { op: "wait-healthz"; port: number; timeoutMs: number }
   | { op: "print"; text: string }
@@ -1129,12 +1129,12 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     port: limited.port,
     days: limited.days,
     force: Boolean(opts.force),
+    noOwnerGrant: true,
   });
   if (platform === "win32") {
     ops.push(
-      setOwner(paths.stateDir),
-      grantService(paths.stateDir, "F"),
       resetInherit(paths.stateDir),
+      setOwner(paths.stateDir),
       {
         op: "argv",
         argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
@@ -2498,6 +2498,19 @@ async function execute(
           }
         }
       }
+      if (platform === "win32" && resolved.includes("/setowner") && resolved.includes("/T") && (resolved[1] ?? "") === plan.stateDir) {
+        for (const file of serviceAclFiles(plan.stateDir, "state")) {
+          if (!existsSync(file)) continue;
+          const fileRead = call(toolArgv("icacls", [file], "win32"));
+          const fileText = `${fileRead.stdout ?? ""}\n${fileRead.stderr ?? ""}`;
+          const fileVerdict = verifyServiceAcl(fileText, "state", { dir: file, svcSid, file });
+          if ((fileRead.status ?? 1) !== 0 || !fileVerdict.ok) {
+            const detail = fileVerdict.ok ? `empty ACL on ${file}` : fileVerdict.detail;
+            io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
+            return finish(EX_CONFIG);
+          }
+        }
+      }
       const expected = registryBodyVersion(resolved);
       if (expected && resolved.includes("install") && resolved.includes("--prefix")) {
         const codeDir = resolved[resolved.indexOf("--prefix") + 1] ?? "";
@@ -2527,7 +2540,7 @@ async function execute(
           ...(step.force ? ["--force"] : []),
         ],
         io,
-        { tokenPath: step.tokenPath, quiet: true },
+        { tokenPath: step.tokenPath, quiet: true, noOwnerGrant: step.noOwnerGrant },
       );
       if (code !== 0) return finish(code);
       continue;
@@ -2681,6 +2694,95 @@ function ourMarker(file: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** Existing token parent: real directory owned by the invoking user, or a refusal sentence. */
+export function tokenParentRefusal(facts: {
+  dir: string;
+  symlink: boolean;
+  directory: boolean;
+  reparse: boolean;
+  platform: NodeJS.Platform;
+  uid: number;
+  invokingUid?: number;
+  ownerSid?: string;
+  invokingSid?: string;
+}): string | null {
+  if (facts.symlink || facts.reparse) return `refusing: ${facts.dir} is a reparse point`;
+  if (!facts.directory) return `refusing: ${facts.dir} is not a directory`;
+  if (facts.platform === "win32") {
+    const owner = facts.ownerSid?.trim().toUpperCase() ?? "";
+    const invoking = facts.invokingSid?.trim().toUpperCase() ?? "";
+    if (owner === "" || owner !== invoking) return `refusing: ${facts.dir} is not owned by the invoking user`;
+    return null;
+  }
+  if (facts.invokingUid === undefined || facts.uid !== facts.invokingUid) {
+    return `refusing: ${facts.dir} is not owned by the invoking user`;
+  }
+  return null;
+}
+
+function directoryOwnerSid(dir: string, exec: (argv: string[]) => ExecResult): string | undefined {
+  const literal = dir.replaceAll("'", "''");
+  const ran = exec(toolArgv("powershell", [
+    "-NoProfile",
+    "-Command",
+    `(Get-Acl -LiteralPath '${literal}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
+  ], "win32"));
+  if ((ran.status ?? 1) !== 0) return undefined;
+  return `${ran.stdout ?? ""}`.match(/S-1-[0-9-]+/i)?.[0];
+}
+
+function sudoUserUid(env: NodeJS.ProcessEnv, exec: (argv: string[]) => ExecResult, platform: NodeJS.Platform): number | undefined {
+  const user = env.SUDO_USER?.trim() ?? "";
+  if (user === "") return undefined;
+  const spec = platform === "darwin" ? "darwin" : "linux";
+  const ran = exec(toolArgv("id", ["-u", user], spec));
+  if ((ran.status ?? 1) !== 0) return undefined;
+  const uid = Number.parseInt((ran.stdout ?? "").trim(), 10);
+  return Number.isInteger(uid) ? uid : undefined;
+}
+
+/**
+ * Create a missing token parent with recursive mkdir.
+ * An existing directory is left untouched: it must be a real directory, not a
+ * symlink or win32 reparse point, and owned by the invoking user.
+ */
+export function ensureTokenParent(
+  dir: string,
+  env: NodeJS.ProcessEnv = process.env,
+  exec: ToolExec = defaultExec,
+): void {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") {
+      try {
+        chmodSync(dir, 0o700);
+      } catch {
+        // The platform does not honour the mode bit.
+      }
+    }
+    return;
+  }
+  const platform = process.platform;
+  const reparse = pathIsReparse(dir, exec, platform);
+  const owned = !reparse && !st.isSymbolicLink() && st.isDirectory();
+  const reason = tokenParentRefusal({
+    dir,
+    symlink: st.isSymbolicLink(),
+    directory: st.isDirectory(),
+    reparse,
+    platform,
+    uid: st.uid,
+    invokingUid: owned && platform !== "win32" ? sudoUserUid(env, exec, platform) : undefined,
+    ownerSid: owned && platform === "win32" ? directoryOwnerSid(dir, exec) : undefined,
+    invokingSid: owned && platform === "win32" ? invokingSid(exec) : undefined,
+  });
+  if (reason) throw new SystemToolError(reason);
 }
 
 function pathIsReparse(file: string, exec: (argv: string[]) => ExecResult, platform: NodeJS.Platform): boolean {

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
+import { ensureTokenParent, mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -88,9 +88,10 @@ function shippedPolicyPath(): string | null {
   return null;
 }
 
-function ownerOnly(path: string): void {
+/** POSIX keeps owner-only mode. Windows grants the current user only outside install mode. */
+function ownerOnly(path: string, grantOwner: boolean): void {
   if (process.platform === "win32") {
-    restrictToOwnerWin32(path);
+    if (grantOwner) restrictToOwnerWin32(path);
     return;
   }
   try {
@@ -167,6 +168,14 @@ export type InitLocalOpts = {
   tokenPath?: string;
   /** Installed body prints its own summary. Skip this command's user-facing text. */
   quiet?: boolean;
+  /**
+   * Install mode. State files inherit the state directory ACL (svc, Administrators, SYSTEM).
+   * Do not grant the invoking user and do not call `restrictToOwnerWin32`.
+   * The profile token is locked by the install plan, not here.
+   */
+  noOwnerGrant?: boolean;
+  /** Install mode. Defaults to process.env. SUDO_USER names the POSIX owner. */
+  env?: NodeJS.ProcessEnv;
 };
 
 export async function runInitLocal(
@@ -222,32 +231,33 @@ export async function runInitLocal(
     for (const p of [...wrote].reverse()) rmSync(p, { force: true });
     rmSync(issuerDir, { recursive: true, force: true });
   };
+  const grantOwner = opts.noOwnerGrant !== true;
   try {
   if (createdState) mkdirLeaf(stateDir, 0o700);
-  if (process.platform === "win32") restrictToOwnerWin32(stateDir);
+  if (process.platform === "win32" && grantOwner) restrictToOwnerWin32(stateDir);
   mkdirLeaf(issuerDir, 0o700);
   const keyPath = join(issuerDir, "key.pem");
   const jwksPath = join(issuerDir, "jwks.json");
   const insideToken = join(issuerDir, "agent.token");
   const external = opts.tokenPath !== undefined && resolve(opts.tokenPath) !== resolve(insideToken);
   const tokenPath = external ? resolve(opts.tokenPath!) : insideToken;
+  if (external) ensureTokenParent(dirname(tokenPath), opts.env ?? process.env);
   const envPath = join(stateDir, "verax.env");
   writeFileSync(keyPath, pem, { encoding: "utf8", mode: 0o600 });
   wrote.push(keyPath);
-  ownerOnly(keyPath);
+  ownerOnly(keyPath, grantOwner);
   writeFileSync(jwksPath, `${JSON.stringify({ keys: [publicJwk] })}\n`, { encoding: "utf8", mode: 0o600 });
   wrote.push(jwksPath);
-  ownerOnly(jwksPath);
-  if (external) mkdirLeaf(dirname(tokenPath), 0o700);
+  ownerOnly(jwksPath, grantOwner);
   writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600 });
   wrote.push(tokenPath);
-  ownerOnly(tokenPath);
+  ownerOnly(tokenPath, grantOwner);
   if (external && existsSync(insideToken)) unlinkSync(insideToken);
 
   if (!existsSync(policyDest) && policySrc) {
     writeFileSync(policyDest, readFileSync(policySrc));
     wrote.push(policyDest);
-    ownerOnly(policyDest);
+    ownerOnly(policyDest, grantOwner);
   }
   const envBody = [
     `VERAX_ISSUER=${ISSUER}`,
@@ -260,7 +270,7 @@ export async function runInitLocal(
   ].join("\n");
   writeFileSync(envPath, envBody, { encoding: "utf8" });
   wrote.push(envPath);
-  ownerOnly(envPath);
+  ownerOnly(envPath, grantOwner);
 
   const lines = [
     ...wrote.map((p) => `wrote ${p}`),

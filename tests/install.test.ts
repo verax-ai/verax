@@ -3,14 +3,15 @@ import { spawnSync } from "node:child_process";
 import { describe, it } from "node:test";
 
 import { createHash } from "node:crypto";
-import { copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { tmpdir, userInfo } from "node:os";
 import { dirname, join, win32 } from "node:path";
 
 import {
   installedBoundaryChecks,
+  tokenParentRefusal,
   windowsDirGrantArgs,
   windowsResetInheritArgs,
   LOGON_HOLDER_COMPARE,
@@ -169,6 +170,50 @@ describe("verax install plan", () => {
     assert.ok(init && init.op === "init");
     assert.equal(init.tokenPath, linux.tokenPath);
     assert.equal(init.tokenPath.startsWith(init.stateDir), false);
+    assert.equal(init.noOwnerGrant, true);
+  });
+
+  it("install init carries no owner grant, and only the token icacls names the invoking user", () => {
+    const win = okPlan("win32", winEnv, winOpts);
+    const init = win.ops.find((op) => op.op === "init");
+    assert.ok(init && init.op === "init");
+    assert.equal(init.noOwnerGrant, true);
+    const user = `${winEnv.USERDOMAIN}\\${winEnv.USERNAME}`;
+    for (const argv of argvs(win.ops)) {
+      if (systemToolName(argv[0] ?? "") !== "icacls") continue;
+      const grantsUser = argv.some((arg) => arg.includes(user) || arg.includes(`${winEnv.USERNAME}:`));
+      if (argv[1] === win.tokenPath) {
+        assert.equal(grantsUser, true, argv.join(" "));
+        continue;
+      }
+      assert.equal(grantsUser, false, argv.join(" "));
+    }
+    const linux = okPlan("linux", linuxEnv, linuxOpts);
+    const linuxInit = linux.ops.find((op) => op.op === "init");
+    assert.ok(linuxInit && linuxInit.op === "init");
+    assert.equal(linuxInit.noOwnerGrant, true);
+    for (const argv of argvs(linux.ops)) {
+      const tool = systemToolName(argv[0] ?? "");
+      if (tool !== "chown" && tool !== "chmod") continue;
+      const touchesState = argv.includes(linux.stateDir);
+      if (!touchesState) continue;
+      assert.equal(argv.some((arg) => arg.includes(linuxEnv.SUDO_USER!)), false, argv.join(" "));
+      if (tool === "chown") assert.match(argv.join(" "), /verax:verax/);
+      if (tool === "chmod") assert.ok(argv.includes("0700"));
+    }
+    const tokenChowns = argvs(linux.ops).filter((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.includes(linux.tokenPath));
+    assert.equal(tokenChowns.length, 1);
+    assert.match(tokenChowns[0]!.join(" "), new RegExp(`${linuxEnv.SUDO_USER}:`));
+    const darwin = planInstall("darwin", darwinEnv, darwinOpts);
+    if (!darwin.ok) throw new Error(darwin.message);
+    const darwinInit = darwin.ops.find((op) => op.op === "init");
+    assert.ok(darwinInit && darwinInit.op === "init");
+    assert.equal(darwinInit.noOwnerGrant, true);
+    for (const argv of argvs(darwin.ops)) {
+      if (systemToolName(argv[0] ?? "") !== "chown" || !argv.includes(darwin.stateDir)) continue;
+      assert.equal(argv.some((arg) => arg.includes(darwinEnv.SUDO_USER!)), false, argv.join(" "));
+      assert.match(argv.join(" "), /_verax:_verax/);
+    }
   });
 
   it("3 autostart runs the trusted node and the registry cli", () => {
@@ -1216,6 +1261,18 @@ describe("verax install plan", () => {
       { dir: file, file, svcSid: "S-1-5-21-1" },
     );
     assert.equal(inherited.ok, true);
+    const explicitOther = verifyServiceAcl(
+      [
+        `${file} *S-1-5-21-1:(I)(F)`,
+        "BUILTIN\\Administrators:(I)(F)",
+        "NT AUTHORITY\\SYSTEM:(I)(F)",
+        "MACHINE\\runneradmin:(F)",
+      ].join("\n"),
+      "state",
+      { dir: file, file, svcSid: "S-1-5-21-1" },
+    );
+    assert.equal(explicitOther.ok, false);
+    if (!explicitOther.ok) assert.match(explicitOther.detail, /unexpected principal/);
     const checks = installedBoundaryChecks({
       codeDir: "C:\\Program Files\\Verax",
       stateDir: "C:\\ProgramData\\Verax\\state",
@@ -1275,6 +1332,159 @@ describe("verax install plan", () => {
       assert.ok(account, named.stderr || named.stdout);
       const escaped = account.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       assert.match(listed.stdout ?? "", new RegExp(`${escaped}:\\(I\\)`));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("install-mode init leaves key.pem with only inherited ACEs", async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows icacls inheritance is checked on a Windows dev machine");
+      return;
+    }
+    const root = mkdtempSync(join(tmpdir(), "verax-acl-init-"));
+    const tokenPath = join(root, "..", `token-${process.pid}`);
+    try {
+      const who = spawnSync(systemToolPath("whoami", "win32"), ["/user", "/fo", "csv", "/nh"], {
+        encoding: "utf8",
+        windowsHide: true,
+        shell: false,
+      });
+      const sid = /S-1-[0-9-]+/.exec(who.stdout ?? "")?.[0];
+      assert.ok(sid, who.stderr || who.stdout);
+      const icacls = systemToolPath("icacls", "win32");
+      const grant = spawnSync(icacls, windowsDirGrantArgs(root, `*${sid}`, "F"), {
+        encoding: "utf8",
+        windowsHide: true,
+        shell: false,
+      });
+      assert.equal(grant.status, 0, `${grant.stdout}\n${grant.stderr}`);
+      const code = await runInitLocal(
+        ["--local", root, "--port", "8801"],
+        { stdout: { write: () => undefined }, stderr: { write: () => undefined } },
+        { quiet: true, noOwnerGrant: true, tokenPath },
+      );
+      assert.equal(code, 0);
+      const key = join(root, "local-issuer", "key.pem");
+      const listed = spawnSync(icacls, [key], { encoding: "utf8", windowsHide: true, shell: false });
+      assert.equal(listed.status, 0, listed.stderr);
+      const aces = (listed.stdout ?? "").split(/\r?\n/).filter((line) => line.includes(":("));
+      assert.ok(aces.length >= 1, listed.stdout);
+      for (const line of aces) assert.match(line, /\(I\)/, line);
+      const named = spawnSync(
+        systemToolPath("powershell", "win32"),
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(New-Object Security.Principal.SecurityIdentifier '${sid}').Translate([Security.Principal.NTAccount]).Value`,
+        ],
+        { encoding: "utf8", windowsHide: true, shell: false, env: systemToolEnv("win32") },
+      );
+      assert.equal(named.status, 0, `${named.stdout}\n${named.stderr}`);
+      const account = (named.stdout ?? "").trim();
+      assert.ok(account, named.stderr || named.stdout);
+      const explicit = aces.filter((line) => line.toLowerCase().includes(account.toLowerCase()) && !/\(I\)/.test(line));
+      assert.deepEqual(explicit, []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(tokenPath, { force: true });
+    }
+  });
+
+  it("install-mode init accepts an existing token folder and leaves its ACL", async () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-token-parent-"));
+    const tokenDir = join(root, "profile");
+    const stateDir = join(root, "state");
+    const tokenPath = join(tokenDir, "agent.token");
+    const err: string[] = [];
+    try {
+      mkdirSync(tokenDir);
+      if (process.platform !== "win32") chmodSync(tokenDir, 0o755);
+      const beforeMode = lstatSync(tokenDir).mode;
+      const icacls = process.platform === "win32" ? systemToolPath("icacls", "win32") : "";
+      const beforeAcl = icacls === ""
+        ? ""
+        : spawnSync(icacls, [tokenDir], { encoding: "utf8", windowsHide: true, shell: false }).stdout ?? "";
+      const code = await runInitLocal(
+        ["--local", stateDir, "--port", "8801"],
+        { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+        {
+          quiet: true,
+          noOwnerGrant: true,
+          tokenPath,
+          ...(process.platform === "win32" ? {} : { env: { SUDO_USER: userInfo().username } }),
+        },
+      );
+      assert.equal(code, 0, err.join(""));
+      assert.equal(existsSync(tokenPath), true);
+      assert.equal(lstatSync(tokenDir).isSymbolicLink(), false);
+      assert.equal(lstatSync(tokenDir).mode, beforeMode);
+      if (icacls !== "") {
+        const after = spawnSync(icacls, [tokenDir], { encoding: "utf8", windowsHide: true, shell: false }).stdout ?? "";
+        assert.equal(after, beforeAcl);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("install-mode init refuses a symlink or junction token folder", async () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-token-link-"));
+    const real = join(root, "real");
+    const link = join(root, "link");
+    const err: string[] = [];
+    try {
+      mkdirSync(real);
+      symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+      const code = await runInitLocal(
+        ["--local", join(root, "state"), "--port", "8801"],
+        { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+        { quiet: true, noOwnerGrant: true, tokenPath: join(link, "agent.token") },
+      );
+      assert.equal(code, 78, err.join(""));
+      assert.match(err.join(""), new RegExp(`refusing: ${link.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} is a reparse point`));
+      assert.equal(existsSync(join(real, "agent.token")), false);
+    } finally {
+      rmSync(link, { recursive: false, force: true });
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a POSIX token folder owned by another uid", async () => {
+    const reason = tokenParentRefusal({
+      dir: "/home/runner/.verax",
+      symlink: false,
+      directory: true,
+      reparse: false,
+      platform: "linux",
+      uid: 0,
+      invokingUid: 1000,
+    });
+    assert.match(reason ?? "", /not owned by the invoking user/);
+    assert.equal(tokenParentRefusal({
+      dir: "/home/runner/.verax",
+      symlink: false,
+      directory: true,
+      reparse: false,
+      platform: "linux",
+      uid: 1000,
+      invokingUid: 1000,
+    }), null);
+    if (process.platform === "win32" || process.getuid?.() === 0) return;
+    const root = mkdtempSync(join(tmpdir(), "verax-token-uid-"));
+    const tokenDir = join(root, "profile");
+    const err: string[] = [];
+    try {
+      mkdirSync(tokenDir);
+      const code = await runInitLocal(
+        ["--local", join(root, "state"), "--port", "8801"],
+        { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+        { quiet: true, noOwnerGrant: true, tokenPath: join(tokenDir, "agent.token"), env: { SUDO_USER: "root" } },
+      );
+      assert.equal(code, 78, err.join(""));
+      assert.match(err.join(""), /not owned by the invoking user/);
+      assert.equal(existsSync(join(tokenDir, "agent.token")), false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
