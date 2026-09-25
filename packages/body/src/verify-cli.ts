@@ -22,7 +22,7 @@ export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--checkpoint-key <public.pem>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
     "  --key <file>      verify decision records against a public key you hold,",
@@ -33,6 +33,10 @@ function usage(): string {
     "                    verify every effect row against a public key you hold,",
     "                    instead of one key taken from the effects. Same",
     "                    distinction as --key, for the effect signer.",
+    "  --checkpoint-key <file>",
+    "                    verify every checkpoint row against a public key you",
+    "                    hold, instead of one key taken from the checkpoint",
+    "                    file. Same distinction as --key, for the witness.",
     "  --json            machine-readable result on stdout",
     "",
     "Exit code is 0 when the ledger verifies and 1 when it does not.",
@@ -67,6 +71,16 @@ export function renderVerify(r: VerifyResult): string {
     }`,
   );
   lines.push(`              ${r.effectTrust.note}`);
+  lines.push(
+    `checkpoints with ${
+      r.checkpointTrust.source === "pinned"
+        ? "a key you supplied"
+        : r.checkpointTrust.source === "in-ledger"
+          ? "the key carried in these files"
+          : "no key"
+    }`,
+  );
+  lines.push(`              ${r.checkpointTrust.note}`);
   lines.push(r.index.line);
   if (r.tail.checkpoint) {
     const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
@@ -106,6 +120,7 @@ export async function runVerify(
   const json = args.includes("--json");
   let publicKeyPem: string | undefined;
   let effectPublicKeyPem: string | undefined;
+  let checkpointPublicKeyPem: string | undefined;
   const readKeyFlag = (flag: string): { ok: true; pem?: string } | { ok: false } => {
     const at = args.indexOf(flag);
     if (at === -1) return { ok: true };
@@ -129,6 +144,9 @@ export async function runVerify(
   const effectKey = readKeyFlag("--effect-key");
   if (!effectKey.ok) return EX_VERIFY_FAILED;
   effectPublicKeyPem = effectKey.pem;
+  const checkpointKey = readKeyFlag("--checkpoint-key");
+  if (!checkpointKey.ok) return EX_VERIFY_FAILED;
+  checkpointPublicKeyPem = checkpointKey.pem;
   const dir = args.find((a) => !a.startsWith("-"));
   if (!dir) {
     out(usage());
@@ -142,6 +160,7 @@ export async function runVerify(
   const result = await verifyLedger(dir, {
     ...(publicKeyPem ? { publicKeyPem } : {}),
     ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
+    ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
   });
   out(json ? JSON.stringify(result, null, 2) : renderVerify(result));
   return result.ok ? 0 : EX_VERIFY_FAILED;

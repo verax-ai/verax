@@ -187,7 +187,7 @@ the answer says `a key you supplied` instead. Effects are signed with a
 separate key. Without a pin, every effect row is checked against one key
 taken from the effects themselves, and that line says the same thing: the
 files agree with each other, not that the key was ever yours. Pass
-`--effect-key <public.pem>` to pin the effect key you hold. `--json` prints
+`--effect-key <public.pem>` to pin the effect key you hold. Checkpoints are signed by the witness key. Every checkpoint row is checked under one key: `--checkpoint-key <public.pem>` when you pin it, otherwise one key taken from the checkpoint file, with the same note that agreement is not trust. The tail counts only checkpoints whose signatures verified. Someone who can rewrite the files can still roll that file back to an older valid prefix together with the records after it; only a checkpoint held elsewhere detects that. `--json` prints
 the same result for a
 pipeline; the exit code is 0 when it verifies and 1 when it does not, and a
 directory with no ledger in it is never quiet success.

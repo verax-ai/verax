@@ -15,7 +15,8 @@
  *               the row carries an attestation and a witness receipt that both
  *               verify under one effect key. The signed COSE payload is
  *               `{ ref, effectHash, witnessClass, resultHash }`, compared after
- *               decode, and the receipt's effect must be that same row. A
+ *               decode, and the receipt's effect (`body.effects[0]`, every
+ *               field the writer put there) must be that same row. A
  *               thrown call relaxes only the hash: the decision keeps the
  *               pre-call hash and the effect is `<subject>:threw` with its own
  *               hash, but the signature is still required. A
@@ -26,6 +27,14 @@
  *               `effectPublicKeyPem` when the reader pins one; otherwise the
  *               first receipt key in the ledger, and every effect row is
  *               checked against that same key.
+ *
+ * Checkpoints are a fifth statement. Each row in `checkpoints.jsonl` must
+ * verify under one witness key: `checkpointPublicKeyPem` when the reader
+ * pins one, otherwise the first key the file carries. A row that does not
+ * verify is named and `ok` is false. The `prevCheckpointHash` chain is
+ * checked with `findCheckpointChainBreak`. The tail uses only the prefix
+ * that verified. A key taken from the file shows the checkpoints agree
+ * with each other, not that the key was ever trusted.
  *
  * And a fourth, which matters most and is the easiest to fudge: **which key**.
  * A ledger checked against the key sitting next to it is internally
@@ -38,6 +47,12 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+import {
+  findCheckpointChainBreak,
+  verifyCheckpoint,
+  verifyCheckpointUnderPin,
+  type SignedCheckpoint,
+} from "@cedulon/checkpoint";
 import { canonical, decisionRecordHash, findDecisionRecordChainBreak, verifyDecisionRecord } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
@@ -68,6 +83,8 @@ export type VerifyResult = {
   trust: VerifyTrust;
   /** Which key answered for effect rows. Same honesty rules as `trust`. */
   effectTrust: VerifyTrust;
+  /** Which key answered for checkpoint rows. Same honesty rules as `trust`. */
+  checkpointTrust: VerifyTrust;
   /** What `index.jsonl` still names. Missing file is not a failure. */
   index: VerifyIndex;
   /** What the newest checkpoint covers, and the records after it. */
@@ -98,6 +115,8 @@ export type VerifyOptions = {
   publicKeyPem?: string;
   /** Verify every effect row against this key instead of the one the effects carry. */
   effectPublicKeyPem?: string;
+  /** Verify every checkpoint row against this key instead of one key taken from the file. */
+  checkpointPublicKeyPem?: string;
 };
 
 /** Every decisions file this directory holds, oldest piece first. */
@@ -194,10 +213,22 @@ function effectSignatureCoversRow(effect: EffectOnDisk, effectKey: string | null
     return false;
   }
   const signedRow = effect.receipt.body.effects[0];
-  if (!signedRow || signedRow.ref !== effect.row?.ref || signedRow.effectHash !== effect.row?.effectHash) {
+  if (!signedRow || !effect.row) return false;
+  try {
+    if (canonical(signedRow) !== canonical(effect.row)) return false;
+  } catch {
     return false;
   }
   return true;
+}
+
+function effectProblem(effect: EffectOnDisk, ref: string | null): string {
+  const signedClass = effect.receipt?.body.effects[0]?.effectClass;
+  const diskClass = effect.row?.effectClass;
+  if (typeof signedClass === "string" && signedClass !== diskClass) {
+    return `effect class is not the signed class: ref ${ref ?? "(missing)"}`;
+  }
+  return `effect attestation does not cover the row: ref ${ref ?? "(missing)"}`;
 }
 
 function firstEffectKey(rows: readonly EffectOnDisk[]): string | null {
@@ -206,6 +237,50 @@ function firstEffectKey(rows: readonly EffectOnDisk[]): string | null {
     if (isPublicKeyPem(pem)) return pem;
   }
   return null;
+}
+
+function firstCheckpointKey(rows: readonly SignedCheckpoint[]): string | null {
+  for (const row of rows) {
+    if (isPublicKeyPem(row.publicKeyPem)) return row.publicKeyPem;
+  }
+  return null;
+}
+
+function checkpointTrustOf(pinned: string, taken: string | null, checkpointCount: number): VerifyTrust {
+  if (pinned !== "") {
+    return {
+      source: "pinned",
+      publicKeyPem: pinned,
+      note: "verified against a key the reader supplied, not one taken from these files",
+    };
+  }
+  if (taken) {
+    return {
+      source: "in-ledger",
+      publicKeyPem: taken,
+      note:
+        "verified against the key carried in the checkpoints themselves: this shows the files are " +
+        "internally consistent, not that the key was ever trusted. Pin a key you hold to check that.",
+    };
+  }
+  return {
+    source: "none",
+    publicKeyPem: null,
+    note:
+      checkpointCount === 0
+        ? "no checkpoints, so no checkpoint key was used"
+        : "no checkpoint key was found in these files",
+  };
+}
+
+/** One key for every row. A pin ignores the key a row carries. */
+function checkpointRowVerifies(row: SignedCheckpoint, key: string | null): boolean {
+  try {
+    if (key) return verifyCheckpointUnderPin(row, key) && verifyCheckpoint(row, key);
+    return verifyCheckpoint(row);
+  } catch {
+    return false;
+  }
 }
 
 function effectTrustOf(pinned: string, taken: string | null, effectCount: number): VerifyTrust {
@@ -265,11 +340,34 @@ function indexStatement(dir: string, decisionRefs: ReadonlySet<string>): { index
 function tailStatement(
   dir: string,
   records: readonly SignedDecisionRecord[],
-): { tail: VerifyTail; problems: string[] } {
+  checkpointPublicKeyPem: string,
+): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[] } {
   const rows = loadCheckpoints(dir);
-  const newest = rows.length > 0 ? rows[rows.length - 1] : null;
+  const pinned = checkpointPublicKeyPem.trim();
+  const taken = firstCheckpointKey(rows);
+  const key = pinned !== "" ? pinned : taken;
+  const checkpointTrust = checkpointTrustOf(pinned, taken, rows.length);
+  const problems: string[] = [];
+  for (let i = 0; i < rows.length; i += 1) {
+    if (!checkpointRowVerifies(rows[i]!, key)) {
+      problems.push(`checkpoint signature does not verify: checkpoint ${i}`);
+    }
+  }
+  let brk: { index: number; reason: string } | null = null;
+  try {
+    brk = findCheckpointChainBreak(rows, key ?? undefined);
+  } catch {
+    brk = rows.length > 0 ? { index: 0, reason: "bad-signature" } : null;
+  }
+  if (brk && brk.reason !== "bad-signature") {
+    problems.push(
+      `checkpoint chain breaks at checkpoint ${brk.index} (${brk.reason}): prevCheckpointHash does not match`,
+    );
+  }
+  const covered = brk ? rows.slice(0, brk.index) : rows;
+  const newest = covered.length > 0 ? covered[covered.length - 1]! : null;
   if (!newest) {
-    return { tail: { line: TAIL_NONE, checkpoint: null }, problems: [] };
+    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems };
   }
   const claims = newest.claims;
   const receiptCount = typeof claims.receiptCount === "number" ? claims.receiptCount : null;
@@ -284,7 +382,6 @@ function tailStatement(
       }
     });
   }
-  const problems: string[] = [];
   if (receiptCount !== null && records.length < receiptCount) {
     problems.push(
       `checkpoint covers ${receiptCount} record(s); the ledger holds ${records.length}`,
@@ -300,6 +397,7 @@ function tailStatement(
       : `tail: ${after < 0 ? 0 : after} record(s) after the newest checkpoint are not covered`;
   return {
     tail: { line, checkpoint: { receiptCount, chainHeadHash, ledgerHoldsRecord } },
+    checkpointTrust,
     problems,
   };
 }
@@ -319,7 +417,7 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
   if (records.length === 0) {
     problems.push("no decisions found: this directory holds no ledger to verify");
     const emptyIndex = indexStatement(dir, new Set());
-    const emptyTail = tailStatement(dir, records);
+    const emptyTail = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
     problems.push(...emptyIndex.problems, ...emptyTail.problems);
     return {
       ok: false,
@@ -333,6 +431,7 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
       effectsOrphaned: 0,
       trust: { source: "none", publicKeyPem: null, note: "no records, so no key was used" },
       effectTrust: effectTrustOf(opts.effectPublicKeyPem?.trim() ?? "", null, 0),
+      checkpointTrust: emptyTail.checkpointTrust,
       index: emptyIndex.index,
       tail: emptyTail.tail,
       problems,
@@ -430,7 +529,7 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
       }
       if (!effectSignatureCoversRow(e, effectKey)) {
         effectsOrphaned += 1;
-        problems.push(`effect attestation does not cover the row: ref ${ref ?? "(missing)"}`);
+        problems.push(effectProblem(e, ref));
         continue;
       }
       effectsBound += 1;
@@ -450,14 +549,14 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     }
     if (!effectSignatureCoversRow(e, effectKey)) {
       effectsOrphaned += 1;
-      problems.push(`effect attestation does not cover the row: ref ${ref ?? "(missing)"}`);
+      problems.push(effectProblem(e, ref));
       continue;
     }
     effectsBound += 1;
   }
 
   const indexed = indexStatement(dir, refler);
-  const tailed = tailStatement(dir, records);
+  const tailed = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
   problems.push(...indexed.problems, ...tailed.problems);
 
   const ok =
@@ -475,6 +574,7 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     effectsOrphaned,
     trust,
     effectTrust,
+    checkpointTrust: tailed.checkpointTrust,
     index: indexed.index,
     tail: tailed.tail,
     problems,
