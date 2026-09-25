@@ -1290,7 +1290,9 @@ function verifyRegistryInstall(codeDir: string, bodyVersion: string): string | n
 }
 
 function isNpmArgv(argv: readonly string[]): boolean {
-  return argv.some((arg) => arg.replace(/\\/g, "/").endsWith("/npm-cli.js"));
+  if (argv.some((arg) => arg.replace(/\\/g, "/").endsWith("/npm-cli.js"))) return true;
+  // POSIX tests stand in a root-owned binary for npm-cli.js. The planned flags still name npm.
+  return argv.includes("--userconfig") && (argv.includes("install") || argv.includes("audit"));
 }
 
 function privateTempPlan(platform: InstallPlatform, dir: string): PlanOp {
@@ -2181,6 +2183,47 @@ function waitMs(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
+/** Check-time sha256. Sharing violations (antivirus) retry like the later copy. */
+export function hashFileWithRetry(
+  file: string,
+  read: (file: string) => Buffer | string,
+  io: { stderr: { write: (chunk: string) => void } },
+  pauseMs = COPY_WAIT_MS,
+): { ok: true; sha256: string } | { ok: false; error: string } {
+  let retries = 0;
+  let code = "";
+  let message = "hash failed";
+  for (let attempt = 1; attempt <= COPY_ATTEMPTS; attempt += 1) {
+    try {
+      const sha256 = createHash("sha256").update(read(file)).digest("hex");
+      if (retries > 0) io.stderr.write(`retried ${file}\n`);
+      return { ok: true, sha256 };
+    } catch (err) {
+      code = (err as NodeJS.ErrnoException).code ?? "";
+      message = (err as Error).message || code || "hash failed";
+      if (!COPY_RETRY_CODES.has(code) || attempt === COPY_ATTEMPTS) {
+        return { ok: false, error: `could not hash ${file}: ${code} ${message}\n` };
+      }
+      retries += 1;
+      waitMs(pauseMs);
+    }
+  }
+  return { ok: false, error: `could not hash ${file}: ${code} ${message}\n` };
+}
+
+function hashTarballDigests(
+  files: readonly string[],
+  io: InstallIo,
+): { digests: { file: string; sha256: string }[] } | { error: string } {
+  const digests: { file: string; sha256: string }[] = [];
+  for (const file of files) {
+    const hashed = hashFileWithRetry(file, readFileSync, io);
+    if (!hashed.ok) return { error: hashed.error };
+    digests.push({ file, sha256: hashed.sha256 });
+  }
+  return { digests };
+}
+
 /** Copy each trusted tarball into the private temp. Retry sharing violations. The copy's sha256 must match the trust-check hash. */
 export function stageTarballCopies(
   files: readonly { source: string; sha256: string; dest: string }[],
@@ -2668,14 +2711,12 @@ function collectTarballs(
         return { error: true, code: EX_CONFIG };
       }
     }
-    let digests: { file: string; sha256: string }[];
-    try {
-      digests = files.map((file) => ({ file, sha256: hashFile(file) }));
-    } catch {
-      io.stderr.write(`--from-tarballs ${dir} could not be hashed\n`);
+    const hashed = hashTarballDigests(files, io);
+    if ("error" in hashed) {
+      io.stderr.write(hashed.error.endsWith("\n") ? hashed.error : `${hashed.error}\n`);
       return { error: true, code: EX_CONFIG };
     }
-    return { dir, files, digests, icacls: chunks.join("\n") };
+    return { dir, files, digests: hashed.digests, icacls: chunks.join("\n") };
   }
   if (platform === "linux" || platform === "darwin") {
     const modes: { uid: number; mode: number }[] = [];
@@ -2687,14 +2728,12 @@ function collectTarballs(
       const st = statSync(file);
       modes.push({ uid: st.uid, mode: st.mode });
     }
-    let digests: { file: string; sha256: string }[];
-    try {
-      digests = files.map((file) => ({ file, sha256: hashFile(file) }));
-    } catch {
-      io.stderr.write(`--from-tarballs ${dir} could not be hashed\n`);
+    const hashed = hashTarballDigests(files, io);
+    if ("error" in hashed) {
+      io.stderr.write(hashed.error.endsWith("\n") ? hashed.error : `${hashed.error}\n`);
       return { error: true, code: EX_CONFIG };
     }
-    return { dir, files, digests, modes };
+    return { dir, files, digests: hashed.digests, modes };
   }
   io.stderr.write("--from-tarballs is not supported on this operating system\n");
   return { error: true, code: EX_CONFIG };

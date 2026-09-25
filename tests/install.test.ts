@@ -20,6 +20,7 @@ import {
   resolveTrustPath,
   restrictToOwnerWin32,
   runInstall,
+  hashFileWithRetry,
   stageTarballCopies,
   verifyServiceAcl,
   systemToolEnv,
@@ -1186,6 +1187,58 @@ describe("verax install plan", () => {
     assert.equal(extra.ok, false);
     if (!extra.ok) assert.match(extra.detail, /BUILTIN\\Users/);
     assert.equal(verifyServiceAcl(exact, "code", { dir, svcSid: "S-1-5-21-1" }).ok, true);
+  });
+
+  it("a tarball hash that fails twice with EPERM then succeeds proceeds and says it retried", () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-tgz-hash-"));
+    const file = join(root, "verax-ai-proxy-0.3.0.tgz");
+    writeFileSync(file, "tarball-bytes");
+    const err: string[] = [];
+    let attempts = 0;
+    try {
+      const hashed = hashFileWithRetry(
+        file,
+        () => {
+          attempts += 1;
+          if (attempts <= 2) {
+            const error = new Error("open") as NodeJS.ErrnoException;
+            error.code = "EPERM";
+            throw error;
+          }
+          return readFileSync(file);
+        },
+        { stderr: { write: (chunk) => err.push(chunk) } },
+        0,
+      );
+      assert.equal(hashed.ok, true);
+      if (!hashed.ok) return;
+      assert.equal(attempts, 3);
+      assert.equal(hashed.sha256, createHash("sha256").update("tarball-bytes").digest("hex"));
+      assert.match(err.join(""), new RegExp(`retried ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("a tarball hash that keeps failing prints the file and the code", () => {
+    const file = join(tmpdir(), "verax-ai-body-missing.tgz");
+    const err: string[] = [];
+    const hashed = hashFileWithRetry(
+      file,
+      () => {
+        const error = new Error("sharing violation") as NodeJS.ErrnoException;
+        error.code = "EPERM";
+        throw error;
+      },
+      { stderr: { write: (chunk) => err.push(chunk) } },
+      0,
+    );
+    assert.equal(hashed.ok, false);
+    if (hashed.ok) return;
+    assert.match(hashed.error, /could not hash/);
+    assert.match(hashed.error, /verax-ai-body-missing\.tgz/);
+    assert.match(hashed.error, /EPERM/);
+    assert.equal(err.join("").includes("retried"), false);
   });
 
   it("a tarball copy that fails twice with EPERM then succeeds proceeds and says it retried", () => {
