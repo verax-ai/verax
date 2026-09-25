@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { type AddressInfo } from "node:net";
 import { tmpdir, userInfo } from "node:os";
 import { dirname, join, win32 } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   installedBoundaryChecks,
@@ -24,6 +25,7 @@ import {
   resolveTrustPath,
   restrictToOwnerWin32,
   runInstall,
+  runUninstall,
   hashFileWithRetry,
   stageTarballCopies,
   verifyServiceAcl,
@@ -1891,6 +1893,89 @@ describe("verax install plan", () => {
       assert.notEqual(missing.status, 0);
     },
   );
+});
+
+describe("verax uninstall", () => {
+  const ioOf = (out: string[], err: string[]) => ({
+    stdout: { write: (s: string) => out.push(s) },
+    stderr: { write: (s: string) => err.push(s) },
+  });
+
+  it("a clean machine prints nothing to remove and exits 0", async () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-uninst-clean-"));
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runUninstall(["uninstall"], {
+      platform: "win32",
+      env: {
+        ...winEnv,
+        ProgramFiles: join(root, "files"),
+        ProgramData: join(root, "data"),
+        USERPROFILE: join(root, "home"),
+      },
+      elevated: () => true,
+      exec: () => ({ status: 1, stdout: "", stderr: "" }),
+      io: ioOf(out, err),
+    });
+    assert.equal(code, 0);
+    assert.match(out.join(""), /nothing to remove/);
+    assert.equal(err.join(""), "");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("a failing schtasks or icacls step prints the tool, exit code, and stderr", async () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-uninst-fail-"));
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runUninstall(["uninstall"], {
+      platform: "win32",
+      env: {
+        ...winEnv,
+        ProgramFiles: join(root, "files"),
+        ProgramData: join(root, "data"),
+        USERPROFILE: join(root, "home"),
+      },
+      elevated: () => true,
+      exec: (argv) => {
+        const tool = systemToolName(argv[0] ?? "");
+        if (tool === "schtasks" || tool === "icacls") return { status: 5, stdout: "", stderr: "access denied\n" };
+        return { status: 0, stdout: "", stderr: "" };
+      },
+      io: ioOf(out, err),
+    });
+    assert.notEqual(code, 0);
+    const written = err.join("");
+    assert.match(written, /schtasks|icacls/);
+    assert.match(written, /\b5\b/);
+    assert.match(written, /access denied/);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("every return 1 and finish(1) in install.ts is preceded by stderr in the same block", () => {
+    const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "install.ts"), "utf8");
+    const lines = source.split(/\n/);
+    const bare: string[] = [];
+    for (let i = 0; i < lines.length; i += 1) {
+      const line = lines[i] ?? "";
+      if (!/\breturn 1\b/.test(line) && !/finish\(1\)/.test(line)) continue;
+      // orderTarballs ranks a filename; it is not a process exit.
+      if (line.includes('base.includes("proxy")')) continue;
+      const indent = /^ */.exec(line)?.[0].length ?? 0;
+      let saw = false;
+      for (let j = i - 1; j >= 0; j -= 1) {
+        const prev = lines[j] ?? "";
+        if (prev.trim() === "") continue;
+        const prevIndent = /^ */.exec(prev)?.[0].length ?? 0;
+        if (prevIndent < indent) break;
+        if (prev.includes("io.stderr.write")) {
+          saw = true;
+          break;
+        }
+      }
+      if (!saw) bare.push(`${i + 1}: ${line.trim()}`);
+    }
+    assert.deepEqual(bare, []);
+  });
 });
 
 function textsUnder(dir: string): string {

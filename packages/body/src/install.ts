@@ -2507,16 +2507,23 @@ async function execute(
         const failed = (ran.status ?? 1) !== 0 || stderrHasErrorMark(ran.stderr ?? "");
         if (failed && !step.optional) {
           if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
-          const detail = redactSecrets(ran.stderr ?? "", step.argv, step.stdin);
-          if (detail !== "") io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
-          return finish(ran.status === EX_CONFIG ? EX_CONFIG : 1);
+          const detail = redactSecrets(ran.stderr ?? "", step.argv, step.stdin).trim();
+          const code = ran.status ?? 1;
+          const tool = systemToolName(resolved[0] ?? "") || "powershell";
+          io.stderr.write(`${tool} exit ${code}${detail ? `: ${detail}` : ""}\n`);
+          if (ran.status === EX_CONFIG) return finish(EX_CONFIG);
+          return finish(1);
         }
         continue;
       }
       if (isNpmArgv(resolved) && (ran.status ?? 1) !== 0 && !step.optional) {
         reportNpmFailure(platform, tempDir, resolved, ran, call, io);
         if (ran.status !== EX_CONFIG && step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
-        return finish(ran.status === EX_CONFIG ? EX_CONFIG : 1);
+        const code = ran.status ?? 1;
+        const detail = redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin);
+        io.stderr.write(`npm exit ${code}${detail ? `: ${detail.split("\n")[0]}` : ""}\n`);
+        if (ran.status === EX_CONFIG) return finish(EX_CONFIG);
+        return finish(1);
       }
       if (ran.status === EX_CONFIG && !step.optional) {
         io.stderr.write(`${redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin)}\n`);
@@ -2527,12 +2534,13 @@ async function execute(
         if (resetDir !== null && directoryIsEmpty(resetDir)) continue;
         if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
         const detail = redactSecrets((ran.stderr || ran.stdout || "").trim(), step.argv, step.stdin);
-        const what = step.argv.includes("signatures")
-          ? "npm audit signatures"
+        const code = ran.status ?? 1;
+        const tool = step.argv.includes("signatures")
+          ? "npm"
           : step.argv.includes("--omit=dev")
-            ? "npm install"
-            : (step.argv[0] ?? "command");
-        io.stderr.write(`${what} failed${detail ? `: ${detail.split("\n")[0]}` : ""}\n`);
+            ? "npm"
+            : (systemToolName(step.argv[0] ?? "") || (step.argv[0] ?? "command"));
+        io.stderr.write(`${tool} exit ${code}${detail ? `: ${detail.split("\n")[0]}` : ""}\n`);
         return finish(1);
       }
       const grantKind = platform === "win32" ? serviceGrantKind(resolved) : null;
@@ -3192,6 +3200,191 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
   return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv);
 }
 
+/** A non-zero tool result that means the install artifact is already gone. */
+function toolAlreadyAbsent(ran: ExecResult): boolean {
+  if ((ran.status ?? 1) === 0) return false;
+  const text = `${ran.stdout ?? ""}\n${ran.stderr ?? ""}`.toLowerCase();
+  if (text.trim() === "") return true;
+  return /cannot find the file specified|does not exist|could not be found|could not find|no such file|not found|not loaded|isn't loaded|is not loaded/.test(text);
+}
+
+function reportToolFailure(io: InstallIo, argv: readonly string[], ran: ExecResult): void {
+  const tool = systemToolName(argv[0] ?? "") || (argv[0] ?? "command");
+  const code = ran.status ?? 1;
+  const err = `${ran.stderr ?? ""}`.replace(/\s+$/, "");
+  io.stderr.write(err === "" ? `${tool} exit ${code}\n` : `${tool} exit ${code}: ${err}\n`);
+}
+
+/** Run one uninstall tool. Absent artifacts are not failures. Returns a non-zero code when the tool failed. */
+function runUninstallTool(exec: ToolExec, io: InstallIo, argv: string[]): number | null {
+  const ran = exec(argv);
+  if ((ran.status ?? 1) === 0 || toolAlreadyAbsent(ran)) return null;
+  reportToolFailure(io, argv, ran);
+  return ran.status ?? 1;
+}
+
+function removeInstallPath(target: string, io: InstallIo): number | null {
+  try {
+    rmSync(target, { recursive: true, force: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "remove failed";
+    io.stderr.write(`rm exit 1: ${message}\n`);
+    return 1;
+  }
+  return null;
+}
+
+/**
+ * Remove whatever is still installed. A clean machine prints `nothing to remove` and exits 0.
+ * A real tool failure prints the tool, its exit code, and its stderr.
+ */
+function executeUninstall(
+  platform: NodeJS.Platform,
+  plan: Extract<InstallPlan, { ok: true }>,
+  exec: ToolExec,
+  io: InstallIo,
+  opts: { keepState: boolean; removeWinAccount: boolean; removeDarwinUser: boolean; removeDarwinGroup: boolean },
+): number {
+  const lines: string[] = [];
+  let any = false;
+  const writeLines = (): void => {
+    for (const line of lines) io.stdout.write(`${line}\n`);
+  };
+
+  const note = (present: boolean, label: string, remove: () => number | null): number | null => {
+    if (!present) {
+      lines.push(`already absent: ${label}`);
+      return null;
+    }
+    any = true;
+    const failed = remove();
+    if (failed !== null) return failed;
+    lines.push(`removed: ${label}`);
+    return null;
+  };
+
+  if (platform === "win32") {
+    const queryArgv = toolArgv("schtasks", ["/Query", "/TN", TASK_NAME], "win32");
+    const query = exec(queryArgv);
+    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+      reportToolFailure(io, queryArgv, query);
+      return query.status ?? 1;
+    }
+    const failed = note(query.status === 0, `scheduled task ${TASK_NAME}`, () => {
+      const end = runUninstallTool(exec, io, toolArgv("schtasks", ["/End", "/TN", TASK_NAME], "win32"));
+      if (end !== null) return end;
+      return runUninstallTool(exec, io, toolArgv("schtasks", ["/Delete", "/TN", TASK_NAME, "/F"], "win32"));
+    });
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  } else if (platform === "linux") {
+    const unit = "/etc/systemd/system/verax.service";
+    const failed = note(existsSync(unit), "systemd unit verax.service", () => {
+      const stopped = runUninstallTool(exec, io, toolArgv("systemctl", ["disable", "--now", "verax"], "linux"));
+      if (stopped !== null) return stopped;
+      const removed = removeInstallPath(unit, io);
+      if (removed !== null) return removed;
+      return runUninstallTool(exec, io, toolArgv("systemctl", ["daemon-reload"], "linux"));
+    });
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  } else if (platform === "darwin") {
+    const failed = note(existsSync(DARWIN_PLIST), `launchd plist ${DARWIN_PLIST}`, () => {
+      const boot = runUninstallTool(exec, io, toolArgv("launchctl", ["bootout", `system/${DARWIN_LABEL}`], "darwin"));
+      if (boot !== null) return boot;
+      return removeInstallPath(DARWIN_PLIST, io);
+    });
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  }
+
+  const codeFailed = note(existsSync(plan.codeDir), plan.codeDir, () => removeInstallPath(plan.codeDir, io));
+  if (codeFailed !== null) {
+    writeLines();
+    return codeFailed;
+  }
+  if (platform === "darwin") {
+    const markerFailed = note(existsSync(DARWIN_MARKER), DARWIN_MARKER, () => removeInstallPath(DARWIN_MARKER, io));
+    if (markerFailed !== null) {
+      writeLines();
+      return markerFailed;
+    }
+    const rootFailed = note(existsSync(DARWIN_ROOT), DARWIN_ROOT, () => removeInstallPath(DARWIN_ROOT, io));
+    if (rootFailed !== null) {
+      writeLines();
+      return rootFailed;
+    }
+  }
+  if (!opts.keepState) {
+    const stateFailed = note(existsSync(plan.stateDir), plan.stateDir, () => removeInstallPath(plan.stateDir, io));
+    if (stateFailed !== null) {
+      writeLines();
+      return stateFailed;
+    }
+  }
+  if (platform === "win32" && opts.removeWinAccount) {
+    const queryArgv = toolArgv("net", ["user", VERAX_SVC], "win32");
+    const query = exec(queryArgv);
+    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+      reportToolFailure(io, queryArgv, query);
+      writeLines();
+      return query.status ?? 1;
+    }
+    const failed = note(query.status === 0, `account ${VERAX_SVC}`, () =>
+      runUninstallTool(exec, io, toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32")),
+    );
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  }
+  if (platform === "darwin" && opts.removeDarwinUser) {
+    const queryArgv = toolArgv("id", ["-u", DARWIN_USER], "darwin");
+    const query = exec(queryArgv);
+    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+      reportToolFailure(io, queryArgv, query);
+      writeLines();
+      return query.status ?? 1;
+    }
+    const failed = note(query.status === 0, `user ${DARWIN_USER}`, () =>
+      runUninstallTool(exec, io, toolArgv("dscl", [".", "-delete", `/Users/${DARWIN_USER}`], "darwin")),
+    );
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  }
+  if (platform === "darwin" && opts.removeDarwinGroup) {
+    const queryArgv = toolArgv("dscl", [".", "-read", `/Groups/${DARWIN_USER}`, "PrimaryGroupID"], "darwin");
+    const query = exec(queryArgv);
+    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+      reportToolFailure(io, queryArgv, query);
+      writeLines();
+      return query.status ?? 1;
+    }
+    const failed = note(query.status === 0, `group ${DARWIN_USER}`, () =>
+      runUninstallTool(exec, io, toolArgv("dscl", [".", "-delete", `/Groups/${DARWIN_USER}`], "darwin")),
+    );
+    if (failed !== null) {
+      writeLines();
+      return failed;
+    }
+  }
+
+  if (!any) {
+    io.stdout.write("nothing to remove\n");
+    return 0;
+  }
+  writeLines();
+  return 0;
+}
+
 export async function runUninstall(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
   const platform = hooks.platform ?? process.platform;
   const env = hooks.env ?? process.env;
@@ -3239,7 +3432,12 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync);
+  return executeUninstall(platform, plan, exec, io, {
+    keepState: parsed.keepState,
+    removeWinAccount: flags.createdAccount,
+    removeDarwinUser: flags.createdUser,
+    removeDarwinGroup: flags.createdGroup,
+  });
 }
 
 function hashUnder(dir: string, rel: string): string | null {
