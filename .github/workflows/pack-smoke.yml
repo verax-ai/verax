@@ -144,6 +144,7 @@ jobs:
           test "$(command -v node)" = "$VERAX_NODE"
           npm run build:dist
       - name: pack:smoke
+        id: pack-smoke-windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -151,8 +152,139 @@ jobs:
           npm run pack:smoke
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::pack:smoke failed"; exit $LASTEXITCODE }
       - name: pack:smoke
+        id: pack-smoke-posix
         if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           test "$(command -v node)" = "$VERAX_NODE"
           npm run pack:smoke
+      - name: platform evidence
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          trap { Write-Host $_.Exception.Message; exit 0 }
+          function Add-Evidence([string]$line) {
+            Write-Host $line
+            $path = $env:GITHUB_STEP_SUMMARY
+            if ([string]::IsNullOrWhiteSpace($path)) { return }
+            [System.IO.File]::AppendAllText($path, "$line`n", [System.Text.UTF8Encoding]::new($false))
+          }
+          function Mark([string]$outcome) {
+            if ($outcome -eq 'success') { return '✅' }
+            return '❌'
+          }
+          $caption = ''
+          $version = ''
+          try {
+            $caption = (Get-CimInstance Win32_OperatingSystem).Caption
+            $version = (Get-CimInstance Win32_OperatingSystem).Version
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $arch = [string]$env:PROCESSOR_ARCHITECTURE
+          $node = 'unavailable'
+          try {
+            $printed = (& node -v 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $printed) { $node = $printed }
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $osLine = ("$caption $version").Trim() -replace '\s+', ' '
+          $win = '${{ steps.pack-smoke-windows.outcome }}'
+          $posix = '${{ steps.pack-smoke-posix.outcome }}'
+          $outcome = $posix
+          if ($win -ne 'skipped' -and -not [string]::IsNullOrWhiteSpace($win)) { $outcome = $win }
+          Add-Evidence '### Platform evidence'
+          Add-Evidence "OS: $osLine"
+          Add-Evidence "Architecture: $arch"
+          Add-Evidence "Node: $node"
+          Add-Evidence 'Matrix leg: os: ${{ matrix.os }}'
+          Add-Evidence "Commit: $env:GITHUB_SHA"
+          Add-Evidence ''
+          Add-Evidence "$(Mark $outcome) the npm packages install cleanly and init / serve / a tool call / verify work"
+          exit 0
+      - name: platform evidence
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=""
+          if [ -f /etc/os-release ]; then
+            pretty=$(grep '^PRETTY_NAME=' /etc/os-release | head -n 1 | cut -d= -f2- | tr -d '"')
+          fi
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          win='${{ steps.pack-smoke-windows.outcome }}'
+          posix='${{ steps.pack-smoke-posix.outcome }}'
+          outcome="$posix"
+          if [ "$win" != "skipped" ] && [ -n "$win" ]; then
+            outcome="$win"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          add "$(mark "$outcome") the npm packages install cleanly and init / serve / a tool call / verify work"
+          exit 0
+      - name: platform evidence
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=$(sw_vers 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          win='${{ steps.pack-smoke-windows.outcome }}'
+          posix='${{ steps.pack-smoke-posix.outcome }}'
+          outcome="$posix"
+          if [ "$win" != "skipped" ] && [ -n "$win" ]; then
+            outcome="$win"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          add "$(mark "$outcome") the npm packages install cleanly and init / serve / a tool call / verify work"
+          exit 0

@@ -219,6 +219,7 @@ jobs:
           }
           exit 0
       - name: install, probe, uninstall
+        id: install-probe
         shell: pwsh
         run: |
           & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801
@@ -360,6 +361,7 @@ jobs:
           }
           exit 0
       - name: second run refuses a state dir the probe user pre-created
+        id: planted-dir
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -405,6 +407,7 @@ jobs:
             exit 1
           }
       - name: a probe user racing the install cannot plant inside the Verax root
+        id: install-race
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -492,6 +495,58 @@ jobs:
           net user verax-svc /delete
           Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1","$env:PUBLIC\verax-race.ps1","$env:PUBLIC\verax-race.log","$env:PUBLIC\verax-race.stop"
           exit 0
+      - name: platform evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          trap { Write-Host $_.Exception.Message; exit 0 }
+          function Add-Evidence([string]$line) {
+            Write-Host $line
+            $path = $env:GITHUB_STEP_SUMMARY
+            if ([string]::IsNullOrWhiteSpace($path)) { return }
+            [System.IO.File]::AppendAllText($path, "$line`n", [System.Text.UTF8Encoding]::new($false))
+          }
+          function Mark([string]$outcome) {
+            if ($outcome -eq 'success') { return '✅' }
+            return '❌'
+          }
+          $caption = ''
+          $version = ''
+          try {
+            $caption = (Get-CimInstance Win32_OperatingSystem).Caption
+            $version = (Get-CimInstance Win32_OperatingSystem).Version
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $arch = [string]$env:PROCESSOR_ARCHITECTURE
+          $node = 'unavailable'
+          try {
+            $printed = (& node -v 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $printed) { $node = $printed }
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $osLine = ("$caption $version").Trim() -replace '\s+', ' '
+          Add-Evidence '### Platform evidence'
+          Add-Evidence "OS: $osLine"
+          Add-Evidence "Architecture: $arch"
+          Add-Evidence "Node: $node"
+          Add-Evidence 'Matrix leg: names: ${{ matrix.names }}'
+          Add-Evidence "Commit: $env:GITHUB_SHA"
+          Add-Evidence ''
+          $probe = '${{ steps.install-probe.outcome }}'
+          $planted = '${{ steps.planted-dir.outcome }}'
+          $race = '${{ steps.install-race.outcome }}'
+          Add-Evidence "$(Mark $probe) installs as a separate service account and starts the service"
+          Add-Evidence "$(Mark $probe) a non-admin user cannot read the signing key"
+          Add-Evidence "$(Mark $probe) a non-admin user cannot write the approval queue"
+          Add-Evidence "$(Mark $probe) a non-admin user cannot change the installed code"
+          Add-Evidence "$(Mark $probe) the agent token works through the service"
+          Add-Evidence "$(Mark $planted) a directory planted by a non-admin user is refused"
+          Add-Evidence "$(Mark $race) a non-admin user racing the install cannot plant inside the Verax root"
+          exit 0
 
   linux:
     runs-on: ${{ matrix.os }}
@@ -553,6 +608,7 @@ jobs:
           sudo chmod -R a-w,u+rX "$dir"
           echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
       - name: install and probe as the invoking user
+        id: install-probe
         run: |
           set -euo pipefail
           # sudo sets SUDO_USER to the invoking account (runner on this job).
@@ -584,6 +640,48 @@ jobs:
       - name: uninstall
         if: always()
         run: sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+      - name: platform evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=""
+          if [ -f /etc/os-release ]; then
+            pretty=$(grep '^PRETTY_NAME=' /etc/os-release | head -n 1 | cut -d= -f2- | tr -d '"')
+          fi
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          probe='${{ steps.install-probe.outcome }}'
+          add "$(mark "$probe") installs as a separate service account and starts the service"
+          add "$(mark "$probe") a non-admin user cannot read the signing key"
+          add "$(mark "$probe") a non-admin user cannot write the approval queue"
+          add "$(mark "$probe") a non-admin user cannot change the installed code"
+          add "$(mark "$probe") the agent token works through the service"
+          exit 0
 
   macos:
     runs-on: ${{ matrix.os }}
@@ -650,6 +748,7 @@ jobs:
           sudo chmod -R go-w,u+rX "$dir"
           echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
       - name: install and probe as the invoking user
+        id: install-probe
         run: |
           set -euo pipefail
           sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
@@ -725,3 +824,42 @@ jobs:
           sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
           sudo /bin/launchctl bootout system/com.verax-ai.body || true
           sudo rm -f /Library/LaunchDaemons/com.verax-ai.body.plist
+      - name: platform evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=$(sw_vers 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          probe='${{ steps.install-probe.outcome }}'
+          add "$(mark "$probe") installs as a separate service account and starts the service"
+          add "$(mark "$probe") a non-admin user cannot read the signing key"
+          add "$(mark "$probe") a non-admin user cannot write the approval queue"
+          add "$(mark "$probe") a non-admin user cannot change the installed code"
+          add "$(mark "$probe") the agent token works through the service"
+          exit 0

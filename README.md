@@ -304,6 +304,8 @@ proxy performance check. Releases go out from the Actions tab:
 provenance attestation, then `mcp-registry.yml` updates the registry record
 once npm answers for the new version. Neither runs on push.
 
+Tested on every release on the platforms listed in docs/PLATFORMS.md, each row linked to its CI run.
+
 ## License
 
 Apache-2.0.
