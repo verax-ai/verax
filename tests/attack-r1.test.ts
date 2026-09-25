@@ -251,7 +251,7 @@ async function boot(opts: {
       await new Promise<void>((resolveClose, reject) => {
         http.close((err) => (err ? reject(err) : resolveClose()));
       });
-      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }
@@ -832,7 +832,7 @@ describe("attack R1", () => {
       }
     } finally {
       await box.close();
-      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -909,7 +909,7 @@ describe("attack R1", () => {
           await new Promise<void>((resolveClose, reject) => {
             http.close((err) => (err ? reject(err) : resolveClose()));
           });
-          rmSync(stateDir, { recursive: true, force: true });
+          rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
         },
       };
       const res = await rpc(mcp, token, "tools/call", { name: "clock.now", arguments: {} });
@@ -932,7 +932,7 @@ describe("attack R1", () => {
       assert.equal(effect.row.effectClass, "clock.now");
     } finally {
       if (box) await box.close();
-      rmSync(scratch, { recursive: true, force: true });
+      rmSync(scratch, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 

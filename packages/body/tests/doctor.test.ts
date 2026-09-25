@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { doctorExit, runDoctor } from "../src/doctor.ts";
+import { doctorBodyLog, doctorExit, runDoctor } from "../src/doctor.ts";
 
 describe("doctor", () => {
   it("fails when argv carries sk-test-not-a-key", () => {
@@ -282,5 +282,13 @@ describe("doctor", () => {
     );
     const document = checks.find((c) => c.id === "downstream-document");
     assert.equal(document?.level, "fail");
+  });
+
+  it("prints the last 20 lines of body.log", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-doc-body-log-"));
+    const lines = Array.from({ length: 25 }, (_, i) => `line-${i + 1}`);
+    writeFileSync(join(dir, "body.log"), `${lines.join("\n")}\n`, { encoding: "utf8" });
+    assert.equal(doctorBodyLog(dir), `${lines.slice(-20).join("\n")}\n`);
+    assert.match(doctorBodyLog(join(dir, "absent")), /body\.log missing:/);
   });
 });

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ensureTokenParent, mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
+import { beginWinOwnerRun, endWinOwnerRun, ensureTokenParent, mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -182,6 +182,19 @@ export async function runInitLocal(
   argv: readonly string[],
   io: InitIo = { stdout: process.stdout, stderr: process.stderr },
   opts: InitLocalOpts = {},
+): Promise<number> {
+  beginWinOwnerRun();
+  try {
+  return await runInitLocalBody(argv, io, opts);
+  } finally {
+    endWinOwnerRun();
+  }
+}
+
+async function runInitLocalBody(
+  argv: readonly string[],
+  io: InitIo,
+  opts: InitLocalOpts,
 ): Promise<number> {
   const parsed = parseInitArgs(argv);
   if ("error" in parsed) {

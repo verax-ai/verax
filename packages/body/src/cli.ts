@@ -3,9 +3,10 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
+import { attachBodyLog } from "./body-log.ts";
 import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
-import { doctorExit, runDoctor } from "./doctor.ts";
+import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
 import { envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { directoryAccess, doctorStateTarget, liveInstalledChecks, runInstall, runUninstall, unreadableSentence } from "./install.ts";
 import { runHalt } from "./halt.ts";
@@ -21,7 +22,9 @@ const HELP = `verax - the body an agent asks before it acts, and the ledger it a
 Usage: verax <command> [options]
 
   (no command)         serve MCP over Streamable HTTP at /mcp on VERAX_BIND (default 127.0.0.1:8787)
-  serve [--env-file <file>]  same as serving, after loading KEY=VALUE lines from that file
+  serve [--env-file <file>] [--log-file <file>]
+                       same as serving, after loading KEY=VALUE lines from that file.
+                       --log-file appends this process's stdout and stderr
   init --local <stateDir> [--force] [--days N] [--port N]
                        write a loopback key, one agent token, and verax.env
   install [--port N] [--days N] [--force]
@@ -119,6 +122,20 @@ if (argv[0] === "uninstall") {
   process.exit(await runUninstall(argv));
 }
 if (argv[0] === "serve") {
+  const logFlag = argv.indexOf("--log-file");
+  if (logFlag !== -1) {
+    const logPath = argv[logFlag + 1];
+    if (!logPath || logPath.startsWith("-")) {
+      process.stderr.write("verax serve --log-file <file>\n");
+      process.exit(78);
+    }
+    const attached = attachBodyLog(logPath);
+    if (!attached.ok) {
+      process.stderr.write(`${attached.reason}\n`);
+      process.exit(78);
+    }
+    process.stderr.write("verax serve starting\n");
+  }
   const fileFlag = argv.indexOf("--env-file");
   if (fileFlag !== -1) {
     const file = argv[fileFlag + 1];
@@ -153,12 +170,14 @@ if (argv[0] === "doctor") {
     process.exit(77);
   }
   const checks = [...runDoctor(process.env, process.argv), ...liveInstalledChecks()];
+  const bodyLog = target ? doctorBodyLog(target) : "";
   if (json) {
-    process.stdout.write(`${JSON.stringify({ checks })}\n`);
+    process.stdout.write(`${JSON.stringify(target ? { checks, bodyLog } : { checks })}\n`);
   } else {
     for (const c of checks) {
       process.stdout.write(`${c.level}\t${c.id}\t${c.detail}\n`);
     }
+    if (bodyLog !== "") process.stdout.write(bodyLog);
   }
   process.exit(doctorExit(checks));
 }

@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
@@ -320,6 +321,14 @@ function scopeFromDevToken(raw: string | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+/** Last 20 lines of `<stateDir>/body.log`, or a missing-file sentence. */
+export function doctorBodyLog(stateDir: string): string {
+  const file = join(stateDir, "body.log");
+  const tail = readLogTail(file, 20);
+  if (tail === null) return `body.log missing: ${file}\n`;
+  return tail;
 }
 
 export function doctorExit(checks: readonly DoctorCheck[]): number {

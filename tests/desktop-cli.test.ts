@@ -274,7 +274,7 @@ describe("verax desktop CLI", () => {
           server.close(() => resolve());
         });
         await issuer.close();
-        rmSync(stateDir, { recursive: true, force: true });
+        rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
   );
@@ -343,7 +343,7 @@ describe("verax desktop CLI", () => {
           server.close(() => resolve());
         });
         await issuer.close();
-        rmSync(stateDir, { recursive: true, force: true });
+        rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
   );

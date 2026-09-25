@@ -12,6 +12,7 @@ import { dirname, join, win32 } from "node:path";
 import {
   installedBoundaryChecks,
   tokenParentRefusal,
+  rootOwnedTokenParentArgv,
   windowsDirGrantArgs,
   windowsResetInheritArgs,
   LOGON_HOLDER_COMPARE,
@@ -225,6 +226,8 @@ describe("verax install plan", () => {
     assert.match(tr, /C:\\Program Files\\nodejs\\node\.exe/);
     assert.match(tr, /C:\\Program Files\\Verax\\node_modules\\@verax-ai\\body\\dist\\cli\.js/);
     assert.match(tr, /serve --env-file/);
+    assert.match(tr, /--log-file/);
+    assert.match(tr, /body\.log/);
     assert.match(tr, /Start-ScheduledTask/);
     assert.equal(tr.includes("AppData"), false);
     assert.equal(tr.includes("\\Verax\\node.exe"), false);
@@ -232,7 +235,14 @@ describe("verax install plan", () => {
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     const unit = linux.ops.find((op) => op.op === "write" && op.path === "/etc/systemd/system/verax.service");
     assert.ok(unit && unit.op === "write");
-    assert.match(unit.contents, /ExecStart=\/usr\/bin\/node \/opt\/verax\/node_modules\/@verax-ai\/body\/dist\/cli\.js serve --env-file \/var\/lib\/verax\/verax\.env/);
+    assert.match(unit.contents, /ExecStart=\/usr\/bin\/node \/opt\/verax\/node_modules\/@verax-ai\/body\/dist\/cli\.js serve --env-file \/var\/lib\/verax\/verax\.env --log-file \/var\/lib\/verax\/body\.log/);
+    const darwin = planInstall("darwin", darwinEnv, darwinOpts);
+    if (!darwin.ok) throw new Error(darwin.message);
+    for (const planned of [win, linux, darwin]) {
+      const wait = planned.ops.find((op) => op.op === "wait-healthz");
+      assert.ok(wait && wait.op === "wait-healthz");
+      assert.equal(wait.timeoutMs, 60_000);
+    }
     assert.equal(unit.contents.includes("/opt/verax/node "), false);
   });
 
@@ -517,6 +527,8 @@ describe("verax install plan", () => {
     assert.match(plist.contents, /<string>\/Library\/Verax\/code\/node_modules\/@verax-ai\/body\/dist\/cli\.js<\/string>/);
     assert.match(plist.contents, /StandardErrorPath/);
     assert.match(plist.contents, /\/Library\/Application Support\/Verax\/state\/body\.err/);
+    assert.match(plist.contents, /<string>--log-file<\/string>/);
+    assert.match(plist.contents, /\/Library\/Application Support\/Verax\/state\/body\.log/);
     const lines = argvs(plan.ops);
     const parent = "/Library/Application Support/Verax";
     const parentMk = plan.ops.find((op) => op.op === "mkdir" && op.path === parent);
@@ -655,7 +667,7 @@ describe("verax install plan", () => {
       }
     } finally {
       await new Promise<void>((resolve) => health.close(() => resolve()));
-      rmSync(root, { recursive: true, force: true });
+      rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -1481,6 +1493,50 @@ describe("verax install plan", () => {
     }
   });
 
+  it("accepts Administrators, SYSTEM, and root-owned token folders", () => {
+    const win = {
+      dir: "C:\\Users\\RUNNER~1\\AppData\\Local\\Temp",
+      symlink: false,
+      directory: true,
+      reparse: false,
+      platform: "win32" as const,
+      uid: 0,
+      invokingSid: "S-1-5-21-1",
+    };
+    assert.equal(tokenParentRefusal({ ...win, ownerSid: "S-1-5-32-544" }), null);
+    assert.equal(tokenParentRefusal({ ...win, ownerSid: "s-1-5-18" }), null);
+    assert.equal(tokenParentRefusal({ ...win, ownerSid: "S-1-5-21-1" }), null);
+    assert.match(tokenParentRefusal({ ...win, ownerSid: "S-1-5-21-99" }) ?? "", /not owned by the invoking user/);
+    assert.equal(tokenParentRefusal({
+      dir: "/home/runner/.verax",
+      symlink: false,
+      directory: true,
+      reparse: false,
+      platform: "linux",
+      uid: 0,
+      invokingUid: 1000,
+    }), null);
+    assert.match(tokenParentRefusal({
+      dir: "/home/runner/.verax",
+      symlink: false,
+      directory: true,
+      reparse: false,
+      platform: "linux",
+      uid: 1001,
+      invokingUid: 1000,
+    }) ?? "", /not owned by the invoking user/);
+    const repair = rootOwnedTokenParentArgv("/home/runner/.verax", 1000, "linux");
+    const chown = repair.find((argv) => systemToolName(argv[0] ?? "") === "chown");
+    const mode = repair.find((argv) => systemToolName(argv[0] ?? "") === "chmod");
+    assert.ok(chown?.includes("1000:") && chown.includes("/home/runner/.verax"));
+    assert.ok(mode?.includes("0700") && mode.includes("/home/runner/.verax"));
+    const linux = okPlan("linux", linuxEnv, linuxOpts);
+    const tokenDir = "/home/runner/.verax";
+    const planned = argvs(linux.ops).filter((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.includes(tokenDir));
+    assert.ok(planned.some((argv) => argv.includes(`${linuxEnv.SUDO_USER}:`)));
+    assert.ok(argvs(linux.ops).some((argv) => systemToolName(argv[0] ?? "") === "chmod" && argv.includes("0700") && argv.includes(tokenDir)));
+  });
+
   it("refuses a POSIX token folder owned by another uid", async () => {
     const reason = tokenParentRefusal({
       dir: "/home/runner/.verax",
@@ -1488,7 +1544,7 @@ describe("verax install plan", () => {
       directory: true,
       reparse: false,
       platform: "linux",
-      uid: 0,
+      uid: 1001,
       invokingUid: 1000,
     });
     assert.match(reason ?? "", /not owned by the invoking user/);

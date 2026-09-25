@@ -34,13 +34,15 @@ const MAX_DAYS = 90;
 const DEFAULT_PORT = 8787;
 const MIN_PORT = 1024;
 const MAX_PORT = 65535;
-const HEALTH_WAIT_MS = 20_000;
+const HEALTH_WAIT_MS = 60_000;
 
 const VERAX_SVC = "verax-svc";
 const ADMINISTRATORS = "BUILTIN\\Administrators";
 const SYSTEM_ACCOUNT = "NT AUTHORITY\\SYSTEM";
 const ADMINISTRATORS_SID = "*S-1-5-32-544";
 const SYSTEM_SID = "*S-1-5-18";
+/** Folder owners an unelevated agent cannot become or replace. */
+const TRUSTED_FOLDER_OWNER_SIDS = new Set(["S-1-5-32-544", "S-1-5-18"]);
 const TASK_NAME = "Verax Body";
 const DARWIN_USER = "_verax";
 const DARWIN_LABEL = "com.verax-ai.body";
@@ -786,8 +788,8 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
   return [powershellStdin(script, password, tempDir)];
 }
 
-function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string, tempDir: string): PlanOp {
-  const argument = `"${cliBin}" serve --env-file "${envFile}"`;
+function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string, logFile: string, tempDir: string): PlanOp {
+  const argument = `"${cliBin}" serve --env-file "${envFile}" --log-file "${logFile}"`;
   const script = [
     "$plain = [Console]::In.ReadLine()",
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
@@ -804,8 +806,8 @@ function xmlEscape(value: string): string {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-function plistText(nodeBin: string, cliBin: string, envFile: string, errFile: string): string {
-  const args = [nodeBin, cliBin, "serve", "--env-file", envFile].map((part) => `    <string>${xmlEscape(part)}</string>`);
+function plistText(nodeBin: string, cliBin: string, envFile: string, errFile: string, logFile: string): string {
+  const args = [nodeBin, cliBin, "serve", "--env-file", envFile, "--log-file", logFile].map((part) => `    <string>${xmlEscape(part)}</string>`);
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -894,7 +896,7 @@ function winPrincipal(env: NodeJS.ProcessEnv, profile: string): string {
   return env.USERDOMAIN?.trim() ? `${env.USERDOMAIN.trim()}\\${user}` : user;
 }
 
-function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: string): string {
+function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: string, logFile: string): string {
   return [
     "[Unit]",
     "Description=Verax body",
@@ -903,7 +905,7 @@ function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: st
     "[Service]",
     "Type=simple",
     "User=verax",
-    `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile}`,
+    `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile} --log-file ${logFile}`,
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     `ReadWritePaths=${stateDir}`,
@@ -997,6 +999,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   if (opts.stateExists && !opts.force) return fail(EX_CONFIG, `refusing: ${paths.stateDir} already exists`);
   const cliBin = cliBinFor(paths.codeDir, platform);
   const envFile = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, "verax.env");
+  const logFile = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, "body.log");
   const winPassword = platform === "win32" ? windowsServicePassword() : "";
   const winCreate = platform === "win32" && !opts.winAccount?.exists;
   const tempDir = privateTempPath(platform, env, posixRoot);
@@ -1140,7 +1143,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
         argv: toolArgv("icacls", [paths.tokenPath, "/inheritance:r", "/grant:r", `${winPrincipal(env, located.home)}:(R)`], "win32"),
       },
     );
-    ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile, tempDir));
+    ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile, logFile, tempDir));
   } else if (platform === "linux") {
     const sudoUser = env.SUDO_USER!.trim();
     const tokenDir = path.posix.dirname(paths.tokenPath);
@@ -1151,7 +1154,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0700", tokenDir], "linux") },
       { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, paths.tokenPath], "linux") },
       { op: "argv", argv: toolArgv("chmod", ["0600", paths.tokenPath], "linux") },
-      { op: "write", path: fixed.systemdUnit, contents: unitText(opts.execPath, cliBin, envFile, paths.stateDir), mode: 0o644 },
+      { op: "write", path: fixed.systemdUnit, contents: unitText(opts.execPath, cliBin, envFile, paths.stateDir, logFile), mode: 0o644 },
       { op: "argv", argv: toolArgv("systemctl", ["daemon-reload"], "linux") },
       { op: "argv", argv: toolArgv("systemctl", ["enable", "--now", "verax"], "linux") },
     );
@@ -1166,7 +1169,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0700", tokenDir], "darwin") },
       { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, paths.tokenPath], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0600", paths.tokenPath], "darwin") },
-      { op: "write", path: fixed.darwinPlist, contents: plistText(opts.execPath, cliBin, envFile, errFile), mode: 0o644 },
+      { op: "write", path: fixed.darwinPlist, contents: plistText(opts.execPath, cliBin, envFile, errFile, logFile), mode: 0o644 },
       { op: "argv", argv: toolArgv("chown", ["root:wheel", fixed.darwinPlist], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0644", fixed.darwinPlist], "darwin") },
       { op: "argv", argv: toolArgv("plutil", ["-lint", fixed.darwinPlist], "darwin") },
@@ -1933,11 +1936,20 @@ function healthOnce(port: number): Promise<boolean> {
   });
 }
 
-async function waitHealth(port: number, timeoutMs: number): Promise<boolean> {
+async function waitHealth(port: number, timeoutMs: number, io: InstallIo): Promise<boolean> {
   const start = Date.now();
+  let nextMark = 10_000;
   while (Date.now() - start < timeoutMs) {
     if (await healthOnce(port)) return true;
-    await new Promise((r) => setTimeout(r, 200));
+    const elapsed = Date.now() - start;
+    while (elapsed >= nextMark && nextMark < timeoutMs) {
+      io.stderr.write(`waiting for the body (${nextMark / 1000} s)…\n`);
+      nextMark += 10_000;
+    }
+    const left = timeoutMs - (Date.now() - start);
+    if (left <= 0) break;
+    const untilMark = nextMark - (Date.now() - start);
+    await new Promise((r) => setTimeout(r, Math.min(200, left, Math.max(untilMark, 1))));
   }
   return false;
 }
@@ -2102,9 +2114,37 @@ function reportNpmFailure(
   }
 }
 
+function portLines(text: string, port: number): string {
+  const re = new RegExp(`:${port}(?!\\d)`);
+  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter((line) => re.test(line));
+  return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+}
+
+/** `ss` or `lsof` at a fixed absolute path. Absent tools are named and skipped. */
+function writeListenerTool(
+  io: InstallIo,
+  exec: (argv: string[]) => ExecResult,
+  candidates: readonly string[],
+  args: readonly string[],
+  port: number,
+): void {
+  const bin = candidates.find((candidate) => existsSync(candidate));
+  if (!bin) {
+    io.stderr.write(`not present: ${candidates[0]}\n`);
+    return;
+  }
+  const ran = exec([bin, ...args]);
+  io.stderr.write(`${[bin, ...args].join(" ")}\n`);
+  const matched = portLines(`${ran.stdout ?? ""}\n${ran.stderr ?? ""}`, port);
+  const raw = `${ran.stdout ?? ""}${ran.stderr ?? ""}`;
+  const text = matched !== "" ? matched : raw;
+  io.stderr.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
+}
+
 function reportHealthTimeout(
   platform: NodeJS.Platform,
   stateDir: string,
+  port: number,
   exec: (argv: string[]) => ExecResult,
   io: InstallIo,
 ): void {
@@ -2129,6 +2169,25 @@ function reportHealthTimeout(
     io.stderr.write(`${journal.join(" ")}\n`);
     io.stderr.write(`${logged.stdout ?? ""}${logged.stderr ?? ""}`);
     if (!`${logged.stdout ?? ""}${logged.stderr ?? ""}`.endsWith("\n")) io.stderr.write("\n");
+  }
+  const logPath = (plat === "win32" ? path.win32 : path.posix).join(stateDir, "body.log");
+  const bodyTail = tailFile(logPath, 60);
+  io.stderr.write(bodyTail === null ? `body.log missing: ${logPath}\n` : bodyTail.endsWith("\n") || bodyTail === "" ? bodyTail : `${bodyTail}\n`);
+  if (plat === "win32") {
+    const netstat = path.win32.join(windowsSystemRoot(), "System32", "NETSTAT.EXE");
+    const listed = exec([netstat, "-ano", "-p", "tcp"]);
+    io.stderr.write(`${netstat} -ano -p tcp\n`);
+    const matched = portLines(`${listed.stdout ?? ""}\n${listed.stderr ?? ""}`, port);
+    io.stderr.write(matched === "" ? "(no netstat line for the port)\n" : matched);
+    const tasklist = path.win32.join(windowsSystemRoot(), "System32", "TASKLIST.EXE");
+    const tasks = exec([tasklist, "/v", "/fi", "USERNAME eq verax-svc"]);
+    io.stderr.write(`${tasklist} /v /fi "USERNAME eq verax-svc"\n`);
+    const taskText = `${tasks.stdout ?? ""}${tasks.stderr ?? ""}`;
+    io.stderr.write(taskText.endsWith("\n") || taskText === "" ? taskText : `${taskText}\n`);
+  } else if (plat === "linux") {
+    writeListenerTool(io, exec, ["/usr/sbin/ss", "/usr/bin/ss", "/sbin/ss", "/bin/ss"], ["-ltnp"], port);
+  } else {
+    writeListenerTool(io, exec, ["/usr/sbin/lsof", "/usr/bin/lsof"], [`-iTCP:${port}`], port);
   }
   for (const dir of parentsOf(stateDir, plat)) {
     io.stderr.write(`${ownerModeLine(plat, dir, exec)}\n`);
@@ -2371,6 +2430,7 @@ async function execute(
   io: InstallIo,
   platform: NodeJS.Platform,
   copyFile: (source: string, dest: string) => void = copyFileSync,
+  installEnv?: NodeJS.ProcessEnv,
 ): Promise<number> {
   const tempStep = plan.ops.find((op): op is Extract<PlanOp, { op: "private-temp" }> => op.op === "private-temp");
   const tempDir = tempStep?.path;
@@ -2540,7 +2600,7 @@ async function execute(
           ...(step.force ? ["--force"] : []),
         ],
         io,
-        { tokenPath: step.tokenPath, quiet: true, noOwnerGrant: step.noOwnerGrant },
+        { tokenPath: step.tokenPath, quiet: true, noOwnerGrant: step.noOwnerGrant, env: installEnv },
       );
       if (code !== 0) return finish(code);
       continue;
@@ -2550,9 +2610,9 @@ async function execute(
       continue;
     }
     if (step.op === "wait-healthz") {
-      if (!(await waitHealth(step.port, step.timeoutMs))) {
+      if (!(await waitHealth(step.port, step.timeoutMs, io))) {
         io.stderr.write(`install-health-timeout:${step.port}\n`);
-        reportHealthTimeout(platform, plan.stateDir, call, io);
+        reportHealthTimeout(platform, plan.stateDir, step.port, call, io);
         return finish(1);
       }
       continue;
@@ -2696,7 +2756,7 @@ function ourMarker(file: string): boolean {
   }
 }
 
-/** Existing token parent: real directory owned by the invoking user, or a refusal sentence. */
+/** Existing token parent: real directory the agent cannot steal, or a refusal sentence. */
 export function tokenParentRefusal(facts: {
   dir: string;
   symlink: boolean;
@@ -2713,24 +2773,54 @@ export function tokenParentRefusal(facts: {
   if (facts.platform === "win32") {
     const owner = facts.ownerSid?.trim().toUpperCase() ?? "";
     const invoking = facts.invokingSid?.trim().toUpperCase() ?? "";
-    if (owner === "" || owner !== invoking) return `refusing: ${facts.dir} is not owned by the invoking user`;
-    return null;
-  }
-  if (facts.invokingUid === undefined || facts.uid !== facts.invokingUid) {
+    if (owner !== "" && (owner === invoking || TRUSTED_FOLDER_OWNER_SIDS.has(owner))) return null;
     return `refusing: ${facts.dir} is not owned by the invoking user`;
   }
-  return null;
+  if (facts.uid === 0 || (facts.invokingUid !== undefined && facts.uid === facts.invokingUid)) return null;
+  return `refusing: ${facts.dir} is not owned by the invoking user`;
+}
+
+/** chown + chmod so the invoking user can read a root-created token folder. */
+export function rootOwnedTokenParentArgv(dir: string, invokingUid: number, platform: NodeJS.Platform): string[][] {
+  const spec = platform === "darwin" ? "darwin" : "linux";
+  return [
+    toolArgv("chown", [`${invokingUid}:`, dir], spec),
+    toolArgv("chmod", ["0700", dir], spec),
+  ];
+}
+
+type WinOwnerCache = {
+  sidResolved: boolean;
+  sid?: string;
+  owners: Map<string, string | undefined>;
+};
+
+let winOwnerCache: WinOwnerCache | null = null;
+let winOwnerDepth = 0;
+
+/** One invoking SID and one owner lookup per path for this install or init run. */
+export function beginWinOwnerRun(): void {
+  if (winOwnerDepth === 0) winOwnerCache = { sidResolved: false, owners: new Map() };
+  winOwnerDepth += 1;
+}
+
+export function endWinOwnerRun(): void {
+  winOwnerDepth = Math.max(0, winOwnerDepth - 1);
+  if (winOwnerDepth === 0) winOwnerCache = null;
 }
 
 function directoryOwnerSid(dir: string, exec: (argv: string[]) => ExecResult): string | undefined {
+  const cached = winOwnerCache?.owners;
+  if (cached?.has(dir)) return cached.get(dir);
   const literal = dir.replaceAll("'", "''");
   const ran = exec(toolArgv("powershell", [
     "-NoProfile",
     "-Command",
     `(Get-Acl -LiteralPath '${literal}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
   ], "win32"));
-  if ((ran.status ?? 1) !== 0) return undefined;
-  return `${ran.stdout ?? ""}`.match(/S-1-[0-9-]+/i)?.[0];
+  const sid = (ran.status ?? 1) !== 0 ? undefined : `${ran.stdout ?? ""}`.match(/S-1-[0-9-]+/i)?.[0];
+  cached?.set(dir, sid);
+  return sid;
 }
 
 function sudoUserUid(env: NodeJS.ProcessEnv, exec: (argv: string[]) => ExecResult, platform: NodeJS.Platform): number | undefined {
@@ -2745,8 +2835,9 @@ function sudoUserUid(env: NodeJS.ProcessEnv, exec: (argv: string[]) => ExecResul
 
 /**
  * Create a missing token parent with recursive mkdir.
- * An existing directory is left untouched: it must be a real directory, not a
- * symlink or win32 reparse point, and owned by the invoking user.
+ * An existing directory must be a real directory, not a symlink or reparse point,
+ * owned by the invoking user, Administrators, SYSTEM, or root. A root-owned
+ * POSIX directory is chowned to the invoking uid and chmod 0700.
  */
 export function ensureTokenParent(
   dir: string,
@@ -2771,6 +2862,7 @@ export function ensureTokenParent(
   const platform = process.platform;
   const reparse = pathIsReparse(dir, exec, platform);
   const owned = !reparse && !st.isSymbolicLink() && st.isDirectory();
+  const invokingUid = owned && platform !== "win32" ? sudoUserUid(env, exec, platform) : undefined;
   const reason = tokenParentRefusal({
     dir,
     symlink: st.isSymbolicLink(),
@@ -2778,11 +2870,19 @@ export function ensureTokenParent(
     reparse,
     platform,
     uid: st.uid,
-    invokingUid: owned && platform !== "win32" ? sudoUserUid(env, exec, platform) : undefined,
+    invokingUid,
     ownerSid: owned && platform === "win32" ? directoryOwnerSid(dir, exec) : undefined,
     invokingSid: owned && platform === "win32" ? invokingSid(exec) : undefined,
   });
   if (reason) throw new SystemToolError(reason);
+  if (platform !== "win32" && st.uid === 0 && invokingUid !== undefined && invokingUid !== 0) {
+    for (const argv of rootOwnedTokenParentArgv(dir, invokingUid, platform)) {
+      const ran = exec(argv);
+      if ((ran.status ?? 1) !== 0) {
+        throw new SystemToolError((ran.stderr || ran.stdout || "chown failed").trim());
+      }
+    }
+  }
 }
 
 function pathIsReparse(file: string, exec: (argv: string[]) => ExecResult, platform: NodeJS.Platform): boolean {
@@ -2843,11 +2943,18 @@ export function restrictToOwnerWin32(target: string, spawn: ToolSpawn = defaultT
   const whoami = requireSystemTool("whoami", "win32");
   const icacls = requireSystemTool("icacls", "win32");
   const opts = { encoding: "utf8" as const, windowsHide: true as const, shell: false as const, env: systemToolEnv("win32") };
-  const who = spawn(whoami, ["/user", "/fo", "csv", "/nh"], opts);
-  if ((who.status ?? 1) !== 0) {
-    throw new Error(`whoami failed: ${(who.stderr || who.stdout || "").trim()}`);
+  let sid = winOwnerCache?.sidResolved ? winOwnerCache.sid : undefined;
+  if (!winOwnerCache?.sidResolved) {
+    const who = spawn(whoami, ["/user", "/fo", "csv", "/nh"], opts);
+    if ((who.status ?? 1) !== 0) {
+      throw new Error(`whoami failed: ${(who.stderr || who.stdout || "").trim()}`);
+    }
+    sid = /S-1-[0-9-]+/.exec(who.stdout ?? "")?.[0];
+    if (winOwnerCache) {
+      winOwnerCache.sidResolved = true;
+      winOwnerCache.sid = sid;
+    }
   }
-  const sid = /S-1-[0-9-]+/.exec(who.stdout ?? "")?.[0];
   if (!sid) throw new Error("whoami did not return a SID");
   const ran = spawn(icacls, [target, "/inheritance:r", "/grant:r", `*${sid}:F`, `${ADMINISTRATORS_SID}:F`, `${SYSTEM_SID}:F`], opts);
   if ((ran.status ?? 1) !== 0) {
@@ -2871,8 +2978,14 @@ export function orderTarballs(files: readonly string[]): string[] {
 }
 
 function invokingSid(exec: (argv: string[]) => ExecResult): string | undefined {
+  if (winOwnerCache?.sidResolved) return winOwnerCache.sid;
   const ran = exec(toolArgv("whoami", ["/user"], "win32"));
-  return `${ran.stdout ?? ""}`.match(/S-1-[0-9-]+/)?.[0];
+  const sid = `${ran.stdout ?? ""}`.match(/S-1-[0-9-]+/)?.[0];
+  if (winOwnerCache) {
+    winOwnerCache.sidResolved = true;
+    winOwnerCache.sid = sid;
+  }
+  return sid;
 }
 
 function markerSource(file: string): string | undefined {
@@ -2946,6 +3059,15 @@ function collectTarballs(
 }
 
 export async function runInstall(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
+  beginWinOwnerRun();
+  try {
+  return await runInstallBody(argv, hooks);
+  } finally {
+    endWinOwnerRun();
+  }
+}
+
+async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
   const platform = hooks.platform ?? process.platform;
   const env = hooks.env ?? process.env;
   const io = hooks.io ?? { stdout: process.stdout, stderr: process.stderr };
@@ -3067,7 +3189,7 @@ export async function runInstall(argv: readonly string[], hooks: InstallHooks = 
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync);
+  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv);
 }
 
 export async function runUninstall(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
