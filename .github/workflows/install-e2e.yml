@@ -17,12 +17,36 @@ jobs:
   windows:
     runs-on: windows-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Account names in icacls output follow the Windows base language. `localized`
+        # renames the built-in groups the way a Turkish install names them, so every
+        # step below runs against names that are not English.
+        names: [default, localized]
     env:
       VERAX_INSTALL_DEBUG: "1"
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: localize built-in group names
+        if: matrix.names == 'localized'
+        shell: pwsh
+        run: |
+          Rename-LocalGroup -SID 'S-1-5-32-544' -NewName 'Yöneticiler'
+          Rename-LocalGroup -SID 'S-1-5-32-545' -NewName 'Kullanıcılar'
+          $text = icacls "$env:ProgramData" | Out-String
+          Write-Host $text
+          if ($text -notmatch 'Yöneticiler' -or $text -notmatch 'Kullanıcılar') {
+            Write-Host "::error::icacls still prints English names; the rename did not reach ACL output"
+            exit 1
+          }
+          if ($text -match 'BUILTIN\\Administrators|BUILTIN\\Users') {
+            Write-Host "::error::English built-in names are still printed"
+            exit 1
+          }
+          Write-Host "ok: icacls prints the localized built-in names"
       - name: official Node
         shell: pwsh
         run: |
