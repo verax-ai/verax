@@ -12,8 +12,11 @@ const workflow = readFileSync(
 describe("install-e2e workflow", () => {
   it("runs the isolated install on Windows, Linux, and macOS", () => {
     assert.match(workflow, /windows-latest/);
-    assert.match(workflow, /ubuntu-latest/);
-    assert.match(workflow, /macos-latest/);
+    // Two Ubuntu releases plus ARM, and Apple Silicon plus Intel macOS.
+    assert.match(workflow, /os: \[ubuntu-24\.04, ubuntu-22\.04, ubuntu-24\.04-arm\]/);
+    assert.match(workflow, /os: \[macos-15, macos-13\]/);
+    assert.match(workflow, /aarch64\) arch="arm64"/);
+    assert.equal(/linux-x64/.test(workflow), false, "Linux Node must follow the runner architecture");
     assert.match(workflow, /pull_request/);
     assert.match(workflow, /workflow_dispatch/);
     assert.match(workflow, /timeout-minutes:\s*15/);

@@ -494,8 +494,14 @@ jobs:
           exit 0
 
   linux:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two Ubuntu releases and ARM: the install touches useradd, systemd and file modes,
+        # which differ between releases and are untested on ARM otherwise.
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm]
     permissions:
       contents: read
     steps:
@@ -504,7 +510,12 @@ jobs:
         run: |
           set -euo pipefail
           ver="$NODE_VERSION"
-          name="node-v${ver}-linux-x64.tar.gz"
+          case "$(uname -m)" in
+            x86_64) arch="x64" ;;
+            aarch64) arch="arm64" ;;
+            *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
+          esac
+          name="node-v${ver}-linux-${arch}.tar.gz"
           curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
           curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
           grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && sha256sum -c -)
@@ -512,7 +523,7 @@ jobs:
           sudo tar -C /usr/local/lib/nodejs -xzf "/tmp/${name}"
           sudo chown -R root:root /usr/local/lib/nodejs
           sudo chmod -R go-w /usr/local/lib/nodejs
-          node="/usr/local/lib/nodejs/node-v${ver}-linux-x64/bin/node"
+          node="/usr/local/lib/nodejs/node-v${ver}-linux-${arch}/bin/node"
           real="$(readlink -f "$node")"
           echo "node -v: $("$node" -v)"
           echo "realpath: $real"
@@ -575,8 +586,13 @@ jobs:
         run: sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
 
   macos:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple Silicon and Intel.
+        os: [macos-15, macos-13]
     permissions:
       contents: read
     steps:
