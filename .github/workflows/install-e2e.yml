@@ -219,8 +219,7 @@ jobs:
           }
           if (-not $hasSvc) { Write-Error "verax-svc missing"; exit 1 }
           $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
-          net user veraxprobe $pass /add
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          New-LocalUser -Name veraxprobe -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires -AccountNeverExpires
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
           $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
           $node = (Get-Command node).Source
@@ -343,9 +342,8 @@ jobs:
           if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
           if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
           $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
-          net user veraxprobe $pass
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+          Set-LocalUser -Name veraxprobe -Password $sec
           $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
           $mk = Join-Path $env:PUBLIC 'verax-precreate.ps1'
           @'
@@ -361,7 +359,7 @@ jobs:
         shell: pwsh
         run: |
           & $env:VERAX_NODE packages/body/dist/cli.js uninstall
-          net user veraxprobe /delete
+          Remove-LocalUser -Name veraxprobe -ErrorAction SilentlyContinue
           net user verax-svc /delete
           Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1"
           exit 0

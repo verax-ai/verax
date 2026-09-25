@@ -1337,6 +1337,23 @@ describe("verax install plan", () => {
     }
   });
 
+  function logAclAndOwner(label: string, dir: string): void {
+    const listed = spawnSync(systemToolPath("icacls", "win32"), [dir], {
+      encoding: "utf8",
+      windowsHide: true,
+      shell: false,
+    });
+    const literal = dir.replace(/'/g, "''");
+    const owner = spawnSync(
+      systemToolPath("powershell", "win32"),
+      ["-NoProfile", "-NonInteractive", "-Command", `(Get-Acl -LiteralPath '${literal}').Owner`],
+      { encoding: "utf8", windowsHide: true, shell: false, env: systemToolEnv("win32") },
+    );
+    console.error(
+      [`=== ${label} ===`, `icacls ${dir}`, listed.stdout ?? "", listed.stderr ?? "", `Owner: ${(owner.stdout ?? "").trim()}`, owner.stderr ?? ""].join("\n"),
+    );
+  }
+
   it("install-mode init leaves key.pem with only inherited ACEs", async (t) => {
     if (process.platform !== "win32") {
       t.skip("Windows icacls inheritance is checked on a Windows dev machine");
@@ -1344,6 +1361,7 @@ describe("verax install plan", () => {
     }
     const root = mkdtempSync(join(tmpdir(), "verax-acl-init-"));
     const tokenPath = join(root, "..", `token-${process.pid}`);
+    const err: string[] = [];
     try {
       const who = spawnSync(systemToolPath("whoami", "win32"), ["/user", "/fo", "csv", "/nh"], {
         encoding: "utf8",
@@ -1359,12 +1377,18 @@ describe("verax install plan", () => {
         shell: false,
       });
       assert.equal(grant.status, 0, `${grant.stdout}\n${grant.stderr}`);
+      const started = Date.now();
       const code = await runInitLocal(
         ["--local", root, "--port", "8801"],
-        { stdout: { write: () => undefined }, stderr: { write: () => undefined } },
+        { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
         { quiet: true, noOwnerGrant: true, tokenPath },
       );
-      assert.equal(code, 0);
+      const elapsed = Date.now() - started;
+      if (code !== 0) {
+        logAclAndOwner("temp root", root);
+        logAclAndOwner("token folder", dirname(tokenPath));
+      }
+      assert.equal(code, 0, `exit ${code} after ${elapsed}ms\n${err.join("")}`);
       const key = join(root, "local-issuer", "key.pem");
       const listed = spawnSync(icacls, [key], { encoding: "utf8", windowsHide: true, shell: false });
       assert.equal(listed.status, 0, listed.stderr);
@@ -1406,6 +1430,7 @@ describe("verax install plan", () => {
       const beforeAcl = icacls === ""
         ? ""
         : spawnSync(icacls, [tokenDir], { encoding: "utf8", windowsHide: true, shell: false }).stdout ?? "";
+      const started = Date.now();
       const code = await runInitLocal(
         ["--local", stateDir, "--port", "8801"],
         { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
@@ -1416,7 +1441,12 @@ describe("verax install plan", () => {
           ...(process.platform === "win32" ? {} : { env: { SUDO_USER: userInfo().username } }),
         },
       );
-      assert.equal(code, 0, err.join(""));
+      const elapsed = Date.now() - started;
+      if (code !== 0 && process.platform === "win32") {
+        logAclAndOwner("temp root", root);
+        logAclAndOwner("token folder", tokenDir);
+      }
+      assert.equal(code, 0, `exit ${code} after ${elapsed}ms\n${err.join("")}`);
       assert.equal(existsSync(tokenPath), true);
       assert.equal(lstatSync(tokenDir).isSymbolicLink(), false);
       assert.equal(lstatSync(tokenDir).mode, beforeMode);
