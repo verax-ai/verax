@@ -338,22 +338,41 @@ jobs:
       - name: second run refuses a state dir the probe user pre-created
         shell: pwsh
         run: |
-          & $env:VERAX_NODE packages/body/dist/cli.js uninstall
-          if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
-          if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
-          $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
-          $sec = ConvertTo-SecureString $pass -AsPlainText -Force
-          Set-LocalUser -Name veraxprobe -Password $sec
-          $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
-          $mk = Join-Path $env:PUBLIC 'verax-precreate.ps1'
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            Write-Host "step: uninstall"
+            & $env:VERAX_NODE packages/body/dist/cli.js uninstall
+            Write-Host "LASTEXITCODE=$LASTEXITCODE"
+            Write-Host "step: remove leftover ProgramData\Verax"
+            if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
+            Write-Host "step: remove leftover ProgramFiles\Verax"
+            if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
+            Write-Host "step: rotate veraxprobe password"
+            $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
+            $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+            Set-LocalUser -Name veraxprobe -Password $sec
+            Write-Host "step: credential for veraxprobe"
+            $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
+            Write-Host "step: write pre-create script"
+            $mk = Join-Path $env:PUBLIC 'verax-precreate.ps1'
           @'
           New-Item -ItemType Directory -Force -Path (Join-Path $env:ProgramData 'Verax\state') | Out-Null
           '@ | Set-Content -Encoding utf8 $mk
-          $pre = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$mk) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
-          if ($pre.ExitCode -ne 0) { Write-Error "pre-create exit $($pre.ExitCode)"; exit $pre.ExitCode }
-          $log = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
-          if ($LASTEXITCODE -ne 78) { Write-Error "install exit $LASTEXITCODE, want 78: $log"; exit 1 }
-          if ($log -notmatch 'was not created by verax install') { Write-Error "install did not name the pre-created directory: $log"; exit 1 }
+            Write-Host "step: pre-create Verax\state as veraxprobe"
+            $pre = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$mk) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
+            Write-Host "ExitCode=$($pre.ExitCode)"
+            if ($pre.ExitCode -ne 0) { Write-Error "pre-create exit $($pre.ExitCode)"; exit $pre.ExitCode }
+            Write-Host "step: install"
+            $log = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+            Write-Host "LASTEXITCODE=$LASTEXITCODE"
+            if ($LASTEXITCODE -ne 78) { Write-Error "install exit $LASTEXITCODE, want 78: $log"; exit 1 }
+            if ($log -notmatch 'was not created by verax install') { Write-Error "install did not name the pre-created directory: $log"; exit 1 }
+          } catch {
+            Write-Host "FAILED at: $($_.InvocationInfo.Line.Trim())"
+            Write-Host $_.Exception.Message
+            exit 1
+          }
       - name: uninstall
         if: always()
         shell: pwsh
