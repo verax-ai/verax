@@ -27,6 +27,9 @@ const ALLOWED = new Set([
   "parseChannelJsonl",
   "parseCardCsv",
   "reconcile",
+  // reconcile-cli passes the decision-ref set; the loader lists the same
+  // decision files verifyLedger reads, so it stays on this package's surface.
+  "loadDecisionRefsFromDir",
   "tenantKey",
   "spokenReason",
   "checkpointsPath",

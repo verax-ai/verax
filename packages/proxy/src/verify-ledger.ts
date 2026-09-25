@@ -10,7 +10,22 @@
  *
  *   signatures  each record verifies against a public key
  *   chain       each record names the hash of the one before it
- *   effects     each effect row is bound to a decision by `effectHash`
+ *   effects     an effect is bound only when a decision with that ref exists and
+ *               its recorded `effectHash` equals the row's `effectHash`, and
+ *               the row carries an attestation and a witness receipt that both
+ *               verify under one effect key. The signed COSE payload is
+ *               `{ ref, effectHash, witnessClass, resultHash }`, compared after
+ *               decode, and the receipt's effect must be that same row. A
+ *               thrown call relaxes only the hash: the decision keeps the
+ *               pre-call hash and the effect is `<subject>:threw` with its own
+ *               hash, but the signature is still required. A
+ *               `duplicate-effect` row is bound to the decision by ref and to
+ *               the fixed refusal hash the writer stores, not to the
+ *               decision's effectHash; the signature is still required.
+ *               Anything else that claims that class is named. The effect key is
+ *               `effectPublicKeyPem` when the reader pins one; otherwise the
+ *               first receipt key in the ledger, and every effect row is
+ *               checked against that same key.
  *
  * And a fourth, which matters most and is the easiest to fudge: **which key**.
  * A ledger checked against the key sitting next to it is internally
@@ -23,10 +38,13 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { decisionRecordHash, findDecisionRecordChainBreak, verifyDecisionRecord } from "@cedulon/core";
+import { canonical, decisionRecordHash, findDecisionRecordChainBreak, verifyDecisionRecord } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
+import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
+import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-extract";
 
 import { loadCheckpoints } from "./checkpoints.ts";
+import { sha256Canonical } from "./hash.ts";
 import { indexPath, parseIndexText, readLedgerManifest } from "./ledger-manifest.ts";
 
 export type VerifyTrust = {
@@ -48,6 +66,8 @@ export type VerifyResult = {
   effectsBound: number;
   effectsOrphaned: number;
   trust: VerifyTrust;
+  /** Which key answered for effect rows. Same honesty rules as `trust`. */
+  effectTrust: VerifyTrust;
   /** What `index.jsonl` still names. Missing file is not a failure. */
   index: VerifyIndex;
   /** What the newest checkpoint covers, and the records after it. */
@@ -74,8 +94,10 @@ export type VerifyTail = {
 };
 
 export type VerifyOptions = {
-  /** Verify against this key instead of the one the records carry. */
+  /** Verify decision records against this key instead of the one they carry. */
   publicKeyPem?: string;
+  /** Verify every effect row against this key instead of the one the effects carry. */
+  effectPublicKeyPem?: string;
 };
 
 /** Every decisions file this directory holds, oldest piece first. */
@@ -112,6 +134,102 @@ function readJsonl(path: string, problems: string[]): unknown[] {
     }
   }
   return out;
+}
+
+type EffectOnDisk = {
+  row?: { ref?: unknown; effectHash?: unknown; effectClass?: unknown };
+  witnessClass?: unknown;
+  resultHash?: unknown;
+  attestation?: { coseHex?: unknown };
+  receipt?: SignedEffectExtract;
+};
+
+function isPublicKeyPem(pem: unknown): pem is string {
+  return typeof pem === "string" && pem.includes("BEGIN PUBLIC KEY");
+}
+
+/**
+ * The writer signs `{ ref, effectHash, witnessClass, resultHash }` as COSE
+ * Sign1 and a one-row extract with the same effect key. A row with either
+ * missing is not bound. Both must verify under the one key the caller
+ * settled on — never a key this row brought by itself.
+ */
+function effectSignatureCoversRow(effect: EffectOnDisk, effectKey: string | null): boolean {
+  const coseHex = effect.attestation?.coseHex;
+  const hasAtt = typeof coseHex === "string" && coseHex !== "";
+  const hasReceipt = effect.receipt !== undefined;
+  if (!hasAtt || !hasReceipt || !effect.receipt || !isPublicKeyPem(effectKey)) return false;
+  const ref = effect.row?.ref;
+  const effectHash = effect.row?.effectHash;
+  const witnessClass = effect.witnessClass;
+  if (typeof ref !== "string" || typeof effectHash !== "string" || typeof witnessClass !== "string") {
+    return false;
+  }
+  const expected = canonical({
+    ref,
+    effectHash,
+    witnessClass,
+    resultHash: typeof effect.resultHash === "string" ? effect.resultHash : null,
+  });
+  let decodedPayload: unknown;
+  try {
+    const decoded = decodeCoseSign1(coseFromHex(coseHex));
+    decodedPayload = JSON.parse(Buffer.from(decoded.payload).toString("utf8"));
+  } catch {
+    return false;
+  }
+  try {
+    if (canonical(decodedPayload) !== expected) return false;
+  } catch {
+    return false;
+  }
+  try {
+    if (!verifyCoseSign1(coseFromHex(coseHex), effectKey, "application/json")) return false;
+  } catch {
+    return false;
+  }
+  try {
+    if (!verifyEffectExtract(effect.receipt, effectKey)) return false;
+  } catch {
+    return false;
+  }
+  const signedRow = effect.receipt.body.effects[0];
+  if (!signedRow || signedRow.ref !== effect.row?.ref || signedRow.effectHash !== effect.row?.effectHash) {
+    return false;
+  }
+  return true;
+}
+
+function firstEffectKey(rows: readonly EffectOnDisk[]): string | null {
+  for (const row of rows) {
+    const pem = row.receipt?.publicKeyPem;
+    if (isPublicKeyPem(pem)) return pem;
+  }
+  return null;
+}
+
+function effectTrustOf(pinned: string, taken: string | null, effectCount: number): VerifyTrust {
+  if (pinned !== "") {
+    return {
+      source: "pinned",
+      publicKeyPem: pinned,
+      note: "verified against a key the reader supplied, not one taken from these files",
+    };
+  }
+  if (taken) {
+    return {
+      source: "in-ledger",
+      publicKeyPem: taken,
+      note:
+        "verified against the key carried in the effects themselves: this shows the files are " +
+        "internally consistent, not that the key was ever trusted. Pin a key you hold to check that.",
+    };
+  }
+  return {
+    source: "none",
+    publicKeyPem: null,
+    note: effectCount === 0 ? "no effects, so no effect key was used" : "no effect key was found in these files",
+  };
 }
 
 const INDEX_NONE = "index: none (cannot check for removed records)";
@@ -214,6 +332,7 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
       effectsBound: 0,
       effectsOrphaned: 0,
       trust: { source: "none", publicKeyPem: null, note: "no records, so no key was used" },
+      effectTrust: effectTrustOf(opts.effectPublicKeyPem?.trim() ?? "", null, 0),
       index: emptyIndex.index,
       tail: emptyTail.tail,
       problems,
@@ -266,28 +385,75 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     problems.push(`chain breaks at record ${brk.index} (${brk.reason}): a row was changed, removed or inserted`);
   }
 
-  // Each effect names the decision it belongs to. An effect whose ref is on no
-  // record is an action with no decision behind it — the loudest thing this
-  // file can find, so it is counted rather than summarised away.
+  // An effect is bound only when a decision with that ref records the same
+  // effectHash (a `:threw` row may carry its own hash; a `duplicate-effect`
+  // row must carry the writer's fixed refusal hash) and the attestation plus
+  // receipt verify under one effect key. A mismatch is named and counts as
+  // orphaned.
   const refler = new Set<string>();
+  const hashesByRef = new Map<string, Set<string>>();
   for (const r of records) {
-    if (typeof r.claims?.ref === "string") refler.add(r.claims.ref);
+    if (typeof r.claims?.ref !== "string") continue;
+    refler.add(r.claims.ref);
+    const recorded = r.claims?.effectHash;
+    if (typeof recorded !== "string") continue;
+    const bag = hashesByRef.get(r.claims.ref) ?? new Set<string>();
+    bag.add(recorded);
+    hashesByRef.set(r.claims.ref, bag);
   }
-  let effects = 0;
+  const effectRows: EffectOnDisk[] = [];
+  for (const path of effectFiles(dir)) {
+    for (const row of readJsonl(path, problems)) effectRows.push(row as EffectOnDisk);
+  }
+  const pinnedEffect = opts.effectPublicKeyPem?.trim() ?? "";
+  const effectKey = pinnedEffect !== "" ? pinnedEffect : firstEffectKey(effectRows);
+  const effectTrust = effectTrustOf(pinnedEffect, effectKey, effectRows.length);
+  let effects = effectRows.length;
   let effectsBound = 0;
   let effectsOrphaned = 0;
-  for (const path of effectFiles(dir)) {
-    for (const row of readJsonl(path, problems)) {
-      effects += 1;
-      const e = row as { row?: { ref?: unknown } };
-      const ref = typeof e.row?.ref === "string" ? e.row.ref : null;
-      if (ref !== null && refler.has(ref)) {
-        effectsBound += 1;
-      } else {
+  for (const e of effectRows) {
+    const ref = typeof e.row?.ref === "string" ? e.row.ref : null;
+    const effectHash = typeof e.row?.effectHash === "string" ? e.row.effectHash : null;
+    const effectClass = typeof e.row?.effectClass === "string" ? e.row.effectClass : "";
+    if (effectClass === "duplicate-effect") {
+      const fixed =
+        ref === null ? null : sha256Canonical({ refused: "duplicate-effect", ref });
+      const boundRefusal = ref !== null && refler.has(ref) && effectHash !== null && effectHash === fixed;
+      if (!boundRefusal) {
         effectsOrphaned += 1;
-        problems.push(`effect with no decision: ref ${ref ?? "(missing)"}`);
+        problems.push(
+          ref === null || !refler.has(ref)
+            ? `duplicate-effect with no decision: ref ${ref ?? "(missing)"}`
+            : `duplicate-effect hash is not the fixed refusal: ref ${ref}`,
+        );
+        continue;
       }
+      if (!effectSignatureCoversRow(e, effectKey)) {
+        effectsOrphaned += 1;
+        problems.push(`effect attestation does not cover the row: ref ${ref ?? "(missing)"}`);
+        continue;
+      }
+      effectsBound += 1;
+      continue;
     }
+    const hashes = ref === null ? undefined : hashesByRef.get(ref);
+    const hashMatch = effectHash !== null && hashes?.has(effectHash) === true;
+    const thrown = effectClass.endsWith(":threw") && ref !== null && refler.has(ref);
+    if (!hashMatch && !thrown) {
+      effectsOrphaned += 1;
+      problems.push(
+        ref === null || !refler.has(ref)
+          ? `effect with no decision: ref ${ref ?? "(missing)"}`
+          : `effect hash does not match its decision: ref ${ref}`,
+      );
+      continue;
+    }
+    if (!effectSignatureCoversRow(e, effectKey)) {
+      effectsOrphaned += 1;
+      problems.push(`effect attestation does not cover the row: ref ${ref ?? "(missing)"}`);
+      continue;
+    }
+    effectsBound += 1;
   }
 
   const indexed = indexStatement(dir, refler);
@@ -308,6 +474,7 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     effectsBound,
     effectsOrphaned,
     trust,
+    effectTrust,
     index: indexed.index,
     tail: tailed.tail,
     problems,

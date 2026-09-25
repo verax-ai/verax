@@ -381,7 +381,7 @@ export class MemoryLedger implements Ledger {
           },
           DEFAULT_WITNESS,
           resultHash,
-          undefined,
+          this.effectSigner,
         ),
       );
       throw new Error(`duplicate-effect:${row.ref}`);
@@ -1068,7 +1068,7 @@ export class FileLedger implements Ledger {
           },
           DEFAULT_WITNESS,
           resultHash,
-          undefined,
+          this.effectSigner,
         ),
       );
       await appendDurable(this.effectsPath, dup);

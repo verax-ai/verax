@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { canonical } from "@cedulon/core";
 import { tenantKey, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
+import { memoryQuotaBytes } from "../config.ts";
 
 function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
@@ -151,8 +152,23 @@ export async function memoryPut(call: ToolCall, stateDir: string, principal: Pri
     versionHash,
   };
   const dir = resolve(stateDir, "tenants", tenantKey(principal), "memory");
+  const payload = `${JSON.stringify(rec)}\n`;
+  let used = 0;
+  try {
+    for (const name of await readdir(dir)) {
+      const file = resolve(dir, name);
+      if (file === path) continue;
+      const info = await stat(file);
+      if (info.isFile()) used += info.size;
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (used + Buffer.byteLength(payload) > memoryQuotaBytes()) {
+    return jsonResult({ error: "memory-quota" }, true);
+  }
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFile(path, `${JSON.stringify(rec)}\n`, {
+  await writeFile(path, payload, {
     encoding: "utf8",
     mode: 0o600,
   });

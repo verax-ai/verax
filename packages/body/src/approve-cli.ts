@@ -69,13 +69,24 @@ function minorUnits(row: ApprovalRow): number | null {
   return typeof fromArgs === "number" ? fromArgs : null;
 }
 
+const HELD_CONTROL = /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+
+/** A control in a stored row must not redraw the prompt, or smuggle a second `payee=`. */
+function escapeHeld(value: string): string {
+  const tainted = HELD_CONTROL.test(value);
+  const pattern = tainted
+    ? /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069=]/g
+    : HELD_CONTROL;
+  return value.replace(pattern, (ch) => `\\u${ch.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
 function heldLine(row: ApprovalRow): string {
   const payee = typeof row.payee === "string" ? row.payee : String(row.args.payee ?? "");
   const currency = typeof row.currency === "string" ? row.currency : String(row.args.currency ?? "");
   const reference = typeof row.args.reference === "string" ? row.args.reference : "";
   const amount = minorUnits(row);
   const prefix = row.requestHash.slice(0, 12);
-  return `held tool=${row.subject} payee=${payee} amount=${amount === null ? "" : String(amount)} currency=${currency} reference=${reference} requestHash=${prefix}\n`;
+  return `held tool=${escapeHeld(row.subject)} payee=${escapeHeld(payee)} amount=${amount === null ? "" : String(amount)} currency=${escapeHeld(currency)} reference=${escapeHeld(reference)} requestHash=${escapeHeld(prefix)}\n`;
 }
 
 function readTypedAmount(): Promise<string> {

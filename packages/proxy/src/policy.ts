@@ -157,6 +157,9 @@ function asSpend(raw: unknown, id: string): PolicySpend {
   return spend;
 }
 
+/** C0, DEL, and the bidi/isolate marks that redraw a terminal line. */
+const SPEND_CONTROL = /[\u0000-\u001F\u007F\u200E\u200F\u202A-\u202E\u2066-\u2069]/;
+
 function spendArgsInvalid(args: Record<string, unknown>): boolean {
   const keys = Object.keys(args);
   const allowed = new Set(["amountMinor", "currency", "payee", "reference"]);
@@ -164,8 +167,9 @@ function spendArgsInvalid(args: Record<string, unknown>): boolean {
   const amt = args.amountMinor;
   if (typeof amt !== "number" || !Number.isInteger(amt) || amt <= 0) return true;
   if (typeof args.currency !== "string" || !/^[A-Z]{3}$/.test(args.currency)) return true;
-  if (typeof args.payee !== "string" || args.payee === "") return true;
-  if (typeof args.reference !== "string" || args.reference.length > 140) return true;
+  if (typeof args.payee !== "string" || args.payee === "" || SPEND_CONTROL.test(args.payee)) return true;
+  if (typeof args.reference !== "string" || args.reference.length > 140 || SPEND_CONTROL.test(args.reference)) return true;
+  if (SPEND_CONTROL.test(args.currency)) return true;
   return false;
 }
 

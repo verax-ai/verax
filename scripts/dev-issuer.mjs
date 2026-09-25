@@ -2,12 +2,12 @@
 // Development only. PKCE S256 authorize/token for local panel sessions.
 // NODE_ENV=production still exits. Not a production authorization server.
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8 } from "jose";
+import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8, jwtVerify } from "jose";
 import { checkPairing, consumePairing } from "../packages/body/src/operator-pairing.ts";
 import {
   DEFAULT_OPERATOR_SUB,
@@ -91,6 +91,8 @@ if (existsSync(privPath) && existsSync(jwkPath)) {
 }
 
 const key = await importPKCS8(privatePem, "ES256");
+// jwtVerify rejects a private key. The public half is the same PEM the JWKS serves.
+const verifyKey = createPublicKey(privatePem);
 trace("keys-ready");
 const port = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
 const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
@@ -272,8 +274,57 @@ function parseForm(text) {
   return out;
 }
 
+/** Same allow-list as the body's `loopbackHostDecision`: 127.0.0.1, localhost, [::1], with the listen port. */
+function issuerHostDecision(hostHeader, bindPort) {
+  if (hostHeader === undefined || String(hostHeader).trim() === "") return "deny";
+  const raw = String(hostHeader).trim();
+  if (raw.startsWith("[") && !raw.includes("]")) return "malformed";
+  let name = raw;
+  let port;
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    name = raw.slice(1, end);
+    const rest = raw.slice(end + 1);
+    if (rest === "") port = undefined;
+    else if (/^:[0-9]+$/.test(rest)) port = Number(rest.slice(1));
+    else return "deny";
+  } else {
+    const colon = raw.lastIndexOf(":");
+    if (colon > 0 && /^[0-9]+$/.test(raw.slice(colon + 1))) {
+      name = raw.slice(0, colon);
+      port = Number(raw.slice(colon + 1));
+    }
+  }
+  const lowered = name.toLowerCase();
+  if (lowered !== "127.0.0.1" && lowered !== "localhost" && lowered !== "::1") return "deny";
+  if (port === undefined) return bindPort === 80 ? "allow" : "deny";
+  return port === bindPort ? "allow" : "deny";
+}
+
+/** `operator` carries `verax:approve`. `agent` is a valid issuer token without it. `none` did not verify. */
+async function bearerRevokeRole(req) {
+  const raw = req.headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return "none";
+  try {
+    const { payload } = await jwtVerify(header.slice("Bearer ".length), verifyKey, { issuer, audience });
+    const scope = typeof payload.scope === "string" ? payload.scope : "";
+    const parts = scope.split(/\s+/).filter((part) => part !== "");
+    return parts.includes("verax:approve") ? "operator" : "agent";
+  } catch {
+    return "none";
+  }
+}
+
 const server = createServer((req, res) => {
   void (async () => {
+    const bound = server.address();
+    const listenPort = bound && typeof bound === "object" ? bound.port : port;
+    const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
+    if (issuerHostDecision(hostHeader, listenPort) !== "allow") {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const allowOrigin = corsOrigin(req);
     if (allowOrigin) {
@@ -690,6 +741,15 @@ const server = createServer((req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/revoke") {
+      const role = await bearerRevokeRole(req);
+      if (role === "none") {
+        sendJson(res, 401, { error: "unauthorized" });
+        return;
+      }
+      if (role !== "operator") {
+        sendJson(res, 403, { error: "operator-scope-required" });
+        return;
+      }
       let parsed;
       try {
         parsed = await readJson(req);

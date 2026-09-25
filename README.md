@@ -182,8 +182,13 @@ VERIFIED
 That last pair of lines is the point. Checking a ledger against the key
 lying next to it proves the files agree with each other and nothing more —
 anything able to write the ledger could write that key too. Pass
-`--key <public.pem>` to verify against a copy you hold, and the answer says
-`a key you supplied` instead. `--json` prints the same result for a
+`--key <public.pem>` to verify decision records against a copy you hold, and
+the answer says `a key you supplied` instead. Effects are signed with a
+separate key. Without a pin, every effect row is checked against one key
+taken from the effects themselves, and that line says the same thing: the
+files agree with each other, not that the key was ever yours. Pass
+`--effect-key <public.pem>` to pin the effect key you hold. `--json` prints
+the same result for a
 pipeline; the exit code is 0 when it verifies and 1 when it does not, and a
 directory with no ledger in it is never quiet success.
 

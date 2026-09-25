@@ -1,10 +1,11 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { EffectRow } from "@cedulon/effect-extract";
 
 import type { ApprovalRow } from "./approvals.ts";
+import { readLedgerManifest } from "./ledger-manifest.ts";
 import type { LedgerEffect } from "./types.ts";
 
 export type ChannelRow = {
@@ -272,6 +273,35 @@ export function parseChannelJsonl(text: string): ChannelRow[] {
 }
 
 /** Read-only: does not take ledger.lock. */
+function decisionPaths(dir: string): string[] {
+  const manifest = readLedgerManifest(dir);
+  if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
+    return manifest.pieces.map((p) => join(dir, p.decisions)).filter((p) => existsSync(p));
+  }
+  const tek = join(dir, "decisions.jsonl");
+  return existsSync(tek) ? [tek] : [];
+}
+
+/** Decision refs, read the same way `verifyLedger` lists decision files. */
+export function loadDecisionRefsFromDir(stateDir: string): Set<string> {
+  const refs = new Set<string>();
+  for (const path of decisionPaths(stateDir)) {
+    let text = "";
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    for (const line of text.split("\n")) {
+      if (line === "") continue;
+      const row = JSON.parse(line) as { claims?: { ref?: unknown } };
+      if (typeof row.claims?.ref === "string") refs.add(row.claims.ref);
+    }
+  }
+  return refs;
+}
+
 export function loadEffectsFromDir(stateDir: string): LedgerEffect[] {
   try {
     const text = readFileSync(join(stateDir, "effects.jsonl"), "utf8");
@@ -367,9 +397,13 @@ export function reconcile(
     approvals?: readonly ApprovalRow[];
     skipped?: CardCsvSkip[];
     descriptorsByPayee?: Readonly<Record<string, readonly string[]>>;
+    /** Effect refs that have a decision. Absent means none: an effect is not a match. */
+    decisionRefs?: ReadonlySet<string>;
   },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;
+  const decisionRefs = opts?.decisionRefs ?? new Set<string>();
+  const decided = (effect: LedgerEffect): boolean => decisionRefs.has(effect.row.ref);
   if (channelRows.length === 0) {
     return {
       scope: { channel: "", windowStartMs: 0, windowEndMs: 0, rowCount: 0 },
@@ -408,6 +442,7 @@ export function reconcile(
       const idx = effects.findIndex(
         (e, i) =>
           !used.has(i) &&
+          decided(e) &&
           (e.row.ref === row.ref ||
             opts?.approvals?.some((a) => a.ref === row.ref && a.allowRef === e.row.ref)),
       );
@@ -442,7 +477,7 @@ export function reconcile(
     let unknownNear = false;
     let descriptorMiss = false;
     const near = effects.findIndex((e, i) => {
-      if (used.has(i) || e.row.effectClass !== row.subject) return false;
+      if (used.has(i) || !decided(e) || e.row.effectClass !== row.subject) return false;
       if (Math.abs(row.occurredAtMs - e.row.timestampMs) > rowTol) return false;
       const stamps = descriptorsFor(e, opts?.approvals, opts?.descriptorsByPayee);
       if (stamps) {

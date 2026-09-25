@@ -22,13 +22,17 @@ export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
-    "  --key <file>      verify against a public key you hold, instead of the one",
-    "                    the records carry. This is the difference between",
-    "                    'these files agree with each other' and 'these files",
-    "                    were signed by the key I was given'.",
+    "  --key <file>      verify decision records against a public key you hold,",
+    "                    instead of the one the records carry. This is the",
+    "                    difference between 'these files agree with each other'",
+    "                    and 'these files were signed by the key I was given'.",
+    "  --effect-key <file>",
+    "                    verify every effect row against a public key you hold,",
+    "                    instead of one key taken from the effects. Same",
+    "                    distinction as --key, for the effect signer.",
     "  --json            machine-readable result on stdout",
     "",
     "Exit code is 0 when the ledger verifies and 1 when it does not.",
@@ -53,6 +57,16 @@ export function renderVerify(r: VerifyResult): string {
     }`,
   );
   lines.push(`              ${r.trust.note}`);
+  lines.push(
+    `effects with ${
+      r.effectTrust.source === "pinned"
+        ? "a key you supplied"
+        : r.effectTrust.source === "in-ledger"
+          ? "the key carried in these files"
+          : "no key"
+    }`,
+  );
+  lines.push(`              ${r.effectTrust.note}`);
   lines.push(r.index.line);
   if (r.tail.checkpoint) {
     const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
@@ -91,21 +105,30 @@ export async function runVerify(
   }
   const json = args.includes("--json");
   let publicKeyPem: string | undefined;
-  const keyAt = args.indexOf("--key");
-  if (keyAt !== -1) {
-    const path = args[keyAt + 1];
+  let effectPublicKeyPem: string | undefined;
+  const readKeyFlag = (flag: string): { ok: true; pem?: string } | { ok: false } => {
+    const at = args.indexOf(flag);
+    if (at === -1) return { ok: true };
+    const path = args[at + 1];
     if (!path || path.startsWith("-")) {
-      out("verify: --key needs a file path");
-      return EX_VERIFY_FAILED;
+      out(`verify: ${flag} needs a file path`);
+      return { ok: false };
     }
     try {
-      publicKeyPem = readFileSync(path, "utf8");
+      const pem = readFileSync(path, "utf8");
+      args.splice(at, 2);
+      return { ok: true, pem };
     } catch {
       out(`verify: cannot read key file ${path}`);
-      return EX_VERIFY_FAILED;
+      return { ok: false };
     }
-    args.splice(keyAt, 2);
-  }
+  };
+  const recordKey = readKeyFlag("--key");
+  if (!recordKey.ok) return EX_VERIFY_FAILED;
+  publicKeyPem = recordKey.pem;
+  const effectKey = readKeyFlag("--effect-key");
+  if (!effectKey.ok) return EX_VERIFY_FAILED;
+  effectPublicKeyPem = effectKey.pem;
   const dir = args.find((a) => !a.startsWith("-"));
   if (!dir) {
     out(usage());
@@ -116,7 +139,10 @@ export async function runVerify(
     return 77;
   }
 
-  const result = await verifyLedger(dir, publicKeyPem ? { publicKeyPem } : {});
+  const result = await verifyLedger(dir, {
+    ...(publicKeyPem ? { publicKeyPem } : {}),
+    ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
+  });
   out(json ? JSON.stringify(result, null, 2) : renderVerify(result));
   return result.ok ? 0 : EX_VERIFY_FAILED;
 }

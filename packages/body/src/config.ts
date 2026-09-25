@@ -27,7 +27,23 @@ export type BodyConfig = {
   downstreamFile?: string | null;
   /** Origins allowed to call this HTTP server. Empty means no browser origin. */
   allowedOrigins?: readonly string[];
+  /**
+   * Bytes one tenant may keep under `memory/`, summed across stored versions.
+   * Default is 1 MiB. `VERAX_MEMORY_QUOTA_BYTES` overrides it.
+   */
+  memoryQuotaBytes?: number;
 };
+
+/** Per-tenant `memory.put` cap. The HTTP body cap does not reset this total. */
+export const DEFAULT_MEMORY_QUOTA_BYTES = 1024 * 1024;
+
+export function memoryQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.VERAX_MEMORY_QUOTA_BYTES?.trim() ?? "";
+  if (raw === "") return DEFAULT_MEMORY_QUOTA_BYTES;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n <= 0) return DEFAULT_MEMORY_QUOTA_BYTES;
+  return n;
+}
 
 export type ConfigResult =
   | { ok: true; value: BodyConfig }
@@ -130,6 +146,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
         .split(",")
         .map((item) => item.trim())
         .filter((item) => item !== ""),
+      memoryQuotaBytes: memoryQuotaBytes(env),
     },
   };
 }
