@@ -41,9 +41,17 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /verax-svc/);
     assert.equal(workflow.includes("LocalService missing"), false);
     assert.match(workflow, /second run refuses a state dir the probe user pre-created/);
-    assert.match(workflow, /LASTEXITCODE -ne 78/);
+    assert.match(workflow, /\$code -ne 78/);
     assert.match(workflow, /was not created by verax install/);
     assert.match(workflow, /Verax\\state/);
+  });
+
+  it("reports step failures where the job log shows them", () => {
+    assert.equal(workflow.includes("Write-Error"), false, "Write-Error does not reach the job log");
+    const second = workflow.slice(workflow.indexOf("- name: second run refuses a state dir the probe user pre-created\n"));
+    const step = second.slice(0, second.indexOf("\n      - name: ", 1));
+    assert.match(step, /Write-Host \$log/);
+    assert.match(step, /ok: install refused the pre-created state dir\"\r?\n\s*\$global:LASTEXITCODE = 0\r?\n\s*exit 0/);
   });
 
   it("prints tarball access evidence on Windows before install and again if that install fails", () => {
