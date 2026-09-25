@@ -114,4 +114,38 @@ describe("install-e2e workflow", () => {
     const installs = linux.split(/\r?\n/).filter((line) => line.includes("cli.js install"));
     assert.equal(installs.length, 2);
   });
+
+  it("installs the macOS Node under /opt/verax-node and forbids /usr/local/lib/verax-node", () => {
+    const pack = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows", "pack-smoke.yml"),
+      "utf8",
+    );
+    for (const [name, text] of [
+      ["install-e2e.yml", workflow],
+      ["pack-smoke.yml", pack],
+    ] as const) {
+      assert.equal(text.includes("/usr/local/lib/verax-node"), false, name);
+    }
+    const macos = workflow.slice(workflow.indexOf("\n  macos:\n"));
+    assert.match(macos, /sudo mkdir -p \/opt\/verax-node\r?\n/);
+    assert.match(macos, /sudo tar -C \/opt\/verax-node -xzf "\/tmp\/\$\{name\}"/);
+    assert.match(macos, /sudo chown -R root:wheel \/opt\/verax-node\r?\n/);
+    assert.match(macos, /sudo chmod -R go-w \/opt\/verax-node\r?\n/);
+    assert.match(macos, /node="\/opt\/verax-node\/node-v\$\{ver\}-darwin-\$\{arch\}\/bin\/node"/);
+    const linux = workflow.slice(workflow.indexOf("\n  linux:\n"), workflow.indexOf("\n  macos:\n"));
+    assert.match(linux, /\/usr\/local\/lib\/nodejs/);
+    assert.equal(linux.includes("/opt/verax-node"), false);
+    assert.equal(linux.includes("/usr/local/lib/verax-node"), false);
+
+    const packMac = pack.slice(pack.indexOf("if: runner.os == 'macOS'"));
+    const packMacNode = packMac.slice(0, packMac.indexOf("\n      - name:"));
+    assert.match(packMacNode, /sudo mkdir -p \/opt\/verax-node\r?\n/);
+    assert.match(packMacNode, /sudo tar -C \/opt\/verax-node -xzf "\/tmp\/\$\{name\}"/);
+    assert.match(packMacNode, /sudo chown -R root:wheel \/opt\/verax-node\r?\n/);
+    assert.match(packMacNode, /sudo chmod -R go-w \/opt\/verax-node\r?\n/);
+    assert.match(packMacNode, /node="\/opt\/verax-node\/node-v\$\{ver\}-darwin-\$\{arch\}\/bin\/node"/);
+    const packLinux = pack.slice(pack.indexOf("if: runner.os == 'Linux'"), pack.indexOf("if: runner.os == 'macOS'"));
+    assert.match(packLinux, /\/usr\/local\/lib\/nodejs/);
+    assert.equal(packLinux.includes("/opt/verax-node"), false);
+  });
 });

@@ -107,11 +107,11 @@ jobs:
           curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
           curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
           grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && shasum -a 256 -c -)
-          sudo mkdir -p /usr/local/lib/verax-node
-          sudo tar -C /usr/local/lib/verax-node -xzf "/tmp/${name}"
-          sudo chown -R root:wheel /usr/local/lib/verax-node
-          sudo chmod -R go-w /usr/local/lib/verax-node
-          node="/usr/local/lib/verax-node/node-v${ver}-darwin-${arch}/bin/node"
+          sudo mkdir -p /opt/verax-node
+          sudo tar -C /opt/verax-node -xzf "/tmp/${name}"
+          sudo chown -R root:wheel /opt/verax-node
+          sudo chmod -R go-w /opt/verax-node
+          node="/opt/verax-node/node-v${ver}-darwin-${arch}/bin/node"
           real="$("$node" -p "require('fs').realpathSync.native(process.execPath)")"
           echo "node -v: $("$node" -v)"
           echo "realpath: $real"

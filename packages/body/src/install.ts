@@ -316,13 +316,22 @@ const SDDL_RIGHTS: Record<string, number> = {
 /** File ACEs ignore key rights. They are not unknown. */
 const SDDL_RIGHTS_IGNORED = new Set(["KA", "KR", "KW", "KX"]);
 
+/**
+ * One place on both systems. Intel Homebrew gives `/usr/local` to the user, so a Node under it can be
+ * swapped; `/opt` is root-owned on both Mac architectures (Apple Silicon Homebrew owns `/opt/homebrew`).
+ * On SELinux hosts `/opt` is labelled `usr_t`, which systemd may start, while `/usr/local/lib` is `lib_t`.
+ */
+function officialNodeRoot(_platform: "linux" | "darwin"): string {
+  return "/opt/verax-node";
+}
+
 function officialNodeRemedy(platform: "linux" | "darwin"): string {
   const ver = process.versions.node;
   const arch = process.arch;
   const os = platform === "darwin" ? "darwin" : "linux";
   const name = `node-v${ver}-${os}-${arch}.tar.gz`;
   const base = `https://nodejs.org/dist/v${ver}`;
-  const dest = "/usr/local/lib/verax-node";
+  const dest = officialNodeRoot(platform);
   const owner = platform === "darwin" ? "root:wheel" : "root:root";
   const check =
     platform === "darwin"
@@ -349,7 +358,8 @@ function nodeTrustMessageFor(nodePath: string, platform: InstallPlatform): strin
   const head = `Node at ${nodePath} can be changed by your user account`;
   if (platform === "win32") return nodeTrustMessage(nodePath);
   const owner = platform === "darwin" ? "root:wheel" : "root:root";
-  return `${head}. An elevated install must not run a Node your account can swap. Download the official tarball and SHASUMS256.txt, check the sha256, and extract as root into /usr/local/lib/verax-node (${owner}, go-w), then run verax install from that Node:\n${officialNodeRemedy(platform)}`;
+  const dest = officialNodeRoot(platform);
+  return `${head}. An elevated install must not run a Node your account can swap. Download the official tarball and SHASUMS256.txt, check the sha256, and extract as root into ${dest} (${owner}, go-w), then run verax install from that Node:\n${officialNodeRemedy(platform)}`;
 }
 
 export type InstallPlatform = "win32" | "linux" | "darwin";

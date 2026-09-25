@@ -905,14 +905,44 @@ describe("verax install plan", () => {
     if (plan.ok) throw new Error("accepted a user-owned Homebrew Node");
     assert.equal(plan.code, 78);
     assert.match(plan.message, /\/opt\/homebrew\/bin\/node/);
-    assert.match(plan.message, /\/usr\/local\/lib\/verax-node/);
+    assert.match(plan.message, /\/opt\/verax-node/);
+    assert.equal(plan.message.includes("/usr/local"), false);
+    assert.match(plan.message, /extract as root into \/opt\/verax-node \(root:wheel, go-w\)/);
     assert.match(plan.message, /root:wheel/);
     assert.match(plan.message, /SHASUMS256\.txt/);
     assert.match(plan.message, new RegExp(`node-v${process.versions.node.replaceAll(".", "\\.")}-darwin-${process.arch}\\.tar\\.gz`));
     assert.match(plan.message, /\$\(which verax\) install/);
   });
 
-  it("linux refusal names the official tarball under /usr/local/lib/verax-node", () => {
+  it("darwin refuses a Node under a user-owned /usr/local/lib ancestor and the remedy stays off /usr/local", () => {
+    const node = "/usr/local/lib/node/bin/node";
+    const plan = planInstall("darwin", darwinEnv, {
+      ...darwinOpts,
+      execPath: node,
+      npmCli: "/usr/local/lib/node/lib/node_modules/npm/bin/npm-cli.js",
+      // Node file, bin, prefix, then /usr/local/lib owned by the user, then /usr/local.
+      nodeModes: [
+        { uid: 0, mode: 0o755 },
+        { uid: 0, mode: 0o755 },
+        { uid: 0, mode: 0o755 },
+        { uid: 501, mode: 0o755 },
+        { uid: 0, mode: 0o755 },
+      ],
+    });
+    if (plan.ok) throw new Error("accepted a Node under a user-owned /usr/local/lib");
+    assert.equal(plan.code, 78);
+    assert.match(plan.message, /\/usr\/local\/lib\/node\/bin\/node/);
+    assert.match(plan.message, /extract as root into \/opt\/verax-node \(root:wheel, go-w\)/);
+    assert.equal(/extract as root into \/usr\/local/.test(plan.message), false);
+    assert.equal(plan.message.includes("/usr/local/lib/verax-node"), false);
+    const remedy = plan.message.split("\n").slice(1);
+    assert.ok(remedy.some((line) => line.includes("/opt/verax-node")));
+    for (const line of remedy) {
+      assert.equal(line.includes("/usr/local"), false, line);
+    }
+  });
+
+  it("linux refusal names the official tarball under /opt/verax-node, which SELinux labels usr_t", () => {
     const plan = planInstall("linux", linuxEnv, {
       ...linuxOpts,
       nodeModes: [
@@ -923,7 +953,8 @@ describe("verax install plan", () => {
     if (plan.ok) throw new Error("accepted a user-owned Node");
     assert.equal(plan.code, 78);
     assert.match(plan.message, /\/usr\/bin\/node/);
-    assert.match(plan.message, /\/usr\/local\/lib\/verax-node/);
+    assert.match(plan.message, /\/opt\/verax-node/);
+    assert.equal(plan.message.includes("/usr/local/lib/verax-node"), false);
     assert.match(plan.message, /root:root/);
     assert.match(plan.message, /sha256sum -c -/);
     assert.match(plan.message, new RegExp(`node-v${process.versions.node.replaceAll(".", "\\.")}-linux-${process.arch}\\.tar\\.gz`));
