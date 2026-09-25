@@ -385,6 +385,85 @@ jobs:
             Write-Host $_.Exception.Message
             exit 1
           }
+      - name: a probe user racing the install cannot plant inside the Verax root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            Write-Host "step: uninstall and clear leftovers"
+            & $env:VERAX_NODE packages/body/dist/cli.js uninstall | Out-Null
+            if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
+            if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
+            $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
+            $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+            Set-LocalUser -Name veraxprobe -Password $sec
+            $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
+            $race = Join-Path $env:PUBLIC 'verax-race.ps1'
+            $log = Join-Path $env:PUBLIC 'verax-race.log'
+            $stop = Join-Path $env:PUBLIC 'verax-race.stop'
+            Remove-Item -Force -ErrorAction SilentlyContinue $log, $stop
+          @'
+          $root = Join-Path $env:ProgramData 'Verax'
+          $log = Join-Path $env:PUBLIC 'verax-race.log'
+          $stop = Join-Path $env:PUBLIC 'verax-race.stop'
+          $tries = 0
+          $deadline = (Get-Date).AddMinutes(10)
+          while (-not (Test-Path $stop) -and (Get-Date) -lt $deadline) {
+            if ([IO.Directory]::Exists($root)) {
+              foreach ($child in @('probe-planted', 'state\keys', 'state\local-issuer')) {
+                $target = Join-Path $root $child
+                $parent = Split-Path $target -Parent
+                if (-not [IO.Directory]::Exists($parent) -or [IO.Directory]::Exists($target)) { continue }
+                $tries += 1
+                try {
+                  [IO.Directory]::CreateDirectory($target) | Out-Null
+                  Add-Content -Path $log -Value "planted $target"
+                } catch {}
+              }
+            }
+          }
+          Add-Content -Path $log -Value "tries $tries"
+          '@ | Set-Content -Encoding utf8 $race
+            Write-Host "step: start the racer as veraxprobe"
+            $racer = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$race) -Credential $cred -PassThru -WorkingDirectory $env:PUBLIC
+            Start-Sleep -Seconds 3
+            Write-Host "step: install while the racer runs"
+            $out = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            New-Item -ItemType File -Force -Path $stop | Out-Null
+            $null = $racer.WaitForExit(30000)
+            Write-Host "install exit=$code"
+            Write-Host $out
+            $raceLog = if (Test-Path $log) { Get-Content -Raw $log } else { "" }
+            Write-Host "---- racer log ----"
+            Write-Host $raceLog
+            if ($raceLog -notmatch 'tries (\d+)' -or [int]$Matches[1] -lt 1) { Write-Host "::error::the racer never saw the root; the race did not happen"; exit 1 }
+            $root = "$env:ProgramData\Verax"
+            $foreign = @()
+            if (Test-Path $root) {
+              foreach ($item in Get-ChildItem -Recurse -Force $root) {
+                $owner = (Get-Acl -LiteralPath $item.FullName).Owner
+                if ($owner -match 'veraxprobe') { $foreign += "$($item.FullName) owner=$owner" }
+              }
+            }
+            if ($code -eq 0) {
+              if ($raceLog -match 'planted') { Write-Host "::error::install succeeded but the racer planted: $raceLog"; exit 1 }
+              if ($foreign.Count -gt 0) { Write-Host "::error::entries owned by veraxprobe under the root: $($foreign -join '; ')"; exit 1 }
+              Write-Host "ok: install won the race and nothing under the root belongs to veraxprobe"
+            } elseif ($code -eq 78) {
+              if ($out -notmatch 'appeared in|was not created by verax install') { Write-Host "::error::install refused without naming the planted entry"; exit 1 }
+              Write-Host "ok: the racer got in and install refused, naming it"
+            } else {
+              Write-Host "::error::install exit $code, want 0 or 78"; exit 1
+            }
+            $global:LASTEXITCODE = 0
+            exit 0
+          } catch {
+            Write-Host "FAILED at: $($_.InvocationInfo.Line.Trim())"
+            Write-Host $_.Exception.Message
+            exit 1
+          }
       - name: uninstall
         if: always()
         shell: pwsh
@@ -392,7 +471,7 @@ jobs:
           & $env:VERAX_NODE packages/body/dist/cli.js uninstall
           Remove-LocalUser -Name veraxprobe -ErrorAction SilentlyContinue
           net user verax-svc /delete
-          Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1"
+          Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1","$env:PUBLIC\verax-race.ps1","$env:PUBLIC\verax-race.log","$env:PUBLIC\verax-race.stop"
           exit 0
 
   linux:

@@ -52,6 +52,19 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /Write-Host "::error::ProgramData\\Verax ACL contains \$banned"; exit 1/);
   });
 
+  it("races a probe user against a real Windows install and accepts only a clean win or a named refusal", () => {
+    const at = workflow.indexOf("- name: a probe user racing the install cannot plant inside the Verax root\n");
+    assert.ok(at > 0, "race step missing");
+    const rest = workflow.slice(at);
+    const step = rest.slice(0, rest.indexOf("\n      - name: ", 1));
+    assert.match(step, /Start-Process .* -Credential \$cred -PassThru/);
+    assert.match(step, /cli\.js install --from-tarballs/);
+    assert.match(step, /the racer never saw the root; the race did not happen/);
+    assert.match(step, /entries owned by veraxprobe under the root/);
+    assert.match(step, /appeared in\|was not created by verax install/);
+    assert.ok(at < workflow.indexOf("      - name: uninstall\n        if: always()"), "race step must run before the final uninstall");
+  });
+
   it("reports step failures where the job log shows them", () => {
     assert.equal(workflow.includes("Write-Error"), false, "Write-Error does not reach the job log");
     const second = workflow.slice(workflow.indexOf("- name: second run refuses a state dir the probe user pre-created\n"));
