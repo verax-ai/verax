@@ -951,6 +951,61 @@ describe("verax install plan", () => {
     if (!bad.ok) assert.match(bad.message, /unknown SDDL right AD/);
   });
 
+  it("accepts a stock Windows 11 SDDL for C:\\, Program Files, and nodejs", async () => {
+    const drive = "O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:PAI(A;;LC;;;AU)(A;OICIIO;SDGXGWGR;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;;0x1000a1;;;S-1-15-3-65536-1888954469-739942743-1668119174-2468466756-4239452838-1296943325-355587736-700089176)";
+    const programFiles = "O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:PAI(A;OICIIO;GA;;;CO)(A;OICIIO;GA;;;SY)(A;;0x1301bf;;;SY)(A;OICIIO;GA;;;BA)(A;;0x1301bf;;;BA)(A;OICIIO;GXGR;;;BU)(A;;0x1200a9;;;BU)(A;CIIO;GA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;0x1200a9;;;AC)(A;OICIIO;GXGR;;;AC)(A;;0x1200a9;;;S-1-15-2-2)(A;OICIIO;GXGR;;;S-1-15-2-2)";
+    const nodejs = "O:SYG:SYD:P(A;OICI;0x1200a9;;;AU)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)";
+    assert.equal(windowsUserCanWrite(drive, { path: "C:\\", ancestor: true }), false);
+    assert.equal(windowsUserCanWrite(programFiles, { path: "C:\\Program Files", ancestor: true }), false);
+    assert.equal(windowsUserCanWrite(nodejs, { path: "C:\\Program Files\\nodejs", ancestor: false }), false);
+    assert.equal(windowsUserCanWrite(`${nodejs}(A;;0x6;;;BU)`, { path: "C:\\Program Files\\nodejs", ancestor: false }), true);
+    assert.equal(windowsUserCanWrite(`${programFiles}(A;;0x40;;;AU)`, { path: "C:\\Program Files", ancestor: true }), true);
+    assert.equal(windowsUserCanWrite(`${nodejs}(A;;0x2;;;AC)`, { path: "C:\\Program Files\\nodejs", ancestor: false }), true);
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;;0x1200a9;;;ZZ)", { ancestor: false }), false);
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;OICIIO;FA;;;ZZ)(D;;FA;;;BU)", { ancestor: true }), false);
+    const err: string[] = [];
+    const root = mkdtempSync(join(tmpdir(), "verax-sddl-stock-"));
+    try {
+      await runInstall(["install", "--port", "8801"], {
+        platform: "win32",
+        env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        elevated: () => true,
+        layout: winOpts,
+        exec: (argv) => {
+          const blob = argv.join(" ");
+          if (blob.includes(".Sddl")) {
+            if (blob.includes("nodejs")) return { status: 0, stdout: `${nodejs}\n`, stderr: "" };
+            if (blob.includes("Program Files")) return { status: 0, stdout: `${programFiles}\n`, stderr: "" };
+            return { status: 0, stdout: `${drive}\n`, stderr: "" };
+          }
+          if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (systemToolName(argv[0] ?? "") === "net") return { status: 2, stdout: "", stderr: "not found\n" };
+          if (systemToolName(argv[0] ?? "") === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      assert.equal(err.join("").includes("can be changed by your user account"), false);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats object and callback allows as writes, skips callback deny, and names an unknown ACE type", () => {
+    const xa = "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)(XA;;FA;;;S-1-5-21-1-2-3-1001;(Member_of {SID(BA)}))";
+    assert.equal(windowsUserCanWrite(xa, { ancestor: false }), true);
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(OA;;0x2;;;BU)", { ancestor: false }), true);
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(ZA;;0x2;;;BU)", { ancestor: false }), true);
+    const xd = "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)(XD;;FA;;;BU)";
+    assert.equal(windowsUserCanWrite(xd), false);
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)(ML;;NW;;;HI)"), false);
+    const qq = "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)(QQ;;FA;;;BU)";
+    assert.equal(windowsUserCanWrite(qq), true);
+    const bad = planInstall("win32", winEnv, { ...winOpts, nodeIcacls: qq });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) assert.match(bad.message, /untrusted ACL, unknown SDDL ACE type QQ/);
+  });
+
   it("refuses an ancestor that grants Users delete-child", async () => {
     const text = "O:BAG:SYD:PAI(A;;DT;;;BU)";
     assert.equal(windowsUserCanWrite(text, { path: "C:\\Program Files", ancestor: true }), true);

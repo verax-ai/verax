@@ -208,19 +208,79 @@ const SID_SYSTEM = "S-1-5-18";
 const SID_TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
 const TRUSTED_WRITER_SIDS = new Set([SID_ADMINISTRATORS, SID_SYSTEM, SID_TRUSTED_INSTALLER]);
 
-/** SDDL aliases. The same two letters on every Windows language. */
+/**
+ * SDDL SID strings from the Windows "SID strings" table.
+ * A fixed well-known SID is mapped to that SID. A domain-relative alias
+ * (DA, DU, …) maps to a marker that is not a trusted writer.
+ * An alias absent from this table is not a parse failure: the ACE keeps the
+ * raw token as an untrusted SID and the rights decide.
+ */
 const SDDL_SID: Record<string, string> = {
-  BA: SID_ADMINISTRATORS,
-  SY: SID_SYSTEM,
-  BU: "S-1-5-32-545",
-  WD: "S-1-1-0",
+  AA: "S-1-5-32-579",
+  AC: "S-1-15-2-1",
+  AN: "S-1-5-7",
+  AO: "S-1-5-32-548",
+  AP: "untrusted:AP",
+  AS: "S-1-18-1",
   AU: "S-1-5-11",
-  IU: "S-1-5-4",
-  CO: "S-1-3-0",
+  BA: SID_ADMINISTRATORS,
+  BG: "S-1-5-32-546",
+  BO: "S-1-5-32-551",
+  BU: "S-1-5-32-545",
+  CA: "untrusted:CA",
+  CD: "S-1-5-32-574",
   CG: "S-1-3-1",
-  OW: "S-1-3-4",
+  CN: "untrusted:CN",
+  CO: "S-1-3-0",
+  CY: "S-1-5-32-569",
+  DA: "untrusted:DA",
+  DC: "untrusted:DC",
+  DD: "untrusted:DD",
+  DG: "untrusted:DG",
+  DU: "untrusted:DU",
+  EA: "untrusted:EA",
+  ED: "S-1-5-9",
+  EK: "untrusted:EK",
+  ER: "S-1-5-32-573",
+  ES: "S-1-5-32-576",
+  HA: "S-1-5-32-578",
+  HI: "S-1-16-12288",
+  IS: "S-1-5-32-568",
+  IU: "S-1-5-4",
+  KA: "untrusted:KA",
+  LA: "untrusted:LA",
+  LG: "untrusted:LG",
   LS: "S-1-5-19",
+  LU: "S-1-5-32-559",
+  LW: "S-1-16-4096",
+  ME: "S-1-16-8192",
+  MP: "S-1-16-8448",
+  MS: "S-1-5-32-577",
+  MU: "S-1-5-32-558",
+  NO: "S-1-5-32-556",
   NS: "S-1-5-20",
+  NU: "S-1-5-2",
+  OW: "S-1-3-4",
+  PA: "untrusted:PA",
+  PO: "S-1-5-32-550",
+  PS: "S-1-5-10",
+  PU: "S-1-5-32-547",
+  RA: "S-1-5-32-575",
+  RC: "S-1-5-12",
+  RD: "S-1-5-32-555",
+  RE: "S-1-5-32-552",
+  RM: "untrusted:RM",
+  RO: "untrusted:RO",
+  RS: "S-1-5-32-553",
+  RU: "S-1-5-32-554",
+  SA: "untrusted:SA",
+  SI: "S-1-16-16384",
+  SO: "S-1-5-32-549",
+  SS: "S-1-18-2",
+  SU: "S-1-5-6",
+  SY: SID_SYSTEM,
+  UD: "S-1-5-84-0-0-0-0-0",
+  WD: "S-1-1-0",
   WR: "S-1-5-33",
 };
 
@@ -562,6 +622,7 @@ export function ancestry(file: string, platform: InstallPlatform): string[] {
 }
 
 export type SddlAce = {
+  /** `A` includes object and callback allows (`OA`, `XA`, `ZA`). `D` includes `OD` and `XD`. */
   type: "A" | "D";
   flags: Set<string>;
   rights: string;
@@ -604,26 +665,109 @@ function daclBody(text: string): string | null {
   return stop < 0 ? rest : rest.slice(0, stop);
 }
 
-/** DACL ACEs. Inherit-only `(IO)` is flagged and does not apply to the object. */
-export function parseSddlAces(text: string): SddlAce[] | null {
+/** Allow ACEs. A conditional expression is not evaluated; it may be true. */
+const ALLOW_ACE_TYPES = new Set(["A", "OA", "XA", "ZA"]);
+/** Deny ACEs. They grant nothing, so the writer check skips them. */
+const DENY_ACE_TYPES = new Set(["D", "OD", "XD"]);
+/** SACL ACE types. In a DACL they are not permissions and are ignored. */
+const SACL_ACE_TYPES = new Set(["AU", "AL", "OU", "OL", "ML", "SP", "RA"]);
+
+/** ACE bodies, including a conditional tail with nested parentheses. Null when a `(` is unclosed. */
+function aceInners(body: string): string[] | null {
+  const inners: string[] = [];
+  let i = 0;
+  while (i < body.length) {
+    if (body[i] !== "(") {
+      i += 1;
+      continue;
+    }
+    let depth = 0;
+    let closed = false;
+    for (let j = i; j < body.length; j += 1) {
+      const ch = body[j];
+      if (ch === "(") depth += 1;
+      else if (ch === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          inners.push(body.slice(i + 1, j));
+          i = j + 1;
+          closed = true;
+          break;
+        }
+      }
+    }
+    if (!closed) return null;
+  }
+  return inners;
+}
+
+/** Split one ACE on `;` that sit outside parentheses, so a condition stays one field. */
+function aceFields(inner: string): string[] {
+  const fields: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i];
+    if (ch === "(") depth += 1;
+    else if (ch === ")" && depth > 0) depth -= 1;
+    else if (ch === ";" && depth === 0) {
+      fields.push(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  fields.push(inner.slice(start));
+  return fields;
+}
+
+function aceFromFields(type: "A" | "D", fields: string[]): SddlAce {
+  const flags = new Set((fields[1] ?? "").toUpperCase().match(/[A-Z]{2}/g) ?? []);
+  const rawSid = (fields[5] ?? "").trim().replace(/^\*/, "");
+  const sid = canonicalSid(rawSid) ?? `untrusted:${rawSid.toUpperCase()}`;
+  return {
+    type,
+    flags,
+    rights: (fields[2] ?? "").toUpperCase(),
+    sid,
+    inheritOnly: flags.has("IO"),
+  };
+}
+
+/**
+ * Parsed DACL, or `null` when the text has no `D:` section.
+ * `unknownType === ""` is a malformed ACE (unclosed `(`). A non-empty value names the type.
+ */
+function readDacl(text: string): { aces: SddlAce[]; unknownType: string | null } | null {
   const body = daclBody(text);
   if (body === null) return null;
+  const inners = aceInners(body);
+  if (inners === null) return { aces: [], unknownType: "" };
   const aces: SddlAce[] = [];
-  for (const match of body.matchAll(/\(([ADOX]{1,2});([^;]*);([^;]*);([^;]*);([^;]*);([^)]*)\)/gi)) {
-    const type = match[1]!.toUpperCase();
-    if (type !== "A" && type !== "D") continue;
-    const flags = new Set(match[2]!.toUpperCase().match(/[A-Z]{2}/g) ?? []);
-    const sid = canonicalSid(match[6] ?? "");
-    if (sid === null) return null;
-    aces.push({
-      type,
-      flags,
-      rights: (match[3] ?? "").toUpperCase(),
-      sid,
-      inheritOnly: flags.has("IO"),
-    });
+  for (const inner of inners) {
+    const fields = aceFields(inner);
+    const type = (fields[0] ?? "").toUpperCase();
+    if (SACL_ACE_TYPES.has(type)) continue;
+    if (DENY_ACE_TYPES.has(type)) {
+      aces.push(aceFromFields("D", fields));
+      continue;
+    }
+    if (ALLOW_ACE_TYPES.has(type)) {
+      aces.push(aceFromFields("A", fields));
+      continue;
+    }
+    return { aces: [], unknownType: type };
   }
-  return aces;
+  return { aces, unknownType: null };
+}
+
+/**
+ * DACL ACEs. Inherit-only `(IO)` is flagged and does not apply to the object.
+ * `OA` / `XA` / `ZA` are stored as allow; `OD` / `XD` as deny. SACL types are dropped.
+ * Any other type fails closed (`null`); the refusal names it.
+ */
+export function parseSddlAces(text: string): SddlAce[] | null {
+  const read = readDacl(text);
+  if (read === null || read.unknownType !== null) return null;
+  return read.aces;
 }
 
 /**
@@ -647,26 +791,41 @@ export function sddlRightsMask(rights: string): { mask: number } | { unknown: st
   return { mask: mask >>> 0 };
 }
 
-/** First unknown SDDL right in a parsed DACL. Null when every rights field is known or the text is not SDDL. */
+/** First unknown SDDL right in a parsed DACL. Null when every rights field is known, the text is not SDDL, or an ACE type is unknown. */
 export function sddlUnknownRight(text: string): string | null {
   const aces = parseSddlAces(text);
   if (aces === null) return null;
   for (const ace of aces) {
+    if (aceSkipped(ace)) continue;
     const parsed = sddlRightsMask(ace.rights);
     if ("unknown" in parsed) return parsed.unknown;
   }
   return null;
 }
 
+/** First ACE type in the DACL that is not allow, deny, or an ignored SACL type. */
+function sddlUnknownAceType(text: string): string | null {
+  const read = readDacl(text);
+  if (read === null || read.unknownType === null || read.unknownType === "") return null;
+  return read.unknownType;
+}
+
+/** Inherit-only and deny ACEs do not apply. They are skipped before SID or rights are read. */
+function aceSkipped(ace: SddlAce): boolean {
+  return ace.inheritOnly || ace.type === "D";
+}
+
 function refuseAcl(text: string, message: string): string {
+  const base = message.endsWith("\n") ? message.slice(0, -1) : message;
+  const aceType = sddlUnknownAceType(text);
+  if (aceType) return `${base} untrusted ACL, unknown SDDL ACE type ${aceType}`;
   const token = sddlUnknownRight(text);
   if (!token) return message;
-  const base = message.endsWith("\n") ? message.slice(0, -1) : message;
   return `${base} unknown SDDL right ${token}`;
 }
 
 function aceWrites(ace: SddlAce, ancestor: boolean): boolean {
-  if (ace.type !== "A" || ace.inheritOnly) return false;
+  if (aceSkipped(ace) || ace.type !== "A") return false;
   const parsed = sddlRightsMask(ace.rights);
   if ("unknown" in parsed) return true;
   return (parsed.mask & (ancestor ? ANCESTOR_REPLACE_MASK : OBJECT_WRITE_MASK)) !== 0;
@@ -675,6 +834,7 @@ function aceWrites(ace: SddlAce, ancestor: boolean): boolean {
 /**
  * True when SDDL lets a principal other than Administrators, SYSTEM, or
  * TrustedInstaller change this object. Text that is not SDDL is untrusted.
+ * An ACE type outside allow, deny, and ignored SACL types is an untrusted ACL.
  * `ancestor: true` counts only replace / re-point rights. `(IO)` does not apply.
  * `svcSid`, when set, is trusted the same way verifyServiceAcl trusts it.
  */
