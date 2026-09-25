@@ -197,29 +197,20 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $rootAcl = icacls "$env:ProgramData\Verax" | Out-String
+          $rootAcl = (Get-Acl -LiteralPath "$env:ProgramData\Verax").Sddl
           Write-Host $rootAcl
-          foreach ($banned in @('BUILTIN\Users', 'CREATOR OWNER', 'Everyone', 'Authenticated Users')) {
-            if ($rootAcl.Contains($banned)) { Write-Host "::error::ProgramData\Verax ACL contains $banned"; exit 1 }
+          foreach ($banned in @('BU', 'S-1-5-32-545', 'WD', 'S-1-1-0', 'AU', 'S-1-5-11', 'CO', 'S-1-3-0', 'IU', 'S-1-5-4')) {
+            if ($rootAcl -match "(;;;${banned}\))") { Write-Host "::error::ProgramData\Verax ACL contains $banned"; exit 1 }
           }
-          $acl = icacls "$env:ProgramData\Verax\state" | Out-String
-          $principals = @()
-          foreach ($line in ($acl -split "`n")) {
-            $trim = $line.Trim()
-            $mark = $trim.IndexOf(":(")
-            if ($mark -lt 0) { continue }
-            if ($trim -match '^Successfully processed') { continue }
-            $left = $trim.Substring(0, $mark).Trim()
-            $prefix = "$env:ProgramData\Verax\state"
-            if ($left.StartsWith($prefix)) { $left = $left.Substring($prefix.Length).Trim() }
-            if ($left -ne "") { $principals += $left }
-          }
-          if ($acl -match 'LOCAL SERVICE') { Write-Host "::error::LOCAL SERVICE present"; exit 1 }
-          $allowed = @('BUILTIN\Administrators', 'Administrators', 'NT AUTHORITY\SYSTEM', 'SYSTEM')
+          $acl = (Get-Acl -LiteralPath "$env:ProgramData\Verax\state").Sddl
+          Write-Host $acl
+          $svcSid = (Get-LocalUser -Name 'verax-svc').SID.Value
+          $aceSids = [regex]::Matches($acl, '\([AD];[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)') | ForEach-Object { $_.Groups[1].Value }
+          if ($aceSids -contains 'LS' -or $aceSids -contains 'S-1-5-19') { Write-Host "::error::LOCAL SERVICE present"; exit 1 }
+          $allowed = @('BA', 'S-1-5-32-544', 'SY', 'S-1-5-18', $svcSid)
           $hasSvc = $false
-          foreach ($p in $principals) {
-            $isSvc = $p -eq 'verax-svc' -or $p.EndsWith('\verax-svc')
-            if ($isSvc) { $hasSvc = $true; continue }
+          foreach ($p in $aceSids) {
+            if ($p -eq $svcSid) { $hasSvc = $true; continue }
             if ($allowed -notcontains $p) { Write-Host "::error::unexpected principal: $p"; exit 1 }
           }
           if (-not $hasSvc) { Write-Host "::error::verax-svc missing"; exit 1 }

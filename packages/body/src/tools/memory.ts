@@ -12,6 +12,20 @@ function sha256Canonical(value: unknown): string {
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
+/** One in-process chain per tenant memory directory. The body is one process per state dir. */
+const memoryQuotaChain = new Map<string, Promise<unknown>>();
+
+function withMemoryQuotaLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previous = memoryQuotaChain.get(key) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  const settled = run.then(() => undefined, () => undefined);
+  memoryQuotaChain.set(key, settled);
+  void settled.then(() => {
+    if (memoryQuotaChain.get(key) === settled) memoryQuotaChain.delete(key);
+  });
+  return run;
+}
+
 function jsonResult(value: unknown, isError = false): ToolResult {
   return {
     content: [{ type: "text", text: JSON.stringify(value) }],
@@ -153,24 +167,26 @@ export async function memoryPut(call: ToolCall, stateDir: string, principal: Pri
   };
   const dir = resolve(stateDir, "tenants", tenantKey(principal), "memory");
   const payload = `${JSON.stringify(rec)}\n`;
-  let used = 0;
-  try {
-    for (const name of await readdir(dir)) {
-      const file = resolve(dir, name);
-      if (file === path) continue;
-      const info = await stat(file);
-      if (info.isFile()) used += info.size;
+  return withMemoryQuotaLock(dir, async () => {
+    let used = 0;
+    try {
+      for (const name of await readdir(dir)) {
+        const file = resolve(dir, name);
+        if (file === path) continue;
+        const info = await stat(file);
+        if (info.isFile()) used += info.size;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-  }
-  if (used + Buffer.byteLength(payload) > memoryQuotaBytes()) {
-    return jsonResult({ error: "memory-quota" }, true);
-  }
-  await mkdir(dir, { recursive: true, mode: 0o700 });
-  await writeFile(path, payload, {
-    encoding: "utf8",
-    mode: 0o600,
+    if (used + Buffer.byteLength(payload) > memoryQuotaBytes()) {
+      return jsonResult({ error: "memory-quota" }, true);
+    }
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    await writeFile(path, payload, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return jsonResult({ ok: true, id, versionHash });
   });
-  return jsonResult({ ok: true, id, versionHash });
 }

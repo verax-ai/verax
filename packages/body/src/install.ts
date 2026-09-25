@@ -37,8 +37,6 @@ const MAX_PORT = 65535;
 const HEALTH_WAIT_MS = 60_000;
 
 const VERAX_SVC = "verax-svc";
-const ADMINISTRATORS = "BUILTIN\\Administrators";
-const SYSTEM_ACCOUNT = "NT AUTHORITY\\SYSTEM";
 const ADMINISTRATORS_SID = "*S-1-5-32-544";
 const SYSTEM_SID = "*S-1-5-18";
 /** Folder owners an unelevated agent cannot become or replace. */
@@ -204,13 +202,59 @@ function spawnSystemTool(
   });
 }
 
-const USER_WRITE_PRINCIPALS = [
-  "builtin\\users",
-  "nt authority\\authenticated users",
-  "everyone",
-  "interactive",
-  "nt authority\\interactive",
-];
+/** Allow-list. A write ACE for any other SID is a non-admin writer. */
+const SID_ADMINISTRATORS = "S-1-5-32-544";
+const SID_SYSTEM = "S-1-5-18";
+const SID_TRUSTED_INSTALLER = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464";
+const TRUSTED_WRITER_SIDS = new Set([SID_ADMINISTRATORS, SID_SYSTEM, SID_TRUSTED_INSTALLER]);
+
+/** SDDL aliases. The same two letters on every Windows language. */
+const SDDL_SID: Record<string, string> = {
+  BA: SID_ADMINISTRATORS,
+  SY: SID_SYSTEM,
+  BU: "S-1-5-32-545",
+  WD: "S-1-1-0",
+  AU: "S-1-5-11",
+  IU: "S-1-5-4",
+  CO: "S-1-3-0",
+  CG: "S-1-3-1",
+  OW: "S-1-3-4",
+  LS: "S-1-5-19",
+  NS: "S-1-5-20",
+  WR: "S-1-5-33",
+};
+
+/** Object write/modify. Ancestor checks use a narrower set. FA and FW expand into these bits. */
+const OBJECT_WRITE_MASK = 0x0002 | 0x0004 | 0x0010 | 0x0040 | 0x0100 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
+/** Replace or re-point a child. Add-file (0x2) and add-subdirectory (0x4) on an ancestor do not. FA includes these bits; the full FA mask is not ORed in. */
+const ANCESTOR_REPLACE_MASK = 0x0040 | 0x10000 | 0x40000 | 0x80000 | 0x10000000;
+
+/** SDDL access rights, two letters each. Not the icacls abbreviation list. */
+const SDDL_RIGHTS: Record<string, number> = {
+  GA: 0x10000000,
+  GR: 0x80000000,
+  GW: 0x40000000,
+  GX: 0x20000000,
+  RC: 0x20000,
+  SD: 0x10000,
+  WD: 0x40000,
+  WO: 0x80000,
+  RP: 0x10,
+  WP: 0x20,
+  CC: 0x1,
+  DC: 0x2,
+  LC: 0x4,
+  SW: 0x8,
+  LO: 0x80,
+  DT: 0x40,
+  CR: 0x100,
+  FA: 0x1f01ff,
+  FR: 0x120089,
+  FW: 0x120116,
+  FX: 0x1200a0,
+};
+/** File ACEs ignore key rights. They are not unknown. */
+const SDDL_RIGHTS_IGNORED = new Set(["KA", "KR", "KW", "KX"]);
 
 function officialNodeRemedy(platform: "linux" | "darwin"): string {
   const ver = process.versions.node;
@@ -517,67 +561,136 @@ export function ancestry(file: string, platform: InstallPlatform): string[] {
   return out;
 }
 
-/** Rights that let a user change the file (node.exe, npm-cli.js, a tarball). */
-const FILE_USER_RIGHTS = new Set(["F", "M", "W", "WD", "AD", "GA", "GW", "D", "WDAC", "WO"]);
-/**
- * Rights that let a user replace or re-point the child of a directory.
- * Add-file / add-subdirectory (`AD`), write-data (`W`), write-DAC (`WD`), and generic write (`GW`)
- * on an ancestor do not, by themselves, replace `C:\Program Files`.
- */
-const ANCESTOR_REPLACE_RIGHTS = new Set(["F", "M", "D", "DC", "WDAC", "WO", "GA"]);
+export type SddlAce = {
+  type: "A" | "D";
+  flags: Set<string>;
+  rights: string;
+  sid: string;
+  inheritOnly: boolean;
+};
 
-function aceDangerous(fromColon: string, ancestor: boolean): boolean {
-  if (/\(DENY\)/i.test(fromColon)) return false;
-  const dangerous = ancestor ? ANCESTOR_REPLACE_RIGHTS : FILE_USER_RIGHTS;
-  const flags = new Set(["OI", "CI", "NP", "I"]);
-  let inheritOnly = false;
-  let hit = false;
-  for (const match of fromColon.matchAll(/\(([^)]+)\)/g)) {
-    const token = match[1]!.toUpperCase();
-    if (token === "IO") {
-      inheritOnly = true;
-      continue;
-    }
-    if (token === "DENY" || flags.has(token)) continue;
-    for (const part of token.split(",")) {
-      const right = part.trim();
-      if (right !== "" && dangerous.has(right)) hit = true;
-    }
+/** `icacls` account names are language-specific. Security reads use this SDDL string. */
+export function windowsSddlArgv(target: string): string[] {
+  const literal = target.replaceAll("'", "''");
+  return toolArgv("powershell", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `(Get-Acl -LiteralPath '${literal}').Sddl`,
+  ], "win32");
+}
+
+export function canonicalSid(token: string): string | null {
+  const raw = token.trim().replace(/^\*/, "");
+  if (raw === "") return null;
+  if (/^S-1-[0-9-]+$/i.test(raw)) return raw.toUpperCase();
+  const alias = SDDL_SID[raw.toUpperCase()];
+  return alias ?? null;
+}
+
+/** Owner SID from an SDDL `O:` field. Null when the text is not SDDL. */
+export function sddlOwner(text: string): string | null {
+  const match = /O:((?:S-1-[0-9-]+)|[A-Z]{2})/i.exec(text.replace(/\s+/g, ""));
+  if (!match?.[1]) return null;
+  return canonicalSid(match[1]);
+}
+
+function daclBody(text: string): string | null {
+  const flat = text.replace(/\s+/g, "");
+  const at = flat.search(/D:/i);
+  if (at < 0) return null;
+  const rest = flat.slice(at + 2);
+  const stop = rest.search(/S:/i);
+  return stop < 0 ? rest : rest.slice(0, stop);
+}
+
+/** DACL ACEs. Inherit-only `(IO)` is flagged and does not apply to the object. */
+export function parseSddlAces(text: string): SddlAce[] | null {
+  const body = daclBody(text);
+  if (body === null) return null;
+  const aces: SddlAce[] = [];
+  for (const match of body.matchAll(/\(([ADOX]{1,2});([^;]*);([^;]*);([^;]*);([^;]*);([^)]*)\)/gi)) {
+    const type = match[1]!.toUpperCase();
+    if (type !== "A" && type !== "D") continue;
+    const flags = new Set(match[2]!.toUpperCase().match(/[A-Z]{2}/g) ?? []);
+    const sid = canonicalSid(match[6] ?? "");
+    if (sid === null) return null;
+    aces.push({
+      type,
+      flags,
+      rights: (match[3] ?? "").toUpperCase(),
+      sid,
+      inheritOnly: flags.has("IO"),
+    });
   }
-  return inheritOnly ? false : hit;
-}
-
-function principalHit(left: string, principals: string[]): boolean {
-  const key = left.toLowerCase().replace(/^\*/, "");
-  if (principals.some((p) => key === p || key.endsWith(`\\${p}`) || key.endsWith(` ${p}`))) return true;
-  const tail = key.split("\\").pop() ?? key;
-  return tail === "users" || tail === "authenticated users" || tail === "everyone" || tail === "interactive";
+  return aces;
 }
 
 /**
- * True when icacls text lets a non-administrator change this object.
- * `ancestor: true` is a directory above the file: only replace / re-point rights count.
- * An inherit-only ACE `(IO)` does not apply to the object itself.
+ * One ACE rights field as a 32-bit mask. Hex is taken as written.
+ * Letter rights are SDDL codes, two characters at a time (`DC` is FILE_WRITE_DATA, not icacls delete-child).
+ * An unknown code fails closed and is named.
+ */
+export function sddlRightsMask(rights: string): { mask: number } | { unknown: string } {
+  const text = rights.toUpperCase().replace(/\s+/g, "");
+  let mask = 0;
+  for (const part of text.match(/0X[0-9A-F]+/g) ?? []) mask |= Number.parseInt(part.slice(2), 16);
+  const words = text.replace(/0X[0-9A-F]+/g, "");
+  if (words.length % 2 !== 0) return { unknown: words };
+  for (let i = 0; i < words.length; i += 2) {
+    const token = words.slice(i, i + 2);
+    if (SDDL_RIGHTS_IGNORED.has(token)) continue;
+    const bit = SDDL_RIGHTS[token];
+    if (bit === undefined) return { unknown: token };
+    mask |= bit;
+  }
+  return { mask: mask >>> 0 };
+}
+
+/** First unknown SDDL right in a parsed DACL. Null when every rights field is known or the text is not SDDL. */
+export function sddlUnknownRight(text: string): string | null {
+  const aces = parseSddlAces(text);
+  if (aces === null) return null;
+  for (const ace of aces) {
+    const parsed = sddlRightsMask(ace.rights);
+    if ("unknown" in parsed) return parsed.unknown;
+  }
+  return null;
+}
+
+function refuseAcl(text: string, message: string): string {
+  const token = sddlUnknownRight(text);
+  if (!token) return message;
+  const base = message.endsWith("\n") ? message.slice(0, -1) : message;
+  return `${base} unknown SDDL right ${token}`;
+}
+
+function aceWrites(ace: SddlAce, ancestor: boolean): boolean {
+  if (ace.type !== "A" || ace.inheritOnly) return false;
+  const parsed = sddlRightsMask(ace.rights);
+  if ("unknown" in parsed) return true;
+  return (parsed.mask & (ancestor ? ANCESTOR_REPLACE_MASK : OBJECT_WRITE_MASK)) !== 0;
+}
+
+/**
+ * True when SDDL lets a principal other than Administrators, SYSTEM, or
+ * TrustedInstaller change this object. Text that is not SDDL is untrusted.
+ * `ancestor: true` counts only replace / re-point rights. `(IO)` does not apply.
+ * `svcSid`, when set, is trusted the same way verifyServiceAcl trusts it.
  */
 export function windowsUserCanWrite(
-  icaclsText: string,
-  opts?: { path?: string; userSid?: string; ancestor?: boolean },
+  text: string,
+  opts?: { path?: string; userSid?: string; ancestor?: boolean; svcSid?: string },
 ): boolean {
-  const principals = [...USER_WRITE_PRINCIPALS];
-  const sid = opts?.userSid?.trim().toLowerCase() ?? "";
-  if (sid !== "") principals.push(sid);
+  const aces = parseSddlAces(text);
+  if (aces === null) return true;
   const ancestor = opts?.ancestor === true;
-  for (const raw of icaclsText.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (line === "" || /^successfully processed/i.test(line)) continue;
-    const mark = line.indexOf(":(");
-    if (mark < 0) continue;
-    let left = line.slice(0, mark).trim();
-    if (opts?.path && left.toLowerCase().startsWith(opts.path.toLowerCase())) {
-      left = left.slice(opts.path.length).trim();
-    }
-    if (!principalHit(left, principals)) continue;
-    if (aceDangerous(line.slice(mark), ancestor)) return true;
+  const svc = opts?.svcSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
+  for (const ace of aces) {
+    if (!aceWrites(ace, ancestor)) continue;
+    if (TRUSTED_WRITER_SIDS.has(ace.sid)) continue;
+    if (svc !== "" && ace.sid === svc) continue;
+    return true;
   }
   return false;
 }
@@ -619,9 +732,9 @@ export function windowsDirGrantArgs(dir: string, principal: string, rights: "F" 
     "/grant:r",
     `${principal}:(OI)(CI)${rights}`,
     "/grant:r",
-    `${ADMINISTRATORS}:(OI)(CI)F`,
+    `${ADMINISTRATORS_SID}:(OI)(CI)F`,
     "/grant:r",
-    `${SYSTEM_ACCOUNT}:(OI)(CI)F`,
+    `${SYSTEM_SID}:(OI)(CI)F`,
   ];
 }
 
@@ -649,9 +762,9 @@ function grantFile(file: string, principal: string, rights: "F" | "R"): PlanOp {
       "/grant:r",
       ace,
       "/grant:r",
-      `${ADMINISTRATORS}:F`,
+      `${ADMINISTRATORS_SID}:F`,
       "/grant:r",
-      `${SYSTEM_ACCOUNT}:F`,
+      `${SYSTEM_SID}:F`,
     ], "win32"),
   };
 }
@@ -988,14 +1101,14 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   const limited = bounds(opts);
   if ("error" in limited) return fail(EX_CONFIG, limited.error);
   if (opts.nodeIcacls !== undefined && windowsUserCanWrite(opts.nodeIcacls, { userSid: opts.userSid })) {
-    return fail(EX_CONFIG, nodeTrustMessageFor(opts.execPath, platform));
+    return fail(EX_CONFIG, refuseAcl(opts.nodeIcacls, nodeTrustMessageFor(opts.execPath, platform)));
   }
   if (opts.nodeModes !== undefined && linuxNodeUntrusted(opts.nodeModes)) {
     return fail(EX_CONFIG, nodeTrustMessageFor(opts.execPath, platform));
   }
   if (opts.fromTarballs) {
     if (opts.tarballIcacls !== undefined && windowsUserCanWrite(opts.tarballIcacls, { path: opts.fromTarballs, userSid: opts.userSid, ancestor: true })) {
-      return fail(EX_CONFIG, tarballTrustMessage(opts.fromTarballs));
+      return fail(EX_CONFIG, refuseAcl(opts.tarballIcacls, tarballTrustMessage(opts.fromTarballs)));
     }
     if (opts.tarballModes !== undefined && linuxNodeUntrusted(opts.tarballModes)) {
       return fail(EX_CONFIG, tarballTrustMessage(opts.fromTarballs));
@@ -1016,7 +1129,8 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     const ownerBad = opts.winRootOwner !== undefined && !adminOrSystem(opts.winRootOwner);
     const aclBad = opts.winRootAcl !== undefined && rootDaclRejected(opts.winRootAcl);
     if (opts.veraxRootExists && (!opts.markerExists || ownerBad || aclBad)) {
-      return fail(EX_CONFIG, `refusing: ${root} was not created by verax install`);
+      const why = `refusing: ${root} was not created by verax install`;
+      return fail(EX_CONFIG, opts.winRootAcl ? refuseAcl(opts.winRootAcl, why) : why);
     }
     if (opts.stateExists && !opts.markerExists) {
       return fail(EX_CONFIG, `refusing: ${paths.stateDir} was not created by verax install`);
@@ -1244,7 +1358,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   return { ok: true, ops, ...paths };
 }
 
-const PRIVATE_TEMP_ACL = [ADMINISTRATORS, SYSTEM_ACCOUNT] as const;
+const PRIVATE_TEMP_ACL = [ADMINISTRATORS_SID, SYSTEM_SID] as const;
 
 /** Admin-only install scratch. Never the caller's TEMP. */
 function privateTempPath(platform: InstallPlatform, env: NodeJS.ProcessEnv, posixRoot?: string): string {
@@ -1478,86 +1592,60 @@ export function planUninstall(
   return { ok: true, ops, ...paths };
 }
 
-function aclPrincipalAllowed(left: string): boolean {
-  const key = left.trim().toLowerCase();
-  if (key === "" ) return true;
-  if (key === "verax-svc" || key.endsWith("\\verax-svc")) return true;
-  if (key === "builtin\\administrators" || key === "administrators" || key.endsWith("\\administrators")) return true;
-  if (key === "nt authority\\system" || key === "system" || key.endsWith("\\system")) return true;
-  if (key === "s-1-5-18" || key === "*s-1-5-18" || key === "s-1-5-32-544" || key === "*s-1-5-32-544") return true;
-  return false;
+function aceRightsKind(rights: string): "F" | "RX" | "other" {
+  const parsed = sddlRightsMask(rights);
+  if ("unknown" in parsed) return "other";
+  const mask = parsed.mask;
+  const full = (mask & 0x1f01ff) === 0x1f01ff || (mask & 0x10000000) !== 0;
+  if (full) return "F";
+  if ((mask & OBJECT_WRITE_MASK) !== 0) return "other";
+  const readExec = /FR|FX|GR|GX|RX/.test(rights) || (mask & 0x1200a9) === 0x1200a9;
+  if (readExec && mask !== 0) return "RX";
+  if (rights === "RX") return "RX";
+  return "other";
 }
 
-function aclLeft(line: string, stateDir?: string): string | null {
-  const trimmed = line.trim();
-  if (trimmed === "" || /^successfully processed/i.test(trimmed)) return null;
-  const mark = trimmed.indexOf(":(");
-  if (mark < 0) return null;
-  let left = trimmed.slice(0, mark).trim();
-  if (stateDir && left.toLowerCase().startsWith(stateDir.toLowerCase())) {
-    left = left.slice(stateDir.length).trim();
-  }
-  return left;
-}
-
-export function foreignAclPrincipals(text: string, stateDir?: string): string[] {
+export function foreignAclPrincipals(text: string, svcSid?: string): string[] {
+  const aces = parseSddlAces(text);
+  if (aces === null) return ["unparsed"];
+  const sid = svcSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
   const found: string[] = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const left = aclLeft(raw, stateDir);
-    if (left === null || aclPrincipalAllowed(left)) continue;
-    found.push(left);
+  for (const ace of aces) {
+    if (ace.inheritOnly || ace.type !== "A") continue;
+    if (TRUSTED_WRITER_SIDS.has(ace.sid)) continue;
+    if (sid !== "" && ace.sid === sid) continue;
+    found.push(ace.sid);
   }
   return found;
 }
 
-const ACL_INHERIT_FLAGS = new Set(["OI", "CI", "IO", "NP", "I"]);
-
 export type ParsedAce = { principal: string; rights: "F" | "RX" | "other"; inheritOnly: boolean };
 
-/** One icacls ACE. Inheritance flags are not rights. `(IO)` does not apply to the object. */
-export function parseIcaclsAce(line: string, dir?: string): ParsedAce | null {
-  const left = aclLeft(line, dir);
-  if (left === null) return null;
-  const mark = line.indexOf(":(");
-  const tail = mark >= 0 ? line.slice(mark) : "";
-  let inheritOnly = false;
-  const rights = new Set<string>();
-  for (const match of tail.matchAll(/\(([^)]+)\)/g)) {
-    const token = match[1]!.toUpperCase();
-    if (token === "IO") {
-      inheritOnly = true;
-      continue;
-    }
-    if (ACL_INHERIT_FLAGS.has(token)) continue;
-    for (const part of token.split(",")) {
-      const right = part.trim().toUpperCase();
-      if (right !== "" && !ACL_INHERIT_FLAGS.has(right)) rights.add(right);
-    }
-  }
-  const trailing = /\(([^)]*)\)\s*([A-Z]+)\s*$/i.exec(tail);
-  if (trailing?.[2]) rights.add(trailing[2].toUpperCase());
-  let kind: ParsedAce["rights"] = "other";
-  if (rights.size === 1 && rights.has("F")) kind = "F";
-  else if ((rights.size === 1 && rights.has("RX")) || (rights.size === 2 && rights.has("R") && rights.has("X"))) kind = "RX";
-  return { principal: left, rights: kind, inheritOnly };
+/** One SDDL allow/deny ACE. `(IO)` does not apply to the object. */
+export function parseIcaclsAce(line: string): ParsedAce | null {
+  const aces = parseSddlAces(line);
+  const ace = aces?.[0];
+  if (!ace) return null;
+  return { principal: `*${ace.sid}`, rights: aceRightsKind(ace.rights), inheritOnly: ace.inheritOnly };
 }
 
-export function parseIcaclsAces(text: string, dir?: string): ParsedAce[] {
-  const aces: ParsedAce[] = [];
-  for (const raw of text.split(/\r?\n/)) {
-    const ace = parseIcaclsAce(raw, dir);
-    if (ace && !ace.inheritOnly) aces.push(ace);
-  }
-  return aces;
+export function parseIcaclsAces(text: string): ParsedAce[] {
+  const aces = parseSddlAces(text);
+  if (aces === null) return [];
+  return aces.filter((ace) => !ace.inheritOnly).map((ace) => ({
+    principal: `*${ace.sid}`,
+    rights: aceRightsKind(ace.rights),
+    inheritOnly: false,
+  }));
 }
 
 function aclRole(principal: string, svcSid?: string): "svc" | "admin" | "system" | "other" {
-  const key = principal.trim().toLowerCase().replace(/^\*/, "");
-  const sid = svcSid?.trim().toLowerCase().replace(/^\*/, "") ?? "";
+  const key = canonicalSid(principal) ?? principal.trim().replace(/^\*/, "").toUpperCase();
+  const sid = svcSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
   if (sid !== "" && key === sid) return "svc";
-  if (key === "verax-svc" || key.endsWith("\\verax-svc")) return "svc";
-  if (key === "builtin\\administrators" || key === "administrators" || key.endsWith("\\administrators") || key === "s-1-5-32-544") return "admin";
-  if (key === "nt authority\\system" || key === "system" || key.endsWith("\\system") || key === "s-1-5-18") return "system";
+  if (key === SID_ADMINISTRATORS) return "admin";
+  if (key === SID_SYSTEM) return "system";
+  if (key === SID_TRUSTED_INSTALLER) return "other";
   return "other";
 }
 
@@ -1570,7 +1658,7 @@ export function verifyServiceAcl(
   kind: "code" | "state",
   opts?: { dir?: string; svcSid?: string; file?: string },
 ): { ok: true; aces: ParsedAce[] } | { ok: false; aces: ParsedAce[]; detail: string } {
-  const aces = parseIcaclsAces(text, opts?.dir);
+  const aces = parseIcaclsAces(text);
   const expectedSvc = kind === "code" ? "RX" : "F";
   const label = opts?.file ?? (kind === "code" ? "code" : "state");
   const parsed = aces.map((ace) => `${ace.principal} ${ace.rights}`).join("\n");
@@ -1609,23 +1697,15 @@ export function manifestMismatches(manifest: string, hashOf: (rel: string) => st
 export type BoundaryCheck = { id: string; level: "ok" | "fail"; detail: string };
 
 function adminOrSystem(owner: string): boolean {
-  const n = owner.trim().toLowerCase().replace(/^\*/, "");
-  return (
-    n === "builtin\\administrators" ||
-    n === "administrators" ||
-    n === "nt authority\\system" ||
-    n === "system" ||
-    n.endsWith("\\administrators") ||
-    n.endsWith("\\system") ||
-    n === "s-1-5-32-544" ||
-    n === "s-1-5-18"
-  );
+  const sid = canonicalSid(owner);
+  if (sid === SID_ADMINISTRATORS || sid === SID_SYSTEM) return true;
+  const n = owner.trim().toLowerCase();
+  return n === "builtin\\administrators" || n === "nt authority\\system" || n === "administrators" || n === "system";
 }
 
-/** True when the Verax root DACL lets Users, CREATOR OWNER, Everyone, or Authenticated Users write. */
+/** True when the root SDDL is missing or grants a write to a SID outside Administrators and SYSTEM. */
 function rootDaclRejected(text: string): boolean {
-  if (windowsUserCanWrite(text)) return true;
-  return /creator owner/i.test(text);
+  return windowsUserCanWrite(text);
 }
 
 export function installedBoundaryChecks(input: {
@@ -1753,7 +1833,7 @@ export function installedBoundaryChecks(input: {
     const bad = rootDaclRejected(input.rootAclText);
     checks.push(
       bad
-        ? { id: "install-root-acl", level: "fail", detail: `root ACL grants write to a non-administrator on ${input.rootDir ?? "the Verax root"}` }
+        ? { id: "install-root-acl", level: "fail", detail: refuseAcl(input.rootAclText, `root ACL grants write to a non-administrator on ${input.rootDir ?? "the Verax root"}`) }
         : { id: "install-root-acl", level: "ok", detail: "root ACL names only Administrators and SYSTEM" },
     );
   }
@@ -2317,9 +2397,9 @@ function applyPrivateTemp(
       step.path,
       "/inheritance:r",
       "/grant:r",
-      `${ADMINISTRATORS}:(OI)(CI)F`,
+      `${ADMINISTRATORS_SID}:(OI)(CI)F`,
       "/grant:r",
-      `${SYSTEM_ACCOUNT}:(OI)(CI)F`,
+      `${SYSTEM_SID}:(OI)(CI)F`,
     ], "win32"), undefined, systemToolEnv("win32", step.path));
     const reset = exec(toolArgv("icacls", windowsResetInheritArgs(step.path), "win32"), undefined, systemToolEnv("win32", step.path));
     const resetOk = (reset.status ?? 1) === 0 || directoryIsEmpty(step.path);
@@ -2494,7 +2574,7 @@ function applyLockRoot(
       return { error: `refusing: ${child} appeared in ${root}\n` };
     }
   }
-  const read = exec(toolArgv("icacls", [root], "win32"), undefined, env);
+  const read = exec(windowsSddlArgv(root), undefined, env);
   const text = `${read.stdout ?? ""}\n${read.stderr ?? ""}`;
   if ((read.status ?? 1) !== 0 || rootDaclRejected(text)) {
     if (step.create) rmSync(root, { recursive: true, force: true });
@@ -2674,7 +2754,7 @@ async function execute(
       const grantKind = platform === "win32" ? serviceGrantKind(resolved) : null;
       if (grantKind) {
         const target = resolved[1] ?? "";
-        const read = call(toolArgv("icacls", [target], "win32"));
+        const read = call(windowsSddlArgv(target));
         const text = `${read.stdout ?? ""}\n${read.stderr ?? ""}`;
         const verdict = verifyServiceAcl(text, grantKind, { dir: target, svcSid });
         if ((read.status ?? 1) !== 0 || !verdict.ok) {
@@ -2684,7 +2764,7 @@ async function execute(
         }
         for (const file of serviceAclFiles(target, grantKind)) {
           if (!existsSync(file)) continue;
-          const fileRead = call(toolArgv("icacls", [file], "win32"));
+          const fileRead = call(windowsSddlArgv(file));
           const fileText = `${fileRead.stdout ?? ""}\n${fileRead.stderr ?? ""}`;
           const fileVerdict = verifyServiceAcl(fileText, grantKind, { dir: file, svcSid, file });
           if ((fileRead.status ?? 1) !== 0 || !fileVerdict.ok) {
@@ -2697,7 +2777,7 @@ async function execute(
       if (platform === "win32" && resolved.includes("/setowner") && resolved.includes("/T") && (resolved[1] ?? "") === plan.stateDir) {
         for (const file of serviceAclFiles(plan.stateDir, "state")) {
           if (!existsSync(file)) continue;
-          const fileRead = call(toolArgv("icacls", [file], "win32"));
+          const fileRead = call(windowsSddlArgv(file));
           const fileText = `${fileRead.stdout ?? ""}\n${fileRead.stderr ?? ""}`;
           const fileVerdict = verifyServiceAcl(fileText, "state", { dir: file, svcSid, file });
           if ((fileRead.status ?? 1) !== 0 || !fileVerdict.ok) {
@@ -3175,12 +3255,12 @@ function collectTarballs(
     const sid = invokingSid(exec);
     const chunks: string[] = [];
     for (const file of targets) {
-      const acl = exec(toolArgv("icacls", [file], "win32"));
+      const acl = exec(windowsSddlArgv(file));
       const text = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
       chunks.push(text);
       const ancestor = file === dir;
       if ((acl.status ?? 1) !== 0 || windowsUserCanWrite(text, { path: file, userSid: sid, ancestor })) {
-        io.stderr.write(`${tarballTrustMessage(file)}\n`);
+        io.stderr.write(`${refuseAcl(text, tarballTrustMessage(file))}\n`);
         return { error: true, code: EX_CONFIG };
       }
     }
@@ -3265,10 +3345,10 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     if (platform === "win32") {
       const sid = invokingSid(exec);
       for (const file of files) {
-        const acl = exec(toolArgv("icacls", [file.path], "win32"));
+        const acl = exec(windowsSddlArgv(file.path));
         const text = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
         if ((acl.status ?? 1) !== 0 || windowsUserCanWrite(text, { path: file.path, userSid: sid, ancestor: file.ancestor })) {
-          io.stderr.write(`${nodeTrustMessage(file.path)}\n`);
+          io.stderr.write(`${refuseAcl(text, nodeTrustMessage(file.path))}\n`);
           return EX_CONFIG;
         }
       }
@@ -3312,11 +3392,10 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     if (pathIsReparse(root, exec, platform)) reparsePath = root;
     else if (pathIsReparse(stateDir, exec, platform)) reparsePath = stateDir;
     if (veraxRootExists) {
-      const literal = root.replaceAll("'", "''");
-      const owned = exec(toolArgv("powershell", ["-NoProfile", "-Command", `(Get-Acl -LiteralPath '${literal}').Owner`], "win32"));
-      winRootOwner = (owned.stdout ?? "").trim();
-      const acl = exec(toolArgv("icacls", [root], "win32"));
-      winRootAcl = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
+      const acl = exec(windowsSddlArgv(root));
+      const text = `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`;
+      winRootAcl = text;
+      winRootOwner = sddlOwner(text) ?? "";
     }
   } else if (platform === "linux") {
     const codeDir = codeDirFor(platform, plannedEnv, posixRoot);
@@ -3662,24 +3741,20 @@ export function liveInstalledChecks(
     manifest = null;
   }
   if (platform === "win32") {
-    const acl = exec(toolArgv("icacls", [stateDir], "win32"));
-    const codeAcl = exec(toolArgv("icacls", [codeDir], "win32"));
+    const acl = exec(windowsSddlArgv(stateDir));
+    const codeAcl = exec(windowsSddlArgv(codeDir));
     const fileAcls = [
       ...serviceAclFiles(stateDir, "state").map((file) => ({ path: file, kind: "state" as const })),
       ...serviceAclFiles(codeDir, "code").map((file) => ({ path: file, kind: "code" as const })),
     ].flatMap((file) => {
       if (!existsSync(file.path)) return [];
-      const read = exec(toolArgv("icacls", [file.path], "win32"));
+      const read = exec(windowsSddlArgv(file.path));
       return [{ path: file.path, kind: file.kind, text: `${read.stdout ?? ""}\n${read.stderr ?? ""}` }];
     });
     const task = exec(toolArgv("schtasks", ["/Query", "/TN", TASK_NAME], "win32"));
-    const ownerOf = (dir: string): string => {
-      const literal = dir.replaceAll("'", "''");
-      const ran = exec(toolArgv("powershell", ["-NoProfile", "-Command", `(Get-Acl -LiteralPath '${literal}').Owner`], "win32"));
-      return (ran.stdout ?? "").trim();
-    };
+    const ownerOf = (dir: string): string => sddlOwner(`${exec(windowsSddlArgv(dir)).stdout ?? ""}`) ?? "";
     const rootDir = path.win32.dirname(stateDir);
-    const rootAcl = exec(toolArgv("icacls", [rootDir], "win32"));
+    const rootAcl = exec(windowsSddlArgv(rootDir));
     const marker = path.win32.join(rootDir, "install.json");
     return installedBoundaryChecks({
       codeDir,

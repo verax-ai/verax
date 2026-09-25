@@ -44,11 +44,11 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /\$code -ne 78/);
     assert.match(workflow, /was not created by verax install/);
     assert.match(workflow, /Verax\\state/);
-    assert.match(workflow, /icacls "\$env:ProgramData\\Verax" \| Out-String/);
+    assert.match(workflow, /\(Get-Acl -LiteralPath "\$env:ProgramData\\Verax"\)\.Sddl/);
     assert.match(workflow, /Write-Host \$rootAcl/);
-    assert.match(workflow, /BUILTIN\\Users/);
-    assert.match(workflow, /CREATOR OWNER/);
-    assert.match(workflow, /Authenticated Users/);
+    assert.match(workflow, /S-1-5-32-545/);
+    assert.match(workflow, /S-1-3-0/);
+    assert.match(workflow, /S-1-5-11/);
     assert.match(workflow, /Write-Host "::error::ProgramData\\Verax ACL contains \$banned"; exit 1/);
   });
 

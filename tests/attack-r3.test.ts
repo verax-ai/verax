@@ -39,7 +39,8 @@ const linuxOpts = {
   stateExists: false,
 };
 
-const adminAcl = "BUILTIN\\Administrators:(OI)(CI)(F)\nNT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n";
+const adminAcl = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+const ATTACKER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 
 function planText(plan: { ok: true; ops: unknown[] } | { ok: false; message: string }): string {
   return plan.ok ? JSON.stringify(plan.ops) : "";
@@ -67,7 +68,11 @@ describe("attack R3", () => {
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
         return { status: 1, stdout: "", stderr: "The user name could not be found." };
       }
-      return { status: 0, stdout: "BUILTIN\\Administrators:(F)\nNT AUTHORITY\\SYSTEM:(F)\n", stderr: "" };
+      // The attacker made the root: a standard user owns it and holds full control. Everything else is admin-only.
+      if (line.includes("Get-Acl") && line.includes(`${verax}'`)) {
+        return { status: 0, stdout: `O:${ATTACKER_SID}G:${ATTACKER_SID}D:(A;OICI;FA;;;${ATTACKER_SID})(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`, stderr: "" };
+      }
+      return { status: 0, stdout: adminAcl, stderr: "" };
     };
     try {
       const code = await runInstall(["install", "--port", "8801"], {
@@ -84,6 +89,47 @@ describe("attack R3", () => {
       const text = err.join("");
       assert.equal(code, EX_CONFIG);
       assert.match(text, /was not created by verax install|not owned by Administrators/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("W1 a root whose DACL changes between plan and lock is refused at the lock", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
+    const root = mkdtempSync(join(tmpdir(), "verax-w1-toctou-"));
+    const data = join(root, "data");
+    const files = join(root, "files");
+    const verax = join(data, "Verax");
+    const err: string[] = [];
+    mkdirSync(verax, { recursive: true });
+    writeFileSync(join(verax, "install.json"), JSON.stringify({ version: "0.3.0", codeDir: join(files, "Verax") }));
+    let rootReads = 0;
+    const exec = (argv: string[]): ExecResult => {
+      const line = argv.join(" ");
+      if (line.includes("reparsepoint")) return { status: 1, stdout: "", stderr: "not a reparse" };
+      if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
+        return { status: 1, stdout: "", stderr: "The user name could not be found." };
+      }
+      if (line.includes("Get-Acl") && line.includes(`${verax}'`)) {
+        rootReads += 1;
+        // Clean when the plan reads it; a user write ACE by the time the lock re-reads it.
+        return rootReads === 1
+          ? { status: 0, stdout: adminAcl, stderr: "" }
+          : { status: 0, stdout: `${adminAcl}(A;OICI;FA;;;${ATTACKER_SID})`, stderr: "" };
+      }
+      return { status: 0, stdout: adminAcl, stderr: "" };
+    };
+    try {
+      const code = await runInstall(["install", "--port", "8801"], {
+        platform: "win32",
+        env: { ...winEnv, ProgramData: data, ProgramFiles: files, USERPROFILE: join(root, "home") },
+        elevated: () => true,
+        layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },
+        exec,
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      assert.ok(rootReads >= 2, `the lock did not re-read the root (${rootReads} reads)`);
+      assert.equal(code, EX_CONFIG, err.join(""));
+      assert.match(err.join(""), /was not created by verax install/);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -255,7 +301,7 @@ describe("attack R3", () => {
       hashOf: () => null,
       autostart: true,
       rootDir: "C:\\ProgramData\\Verax",
-      rootAclText: "BUILTIN\\Users:(OI)(CI)(WD,AD)\nBUILTIN\\Administrators:(OI)(CI)(F)\n",
+      rootAclText: "O:BAG:SYD:PAI(A;CI;DCLC;;;BU)(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)",
     });
     const failed = checks.filter((c) => c.id === "install-root-acl" && c.level === "fail");
     assert.equal(failed.length, 1);

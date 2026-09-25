@@ -33,6 +33,7 @@ import {
   systemToolName,
   systemToolPath,
   windowsUserCanWrite,
+  sddlRightsMask,
   type PlanOp,
 } from "../packages/body/src/install.ts";
 import { runInitLocal } from "../packages/body/src/init-local.ts";
@@ -112,13 +113,18 @@ function winServiceAcl(dir: string): string {
   const codeFile = /[/\\]node_modules[/\\]@verax-ai[/\\]body[/\\]package\.json$/i.test(base);
   const code = codeFile || /[/\\]Verax$/i.test(base);
   const state = /[/\\]state([/\\]|$)/i.test(base) || /install\.json$/i.test(base);
-  if (!code && !state) return `${dir} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`;
-  const rights = code ? "RX" : "F";
-  return [
-    `${dir} *S-1-5-21-1:(OI)(CI)(${rights})`,
-    "BUILTIN\\Administrators:(OI)(CI)(F)",
-    "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
-  ].join("\n");
+  if (!code && !state) return "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)";
+  const rights = code ? "0x1200a9" : "FA";
+  const flags = codeFile || /install\.json$/i.test(base) ? "ID" : "OICI";
+  return `O:BAG:SYD:PAI(A;${flags};${rights};;;S-1-5-21-1)(A;${flags};FA;;;BA)(A;${flags};FA;;;SY)`;
+}
+
+function sddlStdout(argv: readonly string[]): string | null {
+  const cmd = argv.join(" ");
+  if (!cmd.includes(".Sddl")) return null;
+  const matched = cmd.match(/LiteralPath '([^']*)'/);
+  const target = (matched?.[1] ?? "").replace(/''/g, "'");
+  return `${winServiceAcl(target)}\n`;
 }
 
 function stageRegistryInstall(argv: readonly string[], version: string): void {
@@ -149,14 +155,16 @@ describe("verax install plan", () => {
       const text = argv.join(" ");
       assert.equal(/LOCAL SERVICE/i.test(text), false);
       assert.match(text, /verax-svc:\(OI\)\(CI\)F/);
-      assert.match(text, /BUILTIN\\Administrators/);
-      assert.match(text, /NT AUTHORITY\\SYSTEM/);
+      assert.match(text, /\*S-1-5-32-544:\(OI\)\(CI\)F/);
+      assert.match(text, /\*S-1-5-18:\(OI\)\(CI\)F/);
       assert.equal(text.includes("Users"), false);
       assert.equal(text.includes("Everyone"), false);
+      assert.equal(text.includes("BUILTIN\\"), false);
+      assert.equal(text.includes("NT AUTHORITY\\"), false);
       const grants = argv.filter((arg) => arg.includes(":("));
       for (const grant of grants) {
         const principal = grant.split(":")[0] ?? "";
-        const allowed = principal === "verax-svc" || principal === "BUILTIN\\Administrators" || principal === "NT AUTHORITY\\SYSTEM";
+        const allowed = principal === "verax-svc" || principal === "*S-1-5-32-544" || principal === "*S-1-5-18";
         assert.equal(allowed, true, grant);
       }
     }
@@ -307,19 +315,13 @@ describe("verax install plan", () => {
       stateDir: "C:\\ProgramData\\Verax\\state",
       manifest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  node.exe\n",
       hashOf: () => "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      aclText: [
-        "BUILTIN\\Users:(OI)(CI)(RX)",
-        "Everyone:(RX)",
-        "verax-svc:(OI)(CI)(F)",
-        "BUILTIN\\Administrators:(OI)(CI)(F)",
-        "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
-      ].join("\n"),
+      aclText: "O:BAG:SYD:PAI(A;OICI;0x1200a9;;;BU)(A;;GR;;;WD)(A;OICI;FA;;;S-1-5-21-1)(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)",
       autostart: true,
     });
     const failed = checks.filter((c) => c.level === "fail").map((c) => c.detail);
     assert.ok(failed.some((line) => line.includes("node.exe")));
-    assert.ok(failed.some((line) => line.includes("BUILTIN\\Users")));
-    assert.ok(failed.some((line) => line.includes("Everyone")));
+    assert.ok(failed.some((line) => line.includes("S-1-5-32-545")));
+    assert.ok(failed.some((line) => line.includes("S-1-1-0")));
   });
 
   it("a refuses a node whose icacls grants BUILTIN\\Users modify", () => {
@@ -656,6 +658,8 @@ describe("verax install plan", () => {
           const passwd = getentAnswer(argv, home);
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
+          const sddl = sddlStdout(argv);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
             return { status: 2, stdout: "", stderr: "not found\n" };
@@ -729,6 +733,8 @@ describe("verax install plan", () => {
           const passwd = getentAnswer(argv, home);
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
+          const sddl = sddlStdout(argv);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
             return { status: 2, stdout: "", stderr: "not found\n" };
@@ -772,6 +778,8 @@ describe("verax install plan", () => {
         elevated: () => true,
         layout: winOpts,
         exec: (argv, stdin) => {
+          const sddl = sddlStdout(argv);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
             seen = (stdin ?? "").replace(/\r?\n$/, "");
             return { status: 1, stdout: "", stderr: `add failed ${seen}\n` };
@@ -861,12 +869,9 @@ describe("verax install plan", () => {
   });
 
   it("accepts C:\\ add-subdirectory and inherit-only modify when Program Files is admin-only", async () => {
-    const drive = [
-      "C:\\ NT AUTHORITY\\Authenticated Users:(OI)(CI)(IO)(M)",
-      "C:\\ NT AUTHORITY\\Authenticated Users:(AD)",
-    ].join("\n");
+    const drive = "O:BAG:SYD:PAI(A;OICIIO;FA;;;AU)(A;;0x4;;;AU)";
     assert.equal(windowsUserCanWrite(drive, { path: "C:\\", ancestor: true }), false);
-    const nodejs = "C:\\Program Files\\nodejs BUILTIN\\Administrators:(OI)(CI)(F)\n  NT AUTHORITY\\SYSTEM:(OI)(CI)(F)\n";
+    const nodejs = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
     assert.equal(windowsUserCanWrite(nodejs, { path: "C:\\Program Files\\nodejs", ancestor: true }), false);
     const err: string[] = [];
     let sawAdd = false;
@@ -878,11 +883,7 @@ describe("verax install plan", () => {
       elevated: () => true,
       layout: winOpts,
       exec: (argv) => {
-        if (systemToolName(argv[0] ?? "") === "icacls") {
-          const target = argv[1] ?? "";
-          if (/^[A-Za-z]:\\$/.test(target)) return { status: 0, stdout: `${drive}\n`, stderr: "" };
-          return { status: 0, stdout: `${target} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`, stderr: "" };
-        }
+        if (argv.join(" ").includes(".Sddl")) return { status: 0, stdout: `${nodejs}\n`, stderr: "" };
         if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
         if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
           sawAdd = true;
@@ -901,8 +902,57 @@ describe("verax install plan", () => {
     }
   });
 
+  it("SDDL rights are access masks; DC is write-data, and an unknown token is named", () => {
+    const rows: [string, number][] = [
+      ["GA", 0x10000000],
+      ["GR", 0x80000000],
+      ["GW", 0x40000000],
+      ["GX", 0x20000000],
+      ["RC", 0x20000],
+      ["SD", 0x10000],
+      ["WD", 0x40000],
+      ["WO", 0x80000],
+      ["RP", 0x10],
+      ["WP", 0x20],
+      ["CC", 0x1],
+      ["DC", 0x2],
+      ["LC", 0x4],
+      ["SW", 0x8],
+      ["LO", 0x80],
+      ["DT", 0x40],
+      ["CR", 0x100],
+      ["FA", 0x1f01ff],
+      ["FR", 0x120089],
+      ["FW", 0x120116],
+      ["FX", 0x1200a0],
+      ["0x4", 0x4],
+      ["DCLC", 0x6],
+      ["KA", 0],
+    ];
+    for (const [token, mask] of rows) {
+      const parsed = sddlRightsMask(token);
+      if (!("mask" in parsed)) assert.fail(`${token} named unknown ${parsed.unknown}`);
+      assert.equal(parsed.mask, mask >>> 0, token);
+    }
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;OICIIO;FA;;;AU)(A;;0x4;;;AU)", { path: "C:\\", ancestor: true }), false);
+    for (const sid of ["AU", "BU"]) {
+      for (const rights of ["DT", "SD", "WD"]) {
+        assert.equal(
+          windowsUserCanWrite(`O:BAG:SYD:PAI(A;;${rights};;;${sid})`, { ancestor: true }),
+          true,
+          `${sid} ${rights}`,
+        );
+      }
+    }
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;;DCLC;;;BU)"), true);
+    assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;;DCLC;;;BU)", { ancestor: true }), false);
+    const bad = planInstall("win32", winEnv, { ...winOpts, nodeIcacls: "O:BAG:SYD:PAI(A;;AD;;;BU)" });
+    assert.equal(bad.ok, false);
+    if (!bad.ok) assert.match(bad.message, /unknown SDDL right AD/);
+  });
+
   it("refuses an ancestor that grants Users delete-child", async () => {
-    const text = "C:\\Program Files BUILTIN\\Users:(DC)\n";
+    const text = "O:BAG:SYD:PAI(A;;DT;;;BU)";
     assert.equal(windowsUserCanWrite(text, { path: "C:\\Program Files", ancestor: true }), true);
     const err: string[] = [];
     const code = await runInstall(["install", "--port", "8801"], {
@@ -927,7 +977,7 @@ describe("verax install plan", () => {
   });
 
   it("refuses a node file that grants Users write", async () => {
-    const text = "C:\\Program Files\\nodejs\\node.exe Users:(W)\n";
+    const text = "O:BAG:SYD:PAI(A;;FW;;;BU)";
     assert.equal(windowsUserCanWrite(text, { path: "C:\\Program Files\\nodejs\\node.exe", ancestor: false }), true);
     const err: string[] = [];
     const code = await runInstall(["install", "--port", "8801"], {
@@ -1058,6 +1108,8 @@ describe("verax install plan", () => {
       elevated: () => true,
       layout: winOpts,
       exec: (argv, stdin) => {
+        const sddl = sddlStdout(argv);
+        if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
         if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
           password = stdin ?? "";
           return { status: 0, stdout: stdin ?? "", stderr: `${PS_ERROR_MARK} secedit exited 1\n` };
@@ -1102,7 +1154,7 @@ describe("verax install plan", () => {
     const temp = win.ops[tempAt];
     if (!temp || temp.op !== "private-temp") throw new Error("missing private temp");
     assert.match(temp.path, /^C:\\ProgramData\\Verax\\install-tmp-[0-9a-f]{32}$/);
-    assert.deepEqual(temp.acl, ["BUILTIN\\Administrators", "NT AUTHORITY\\SYSTEM"]);
+    assert.deepEqual(temp.acl, ["*S-1-5-32-544", "*S-1-5-18"]);
     assert.equal(temp.inheritance, "removed");
     assert.equal(temp.owner, "*S-1-5-32-544");
     for (const op of scripts) {
@@ -1178,6 +1230,8 @@ describe("verax install plan", () => {
           const passwd = getentAnswer(argv, join(root, "home"));
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
+          const sddl = sddlStdout(argv);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
             return { status: 2, stdout: "", stderr: "not found\n" };
@@ -1278,30 +1332,17 @@ describe("verax install plan", () => {
     const empty = verifyServiceAcl("Successfully processed 1 files", "state", { dir: file, file });
     assert.equal(empty.ok, false);
     if (!empty.ok) assert.match(empty.detail, new RegExp(`empty ACL on ${file.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
-    const noSvc = verifyServiceAcl(
-      ["BUILTIN\\Administrators:(I)(F)", "NT AUTHORITY\\SYSTEM:(I)(F)"].join("\n"),
-      "state",
-      { dir: file, file },
-    );
+    const noSvc = verifyServiceAcl("O:BAG:SYD:PAI(A;ID;FA;;;BA)(A;ID;FA;;;SY)", "state", { dir: file, file });
     assert.equal(noSvc.ok, false);
     if (!noSvc.ok) assert.match(noSvc.detail, /expected svc/);
     const inherited = verifyServiceAcl(
-      [
-        `${file} *S-1-5-21-1:(I)(F)`,
-        "BUILTIN\\Administrators:(I)(F)",
-        "NT AUTHORITY\\SYSTEM:(I)(F)",
-      ].join("\n"),
+      "O:BAG:SYD:PAI(A;ID;FA;;;S-1-5-21-1)(A;ID;FA;;;BA)(A;ID;FA;;;SY)",
       "state",
       { dir: file, file, svcSid: "S-1-5-21-1" },
     );
     assert.equal(inherited.ok, true);
     const explicitOther = verifyServiceAcl(
-      [
-        `${file} *S-1-5-21-1:(I)(F)`,
-        "BUILTIN\\Administrators:(I)(F)",
-        "NT AUTHORITY\\SYSTEM:(I)(F)",
-        "MACHINE\\runneradmin:(F)",
-      ].join("\n"),
+      "O:BAG:SYD:PAI(A;ID;FA;;;S-1-5-21-1)(A;ID;FA;;;BA)(A;ID;FA;;;SY)(A;;FA;;;S-1-5-21-9)",
       "state",
       { dir: file, file, svcSid: "S-1-5-21-1" },
     );
@@ -1610,23 +1651,15 @@ describe("verax install plan", () => {
 
   it("code ACL verifier refuses svc F, a missing service, and an extra Users ACE", () => {
     const dir = "C:\\Program Files\\Verax";
-    const exact = [
-      `${dir} *S-1-5-21-1:(OI)(CI)(RX)`,
-      "BUILTIN\\Administrators:(OI)(CI)(F)",
-      "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
-    ].join("\n");
-    const full = verifyServiceAcl(exact.replace("(RX)", "(F)"), "code", { dir, svcSid: "S-1-5-21-1" });
+    const exact = "O:BAG:SYD:PAI(A;OICI;0x1200a9;;;S-1-5-21-1)(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+    const full = verifyServiceAcl(exact.replace("0x1200a9", "FA"), "code", { dir, svcSid: "S-1-5-21-1" });
     assert.equal(full.ok, false);
     if (!full.ok) assert.match(full.detail, /\*S-1-5-21-1 F/);
-    const missing = verifyServiceAcl(
-      ["BUILTIN\\Administrators:(OI)(CI)(F)", "NT AUTHORITY\\SYSTEM:(OI)(CI)(F)"].join("\n"),
-      "code",
-      { dir },
-    );
+    const missing = verifyServiceAcl("O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)", "code", { dir });
     assert.equal(missing.ok, false);
-    const extra = verifyServiceAcl(`${exact}\nBUILTIN\\Users:(OI)(CI)(RX)`, "code", { dir, svcSid: "S-1-5-21-1" });
+    const extra = verifyServiceAcl(`${exact}(A;OICI;0x1200a9;;;BU)`, "code", { dir, svcSid: "S-1-5-21-1" });
     assert.equal(extra.ok, false);
-    if (!extra.ok) assert.match(extra.detail, /BUILTIN\\Users/);
+    if (!extra.ok) assert.match(extra.detail, /S-1-5-32-545/);
     assert.equal(verifyServiceAcl(exact, "code", { dir, svcSid: "S-1-5-21-1" }).ok, true);
   });
 
@@ -1745,7 +1778,7 @@ describe("verax install plan", () => {
       fromTarballs: "C:\\pack",
       tarballFiles: [source],
       tarballDigests: [{ file: source, sha256: "abc" }],
-      tarballIcacls: "C:\\pack BUILTIN\\Administrators:(F)\n",
+      tarballIcacls: "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)",
     });
     if (!plan.ok) throw new Error(plan.message);
     const stage = plan.ops.find((op) => op.op === "stage-tarballs");
