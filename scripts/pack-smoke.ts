@@ -136,7 +136,13 @@ function stopChild(child: ChildProcess): Promise<void> {
       clearTimeout(timer);
       resolve();
     });
-    child.kill("SIGTERM");
+    // On Windows the bin runs under a shell: killing the shell leaves `verax serve` running
+    // and holding the consumer directory. Take the whole tree down.
+    if (process.platform === "win32" && child.pid !== undefined) {
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      child.kill("SIGTERM");
+    }
   });
 }
 
@@ -271,9 +277,11 @@ try {
 }
 check(verified.status === 0 && ok && decisions >= 2, "verax verify --json ok with at least 2 decisions", verdict);
 
-rmSync(stateDir, { recursive: true, force: true });
-rmSync(packDir, { recursive: true, force: true });
-rmSync(consumer, { recursive: true, force: true });
+// Windows releases file handles a moment after a process exits.
+const cleanup = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 } as const;
+rmSync(stateDir, cleanup);
+rmSync(packDir, cleanup);
+rmSync(consumer, cleanup);
 
 process.stdout.write(`\npack-smoke: ${failures.length === 0 ? "green" : `${failures.length} failed`}\n`);
 process.exit(failures.length === 0 ? 0 : 1);
