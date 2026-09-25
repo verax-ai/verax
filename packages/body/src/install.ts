@@ -622,6 +622,26 @@ function powershellStdin(body: string, password: string, tempDir: string): PlanO
 }
 
 /**
+ * One PowerShell snippet for the install script and the win32 test.
+ * Normalises holder tokens to sorted unique strings and compares with
+ * Compare-Object. Functions emit strings; they do not return collections,
+ * so a one-item result is not unrolled into a bare string.
+ * `$prev`, `$want`, and `$got` are the raw token lists. Sets `$prevSet`,
+ * `$wantSet`, and `$gotSet`. A mismatch prints previous/expected/after/added/missing
+ * and throws; added/missing are also printed when the sets match.
+ */
+export const LOGON_HOLDER_COMPARE = [
+  "function Normalize-LogonHolders([string]$csv) { foreach ($raw in ($csv -split ',')) { $n = $raw.Trim(); if ($n.Length -eq 0) { continue }; if ($n.StartsWith('*')) { $n = $n.Substring(1).Trim() }; if ($n.Length -eq 0) { continue }; if ($n -notmatch '^(?i)S-1-') { try { $n = (New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { } }; $n.ToUpperInvariant() } }",
+  "$prevSet = [string[]]@((Normalize-LogonHolders (($prev -join ','))) | Sort-Object -Unique)",
+  "$wantSet = [string[]]@((Normalize-LogonHolders (($want -join ','))) | Sort-Object -Unique)",
+  "$gotSet = [string[]]@((Normalize-LogonHolders (($got -join ','))) | Sort-Object -Unique)",
+  "$added = [string[]]@(); $missing = [string[]]@(); $holderEqual = $false",
+  "if ($wantSet.Count -gt 0 -and $gotSet.Count -gt 0) { $cmp = @(Compare-Object -ReferenceObject $wantSet -DifferenceObject $gotSet -SyncWindow 0); $holderEqual = $cmp.Count -eq 0; $added = [string[]]@($cmp | Where-Object { $_.SideIndicator -eq '=>' } | ForEach-Object { $_.InputObject }); $missing = [string[]]@($cmp | Where-Object { $_.SideIndicator -eq '<=' } | ForEach-Object { $_.InputObject }) } elseif ($wantSet.Count -eq 0 -and $gotSet.Count -eq 0) { $holderEqual = $true } else { if ($gotSet.Count -gt 0) { $added = $gotSet }; if ($wantSet.Count -gt 0) { $missing = $wantSet } }",
+  "[Console]::Error.WriteLine(('added: ' + ($added -join ','))); [Console]::Error.WriteLine(('missing: ' + ($missing -join ',')))",
+  "if (-not $holderEqual) { [Console]::Error.WriteLine(('previous: ' + ($prevSet -join ','))); [Console]::Error.WriteLine(('expected: ' + ($wantSet -join ','))); [Console]::Error.WriteLine(('after: ' + ($gotSet -join ','))); throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
+].join("; ");
+
+/**
  * Secedit holder list as a set of upper-case SIDs.
  * Split on commas, trim, drop one leading `*`, map a name through `nameToSid`,
  * keep an unmapped name upper-cased, de-duplicate. A token that already matches
@@ -714,12 +734,7 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
     "$gotText = [regex]::Replace([IO.File]::ReadAllText($after), '\\\\[ \\t]*\\r?\\n', '')",
     "$got = @()",
     "if ($gotText -match 'SeBatchLogonRight\\s*=\\s*([^\\r\\n]*)') { $got = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }",
-    "function Join-HolderSet($set) { $items = [System.Collections.Generic.List[string]]::new(); foreach ($item in $set) { [void]$items.Add($item) }; return ($items.ToArray() -join ',') }",
-    "function Normalize-LogonHolders([string]$csv) { $set = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal); foreach ($raw in ($csv -split ',')) { $n = $raw.Trim(); if ($n.Length -eq 0) { continue }; if ($n.StartsWith('*')) { $n = $n.Substring(1).Trim() }; if ($n.Length -eq 0) { continue }; if ($n -notmatch '^(?i)S-1-') { try { $n = (New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { } }; [void]$set.Add($n.ToUpperInvariant()) }; return $set }",
-    "$prevSet = Normalize-LogonHolders (($prev -join ','))",
-    "$wantSet = Normalize-LogonHolders (($want -join ','))",
-    "$gotSet = Normalize-LogonHolders (($got -join ','))",
-    "if (-not $wantSet.SetEquals($gotSet)) { $added = [System.Collections.Generic.List[string]]::new(); foreach ($item in $gotSet) { if (-not $wantSet.Contains($item)) { [void]$added.Add($item) } }; $missing = [System.Collections.Generic.List[string]]::new(); foreach ($item in $wantSet) { if (-not $gotSet.Contains($item)) { [void]$missing.Add($item) } }; [Console]::Error.WriteLine(('previous: ' + (Join-HolderSet $prevSet))); [Console]::Error.WriteLine(('expected: ' + (Join-HolderSet $wantSet))); [Console]::Error.WriteLine(('after: ' + (Join-HolderSet $gotSet))); [Console]::Error.WriteLine(('added: ' + ($added.ToArray() -join ','))); [Console]::Error.WriteLine(('missing: ' + ($missing.ToArray() -join ','))); throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
+    LOGON_HOLDER_COMPARE,
     "$beforeOther = @([regex]::Matches($flat, '(?m)^\\s*(Se\\w+)\\s*=\\s*([^\\r\\n]*)') | Where-Object { $_.Groups[1].Value -ne 'SeBatchLogonRight' } | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() + '=' + (($_.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ',') } | Sort-Object)",
     "$afterOther = @([regex]::Matches($gotText, '(?m)^\\s*(Se\\w+)\\s*=\\s*([^\\r\\n]*)') | Where-Object { $_.Groups[1].Value -ne 'SeBatchLogonRight' } | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() + '=' + (($_.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ',') } | Sort-Object)",
     "if ($beforeOther.Count -ne $afterOther.Count) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",

@@ -10,6 +10,7 @@ import { join, win32 } from "node:path";
 
 import {
   installedBoundaryChecks,
+  LOGON_HOLDER_COMPARE,
   logonHolderMismatchLines,
   normalizeLogonHolders,
   planInstall,
@@ -1015,6 +1016,8 @@ describe("verax install plan", () => {
     assert.match(text, /verax-rights-after\.cfg/);
     assert.match(text, /secedit \/export/);
     assert.match(text, /previous holders plus the service account/);
+    assert.equal(text.includes(LOGON_HOLDER_COMPARE), true);
+    assert.equal(text.includes("SetEquals"), false);
     assert.match(text, /Normalize-LogonHolders/);
     assert.match(
       text,
@@ -1114,6 +1117,43 @@ describe("verax install plan", () => {
     }));
     assert.deepEqual(good, []);
   });
+
+  it(
+    "powershell holder compare keeps one item and names an extra SID",
+    { skip: process.platform === "win32" ? false : "runs %SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" },
+    () => {
+      const env = systemToolEnv("win32");
+      const ps = systemToolPath("powershell", "win32");
+      const run = (setup: string) =>
+        spawnSync(ps, ["-NoProfile", "-NonInteractive", "-Command", `${setup}; ${LOGON_HOLDER_COMPARE}`], {
+          encoding: "utf8",
+          windowsHide: true,
+          shell: false,
+          env,
+        });
+      const addedMissing = (stderr: string) => {
+        const lines = stderr.split(/\r?\n/);
+        return {
+          added: lines.find((line) => line.startsWith("added: ")),
+          missing: lines.find((line) => line.startsWith("missing: ")),
+        };
+      };
+      const one = run("$prev = @('*S-1-5-32-544'); $want = @('*S-1-5-32-544'); $got = @('*S-1-5-32-544')");
+      assert.equal(one.status, 0, one.stderr);
+      assert.deepEqual(addedMissing(`${one.stderr}`), { added: "added: ", missing: "missing: " });
+      const admin = run("$prev = @('Administrators'); $want = @('Administrators'); $got = @('*S-1-5-32-544')");
+      assert.equal(admin.status, 0, admin.stderr);
+      assert.deepEqual(addedMissing(`${admin.stderr}`), { added: "added: ", missing: "missing: " });
+      const extra = run(
+        "$prev = @('*S-1-5-32-544','*S-1-5-32-551'); $want = @('*S-1-5-32-544','*S-1-5-32-551'); $got = @('*S-1-5-32-544','*S-1-5-32-551','*S-1-5-99-7')",
+      );
+      assert.notEqual(extra.status, 0);
+      assert.deepEqual(addedMissing(`${extra.stderr}`), { added: "added: S-1-5-99-7", missing: "missing: " });
+      const emptyPrev = run("$prev = @(); $want = @('*S-1-5-21-9'); $got = @('*S-1-5-21-9')");
+      assert.equal(emptyPrev.status, 0, emptyPrev.stderr);
+      assert.deepEqual(addedMissing(`${emptyPrev.stderr}`), { added: "added: ", missing: "missing: " });
+    },
+  );
 
   it(
     "powershell with the product env runs whoami and rejects a missing exe",
