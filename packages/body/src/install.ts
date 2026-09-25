@@ -772,15 +772,16 @@ const DENY_ACE_TYPES = new Set(["D", "OD", "XD"]);
 /** SACL ACE types. In a DACL they are not permissions and are ignored. */
 const SACL_ACE_TYPES = new Set(["AU", "AL", "OU", "OL", "ML", "SP", "RA"]);
 
-/** ACE bodies, including a conditional tail with nested parentheses. Null when a `(` is unclosed. */
+/**
+ * ACE bodies, including a conditional tail with nested parentheses.
+ * Null when a `(` is unclosed or any character sits outside an ACE.
+ * Control flags are removed before this runs.
+ */
 function aceInners(body: string): string[] | null {
   const inners: string[] = [];
   let i = 0;
   while (i < body.length) {
-    if (body[i] !== "(") {
-      i += 1;
-      continue;
-    }
+    if (body[i] !== "(") return null;
     let depth = 0;
     let closed = false;
     for (let j = i; j < body.length; j += 1) {
@@ -799,6 +800,19 @@ function aceInners(body: string): string[] | null {
     if (!closed) return null;
   }
   return inners;
+}
+
+/** DACL control flags. `NO_ACCESS_CONTROL` is a NULL DACL: everyone has full control. */
+function splitDaclFlags(body: string): { nullDacl: boolean; aces: string } | null {
+  let rest = body;
+  let nullDacl = false;
+  while (rest.length > 0 && rest[0] !== "(") {
+    const match = /^(?:NO_ACCESS_CONTROL|AR|AI|P)/i.exec(rest);
+    if (!match?.[0]) return null;
+    if (match[0].toUpperCase() === "NO_ACCESS_CONTROL") nullDacl = true;
+    rest = rest.slice(match[0].length);
+  }
+  return { nullDacl, aces: rest };
 }
 
 /** Split one ACE on `;` that sit outside parentheses, so a condition stays one field. */
@@ -834,13 +848,19 @@ function aceFromFields(type: "A" | "D", fields: string[]): SddlAce {
 
 /**
  * Parsed DACL, or `null` when the text has no `D:` section.
- * `unknownType === ""` is a malformed ACE (unclosed `(`). A non-empty value names the type.
+ * `nullDacl` is `NO_ACCESS_CONTROL` (with or without `P` / `AI` / `AR`): everyone has full control.
+ * An empty body (`D:` or `D:P` and no ACEs) is a present DACL that denies everyone.
+ * `unknownType === ""` means the body did not parse (unclosed `(`, leftover text, unknown flag).
+ * A non-empty value names an ACE type this checker does not understand.
  */
-function readDacl(text: string): { aces: SddlAce[]; unknownType: string | null } | null {
+function readDacl(text: string): { aces: SddlAce[]; unknownType: string | null; nullDacl: boolean } | null {
   const body = daclBody(text);
   if (body === null) return null;
-  const inners = aceInners(body);
-  if (inners === null) return { aces: [], unknownType: "" };
+  const split = splitDaclFlags(body);
+  if (split === null) return { aces: [], unknownType: "", nullDacl: false };
+  if (split.nullDacl) return { aces: [], unknownType: null, nullDacl: true };
+  const inners = aceInners(split.aces);
+  if (inners === null) return { aces: [], unknownType: "", nullDacl: false };
   const aces: SddlAce[] = [];
   for (const inner of inners) {
     const fields = aceFields(inner);
@@ -854,9 +874,9 @@ function readDacl(text: string): { aces: SddlAce[]; unknownType: string | null }
       aces.push(aceFromFields("A", fields));
       continue;
     }
-    return { aces: [], unknownType: type };
+    return { aces: [], unknownType: type, nullDacl: false };
   }
-  return { aces, unknownType: null };
+  return { aces, unknownType: null, nullDacl: false };
 }
 
 /**
@@ -866,7 +886,7 @@ function readDacl(text: string): { aces: SddlAce[]; unknownType: string | null }
  */
 export function parseSddlAces(text: string): SddlAce[] | null {
   const read = readDacl(text);
-  if (read === null || read.unknownType !== null) return null;
+  if (read === null || read.unknownType !== null || read.nullDacl) return null;
   return read.aces;
 }
 
@@ -931,10 +951,34 @@ function aceWrites(ace: SddlAce, ancestor: boolean): boolean {
   return (parsed.mask & (ancestor ? ANCESTOR_REPLACE_MASK : OBJECT_WRITE_MASK)) !== 0;
 }
 
+/** OWNER RIGHTS. A non-inherit-only allow ACE replaces the owner's implicit WRITE_DAC. */
+const SID_OWNER_RIGHTS = "S-1-3-4";
+
+/**
+ * Without an OWNER RIGHTS ACE the owner holds WRITE_DAC even when the DACL
+ * does not name them. Administrators, SYSTEM, TrustedInstaller, and `svcSid`
+ * (only when this check already trusts that SID) are not that owner.
+ * An inherit-only OWNER RIGHTS ACE does not apply to the object.
+ */
+function untrustedOwnerCanWrite(text: string, aces: readonly SddlAce[], ancestor: boolean, svcSid: string): boolean {
+  const owner = sddlOwner(text);
+  // An owner we cannot read is an owner we cannot trust.
+  if (owner === null) return true;
+  if (TRUSTED_WRITER_SIDS.has(owner)) return false;
+  if (svcSid !== "" && owner === svcSid) return false;
+  const limits = aces.filter((ace) => ace.type === "A" && ace.sid === SID_OWNER_RIGHTS && !ace.inheritOnly);
+  if (limits.length === 0) return true;
+  return limits.some((ace) => aceWrites(ace, ancestor));
+}
+
 /**
  * True when SDDL lets a principal other than Administrators, SYSTEM, or
  * TrustedInstaller change this object. Text that is not SDDL is untrusted.
+ * `NO_ACCESS_CONTROL` is a NULL DACL and grants everyone full control.
+ * An empty DACL (`D:` or `D:P` with no ACEs) denies everyone.
+ * A DACL body that does not fully parse is untrusted.
  * An ACE type outside allow, deny, and ignored SACL types is an untrusted ACL.
+ * The owner keeps implicit WRITE_DAC unless an OWNER RIGHTS ACE limits them.
  * `ancestor: true` counts only replace / re-point rights. `(IO)` does not apply.
  * `svcSid`, when set, is trusted the same way verifyServiceAcl trusts it.
  */
@@ -942,8 +986,9 @@ export function windowsUserCanWrite(
   text: string,
   opts?: { path?: string; userSid?: string; ancestor?: boolean; svcSid?: string },
 ): boolean {
-  const aces = parseSddlAces(text);
-  if (aces === null) return true;
+  const read = readDacl(text);
+  if (read === null || read.unknownType !== null || read.nullDacl) return true;
+  const aces = read.aces;
   const ancestor = opts?.ancestor === true;
   const svc = opts?.svcSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
   for (const ace of aces) {
@@ -952,7 +997,7 @@ export function windowsUserCanWrite(
     if (svc !== "" && ace.sid === svc) continue;
     return true;
   }
-  return false;
+  return untrustedOwnerCanWrite(text, aces, ancestor, svc);
 }
 
 /** Symlink or junction resolved. A missing path stays as given so a later ACL or stat check can refuse it. */
@@ -1150,6 +1195,7 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
     "$sec = ConvertTo-SecureString -String $plain -AsPlainText -Force",
     user,
     "$sid = (Get-LocalUser -Name 'verax-svc').SID.Value",
+    "[Console]::Out.WriteLine(('VERAX_SVC_SID:' + $sid))",
     "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member $sid -ErrorAction SilentlyContinue",
     "Enable-LocalUser -Name 'verax-svc'",
     "$star = '*' + $sid",
@@ -1504,6 +1550,14 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       grantFile(markerPath, VERAX_SVC, "F"),
     );
   } else if (platform === "linux") {
+    const createAccount = !opts.linuxAccount?.exists;
+    // The marker claims the login only after useradd has succeeded. -d / is the home uninstall re-checks.
+    if (createAccount) {
+      ops.push({
+        op: "argv",
+        argv: toolArgv("useradd", ["--system", "--no-create-home", "-d", "/", "--shell", "/usr/sbin/nologin", "verax"], "linux"),
+      });
+    }
     ops.push(
       {
         op: "write",
@@ -1511,24 +1565,15 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
         contents: installMarkerText(opts, paths, {
           createdUser: true,
           // useradd without -N creates the matching group. A later uninstall removes it only when the marker says so.
-          createdGroup: !opts.linuxAccount?.exists || Boolean(opts.linuxAccount?.createdGroup),
+          createdGroup: createAccount || Boolean(opts.linuxAccount?.createdGroup),
         }),
         mode: 0o644,
       },
-      ...(!opts.linuxAccount?.exists
-        ? [{ op: "argv" as const, argv: toolArgv("useradd", ["--system", "--no-create-home", "--shell", "/usr/sbin/nologin", "verax"], "linux") }]
-        : []),
       { op: "argv", argv: toolArgv("chown", ["verax:verax", paths.stateDir], "linux") },
       { op: "argv", argv: toolArgv("chmod", ["0700", paths.stateDir], "linux") },
     );
   } else {
     const account = opts.darwinAccount ?? { uid: 280, gid: 280, createUser: true, createGroup: true, recordUser: true, recordGroup: true };
-    ops.push({
-      op: "write",
-      path: fixed.darwinMarker,
-      contents: installMarkerText(opts, paths, { createdUser: account.recordUser, createdGroup: account.recordGroup }),
-      mode: 0o644,
-    });
     if (account.createGroup) {
       ops.push(
         dscl(["-create", `/Groups/${DARWIN_USER}`]),
@@ -1546,6 +1591,17 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
         dscl(["-create", `/Users/${DARWIN_USER}`, "RealName", "Verax body"]),
       );
     }
+    ops.push({
+      op: "write",
+      path: fixed.darwinMarker,
+      contents: installMarkerText(opts, paths, {
+        createdUser: account.recordUser,
+        createdGroup: account.recordGroup,
+        accountUid: account.uid,
+        accountGid: account.gid,
+      }),
+      mode: 0o644,
+    });
     ops.push(
       { op: "argv", argv: toolArgv("chown", ["root:wheel", fixed.darwinMarker], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0644", fixed.darwinMarker], "darwin") },
@@ -1947,6 +2003,11 @@ export function verifyServiceAcl(
     aces,
     detail: `${label} ACL mismatch: ${why}\n${parsed}`,
   });
+  const ownerAces = parseSddlAces(text);
+  const svcSidKey = opts?.svcSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
+  if (ownerAces !== null && untrustedOwnerCanWrite(text, ownerAces, false, svcSidKey)) {
+    return fail("owner can change the object");
+  }
   if (aces.length === 0) return fail(opts?.file ? `empty ACL on ${opts.file}` : "empty ACL");
   const roles = aces.map((ace) => ({ ace, role: aclRole(ace.principal, opts?.svcSid) }));
   if (roles.some((row) => row.role === "other")) return fail("unexpected principal");
@@ -1978,7 +2039,7 @@ export type BoundaryCheck = { id: string; level: "ok" | "fail"; detail: string }
 
 function adminOrSystem(owner: string): boolean {
   const sid = canonicalSid(owner);
-  if (sid === SID_ADMINISTRATORS || sid === SID_SYSTEM) return true;
+  if (sid === SID_ADMINISTRATORS || sid === SID_SYSTEM || sid === SID_TRUSTED_INSTALLER) return true;
   const n = owner.trim().toLowerCase();
   return n === "builtin\\administrators" || n === "nt authority\\system" || n === "administrators" || n === "system";
 }
@@ -2578,12 +2639,23 @@ function writeListenerTool(
   io.stderr.write(text.endsWith("\n") || text === "" ? text : `${text}\n`);
 }
 
-/** `getenforce` through the injected exec. A missing binary or a non-zero status is no SELinux. */
+/**
+ * `getenforce` through the injected exec.
+ * A missing binary, a non-zero status, or an empty answer is not "no SELinux":
+ * read `/sys/fs/selinux/enforce` (1 = enforcing, 0 = permissive) before that conclusion.
+ */
 function selinuxMode(exec: (argv: string[]) => ExecResult): string | null {
   const ran = exec(toolArgv("getenforce", [], "linux"));
-  if ((ran.status ?? 1) !== 0) return null;
-  const mode = (ran.stdout ?? "").trim();
-  return mode === "" ? null : mode;
+  if ((ran.status ?? 1) === 0) {
+    const mode = (ran.stdout ?? "").trim();
+    if (mode !== "") return mode;
+  }
+  const flag = exec(["/bin/cat", "/sys/fs/selinux/enforce"]);
+  if ((flag.status ?? 1) !== 0) return null;
+  const value = (flag.stdout ?? "").trim();
+  if (value === "1") return "Enforcing";
+  if (value === "0") return "Permissive";
+  return null;
 }
 
 function serviceMainPid(exec: (argv: string[]) => ExecResult): string | null {
@@ -2633,7 +2705,7 @@ function selinuxFileType(exec: (argv: string[]) => ExecResult, file: string): st
 
 /**
  * Enforcing only, and only before install creates anything.
- * Permissive, Disabled, and a missing getenforce are not a check.
+ * Permissive and Disabled are not a check. A missing getenforce still reads the kernel flag.
  * Returns the refusal line, or null when the Node label may start a service.
  */
 export function linuxSelinuxNodeRefusal(
@@ -3107,11 +3179,46 @@ function removeRollbackPath(target: string, io: InstallIo): void {
  * macOS `_verax` and Windows `verax-svc` follow the same rule: only an account
  * this run created is removed.
  */
+type MarkerPrior = { path: string; prior: string | null };
+
+function isInstallMarker(file: string): boolean {
+  return /[/\\]install\.json$/i.test(file);
+}
+
+/** Put the service SID captured at create into a marker that claims the Windows account. */
+function stampAccountSid(contents: string, sid: string): string {
+  try {
+    const parsed = JSON.parse(contents) as Record<string, unknown>;
+    if (parsed.createdAccount !== true) return contents;
+    if (typeof parsed.accountSid === "string" && parsed.accountSid !== "") return contents;
+    parsed.accountSid = sid;
+    return `${JSON.stringify(parsed, null, 2)}\n`;
+  } catch {
+    return contents;
+  }
+}
+
+function restoreInstallMarker(saved: MarkerPrior | null, io: InstallIo): void {
+  if (!saved) return;
+  if (saved.prior === null) {
+    removeRollbackPath(saved.path, io);
+    return;
+  }
+  try {
+    mkdirSync(path.dirname(saved.path), { recursive: true });
+    writeFileSync(saved.path, saved.prior);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "restore failed";
+    io.stderr.write(`rm exit 1: ${message}\n`);
+  }
+}
+
 function rollbackCreatedThisRun(
   created: CreatedThisRun,
   plan: { codeDir: string; stateDir: string },
   call: ToolExec,
   io: InstallIo,
+  markerPrior: MarkerPrior | null,
 ): void {
   const ignore = (argv: string[]): void => {
     call(argv);
@@ -3132,6 +3239,7 @@ function rollbackCreatedThisRun(
   if (created.darwinUser) best(toolArgv("dscl", [".", "-delete", `/Users/${DARWIN_USER}`], "darwin"));
   if (created.darwinGroup) best(toolArgv("dscl", [".", "-delete", `/Groups/${DARWIN_USER}`], "darwin"));
   if (created.winAccount) best(toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32"));
+  restoreInstallMarker(markerPrior, io);
   if (created.serviceFile !== "") removeRollbackPath(created.serviceFile, io);
   if (created.stateDir) removeRollbackPath(plan.stateDir, io);
   if (created.codeDir) removeRollbackPath(plan.codeDir, io);
@@ -3154,6 +3262,8 @@ async function execute(
     return exec(argv, stdin, systemToolEnv(platform, tempDir), cwd);
   };
   let svcSid = "";
+  let winSid = "";
+  let markerPrior: MarkerPrior | null = null;
   const serviceArgv = (argv: string[]): string[] | { error: string } => {
     if (!argv.some((arg) => arg.startsWith(`${VERAX_SVC}:`))) return argv;
     if (svcSid === "") {
@@ -3244,7 +3354,11 @@ async function execute(
           if (ran.status === EX_CONFIG) return finish(EX_CONFIG);
           return finish(1);
         }
-        if (!failed) rememberCreatedAccount(created, resolved);
+        if (!failed) {
+          const printed = /VERAX_SVC_SID:(S-1-[0-9-]+)/i.exec(ran.stdout ?? "");
+          if (printed?.[1]) winSid = printed[1].toUpperCase();
+          rememberCreatedAccount(created, resolved);
+        }
         continue;
       }
       if (isNpmArgv(resolved) && (ran.status ?? 1) !== 0 && !step.optional) {
@@ -3326,8 +3440,21 @@ async function execute(
     if (step.op === "write") {
       const service = step.path.endsWith("/verax.service") || step.path.endsWith("/com.verax-ai.body.plist");
       const priorService = service && existsSync(step.path);
+      let contents = step.contents;
+      if (isInstallMarker(step.path)) {
+        if (markerPrior === null) {
+          let prior: string | null = null;
+          try {
+            prior = readFileSync(step.path, "utf8");
+          } catch {
+            prior = null;
+          }
+          markerPrior = { path: step.path, prior };
+        }
+        if (winSid !== "") contents = stampAccountSid(contents, winSid);
+      }
       mkdirSync(path.dirname(step.path), { recursive: true });
-      writeFileSync(step.path, step.contents, { encoding: "utf8", mode: step.mode ?? 0o644, flag: step.exclusive ? "wx" : "w" });
+      writeFileSync(step.path, contents, { encoding: "utf8", mode: step.mode ?? 0o644, flag: step.exclusive ? "wx" : "w" });
       if (service && !priorService) created.serviceFile = step.path;
       continue;
     }
@@ -3368,7 +3495,7 @@ async function execute(
     if (status === 0) status = 1;
     throw err;
   } finally {
-    if (status !== 0) rollbackCreatedThisRun(created, plan, call, io);
+    if (status !== 0) rollbackCreatedThisRun(created, plan, call, io, markerPrior);
     for (const dir of createdTemps) rmSync(dir, { recursive: true, force: true });
     if (status !== 0) removeEmptyDirs(createdParents);
   }
@@ -3412,7 +3539,14 @@ function invokingEnv(
 function installMarkerText(
   opts: PlanOpts,
   paths: Paths,
-  extra?: { createdAccount?: boolean; createdUser?: boolean; createdGroup?: boolean },
+  extra?: {
+    createdAccount?: boolean;
+    createdUser?: boolean;
+    createdGroup?: boolean;
+    accountUid?: number;
+    accountGid?: number;
+    accountSid?: string;
+  },
 ): string {
   const body: Record<string, unknown> = {
     version: opts.bodyVersion,
@@ -3424,6 +3558,9 @@ function installMarkerText(
   if (extra?.createdAccount) body.createdAccount = true;
   if (extra?.createdUser) body.createdUser = true;
   if (extra?.createdGroup) body.createdGroup = true;
+  if (extra?.accountUid !== undefined) body.accountUid = extra.accountUid;
+  if (extra?.accountGid !== undefined) body.accountGid = extra.accountGid;
+  if (extra?.accountSid) body.accountSid = extra.accountSid;
   return `${JSON.stringify(body, null, 2)}\n`;
 }
 
@@ -3496,20 +3633,37 @@ function pickDarwinAccount(
   };
 }
 
-function markerFlags(file: string): { createdAccount: boolean; createdUser: boolean; createdGroup: boolean } {
+function markerFlags(file: string): {
+  createdAccount: boolean;
+  createdUser: boolean;
+  createdGroup: boolean;
+  accountUid?: number;
+  accountGid?: number;
+  accountSid?: string;
+} {
+  const empty = { createdAccount: false, createdUser: false, createdGroup: false };
   try {
     const parsed = JSON.parse(readFileSync(file, "utf8")) as {
       createdAccount?: unknown;
       createdUser?: unknown;
       createdGroup?: unknown;
+      accountUid?: unknown;
+      accountGid?: unknown;
+      accountSid?: unknown;
     };
+    const uid = typeof parsed.accountUid === "number" && Number.isInteger(parsed.accountUid) ? parsed.accountUid : undefined;
+    const gid = typeof parsed.accountGid === "number" && Number.isInteger(parsed.accountGid) ? parsed.accountGid : undefined;
+    const sid = typeof parsed.accountSid === "string" && /^S-1-[0-9-]+$/i.test(parsed.accountSid) ? parsed.accountSid.toUpperCase() : undefined;
     return {
       createdAccount: parsed.createdAccount === true,
       createdUser: parsed.createdUser === true,
       createdGroup: parsed.createdGroup === true,
+      ...(uid !== undefined ? { accountUid: uid } : {}),
+      ...(gid !== undefined ? { accountGid: gid } : {}),
+      ...(sid !== undefined ? { accountSid: sid } : {}),
     };
   } catch {
-    return { createdAccount: false, createdUser: false, createdGroup: false };
+    return empty;
   }
 }
 
@@ -4055,6 +4209,94 @@ function reportToolFailure(io: InstallIo, argv: readonly string[], ran: ExecResu
   io.stderr.write(err === "" ? `${tool} exit ${code}\n` : `${tool} exit ${code}: ${err}\n`);
 }
 
+const LINUX_SYSTEM_ID_MAX = 999;
+const LINUX_NOLOGIN = "/usr/sbin/nologin";
+
+function linuxSystemId(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= LINUX_SYSTEM_ID_MAX;
+}
+
+function linuxPasswdLine(exec: ToolExec): { uid: number; home: string; shell: string } | null {
+  const ran = exec(toolArgv("getent", ["passwd", "verax"], "linux"));
+  if ((ran.status ?? 1) !== 0) return null;
+  const line = (ran.stdout ?? "").split(/\r?\n/).find((row) => row.startsWith("verax:"));
+  if (!line) return null;
+  const parts = line.split(":");
+  if (parts.length < 7) return null;
+  const uid = Number(parts[2]);
+  if (!Number.isInteger(uid)) return null;
+  return { uid, home: parts[5] ?? "", shell: parts[6] ?? "" };
+}
+
+/** The login useradd creates: system uid, nologin shell, home `/` or none. */
+function linuxUserVerdict(exec: ToolExec): { remove: true } | { remove: false; line: string } {
+  const account = linuxPasswdLine(exec);
+  if (!account) return { remove: false, line: "not removing account verax: live account is not the system user this install creates" };
+  const homeOk = account.home === "/" || account.home === "";
+  if (linuxSystemId(account.uid) && account.shell === LINUX_NOLOGIN && homeOk) return { remove: true };
+  const home = account.home === "" ? "none" : account.home;
+  return { remove: false, line: `not removing account verax: uid ${account.uid}, shell ${account.shell}, home ${home}` };
+}
+
+function linuxGroupVerdict(exec: ToolExec): { remove: true } | { remove: false; line: string } {
+  const ran = exec(toolArgv("getent", ["group", "verax"], "linux"));
+  const line = (ran.status ?? 1) === 0 ? (ran.stdout ?? "").split(/\r?\n/).find((row) => row.startsWith("verax:")) : undefined;
+  const gid = Number(line?.split(":")[2]);
+  if (linuxSystemId(gid)) return { remove: true };
+  const shown = Number.isInteger(gid) ? String(gid) : "unknown";
+  return { remove: false, line: `not removing group verax: gid ${shown} is outside the system range` };
+}
+
+function darwinNumber(exec: ToolExec, record: string, field: string): number | null {
+  const ran = exec(toolArgv("dscl", [".", "-read", record, field], "darwin"));
+  if ((ran.status ?? 1) !== 0) return null;
+  const n = Number((ran.stdout ?? "").match(/(\d+)/)?.[1]);
+  return Number.isInteger(n) ? n : null;
+}
+
+function darwinUserVerdict(
+  exec: ToolExec,
+  recordedUid: number | undefined,
+  recordedGid: number | undefined,
+): { remove: true } | { remove: false; line: string } {
+  const uid = darwinNumber(exec, `/Users/${DARWIN_USER}`, "UniqueID");
+  const gid = darwinNumber(exec, `/Users/${DARWIN_USER}`, "PrimaryGroupID");
+  if (recordedUid !== undefined && recordedGid !== undefined && uid === recordedUid && gid === recordedGid) return { remove: true };
+  return {
+    remove: false,
+    line: `not removing user ${DARWIN_USER}: live uid ${uid ?? "unknown"} gid ${gid ?? "unknown"} does not match marker uid ${recordedUid ?? "unset"} gid ${recordedGid ?? "unset"}`,
+  };
+}
+
+function darwinGroupVerdict(exec: ToolExec, recordedGid: number | undefined): { remove: true } | { remove: false; line: string } {
+  const gid = darwinNumber(exec, `/Groups/${DARWIN_USER}`, "PrimaryGroupID");
+  if (recordedGid !== undefined && gid === recordedGid) return { remove: true };
+  return {
+    remove: false,
+    line: `not removing group ${DARWIN_USER}: live gid ${gid ?? "unknown"} does not match marker gid ${recordedGid ?? "unset"}`,
+  };
+}
+
+function windowsServiceSid(exec: ToolExec): string | null {
+  const ran = exec(toolArgv("powershell", [
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "(Get-LocalUser -Name 'verax-svc').SID.Value",
+  ], "win32"));
+  if ((ran.status ?? 1) !== 0) return null;
+  return (ran.stdout ?? "").match(/S-1-[0-9-]+/i)?.[0]?.toUpperCase() ?? null;
+}
+
+function windowsAccountVerdict(exec: ToolExec, recordedSid: string | undefined): { remove: true } | { remove: false; line: string } {
+  const live = windowsServiceSid(exec);
+  if (recordedSid !== undefined && live === recordedSid) return { remove: true };
+  return {
+    remove: false,
+    line: `not removing account ${VERAX_SVC}: live SID ${live ?? "unknown"} does not match marker SID ${recordedSid ?? "unset"}`,
+  };
+}
+
 /** Run one uninstall tool. Absent artifacts are not failures. Returns a non-zero code when the tool failed. */
 function runUninstallTool(exec: ToolExec, io: InstallIo, argv: string[]): number | null {
   const ran = exec(argv);
@@ -4090,6 +4332,9 @@ function executeUninstall(
     removeDarwinGroup: boolean;
     removeLinuxUser: boolean;
     removeLinuxGroup: boolean;
+    accountUid?: number;
+    accountGid?: number;
+    accountSid?: string;
   },
 ): number {
   const lines: string[] = [];
@@ -4183,12 +4428,22 @@ function executeUninstall(
       writeLines();
       return query.status ?? 1;
     }
-    const failed = note(query.status === 0, `account ${VERAX_SVC}`, () =>
-      runUninstallTool(exec, io, toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32")),
-    );
-    if (failed !== null) {
-      writeLines();
-      return failed;
+    if (query.status !== 0) {
+      note(false, `account ${VERAX_SVC}`, () => null);
+    } else {
+      const verdict = windowsAccountVerdict(exec, opts.accountSid);
+      if (!verdict.remove) {
+        any = true;
+        lines.push(verdict.line);
+      } else {
+        const failed = note(true, `account ${VERAX_SVC}`, () =>
+          runUninstallTool(exec, io, toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32")),
+        );
+        if (failed !== null) {
+          writeLines();
+          return failed;
+        }
+      }
     }
   }
   if (platform === "darwin" && opts.removeDarwinUser) {
@@ -4199,12 +4454,22 @@ function executeUninstall(
       writeLines();
       return query.status ?? 1;
     }
-    const failed = note(query.status === 0, `user ${DARWIN_USER}`, () =>
-      runUninstallTool(exec, io, toolArgv("dscl", [".", "-delete", `/Users/${DARWIN_USER}`], "darwin")),
-    );
-    if (failed !== null) {
-      writeLines();
-      return failed;
+    if (query.status !== 0) {
+      note(false, `user ${DARWIN_USER}`, () => null);
+    } else {
+      const verdict = darwinUserVerdict(exec, opts.accountUid, opts.accountGid);
+      if (!verdict.remove) {
+        any = true;
+        lines.push(verdict.line);
+      } else {
+        const failed = note(true, `user ${DARWIN_USER}`, () =>
+          runUninstallTool(exec, io, toolArgv("dscl", [".", "-delete", `/Users/${DARWIN_USER}`], "darwin")),
+        );
+        if (failed !== null) {
+          writeLines();
+          return failed;
+        }
+      }
     }
   }
   if (platform === "darwin" && opts.removeDarwinGroup) {
@@ -4215,12 +4480,22 @@ function executeUninstall(
       writeLines();
       return query.status ?? 1;
     }
-    const failed = note(query.status === 0, `group ${DARWIN_USER}`, () =>
-      runUninstallTool(exec, io, toolArgv("dscl", [".", "-delete", `/Groups/${DARWIN_USER}`], "darwin")),
-    );
-    if (failed !== null) {
-      writeLines();
-      return failed;
+    if (query.status !== 0) {
+      note(false, `group ${DARWIN_USER}`, () => null);
+    } else {
+      const verdict = darwinGroupVerdict(exec, opts.accountGid);
+      if (!verdict.remove) {
+        any = true;
+        lines.push(verdict.line);
+      } else {
+        const failed = note(true, `group ${DARWIN_USER}`, () =>
+          runUninstallTool(exec, io, toolArgv("dscl", [".", "-delete", `/Groups/${DARWIN_USER}`], "darwin")),
+        );
+        if (failed !== null) {
+          writeLines();
+          return failed;
+        }
+      }
     }
   }
   if (platform === "linux" && opts.removeLinuxUser) {
@@ -4231,12 +4506,22 @@ function executeUninstall(
       writeLines();
       return query.status ?? 1;
     }
-    const failed = note(query.status === 0, "account verax", () =>
-      runUninstallTool(exec, io, toolArgv("userdel", ["verax"], "linux")),
-    );
-    if (failed !== null) {
-      writeLines();
-      return failed;
+    if (query.status !== 0) {
+      note(false, "account verax", () => null);
+    } else {
+      const verdict = linuxUserVerdict(exec);
+      if (!verdict.remove) {
+        any = true;
+        lines.push(verdict.line);
+      } else {
+        const failed = note(true, "account verax", () =>
+          runUninstallTool(exec, io, toolArgv("userdel", ["verax"], "linux")),
+        );
+        if (failed !== null) {
+          writeLines();
+          return failed;
+        }
+      }
     }
   }
   if (platform === "linux" && opts.removeLinuxGroup) {
@@ -4247,12 +4532,22 @@ function executeUninstall(
       writeLines();
       return query.status ?? 1;
     }
-    const failed = note(query.status === 0, "group verax", () =>
-      runUninstallTool(exec, io, toolArgv("groupdel", ["verax"], "linux")),
-    );
-    if (failed !== null) {
-      writeLines();
-      return failed;
+    if (query.status !== 0) {
+      note(false, "group verax", () => null);
+    } else {
+      const verdict = linuxGroupVerdict(exec);
+      if (!verdict.remove) {
+        any = true;
+        lines.push(verdict.line);
+      } else {
+        const failed = note(true, "group verax", () =>
+          runUninstallTool(exec, io, toolArgv("groupdel", ["verax"], "linux")),
+        );
+        if (failed !== null) {
+          writeLines();
+          return failed;
+        }
+      }
     }
   }
 
@@ -4329,6 +4624,9 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     removeDarwinGroup: flags.createdGroup,
     removeLinuxUser: flags.createdUser,
     removeLinuxGroup: flags.createdGroup,
+    accountUid: flags.accountUid,
+    accountGid: flags.accountGid,
+    accountSid: flags.accountSid,
   });
 }
 

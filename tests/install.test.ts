@@ -95,6 +95,8 @@ const darwinOpts = {
 function getentAnswer(argv: readonly string[], home: string): { status: number; stdout: string; stderr: string } | null {
   const tool = argv[0] ?? "";
   if (tool.endsWith("getent") && argv[1] === "passwd") {
+    // The account this install creates. A human-shaped verax must not satisfy uninstall.
+    if (argv[2] === "verax") return { status: 0, stdout: "verax:x:999:999::/:/usr/sbin/nologin\n", stderr: "" };
     return { status: 0, stdout: `${argv[2]}:x:1000:1000::${home}:/bin/bash\n`, stderr: "" };
   }
   // macOS asks Directory Services for the same thing.
@@ -218,7 +220,7 @@ describe("verax install plan", () => {
 
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     const lines = argvs(linux.ops);
-    assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "useradd" && argv.slice(1).join(" ") === "--system --no-create-home --shell /usr/sbin/nologin verax"));
+    assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "useradd" && argv.slice(1).join(" ") === "--system --no-create-home -d / --shell /usr/sbin/nologin verax"));
     assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.join(" ").includes("verax:verax") && argv.includes(linux.stateDir)));
     assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chmod" && argv.includes("0700") && argv.includes(linux.stateDir)));
   });
