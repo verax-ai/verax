@@ -10,6 +10,8 @@ import { join, win32 } from "node:path";
 
 import {
   installedBoundaryChecks,
+  logonHolderMismatchLines,
+  normalizeLogonHolders,
   planInstall,
   PS_ERROR_MARK,
   registryLockProblems,
@@ -1013,11 +1015,35 @@ describe("verax install plan", () => {
     assert.match(text, /verax-rights-after\.cfg/);
     assert.match(text, /secedit \/export/);
     assert.match(text, /previous holders plus the service account/);
+    assert.match(text, /Normalize-LogonHolders/);
+    assert.match(
+      text,
+      /\(New-Object System\.Security\.Principal\.NTAccount\(\$n\)\)\.Translate\(\[System\.Security\.Principal\.SecurityIdentifier\]\)\.Value/,
+    );
+    assert.match(text, /'previous: '/);
+    assert.match(text, /'expected: '/);
+    assert.match(text, /'after: '/);
+    assert.match(text, /'added: '/);
+    assert.match(text, /'missing: '/);
+    assert.match(text, /holders, service account added/);
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     const linuxTemp = linux.ops.find((op) => op.op === "private-temp");
     if (!linuxTemp || linuxTemp.op !== "private-temp") throw new Error("missing posix private temp");
     assert.equal(linuxTemp.mode, 0o700);
     assert.match(linuxTemp.path, /^\/var\/tmp\/verax-install-tmp-[0-9a-f]{32}$/);
+  });
+
+  it("normalises SeBatchLogonRight holders to a SID set before the read-back compare", () => {
+    const map = { Administrators: "S-1-5-32-544" };
+    const namesAndSid = normalizeLogonHolders("Administrators,*S-1-5-32-551", map);
+    const sidsOnly = normalizeLogonHolders("*S-1-5-32-544, *S-1-5-32-551 ,*S-1-5-32-544", map);
+    assert.deepEqual(namesAndSid, ["S-1-5-32-544", "S-1-5-32-551"]);
+    assert.deepEqual(sidsOnly, namesAndSid);
+    const withExtra = normalizeLogonHolders("*S-1-5-32-544,*S-1-5-32-551,*S-1-5-99-7", map);
+    const lines = logonHolderMismatchLines(namesAndSid, namesAndSid, withExtra);
+    assert.equal(lines[3], "added: S-1-5-99-7");
+    assert.equal(lines[4], "missing: ");
+    assert.deepEqual(normalizeLogonHolders("Guest", {}), ["GUEST"]);
   });
 
   it("npm install drops the caller npm config and refuses a foreign lock resolution", () => {

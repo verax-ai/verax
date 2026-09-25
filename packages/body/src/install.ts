@@ -621,6 +621,50 @@ function powershellStdin(body: string, password: string, tempDir: string): PlanO
   };
 }
 
+/**
+ * Secedit holder list as a set of upper-case SIDs.
+ * Split on commas, trim, drop one leading `*`, map a name through `nameToSid`,
+ * keep an unmapped name upper-cased, de-duplicate. A token that already matches
+ * `S-1-` is a SID and is not looked up. The install script's
+ * `Normalize-LogonHolders` is this function with NTAccount.Translate as the map.
+ */
+export function normalizeLogonHolders(csv: string, nameToSid: Readonly<Record<string, string>>): string[] {
+  const lookup = new Map<string, string>();
+  for (const [name, sid] of Object.entries(nameToSid)) lookup.set(name.toUpperCase(), sid);
+  const set = new Set<string>();
+  for (const raw of csv.split(",")) {
+    let n = raw.trim();
+    if (n.length === 0) continue;
+    if (n.startsWith("*")) n = n.slice(1).trim();
+    if (n.length === 0) continue;
+    if (!/^S-1-/i.test(n)) {
+      const sid = lookup.get(n.toUpperCase());
+      if (sid !== undefined) n = sid;
+    }
+    set.add(n.toUpperCase());
+  }
+  return [...set].sort();
+}
+
+/** Five stderr lines for a holder-set mismatch. `added` is after − expected. */
+export function logonHolderMismatchLines(
+  previous: readonly string[],
+  expected: readonly string[],
+  after: readonly string[],
+): string[] {
+  const expectedSet = new Set(expected);
+  const afterSet = new Set(after);
+  const added = after.filter((sid) => !expectedSet.has(sid));
+  const missing = expected.filter((sid) => !afterSet.has(sid));
+  return [
+    `previous: ${previous.join(",")}`,
+    `expected: ${expected.join(",")}`,
+    `after: ${after.join(",")}`,
+    `added: ${added.join(",")}`,
+    `missing: ${missing.join(",")}`,
+  ];
+}
+
 /** Terminating errors exit 1. Native calls still need an explicit `$LASTEXITCODE` check. */
 export function powerShellScript(body: string): string {
   return [
@@ -670,14 +714,17 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
     "$gotText = [regex]::Replace([IO.File]::ReadAllText($after), '\\\\[ \\t]*\\r?\\n', '')",
     "$got = @()",
     "if ($gotText -match 'SeBatchLogonRight\\s*=\\s*([^\\r\\n]*)') { $got = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }",
-    "$wantSet = @($want | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)",
-    "$gotSet = @($got | ForEach-Object { $_.ToLowerInvariant() } | Sort-Object -Unique)",
-    "if ($wantSet.Count -ne $gotSet.Count) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
-    "for ($i = 0; $i -lt $wantSet.Count; $i++) { if ($wantSet[$i] -ne $gotSet[$i]) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' } }",
+    "function Join-HolderSet($set) { $items = [System.Collections.Generic.List[string]]::new(); foreach ($item in $set) { [void]$items.Add($item) }; return ($items.ToArray() -join ',') }",
+    "function Normalize-LogonHolders([string]$csv) { $set = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal); foreach ($raw in ($csv -split ',')) { $n = $raw.Trim(); if ($n.Length -eq 0) { continue }; if ($n.StartsWith('*')) { $n = $n.Substring(1).Trim() }; if ($n.Length -eq 0) { continue }; if ($n -notmatch '^(?i)S-1-') { try { $n = (New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]).Value } catch { } }; [void]$set.Add($n.ToUpperInvariant()) }; return $set }",
+    "$prevSet = Normalize-LogonHolders (($prev -join ','))",
+    "$wantSet = Normalize-LogonHolders (($want -join ','))",
+    "$gotSet = Normalize-LogonHolders (($got -join ','))",
+    "if (-not $wantSet.SetEquals($gotSet)) { $added = [System.Collections.Generic.List[string]]::new(); foreach ($item in $gotSet) { if (-not $wantSet.Contains($item)) { [void]$added.Add($item) } }; $missing = [System.Collections.Generic.List[string]]::new(); foreach ($item in $wantSet) { if (-not $gotSet.Contains($item)) { [void]$missing.Add($item) } }; [Console]::Error.WriteLine(('previous: ' + (Join-HolderSet $prevSet))); [Console]::Error.WriteLine(('expected: ' + (Join-HolderSet $wantSet))); [Console]::Error.WriteLine(('after: ' + (Join-HolderSet $gotSet))); [Console]::Error.WriteLine(('added: ' + ($added.ToArray() -join ','))); [Console]::Error.WriteLine(('missing: ' + ($missing.ToArray() -join ','))); throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
     "$beforeOther = @([regex]::Matches($flat, '(?m)^\\s*(Se\\w+)\\s*=\\s*([^\\r\\n]*)') | Where-Object { $_.Groups[1].Value -ne 'SeBatchLogonRight' } | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() + '=' + (($_.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ',') } | Sort-Object)",
     "$afterOther = @([regex]::Matches($gotText, '(?m)^\\s*(Se\\w+)\\s*=\\s*([^\\r\\n]*)') | Where-Object { $_.Groups[1].Value -ne 'SeBatchLogonRight' } | ForEach-Object { $_.Groups[1].Value.ToLowerInvariant() + '=' + (($_.Groups[2].Value.Split(',') | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ -ne '' } | Sort-Object -Unique) -join ',') } | Sort-Object)",
     "if ($beforeOther.Count -ne $afterOther.Count) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' }",
     "for ($i = 0; $i -lt $beforeOther.Count; $i++) { if ($beforeOther[$i] -ne $afterOther[$i]) { throw 'SeBatchLogonRight is not exactly the previous holders plus the service account' } }",
+    "[Console]::Out.WriteLine(('SeBatchLogonRight: ' + $gotSet.Count + ' holders, service account added'))",
     "Remove-Item $cfg,$db,$after -ErrorAction SilentlyContinue",
   ].join("; ");
   return [powershellStdin(script, password, tempDir)];
