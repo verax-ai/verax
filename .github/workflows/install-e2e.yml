@@ -36,12 +36,16 @@ jobs:
         run: |
           Rename-LocalGroup -SID 'S-1-5-32-544' -NewName 'Yöneticiler'
           Rename-LocalGroup -SID 'S-1-5-32-545' -NewName 'Kullanıcılar'
-          $text = icacls "$env:ProgramData" | Out-String
-          Write-Host $text
-          if ($text -notmatch 'Yöneticiler' -or $text -notmatch 'Kullanıcılar') {
-            Write-Host "::error::icacls still prints English names; the rename did not reach ACL output"
+          # Read the new names in Unicode; icacls prints through the OEM code page and folds ö and ı.
+          $admins = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+          $users = (Get-LocalGroup -SID 'S-1-5-32-545').Name
+          Write-Host "S-1-5-32-544 is now '$admins'; S-1-5-32-545 is now '$users'"
+          if ($admins -ne 'Yöneticiler' -or $users -ne 'Kullanıcılar') {
+            Write-Host "::error::the built-in groups were not renamed"
             exit 1
           }
+          $text = icacls "$env:ProgramData" | Out-String
+          Write-Host $text
           if ($text -match 'BUILTIN\\Administrators|BUILTIN\\Users') {
             Write-Host "::error::English built-in names are still printed"
             exit 1
