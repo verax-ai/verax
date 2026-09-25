@@ -31,6 +31,9 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /healthz/);
     assert.match(workflow, /icacls \$dir \/inheritance:r \/grant:r "\*S-1-5-32-544:\(OI\)\(CI\)F" "\*S-1-5-18:\(OI\)\(CI\)F"\r?\n/);
     assert.match(workflow, /icacls "\$dir\\\*" \/reset \/T \/C/);
+    // The owner of the tarball directory and of its ancestors can rewrite the DACL: keep them administrator-owned.
+    assert.match(workflow, /\$dir = Join-Path \$env:ProgramData "verax-ci-tarballs"/);
+    assert.match(workflow, /icacls \$dir \/setowner "\*S-1-5-32-544" \/T \/C/);
     assert.equal(/icacls \$dir \/inheritance:r \/grant:r "\*S-1-5-32-544:\(OI\)\(CI\)F" "\*S-1-5-18:\(OI\)\(CI\)F" \/T/.test(workflow), false);
     assert.match(workflow, /veraxprobe/);
     assert.match(workflow, /Start-Process/);

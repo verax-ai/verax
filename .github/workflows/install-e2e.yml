@@ -121,7 +121,9 @@ jobs:
         shell: pwsh
         run: |
           if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
-          $dir = Join-Path $env:RUNNER_TEMP "verax-tarballs"
+          # An administrator-owned place: the owner of the directory and of every ancestor can rewrite
+          # its DACL, and the runner account (like an agent under a non-elevated token) must not own them.
+          $dir = Join-Path $env:ProgramData "verax-ci-tarballs"
           New-Item -ItemType Directory -Force -Path $dir | Out-Null
           npm pack -w @verax-ai/inventory --pack-destination $dir
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -132,6 +134,8 @@ jobs:
           icacls $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           icacls "$dir\*" /reset /T /C
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls $dir /setowner "*S-1-5-32-544" /T /C
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "VERAX_TARBALLS=$dir"
       - name: diagnose tarball access
