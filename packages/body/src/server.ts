@@ -1,10 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { BodyConfig } from "./config.ts";
+import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import {
   approvalsLogFor,
   approvePending,
@@ -20,7 +21,7 @@ import { isRevokedJti } from "./revoke.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
-import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
+import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
@@ -205,10 +206,41 @@ export const TOOL_META = [
 ];
 
 const MAX_BODY_BYTES = 1024 * 1024;
+// Node's default requestTimeout is 300s. A stalled body would otherwise stay
+// authorised until that default. Headers are bounded tighter than the body.
+const REQUEST_TIMEOUT_MS = 30_000;
+const HEADERS_TIMEOUT_MS = 20_000;
 // Unbounded GET /api/ledger stringified ~690 MB at 200k rows and threw Invalid string length (HTTP 500).
 const DEFAULT_LEDGER_LIMIT = 1000;
 const MAX_LEDGER_LIMIT = 5000;
 const responseSlot = new AsyncLocalStorage<ServerResponse>();
+
+/** `malformed` falls through so `Host: [` stays the existing bad-request. */
+export function loopbackHostDecision(hostHeader: string | undefined, bindPort: number): "allow" | "deny" | "malformed" {
+  if (hostHeader === undefined || hostHeader.trim() === "") return "deny";
+  const raw = hostHeader.trim();
+  if (raw.startsWith("[") && !raw.includes("]")) return "malformed";
+  let name = raw;
+  let port: number | undefined;
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    name = raw.slice(1, end);
+    const rest = raw.slice(end + 1);
+    if (rest === "") port = undefined;
+    else if (/^:[0-9]+$/.test(rest)) port = Number(rest.slice(1));
+    else return "deny";
+  } else {
+    const colon = raw.lastIndexOf(":");
+    if (colon > 0 && /^[0-9]+$/.test(raw.slice(colon + 1))) {
+      name = raw.slice(0, colon);
+      port = Number(raw.slice(colon + 1));
+    }
+  }
+  const lowered = name.toLowerCase();
+  if (lowered !== "127.0.0.1" && lowered !== "localhost" && lowered !== "::1") return "deny";
+  if (port === undefined) return bindPort === 80 ? "allow" : "deny";
+  return port === bindPort ? "allow" : "deny";
+}
 
 function contentLengthOverLimit(req: IncomingMessage): boolean {
   const raw = req.headers["content-length"];
@@ -243,6 +275,20 @@ async function readJsonBody(
   } catch {
     return { ok: false, bad: true };
   }
+}
+
+/**
+ * Second look at a bearer that already verified. The first look runs before
+ * the body is read; this one runs after the body and before dispatch or
+ * approval. `exp` is seconds since the epoch. A passed `exp` is dead even
+ * inside the verifier's clock tolerance: that tolerance applied at the door,
+ * and the body has since arrived. A missing `exp` is dead too.
+ */
+export function bearerStillLive(payload: { jti?: unknown; exp?: unknown }, stateDir: string): boolean {
+  const jti = typeof payload.jti === "string" ? payload.jti : "";
+  if (jti === "" || isRevokedJti(stateDir, jti)) return false;
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return false;
+  return payload.exp * 1000 > Date.now();
 }
 
 function isProtectedResourcePath(pathname: string, audience: string): boolean {
@@ -357,7 +403,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     throw err;
   }
   const toolMeta = [...TOOL_META, ...extraTools.map(downstreamMeta)];
-  const verify = createVerifier(config.jwksUrl, config.issuer, config.audience, config.jwksFile);
+  const verify = createVerifier(config.jwksUrl, config.issuer, config.audience, config.jwksFile, config.jwksPin);
 
   const attachHandlers = (mcp: McpServer) => {
     mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolMeta }));
@@ -393,6 +439,25 @@ export async function listen(config: BodyConfig): Promise<Server> {
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     try {
+      if (isLoopbackHost(config.bindHost)) {
+        const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
+        const listenPort = (server.address() as AddressInfo).port;
+        const hostDecision = loopbackHostDecision(hostHeader, listenPort);
+        if (hostDecision === "deny") {
+          send(res, 400, { error: "host-not-allowed" });
+          req.resume();
+          return;
+        }
+      }
+      if (req.headers.origin !== undefined) {
+        const origin = Array.isArray(req.headers.origin) ? (req.headers.origin[0] ?? "") : req.headers.origin;
+        const allowed = config.allowedOrigins ?? [];
+        if (!allowed.includes(origin)) {
+          send(res, 403, { error: "origin-not-allowed" });
+          req.resume();
+          return;
+        }
+      }
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "127.0.0.1"}`);
       if (req.method === "POST" && contentLengthOverLimit(req)) {
         send(res, 413, { error: "payload-too-large" });
@@ -400,6 +465,14 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (req.method === "GET" && url.pathname === "/healthz") {
+      // Local mode reads VERAX_JWKS_FILE. Any process that can read that key
+      // file can mint verax:audit, so counts are not a door here: liveness only.
+      const installNonce = readInstallHealthNonce(config.stateDir);
+      const nonceField = installNonce === null ? {} : { nonce: installNonce };
+      if (config.jwksFile) {
+        send(res, 200, { ok: true, ...nonceField });
+        return;
+      }
       const token = readBearer(req.headers.authorization);
       let canRead = false;
       if (token) {
@@ -419,7 +492,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         }
       }
       if (!canRead) {
-        send(res, 200, { ok: true });
+        send(res, 200, { ok: true, ...nonceField });
         return;
       }
       // The ledger counts its own lines as it writes them; asking it is free.
@@ -442,6 +515,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       }
       send(res, 200, {
         ok: true,
+        ...nonceField,
         ...counted,
         lock: services.ledger.lockStatus(),
         heartbeat: readHeartbeat(config.stateDir),
@@ -498,6 +572,22 @@ export async function listen(config: BodyConfig): Promise<Server> {
       send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
       return;
     }
+    const refuseStaleBearer = async (): Promise<boolean> => {
+      if (bearerStillLive(verified.payload, config.stateDir)) return false;
+      await bumpUnauthenticated(config.stateDir);
+      send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+      return true;
+    };
+    // Local mode: any process that can read the key file can mint
+    // verax:approve or verax:audit, so those scopes are not honoured at all.
+    // Nothing is written; the refusal is the whole answer.
+    if (
+      config.jwksFile &&
+      (verified.principal.scopes.has("verax:approve") || verified.principal.scopes.has("verax:audit"))
+    ) {
+      send(res, 403, { error: "local-mode-operator-scope" });
+      return;
+    }
     try {
       if (apiApprove) {
         // Reading the ledger is not approving from it. The audit scope opens
@@ -508,6 +598,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           return;
         }
         const parsed = await readJsonBody(req, MAX_BODY_BYTES);
+        if (await refuseStaleBearer()) return;
         if (!parsed.ok) {
           send(res, 400, { error: "bad-body" });
           return;
@@ -570,6 +661,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (apiLedger || apiInventory || contest || apiAgents) {
+        if (await refuseStaleBearer()) return;
         // The audit doors hand out the whole ledger: every tenant's decisions, the
         // inputs documents that name their principals, and the approval snapshots
         // that carry spend arguments. `verax:read` is a brain scope, so it cannot be
@@ -671,6 +763,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       });
       await mcp.connect(transport);
       const parsed = req.method === "POST" ? await readJsonBody(req, MAX_BODY_BYTES) : { ok: true as const, value: undefined };
+      if (await refuseStaleBearer()) return;
       if (parsed.ok === false && "tooLarge" in parsed) {
         send(res, 413, { error: "payload-too-large" });
         req.destroy();
@@ -750,6 +843,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
       // Swallow so a bad Host cannot reject the request listener.
     }
   });
+
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

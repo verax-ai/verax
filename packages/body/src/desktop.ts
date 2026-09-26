@@ -1,10 +1,25 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { get } from "node:http";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { systemToolPath } from "./install.ts";
+import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
+
+/** One stderr line when this state has no enrolled operator. */
+export const DESKTOP_PASSKEY_HINT =
+  "the panel reads the ledger after a passkey sign-in; run verax operator enroll\n";
+
+/**
+ * The credentials file is written only when an operator enrolls. Its presence
+ * is the whole answer; a missing file means the panel's audit doors will
+ * refuse the session that has no passkey.
+ */
+export function desktopPasskeyHint(stateDir: string): string | null {
+  return hasRegisteredOperator(stateDir) ? null : DESKTOP_PASSKEY_HINT;
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -123,13 +138,75 @@ export function portOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
-async function waitPort(port: number, ms: number): Promise<boolean> {
-  const start = Date.now();
-  while (Date.now() - start < ms) {
-    if (await portOpen(port)) return true;
-    await new Promise((r) => setTimeout(r, 100));
+/**
+ * Bind the loopback port and close it. True only when this process held it.
+ * A connect probe is not this: whoever is already listening would answer it.
+ */
+export function desktopPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", () => resolve(false));
+    server.listen(port, "127.0.0.1", () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+export function desktopPortBusyLine(name: DesktopChildName, port: number): string {
+  return `desktop-port-busy:${name}:${port}\n`;
+}
+
+/** JWKS document the dev issuer rewrites under the state directory on every start. */
+export function issuerJwksPinPath(stateDir: string): string {
+  return join(stateDir, "dev-issuer", "jwks.json");
+}
+
+/** Drop a file left by an earlier run. A missing file is the state we want. */
+export function discardStaleFile(file: string): void {
+  try {
+    unlinkSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
-  return false;
+}
+
+/**
+ * The pin is the file the issuer just wrote. Compact JSON, or a throw when
+ * it is not a key set. Nothing is fetched.
+ */
+export function readIssuerJwksPin(stateDir: string): string {
+  let text: string;
+  try {
+    text = readFileSync(issuerJwksPinPath(stateDir), "utf8");
+  } catch {
+    throw new Error("desktop-jwks-pin-failed");
+  }
+  try {
+    const parsed = JSON.parse(text) as { keys?: unknown };
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
+      throw new Error("desktop-jwks-pin-failed");
+    }
+    return JSON.stringify({ keys: parsed.keys });
+  } catch (err) {
+    if (err instanceof Error && err.message === "desktop-jwks-pin-failed") throw err;
+    throw new Error("desktop-jwks-pin-failed");
+  }
+}
+
+export function issuerReadyLine(port: number): string {
+  return `dev-issuer listening on http://127.0.0.1:${port}/`;
+}
+
+export function bodyReadyLine(port: number): string {
+  return `listening 127.0.0.1:${port}`;
+}
+
+export function panelReadyLine(port: number): string {
+  return `http://127.0.0.1:${port}`;
+}
+
+export function childStillAlive(child: { exitCode: number | null; signalCode: NodeJS.Signals | null }): boolean {
+  return child.exitCode === null && child.signalCode === null;
 }
 
 /** GET /healthz on the loopback port; true only for a 200. */
@@ -176,10 +253,62 @@ export async function desktopMode(
   return { error: "desktop-body-locked", pid: lock.pid };
 }
 
+export type DesktopChildName = "issuer" | "body" | "panel";
+
+export type SupervisedChild = {
+  name: DesktopChildName;
+  /** Registers the listener invoked when this child exits. May run it immediately if it already has. */
+  onExit: (listener: () => void) => void;
+};
+
+/**
+ * The first of the issuer, the body or the panel to exit stops the rest.
+ * A later exit does not stop again. `stillWatching` is false once this run
+ * is shutting down on purpose, so those exits are not a child failure.
+ */
+export function superviseDesktopChildren(
+  children: readonly SupervisedChild[],
+  stopAll: () => void,
+  stillWatching: () => boolean = () => true,
+): Promise<DesktopChildName> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (name: DesktopChildName) => {
+      if (done || !stillWatching()) return;
+      done = true;
+      stopAll();
+      resolve(name);
+    };
+    for (const child of children) child.onExit(() => finish(child.name));
+  });
+}
+
+export function desktopChildExitedLine(name: DesktopChildName): string {
+  return `desktop-child-exited:${name}\n`;
+}
+
+export type DesktopSpawnName = DesktopChildName | "browser";
+
+/** Test seam. Production leaves this unset and spawns the real children. */
+export type DesktopHooks = {
+  spawn?: (
+    name: DesktopSpawnName,
+    cmd: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    cwd: string,
+  ) => ChildProcess;
+  /** Caps issuer, body, and panel readiness waits. The CLI uses the built-in budgets. */
+  readyMs?: number;
+};
+
 export function killTree(pid: number | undefined): void {
   if (pid == null) return;
   if (process.platform === "win32") {
-    spawnSync("taskkill", ["/T", "/PID", String(pid), "/F"], { windowsHide: true, stdio: "ignore" });
+    spawnSync(systemToolPath("taskkill", "win32"), ["/T", "/PID", String(pid), "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
     return;
   }
   try {
@@ -257,17 +386,10 @@ function defaultBrowser(): string | null {
   return null;
 }
 
-function collectOutput(child: ChildProcess, sink: { text: string }): void {
-  const feed = (c: Buffer | string) => {
-    sink.text += String(c);
-  };
-  child.stdout?.on("data", feed);
-  child.stderr?.on("data", feed);
-}
-
 export async function runDesktop(
   opts: DesktopOpts,
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
+  hooks?: DesktopHooks,
 ): Promise<number> {
   const repoRoot = resolveRepoRoot();
   const cloneOnly = desktopCloneError(repoRoot);
@@ -275,6 +397,10 @@ export async function runDesktop(
     writeErr(cloneOnly);
     return 78;
   }
+  // Before the issuer, the body, or the window: a first run with no operator
+  // file otherwise opens a panel that cannot read the ledger and does not say why.
+  const passkeyHint = desktopPasskeyHint(opts.stateDir);
+  if (passkeyHint) writeErr(passkeyHint);
   mkdirSync(opts.stateDir, { recursive: true });
   const tokenPath = join(opts.stateDir, "dev-token");
   const issuerScript = join(repoRoot, "scripts", "dev-issuer.mjs");
@@ -286,9 +412,70 @@ export async function runDesktop(
   const issuerUrl = `http://127.0.0.1:${opts.issuerPort}`;
   const kids: ChildProcess[] = [];
   const log = { text: "" };
+  const gate = { watch: true };
+  const exited: { name: DesktopChildName | null } = { name: null };
+  let resolveGone: (name: DesktopChildName) => void = () => {};
+  const childGone = new Promise<DesktopChildName>((resolve) => {
+    resolveGone = resolve;
+  });
 
   const stopAll = () => {
+    gate.watch = false;
     for (const c of kids) killTree(c.pid);
+  };
+  const launch = (
+    name: DesktopSpawnName,
+    cmd: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    cwd: string,
+    hideWindow = true,
+  ): ChildProcess => (hooks?.spawn ? hooks.spawn(name, cmd, args, env, cwd) : spawnLogged(cmd, args, env, cwd, hideWindow));
+  const pipe = (child: ChildProcess, own: { text: string }) => {
+    const feed = (chunk: Buffer | string) => {
+      const text = String(chunk);
+      own.text += text;
+      log.text += text;
+    };
+    child.stdout?.on("data", feed);
+    child.stderr?.on("data", feed);
+  };
+  // Before the wait, so a child that dies during startup is the failure.
+  const arm = (name: DesktopChildName, child: ChildProcess) => {
+    const note = () => {
+      if (!gate.watch || exited.name) return;
+      exited.name = name;
+      resolveGone(name);
+      stopAll();
+    };
+    if (child.exitCode !== null || child.signalCode !== null) note();
+    else child.once("exit", note);
+  };
+  const waitReady = async (
+    child: ChildProcess,
+    own: { text: string },
+    ready: (text: string) => boolean,
+    ms: number,
+  ): Promise<"ready" | "exited" | "timeout"> => {
+    const start = Date.now();
+    while (Date.now() - start < ms) {
+      if (exited.name || !childStillAlive(child)) return "exited";
+      if (ready(own.text)) return childStillAlive(child) && !exited.name ? "ready" : "exited";
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    if (exited.name || !childStillAlive(child)) return "exited";
+    return ready(own.text) ? "ready" : "timeout";
+  };
+  const busy = async (name: DesktopChildName, port: number): Promise<boolean> => {
+    if (await desktopPortFree(port)) return false;
+    writeErr(desktopPortBusyLine(name, port));
+    stopAll();
+    return true;
+  };
+  const childFailed = (name: DesktopChildName): number => {
+    writeErr(desktopChildExitedLine(exited.name ?? name));
+    stopAll();
+    return 1;
   };
 
   try {
@@ -302,29 +489,79 @@ export async function runDesktop(
     // metadata names, and its token is not ours to read. The panel's own
     // origin has to be on that issuer's allow-list (VERAX_DEV_REDIRECT_URIS on
     // the running issuer), which this run cannot set after the fact.
+    // The body port is that body. Only the ports this run will bind must be free.
+    const ports: [DesktopChildName, number][] =
+      decided.mode === "spawn"
+        ? [
+            ["issuer", opts.issuerPort],
+            ["body", opts.bodyPort],
+            ["panel", opts.panelPort],
+          ]
+        : [["panel", opts.panelPort]];
+    for (const [name, port] of ports) {
+      if (await busy(name, port)) return 1;
+    }
+
     let token: string | null = null;
     if (decided.mode === "spawn") {
-      const issuer = spawnLogged(
+      // A token or pin left on disk is the previous run's. This issuer must write both.
+      discardStaleFile(tokenPath);
+      discardStaleFile(issuerJwksPinPath(opts.stateDir));
+      if (await busy("issuer", opts.issuerPort)) return 1;
+      const issuer = launch(
+        "issuer",
         process.execPath,
         ["--experimental-strip-types", issuerScript, "--out", tokenPath],
         issuerEnv(cleanEnv(), opts, audience, issuerUrl),
         repoRoot,
       );
       kids.push(issuer);
-      collectOutput(issuer, log);
-      if (!(await waitPort(opts.issuerPort, 15_000))) {
+      arm("issuer", issuer);
+      const issuerOut = { text: "" };
+      pipe(issuer, issuerOut);
+      const issuerReady = await waitReady(
+        issuer,
+        issuerOut,
+        (text) => text.includes(issuerReadyLine(opts.issuerPort)),
+        hooks?.readyMs ?? 15_000,
+      );
+      if (issuerReady === "exited") return childFailed("issuer");
+      if (issuerReady === "timeout") {
         writeErr("desktop-issuer-timeout\n");
         stopAll();
         return 1;
       }
-      token = readFileSync(tokenPath, "utf8").trim();
-      if (token === "") {
+      // The --out file is the agent credential. It does not carry verax:audit.
+      // The panel reads the ledger with the passkey session, not this file.
+      let tokenText = "";
+      try {
+        tokenText = readFileSync(tokenPath, "utf8").trim();
+      } catch {
+        tokenText = "";
+      }
+      if (tokenText === "") {
         writeErr("desktop-token-missing\n");
         stopAll();
         return 1;
       }
+      token = tokenText;
 
-      const body = spawnLogged(
+      // The body verifies with the keys this issuer wrote at start. A fetch of
+      // the port would pin whoever answered. VERAX_JWKS_FILE is not this pin:
+      // that mode refuses operator scopes. The URL stays so config can load;
+      // the pin is what verification uses, and it does not refetch.
+      let pinnedJwks: string;
+      try {
+        pinnedJwks = readIssuerJwksPin(opts.stateDir);
+      } catch {
+        writeErr("desktop-jwks-pin-failed\n");
+        stopAll();
+        return 1;
+      }
+
+      if (await busy("body", opts.bodyPort)) return 1;
+      const body = launch(
+        "body",
         process.execPath,
         ["--experimental-strip-types", mainTs],
         {
@@ -332,6 +569,7 @@ export async function runDesktop(
           VERAX_STATE_DIR: opts.stateDir,
           VERAX_ISSUER: issuerUrl,
           VERAX_JWKS_URL: `${issuerUrl}/.well-known/jwks.json`,
+          VERAX_JWKS_PIN: pinnedJwks,
           VERAX_AUDIENCE: audience,
           VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
           VERAX_POLICY_FILE: policy,
@@ -340,8 +578,17 @@ export async function runDesktop(
         repoRoot,
       );
       kids.push(body);
-      collectOutput(body, log);
-      if (!(await waitPort(opts.bodyPort, 15_000))) {
+      arm("body", body);
+      const bodyOut = { text: "" };
+      pipe(body, bodyOut);
+      const bodyReady = await waitReady(
+        body,
+        bodyOut,
+        (text) => text.includes(bodyReadyLine(opts.bodyPort)),
+        hooks?.readyMs ?? 15_000,
+      );
+      if (bodyReady === "exited") return childFailed("body");
+      if (bodyReady === "timeout") {
         writeErr("desktop-body-timeout\n");
         stopAll();
         return 1;
@@ -354,7 +601,7 @@ export async function runDesktop(
       join(panelDir, "vite.config.ts"),
       join(repoRoot, "packages"),
     ];
-    if (panelBuildNeeded(join(panelDir, "dist", "index.html"), panelSources)) {
+    if (!hooks?.spawn && panelBuildNeeded(join(panelDir, "dist", "index.html"), panelSources)) {
       const built = spawnSync(process.execPath, [viteJs, "build"], {
         cwd: panelDir,
         env: { ...cleanEnv(), VERAX_BODY_URL: audience },
@@ -369,7 +616,9 @@ export async function runDesktop(
       }
     }
 
-    const panel = spawnLogged(
+    if (await busy("panel", opts.panelPort)) return 1;
+    const panel = launch(
+      "panel",
       process.execPath,
       [viteJs, "preview", "--host", "127.0.0.1", "--port", String(opts.panelPort), "--strictPort"],
       {
@@ -379,8 +628,17 @@ export async function runDesktop(
       panelDir,
     );
     kids.push(panel);
-    collectOutput(panel, log);
-    if (!(await waitPort(opts.panelPort, 20_000))) {
+    arm("panel", panel);
+    const panelOut = { text: "" };
+    pipe(panel, panelOut);
+    const panelReady = await waitReady(
+      panel,
+      panelOut,
+      (text) => text.includes(panelReadyLine(opts.panelPort)),
+      hooks?.readyMs ?? 20_000,
+    );
+    if (panelReady === "exited") return childFailed("panel");
+    if (panelReady === "timeout") {
       writeErr("desktop-panel-timeout\n");
       stopAll();
       return 1;
@@ -405,9 +663,9 @@ export async function runDesktop(
           `--app=${url}`,
           "--window-size=1360,880",
         ];
-    const browser = spawnLogged(browserBin, browserArgv, cleanEnv(), repoRoot, false);
+    const browser = launch("browser", browserBin, browserArgv, cleanEnv(), repoRoot, false);
     kids.push(browser);
-    collectOutput(browser, log);
+    pipe(browser, { text: "" });
     if (token !== null && log.text.includes(token)) {
       writeErr("desktop-token-leaked\n");
       stopAll();
@@ -425,24 +683,38 @@ export async function runDesktop(
     process.once("SIGINT", onSignal);
     process.once("SIGTERM", onSignal);
     const closed = new Promise<void>((resolve) => {
-      browser.once("close", () => resolve());
+      if (browser.exitCode !== null || browser.signalCode !== null) resolve();
+      else browser.once("close", () => resolve());
     });
+    const childExit = async (name: DesktopChildName): Promise<number> => {
+      writeErr(desktopChildExitedLine(name));
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+      stopAll();
+      return 1;
+    };
     const exitedEarly = await Promise.race([
-      closed.then(() => true),
-      new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(false), 3_000);
+      closed.then(() => ({ kind: "browser" as const })),
+      childGone.then((name) => ({ kind: "child" as const, name })),
+      new Promise<{ kind: "stay" }>((resolve) => {
+        setTimeout(() => resolve({ kind: "stay" }), 3_000);
       }),
     ]);
-    if (exitedEarly) {
+    if (exitedEarly.kind === "child") return childExit(exitedEarly.name);
+    if (exitedEarly.kind === "browser") {
       writeErr("desktop-browser-exited-early\n");
       process.removeListener("SIGINT", onSignal);
       process.removeListener("SIGTERM", onSignal);
       stopAll();
       return 1;
     }
-    await closed;
+    const ended = await Promise.race([
+      closed.then(() => ({ kind: "browser" as const })),
+      childGone.then((name) => ({ kind: "child" as const, name })),
+    ]);
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    if (ended.kind === "child") return childExit(ended.name);
     stopAll();
     return 0;
   } catch (err) {

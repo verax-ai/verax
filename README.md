@@ -66,8 +66,20 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ## Connect your agent
 
+One elevated command installs the body where your agent's shell cannot read it. On Windows that is an Administrator terminal. On Linux and macOS it is root: `sudo verax install`.
+
 ```sh
 npm install -g @verax-ai/body
+verax install
+```
+
+The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs the already-trusted system Node, keeps the ledger under a service account, and writes the agent token only into your profile (`%USERPROFILE%\.verax\agent.token` or `~/.verax/agent.token`). It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. Isolation is the service account and file permissions.
+
+Approve a held call from an elevated terminal: `verax approve` (Windows: Run as administrator; Linux and macOS: `sudo verax approve`).
+
+To try it in your own user, which is not a boundary:
+
+```sh
 verax init --local ~/.verax
 verax serve --env-file ~/.verax/verax.env
 ```
@@ -76,9 +88,7 @@ verax serve --env-file ~/.verax/verax.env
 claude mcp add --transport http verax http://127.0.0.1:8787/mcp --header "Authorization: Bearer $(cat ~/.verax/local-issuer/agent.token)"
 ```
 
-Port 8787 taken? verax init --local ~/.verax --port 8797
-
-The token can read and write memory through the gate; it cannot approve. The shipped policy refuses `spend` until you add a rule for it; a call your policy holds waits for `verax approve` on this machine.
+The token can read and write memory through the gate; it cannot approve. The shipped policy refuses `spend` until you add a rule for it; a call your policy holds waits for `verax approve` on this machine. See docs/THREAT_MODEL.md.
 
 ### With Conarium
 
@@ -136,7 +146,7 @@ Not shown here: a real database (these are Conarium's sample rows); statement re
 
 | Package | What it is |
 | --- | --- |
-| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock`, `desktop` (clone only). |
+| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock`, `desktop` (clone only). |
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
@@ -172,10 +182,22 @@ VERIFIED
 That last pair of lines is the point. Checking a ledger against the key
 lying next to it proves the files agree with each other and nothing more —
 anything able to write the ledger could write that key too. Pass
-`--key <public.pem>` to verify against a copy you hold, and the answer says
-`a key you supplied` instead. `--json` prints the same result for a
+`--key <public.pem>` to verify decision records against a copy you hold, and
+the answer says `a key you supplied` instead. Effects are signed with a
+separate key. Without a pin, every effect row is checked against one key
+taken from the effects themselves, and that line says the same thing: the
+files agree with each other, not that the key was ever yours. Pass
+`--effect-key <public.pem>` to pin the effect key you hold. Checkpoints are signed by the witness key. Every checkpoint row is checked under one key: `--checkpoint-key <public.pem>` when you pin it, otherwise one key taken from the checkpoint file, with the same note that agreement is not trust. The tail counts only checkpoints whose signatures verified. Someone who can rewrite the files can still roll that file back to an older valid prefix together with the records after it; only a checkpoint held elsewhere detects that. `--json` prints
+the same result for a
 pipeline; the exit code is 0 when it verifies and 1 when it does not, and a
 directory with no ledger in it is never quiet success.
+
+Records are COSE_Sign1 with algorithm `-19` (Ed25519, RFC 9864), not the
+older polymorphic `-8` (EdDSA). Some COSE libraries do not know `-19` yet:
+as of go-cose 1.3.0 and pycose 1.1.0 both reject it, and support is tracked
+in [go-cose#224](https://github.com/veraison/go-cose/issues/224) and
+[pycose#126](https://github.com/TimothyClaeys/pycose/issues/126).
+`verax verify` does not depend on either library.
 
 ## Install
 
@@ -288,6 +310,8 @@ proxy performance check. Releases go out from the Actions tab:
 `release.yml` publishes the three packages with npm trusted publishing and a
 provenance attestation, then `mcp-registry.yml` updates the registry record
 once npm answers for the new version. Neither runs on push.
+
+Tested on every release on the platforms listed in docs/PLATFORMS.md, each row linked to its CI run.
 
 ## License
 

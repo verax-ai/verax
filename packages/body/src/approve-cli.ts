@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
+import { createInterface } from "node:readline";
 import {
   approvePending,
   approvalsLogFor,
@@ -9,8 +10,11 @@ import {
   FileLedger,
   loadApprovalsFromDir,
   loadPolicy,
+  TERMINAL_CONTROL_CLASS,
+  type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
+import { directoryAccess, stateDirFor, SystemToolError, unreadableSentence } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
 function policyForApprove(stateDir: string, policyHash: string): Policy | null {
@@ -57,19 +61,100 @@ export function resolveApproveRef(
   return { ok: false, reason: "unknown-ref", candidates: [] };
 }
 
+const NEEDS_TERMINAL =
+  "verax approve needs a terminal: it shows what is waiting and asks you to type the amount back\n";
+
+function minorUnits(row: ApprovalRow): number | null {
+  if (typeof row.amount === "number") return row.amount;
+  const fromArgs = row.args.amountMinor;
+  return typeof fromArgs === "number" ? fromArgs : null;
+}
+
+const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
+
+/** A control in a stored row must not redraw the prompt, or smuggle a second `payee=`. */
+function escapeHeld(value: string): string {
+  const tainted = HELD_CONTROL.test(value);
+  const pattern = tainted ? new RegExp(`[${TERMINAL_CONTROL_CLASS}=]`, "gu") : HELD_CONTROL;
+  return value.replace(pattern, (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+}
+
+function heldLine(row: ApprovalRow): string {
+  const payee = typeof row.payee === "string" ? row.payee : String(row.args.payee ?? "");
+  const currency = typeof row.currency === "string" ? row.currency : String(row.args.currency ?? "");
+  const reference = typeof row.args.reference === "string" ? row.args.reference : "";
+  const amount = minorUnits(row);
+  const prefix = row.requestHash.slice(0, 12);
+  return `held tool=${escapeHeld(row.subject)} payee=${escapeHeld(payee)} amount=${amount === null ? "" : String(amount)} currency=${escapeHeld(currency)} reference=${escapeHeld(reference)} requestHash=${escapeHeld(prefix)}\n`;
+}
+
+function readTypedAmount(): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.once("line", (line) => {
+      rl.close();
+      resolve(line);
+    });
+  });
+}
+
+export type ApproveIo = {
+  isTTY: boolean;
+  ask: (prompt: string) => Promise<string>;
+};
+
+function defaultApproveIo(): ApproveIo {
+  return {
+    isTTY: Boolean(process.stdin.isTTY),
+    ask: () => readTypedAmount(),
+  };
+}
+
 export async function runApprove(
   argv: string[],
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
   writeOut: (s: string) => void = (s) => process.stdout.write(s),
+  io?: ApproveIo,
 ): Promise<number> {
-  const rest = argv.slice(1);
-  const stateDir = rest[0];
-  const given = rest[1];
-  if (!stateDir || !given || rest.length !== 2) {
+  const terminal = io ?? defaultApproveIo();
+  const rest = argv.slice(1).filter((a) => a !== "--from-script");
+  const fromScript = argv.includes("--from-script");
+  let stateDir = rest[0];
+  let given = rest[1];
+  if (rest.length === 1 && stateDir) {
+    let installed: string;
+    try {
+      installed = stateDirFor(process.platform);
+    } catch (err) {
+      writeErr(`${err instanceof SystemToolError ? err.message : "refusing install root"}\n`);
+      return 78;
+    }
+    const access = directoryAccess(installed);
+    if (access === "unreadable") {
+      writeErr(`${unreadableSentence(installed)}\n`);
+      return 77;
+    }
+    if (access === "ok") {
+      given = stateDir;
+      stateDir = installed;
+    }
+  }
+  if (!stateDir || !given || (rest.length !== 2 && !(rest.length === 1 && stateDir && given))) {
     writeErr("verax approve <stateDir> <ref>\n");
     return 78;
   }
-  const resolved = resolveApproveRef(loadApprovalsFromDir(stateDir), given);
+  if (directoryAccess(stateDir) === "unreadable") {
+    writeErr(`${unreadableSentence(stateDir)}\n`);
+    return 77;
+  }
+  // A non-interactive shell can read the state directory. Without a person
+  // at a terminal, or an explicit --from-script, nothing is approved.
+  if (!fromScript && !terminal.isTTY) {
+    writeErr(NEEDS_TERMINAL);
+    return 78;
+  }
+  const rows = loadApprovalsFromDir(stateDir);
+  const resolved = resolveApproveRef(rows, given);
   if (!resolved.ok) {
     if (resolved.reason === "ambiguous-ref") {
       writeErr(`ambiguous-ref\n${resolved.candidates.join("\n")}\n`);
@@ -79,13 +164,32 @@ export async function runApprove(
     return 78;
   }
   const ref = resolved.ref;
+  const via = fromScript ? "cli-script" : "cli";
+  // The amount is checked before the ledger is opened. A running body holds
+  // the lock, and queueing first would approve without the person ever typing it.
+  if (!fromScript) {
+    const waiting = rows.find((row) => row.ref === ref);
+    if (!waiting) {
+      writeErr("approve-unknown-ref\n");
+      return 78;
+    }
+    const expected = minorUnits(waiting);
+    const shown = expected === null ? "" : String(expected);
+    writeOut(heldLine(waiting));
+    writeOut("Type the amount in minor units:\n");
+    const typed = (await terminal.ask("Type the amount in minor units:\n")).trim();
+    if (typed !== shown) {
+      writeErr("approve-amount-mismatch\n");
+      return 1;
+    }
+  }
   let ledger: FileLedger;
   try {
     ledger = new FileLedger(stateDir);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "";
     if (msg.startsWith("ledger-locked")) {
-      enqueueApprovalCommand(stateDir, { ref, approverId: operatorName(), atMs: Date.now() });
+      enqueueApprovalCommand(stateDir, { ref, approverId: operatorName(), atMs: Date.now(), via });
       writeOut("approve-queued\n");
       return 0;
     }
@@ -109,7 +213,7 @@ export async function runApprove(
       nonce: () => crypto.randomUUID(),
       ref,
       approverId: operatorName(),
-      via: "cli",
+      via,
       policyHash: defer.claims.policyHash,
       approvals,
       ...(policy

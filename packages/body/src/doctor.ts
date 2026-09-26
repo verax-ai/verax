@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
@@ -177,22 +178,31 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
 
   const tokenScope = scopeFromDevToken(env.VERAX_DEV_TOKEN);
   const mintScope = env.VERAX_DEV_SCOPE?.trim() ?? "";
-  const seenScope = tokenScope ?? (mintScope !== "" ? mintScope : null);
-  if (seenScope !== null) {
-    const parts = seenScope.split(/\s+/).filter((s) => s !== "");
+  // VERAX_DEV_SCOPE cannot put verax:audit on the agent file or on a session
+  // that has not passed a passkey. The panel reads the ledger with that session.
+  if (tokenScope !== null) {
+    const parts = tokenScope.split(/\s+/).filter((s) => s !== "");
     if (parts.includes("verax:audit")) {
       checks.push({
         id: "dev-token-audit",
-        level: "ok",
-        detail: "development token scope includes verax:audit",
+        level: "warn",
+        detail:
+          "development token carries verax:audit; that scope belongs on the passkey session, not the agent token. The panel reads /api/ledger only after a passkey sign-in",
       });
     } else {
       checks.push({
         id: "dev-token-audit",
-        level: "warn",
-        detail: "development token scope lacks verax:audit; the panel cannot read /api/ledger or /healthz counts",
+        level: "ok",
+        detail: "development token does not carry verax:audit",
       });
     }
+  } else if (mintScope !== "") {
+    checks.push({
+      id: "dev-token-audit",
+      level: "ok",
+      detail:
+        "VERAX_DEV_SCOPE does not mint verax:audit onto the agent token or a session without a passkey; the panel reads /api/ledger with the passkey session",
+    });
   }
 
   const downstreamPath = env.VERAX_DOWNSTREAM?.trim() ?? "";
@@ -320,6 +330,14 @@ function scopeFromDevToken(raw: string | undefined): string | null {
   } catch {
     return null;
   }
+}
+
+/** Last 20 lines of `<stateDir>/body.log`, or a missing-file sentence. */
+export function doctorBodyLog(stateDir: string): string {
+  const file = join(stateDir, "body.log");
+  const tail = readLogTail(file, 20);
+  if (tail === null) return `body.log missing: ${file}\n`;
+  return tail;
 }
 
 export function doctorExit(checks: readonly DoctorCheck[]): number {

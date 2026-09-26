@@ -1,6 +1,7 @@
+import { type AddressInfo } from "node:net";
 import { JwksFileError } from "./auth.ts";
 import { EX_CONFIG, loadConfig, overlayInventoryArg } from "./config.ts";
-import { KeysPartialError } from "./keys.ts";
+import { KeyAlgorithmError, KeysPartialError } from "./keys.ts";
 import { listen } from "./server.ts";
 
 export async function main(
@@ -19,6 +20,10 @@ export async function main(
   }
   try {
     const server = await listen(loaded.value);
+    const addr = server.address();
+    if (addr && typeof addr === "object") {
+      process.stderr.write(`listening ${(addr as AddressInfo).address}:${(addr as AddressInfo).port}\n`);
+    }
     const shutdown = () => {
       server.close(() => process.exit(0));
     };
@@ -27,6 +32,10 @@ export async function main(
   } catch (err) {
     if (err instanceof KeysPartialError) {
       process.stderr.write("keys-partial\n");
+      process.exit(err.code);
+    }
+    if (err instanceof KeyAlgorithmError) {
+      process.stderr.write(`${err.message}\n`);
       process.exit(err.code);
     }
     if (err instanceof JwksFileError) {

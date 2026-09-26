@@ -161,6 +161,11 @@ refusal; Phase 4 proves a second copy.
 - Disk: free space on `stateDir` below `policy.limits.diskFreeBytes`
   (default 64 MiB) → `deny ledger-disk-low`. If the deny cannot be
   appended, HTTP 507 and a metrics bump — no silent drop.
+- Memory: one tenant's stored `memory.put` versions sum to at most
+  `VERAX_MEMORY_QUOTA_BYTES` (default 1 MiB, `config.ts`
+  `memoryQuotaBytes`). The per-request HTTP cap does not reset the
+  total. A put that would pass the cap is `memory-quota` and is not
+  written. Replacing an id counts the new file minus the old one.
 - Halt: `verax halt <stateDir>` writes `<stateDir>/halted`. New
   work is `deny halted` (still signed). Clear the file to resume.
 - Revoke: S3 tokens carry `jti`. Dev issuer `POST /revoke`. Body

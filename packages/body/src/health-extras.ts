@@ -1,6 +1,20 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
+/** Written by `verax install` before the service starts. `/healthz` echoes it. */
+export const INSTALL_HEALTH_NONCE = "install-health-nonce";
+
+/** Hex nonce from this install, or null when the file is absent or not that shape. */
+export function readInstallHealthNonce(stateDir: string): string | null {
+  try {
+    const text = readFileSync(join(stateDir, INSTALL_HEALTH_NONCE), "utf8").trim();
+    if (!/^[0-9a-f]{64}$/i.test(text)) return null;
+    return text.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 export type HealthHeartbeat = {
   atMs: number;
   lastDecisionN: number;

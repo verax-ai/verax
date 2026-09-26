@@ -16,18 +16,27 @@
 import { readFileSync } from "node:fs";
 
 import { verifyLedger, type VerifyResult } from "@verax-ai/proxy";
+import { directoryAccess, unreadableSentence } from "./install.ts";
 
 export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--checkpoint-key <public.pem>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
-    "  --key <file>      verify against a public key you hold, instead of the one",
-    "                    the records carry. This is the difference between",
-    "                    'these files agree with each other' and 'these files",
-    "                    were signed by the key I was given'.",
+    "  --key <file>      verify decision records against a public key you hold,",
+    "                    instead of the one the records carry. This is the",
+    "                    difference between 'these files agree with each other'",
+    "                    and 'these files were signed by the key I was given'.",
+    "  --effect-key <file>",
+    "                    verify every effect row against a public key you hold,",
+    "                    instead of one key taken from the effects. Same",
+    "                    distinction as --key, for the effect signer.",
+    "  --checkpoint-key <file>",
+    "                    verify every checkpoint row against a public key you",
+    "                    hold, instead of one key taken from the checkpoint",
+    "                    file. Same distinction as --key, for the witness.",
     "  --json            machine-readable result on stdout",
     "",
     "Exit code is 0 when the ledger verifies and 1 when it does not.",
@@ -52,6 +61,43 @@ export function renderVerify(r: VerifyResult): string {
     }`,
   );
   lines.push(`              ${r.trust.note}`);
+  lines.push(
+    `effects with ${
+      r.effectTrust.source === "pinned"
+        ? "a key you supplied"
+        : r.effectTrust.source === "in-ledger"
+          ? "the key carried in these files"
+          : "no key"
+    }`,
+  );
+  lines.push(`              ${r.effectTrust.note}`);
+  lines.push(
+    `checkpoints with ${
+      r.checkpointTrust.source === "pinned"
+        ? "a key you supplied"
+        : r.checkpointTrust.source === "in-ledger"
+          ? "the key carried in these files"
+          : "no key"
+    }`,
+  );
+  lines.push(`              ${r.checkpointTrust.note}`);
+  lines.push(r.index.line);
+  lines.push(r.effectCompleteness);
+  if (r.tail.checkpoint) {
+    const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
+    const holds =
+      r.tail.checkpoint.ledgerHoldsRecord === null
+        ? "no head hash to look up"
+        : r.tail.checkpoint.ledgerHoldsRecord
+          ? "ledger holds that record"
+          : "ledger does not hold that record";
+    const covered =
+      r.tail.checkpoint.receiptCount === null
+        ? "no record count"
+        : `${r.tail.checkpoint.receiptCount} record(s)`;
+    lines.push(`checkpoint    newest covers ${covered}, head ${head}, ${holds}`);
+  }
+  lines.push(r.tail.line);
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");
@@ -74,28 +120,77 @@ export async function runVerify(
   }
   const json = args.includes("--json");
   let publicKeyPem: string | undefined;
-  const keyAt = args.indexOf("--key");
-  if (keyAt !== -1) {
-    const path = args[keyAt + 1];
+  let effectPublicKeyPem: string | undefined;
+  let checkpointPublicKeyPem: string | undefined;
+  const readKeyFlag = (flag: string): { ok: true; pem?: string } | { ok: false } => {
+    const at = args.indexOf(flag);
+    if (at === -1) return { ok: true };
+    const path = args[at + 1];
     if (!path || path.startsWith("-")) {
-      out("verify: --key needs a file path");
-      return EX_VERIFY_FAILED;
+      out(`verify: ${flag} needs a file path`);
+      return { ok: false };
     }
     try {
-      publicKeyPem = readFileSync(path, "utf8");
+      const pem = readFileSync(path, "utf8");
+      args.splice(at, 2);
+      return { ok: true, pem };
     } catch {
       out(`verify: cannot read key file ${path}`);
-      return EX_VERIFY_FAILED;
+      return { ok: false };
     }
-    args.splice(keyAt, 2);
-  }
+  };
+  const recordKey = readKeyFlag("--key");
+  if (!recordKey.ok) return EX_VERIFY_FAILED;
+  publicKeyPem = recordKey.pem;
+  const effectKey = readKeyFlag("--effect-key");
+  if (!effectKey.ok) return EX_VERIFY_FAILED;
+  effectPublicKeyPem = effectKey.pem;
+  const checkpointKey = readKeyFlag("--checkpoint-key");
+  if (!checkpointKey.ok) return EX_VERIFY_FAILED;
+  checkpointPublicKeyPem = checkpointKey.pem;
   const dir = args.find((a) => !a.startsWith("-"));
   if (!dir) {
     out(usage());
     return EX_VERIFY_FAILED;
   }
+  if (directoryAccess(dir) === "unreadable") {
+    out(unreadableSentence(dir));
+    return 77;
+  }
 
-  const result = await verifyLedger(dir, publicKeyPem ? { publicKeyPem } : {});
+  let result: VerifyResult;
+  try {
+    result = await verifyLedger(dir, {
+      ...(publicKeyPem ? { publicKeyPem } : {}),
+      ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
+      ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
+    });
+  } catch (err) {
+    const problem = err instanceof Error ? err.message : "ledger could not be read";
+    const failed: VerifyResult = {
+      ok: false,
+      directory: dir,
+      decisions: 0,
+      effects: 0,
+      signaturesValid: 0,
+      signaturesInvalid: 0,
+      chainBreakAt: null,
+      effectsBound: 0,
+      effectsOrphaned: 0,
+      trust: { source: "none", publicKeyPem: null, note: problem },
+      effectTrust: { source: "none", publicKeyPem: null, note: problem },
+      checkpointTrust: { source: "none", publicKeyPem: null, note: problem },
+      index: { present: false, missing: 0, line: "index: none (cannot check for removed records)" },
+      effectCompleteness: "effect completeness was not checked",
+      tail: {
+        line: "tail: no checkpoint; removing the newest records with their effects is not detectable from these files",
+        checkpoint: null,
+      },
+      problems: [problem],
+    };
+    out(json ? JSON.stringify(failed, null, 2) : renderVerify(failed));
+    return EX_VERIFY_FAILED;
+  }
   out(json ? JSON.stringify(result, null, 2) : renderVerify(result));
   return result.ok ? 0 : EX_VERIFY_FAILED;
 }

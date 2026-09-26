@@ -6,8 +6,8 @@
 //
 // Run: node --experimental-strip-types scripts/pack-smoke.ts
 
-import { spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -98,6 +98,190 @@ writeFileSync(join(consumer, "probe.mjs"), 'import("@verax-ai/body").then(() => 
 const probe = run(process.execPath, ["probe.mjs"], consumer);
 check(probe.status === 0 && /imported/.test(probe.out), "importing @verax-ai/body in a plain Node process", probe.out.slice(0, 300));
 
+// The installed bin, never this repository's sources. On Windows npx is a
+// script, so it needs a shell; the same rule as run().
+function spawnVerax(args: string[], env: NodeJS.ProcessEnv): ChildProcess {
+  const shell = process.platform === "win32";
+  return spawn(shell ? "npx.cmd" : "npx", ["--no-install", "verax", ...args], {
+    cwd: consumer,
+    env,
+    shell,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function envFromState(stateDir: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("VERAX_")) delete env[key];
+  }
+  for (const line of readFileSync(join(stateDir, "verax.env"), "utf8").split(/\r?\n/)) {
+    const m = /^([A-Z0-9_]+)=(.*)$/.exec(line);
+    if (m) env[m[1]] = m[2];
+  }
+  env.VERAX_BIND = "127.0.0.1:0";
+  return env;
+}
+
+function stopChild(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+    }, 5_000);
+    child.once("exit", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+    // On Windows the bin runs under a shell: killing the shell leaves `verax serve` running
+    // and holding the consumer directory. Take the whole tree down.
+    if (process.platform === "win32" && child.pid !== undefined) {
+      spawnSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+    } else {
+      child.kill("SIGTERM");
+    }
+  });
+}
+
+function listen(env: NodeJS.ProcessEnv): Promise<{ child: ChildProcess; port: number }> {
+  return new Promise((resolve, reject) => {
+    const child = spawnVerax(["serve"], env);
+    let err = "";
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill("SIGKILL");
+      reject(new Error(`no listen: ${err.slice(0, 400)}`));
+    }, 15_000);
+    const onExit = (code: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`exit ${code}: ${err.slice(0, 400)}`));
+    };
+    child.once("exit", onExit);
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      err += String(chunk);
+      const m = /listening [^\s:]+:(\d+)/.exec(err);
+      if (!m || settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.off("exit", onExit);
+      resolve({ child, port: Number(m[1]) });
+    });
+  });
+}
+
+type ToolReply = { status: number; isError: boolean; text: string };
+
+function toolText(body: string): { isError: boolean; text: string } {
+  const candidates = [body.trim()];
+  for (const line of body.split(/\r?\n/)) {
+    const data = /^data:\s*(.*)$/.exec(line.trim());
+    if (data?.[1] && data[1] !== "[DONE]") candidates.push(data[1]);
+  }
+  for (const raw of candidates) {
+    try {
+      const msg = JSON.parse(raw) as {
+        result?: { isError?: boolean; content?: Array<{ text?: string }> };
+        error?: { message?: string };
+      };
+      if (msg.error) return { isError: true, text: msg.error.message ?? "jsonrpc-error" };
+      if (!msg.result) continue;
+      const text = (msg.result.content ?? []).map((part) => part.text ?? "").join("");
+      return { isError: msg.result.isError === true, text };
+    } catch {
+      // not this candidate
+    }
+  }
+  return { isError: true, text: body.slice(0, 300) };
+}
+
+async function toolsCall(port: number, token: string, params: Record<string, unknown>): Promise<ToolReply> {
+  const res = await fetch(`http://127.0.0.1:${port}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params }),
+  });
+  const parsed = toolText(await res.text());
+  return { status: res.status, isError: parsed.isError, text: parsed.text };
+}
+
+const stateDir = mkdtempSync(join(tmpdir(), "verax-pack-state-"));
+let serving: ChildProcess | undefined;
+try {
+  const init = run("npx", ["--no-install", "verax", "init", "--local", stateDir], consumer);
+  const tokenPath = join(stateDir, "local-issuer", "agent.token");
+  const token = existsSync(tokenPath) ? readFileSync(tokenPath, "utf8").trim() : "";
+  check(init.status === 0 && token.startsWith("eyJ"), "verax init --local writes the agent token", init.out.slice(0, 300));
+
+  if (init.status === 0 && token.startsWith("eyJ")) {
+    try {
+      const up = await listen(envFromState(stateDir));
+      serving = up.child;
+      const health = await fetch(`http://127.0.0.1:${up.port}/healthz`);
+      check(health.status === 200, "verax serve answers /healthz", `status ${health.status}`);
+      await health.arrayBuffer();
+
+      const allowed = await toolsCall(up.port, token, {
+        name: "memory.put",
+        arguments: {
+          id: "pack-smoke-note",
+          body: { text: "installed" },
+          source: { kind: "pack-smoke" },
+          validUntilMs: Date.now() + 60 * 60 * 1000,
+        },
+      });
+      check(
+        allowed.status === 200 && allowed.isError === false,
+        "memory.put the default local policy allows",
+        `status ${allowed.status} ${allowed.text.slice(0, 200)}`,
+      );
+
+      const denied = await toolsCall(up.port, token, {
+        name: "message.send",
+        arguments: { to: "ops@example.invalid", text: "no" },
+      });
+      check(
+        denied.status === 200 && denied.isError === true && denied.text.includes("denied:"),
+        "a call the default local policy denies is denied",
+        `status ${denied.status} ${denied.text.slice(0, 200)}`,
+      );
+    } catch (err) {
+      check(false, "verax serve from the installed bin", err instanceof Error ? err.message : "serve failed");
+    }
+  }
+} finally {
+  if (serving) await stopChild(serving);
+}
+
+const verified = run("npx", ["--no-install", "verax", "verify", stateDir, "--json"], consumer);
+let verdict = "";
+let decisions = 0;
+let ok = false;
+try {
+  const parsed = JSON.parse(verified.stdout) as { ok?: boolean; decisions?: number };
+  ok = parsed.ok === true;
+  decisions = typeof parsed.decisions === "number" ? parsed.decisions : 0;
+  verdict = `ok=${parsed.ok} decisions=${parsed.decisions}`;
+} catch {
+  verdict = verified.out.slice(0, 300);
+}
+check(verified.status === 0 && ok && decisions >= 2, "verax verify --json ok with at least 2 decisions", verdict);
+
+// Windows releases file handles a moment after a process exits.
+const cleanup = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 } as const;
+rmSync(stateDir, cleanup);
+rmSync(packDir, cleanup);
+rmSync(consumer, cleanup);
+
 process.stdout.write(`\npack-smoke: ${failures.length === 0 ? "green" : `${failures.length} failed`}\n`);
-process.stdout.write(`tarballs: ${packDir}\nconsumer: ${consumer}\n`);
 process.exit(failures.length === 0 ? 0 : 1);

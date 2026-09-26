@@ -2,12 +2,12 @@
 // Development only. PKCE S256 authorize/token for local panel sessions.
 // NODE_ENV=production still exits. Not a production authorization server.
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, unlinkSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8 } from "jose";
+import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8, jwtVerify } from "jose";
 import { checkPairing, consumePairing } from "../packages/body/src/operator-pairing.ts";
 import {
   DEFAULT_OPERATOR_SUB,
@@ -17,6 +17,8 @@ import {
   updateCounter,
 } from "../packages/body/src/operator-credentials.ts";
 import { readRpConfig } from "../packages/body/src/rp-config.ts";
+import { payloadTooLarge, readIssuerBody as readBody } from "./issuer-body.mjs";
+import { collectVendorEsm, readVendorFile } from "./vendor-allow.mjs";
 
 // Off by default. With VERAX_DEV_ISSUER_TRACE=1 the issuer names each phase and
 // the time since it started, on stderr. It exists because a gate run twice saw
@@ -50,6 +52,7 @@ if (!outPath) {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..");
+const vendorFiles = collectVendorEsm(resolve(repoRoot, "node_modules", "@simplewebauthn", "browser"));
 const rp = readRpConfig(process.env);
 if (!rp.ok) {
   process.stderr.write(`dev-issuer: passkey enroll and sign-in are closed: ${rp.reason}\n`);
@@ -91,25 +94,31 @@ if (existsSync(privPath) && existsSync(jwkPath)) {
 }
 
 const key = await importPKCS8(privatePem, "ES256");
+// jwtVerify rejects a private key. The public half is the same PEM the JWKS serves.
+const verifyKey = createPublicKey(privatePem);
 trace("keys-ready");
 const port = Number(process.env.VERAX_DEV_ISSUER_PORT ?? "8790");
 const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
 const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
 const agentSub = process.env.VERAX_DEV_SUB ?? "dev-brain";
 const operatorSub = process.env.VERAX_DEV_OPERATOR_SUB ?? "operator-1";
+// The ask may name audit. agentScope drops it: the agent file and a session
+// without a passkey never carry verax:audit or verax:approve. There is no
+// env switch that puts either back onto that file.
 const requestedScope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory verax:audit";
 
-/** The file written for the agent never carries approve, even when the env asks. */
+/** The file written for the agent never carries approve or audit, even when the env asks. */
 function agentScope(raw) {
   return raw
     .split(/\s+/)
-    .filter((part) => part !== "" && part !== "verax:approve")
+    .filter((part) => part !== "" && part !== "verax:approve" && part !== "verax:audit")
     .join(" ");
 }
 
 async function mintAccessToken(kind, extra = {}) {
   // A session without a passkey is read-only, even when VERAX_DEV_SCOPE asks
-  // for approve. Approve is minted only after a registered operator signs in.
+  // for approve or audit. Both are minted only after a registered operator
+  // signs in (grantApprove).
   let tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
   if (kind === "session" && extra.grantApprove !== true) {
     tokenScope = agentScope(tokenScope);
@@ -237,6 +246,25 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+/** A JSON body is usable only when it is a plain object. null, arrays, strings and numbers are not. */
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function oneLine(err) {
+  const message = err instanceof Error ? err.message : "error";
+  return message.replace(/\s+/g, " ").slice(0, 300);
+}
+
+function rejectBody(res, err) {
+  if (payloadTooLarge(err)) {
+    sendJson(res, 413, { error: "payload-too-large" });
+    return;
+  }
+  const error = err && err.code === "BAD_REQUEST" ? "bad-request" : "invalid_request";
+  sendJson(res, 400, { error });
+}
+
 function redirectWith(res, redirectUri, params) {
   let loc;
   try {
@@ -252,16 +280,16 @@ function redirectWith(res, redirectUri, params) {
   res.end();
 }
 
-async function readBody(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
-}
-
 async function readJson(req) {
   const text = await readBody(req);
   if (text === "") return {};
-  return JSON.parse(text);
+  const parsed = JSON.parse(text);
+  if (!isPlainObject(parsed)) {
+    const err = new Error("bad-request");
+    err.code = "BAD_REQUEST";
+    throw err;
+  }
+  return parsed;
 }
 
 function parseForm(text) {
@@ -272,8 +300,87 @@ function parseForm(text) {
   return out;
 }
 
+/** Same allow-list as the body's `loopbackHostDecision`: 127.0.0.1, localhost, [::1], with the listen port. */
+function issuerHostDecision(hostHeader, bindPort) {
+  if (hostHeader === undefined || String(hostHeader).trim() === "") return "deny";
+  const raw = String(hostHeader).trim();
+  if (raw.startsWith("[") && !raw.includes("]")) return "malformed";
+  let name = raw;
+  let port;
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    name = raw.slice(1, end);
+    const rest = raw.slice(end + 1);
+    if (rest === "") port = undefined;
+    else if (/^:[0-9]+$/.test(rest)) port = Number(rest.slice(1));
+    else return "deny";
+  } else {
+    const colon = raw.lastIndexOf(":");
+    if (colon > 0 && /^[0-9]+$/.test(raw.slice(colon + 1))) {
+      name = raw.slice(0, colon);
+      port = Number(raw.slice(colon + 1));
+    }
+  }
+  const lowered = name.toLowerCase();
+  if (lowered !== "127.0.0.1" && lowered !== "localhost" && lowered !== "::1") return "deny";
+  if (port === undefined) return bindPort === 80 ? "allow" : "deny";
+  return port === bindPort ? "allow" : "deny";
+}
+
+/**
+ * True when this jti is already on the revocation list. An unreadable list
+ * is treated as revoked: a role is not granted on a check that could not
+ * be finished. A missing file is an empty list.
+ */
+function bearerJtiRevoked(jti) {
+  if (jti === "") return false;
+  const path = join(stateDir, "revoked-jti.jsonl");
+  if (!existsSync(path)) return false;
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return true;
+  }
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    try {
+      const row = JSON.parse(line);
+      if (row && row.jti === jti) return true;
+    } catch {
+      // A torn line does not grant the role.
+    }
+  }
+  return false;
+}
+
+/** `operator` carries `verax:approve`. `agent` is a valid issuer token without it. `none` did not verify. */
+async function bearerRevokeRole(req) {
+  const raw = req.headers.authorization;
+  const header = Array.isArray(raw) ? raw[0] : raw;
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return "none";
+  try {
+    const { payload } = await jwtVerify(header.slice("Bearer ".length), verifyKey, { issuer, audience });
+    const jti = typeof payload.jti === "string" ? payload.jti : "";
+    if (bearerJtiRevoked(jti)) return "none";
+    const scope = typeof payload.scope === "string" ? payload.scope : "";
+    const parts = scope.split(/\s+/).filter((part) => part !== "");
+    return parts.includes("verax:approve") ? "operator" : "agent";
+  } catch {
+    return "none";
+  }
+}
+
 const server = createServer((req, res) => {
   void (async () => {
+    try {
+    const bound = server.address();
+    const listenPort = bound && typeof bound === "object" ? bound.port : port;
+    const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
+    if (issuerHostDecision(hostHeader, listenPort) !== "allow") {
+      sendJson(res, 401, { error: "unauthorized" });
+      return;
+    }
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     const allowOrigin = corsOrigin(req);
     if (allowOrigin) {
@@ -389,8 +496,16 @@ const server = createServer((req, res) => {
         const text = await readBody(req);
         const ctype = String(req.headers["content-type"] ?? "");
         parsed = ctype.includes("application/json") ? JSON.parse(text || "{}") : parseForm(text);
-      } catch {
+      } catch (err) {
+        if (payloadTooLarge(err)) {
+          sendJson(res, 413, { error: "payload-too-large" });
+          return;
+        }
         sendJson(res, 400, { error: "invalid_request" });
+        return;
+      }
+      if (!isPlainObject(parsed)) {
+        sendJson(res, 400, { error: "bad-request" });
         return;
       }
       const grant = parsed.grant_type;
@@ -428,20 +543,12 @@ const server = createServer((req, res) => {
     }
     if (req.method === "GET" && url.pathname.startsWith("/vendor/@simplewebauthn/browser/")) {
       const rel = url.pathname.slice("/vendor/@simplewebauthn/browser/".length);
-      if (rel.includes("..") || rel.includes("\\")) {
+      const body = readVendorFile(rel, vendorFiles, readFileSync);
+      if (body === null) {
         res.writeHead(404);
         res.end();
         return;
       }
-      const vendorRoot = resolve(repoRoot, "node_modules", "@simplewebauthn", "browser");
-      const file = resolve(vendorRoot, rel);
-      const relToRoot = relative(vendorRoot, file);
-      if (relToRoot.startsWith("..") || relToRoot === "" || !existsSync(file)) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      const body = readFileSync(file);
       res.writeHead(200, { "content-type": rel.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream" });
       res.end(body);
       return;
@@ -500,8 +607,8 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
-        sendJson(res, 400, { error: "invalid_request" });
+      } catch (err) {
+        rejectBody(res, err);
         return;
       }
       const code = typeof parsed.code === "string" ? parsed.code : "";
@@ -532,8 +639,8 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
-        sendJson(res, 400, { error: "invalid_request" });
+      } catch (err) {
+        rejectBody(res, err);
         return;
       }
       const code = typeof parsed.code === "string" ? parsed.code : "";
@@ -613,8 +720,8 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
-        sendJson(res, 400, { error: "invalid_request" });
+      } catch (err) {
+        rejectBody(res, err);
         return;
       }
       const responseType = parsed.response_type;
@@ -690,10 +797,23 @@ const server = createServer((req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/revoke") {
+      const role = await bearerRevokeRole(req);
+      if (role === "none") {
+        sendJson(res, 401, { error: "unauthorized" });
+        return;
+      }
+      if (role !== "operator") {
+        sendJson(res, 403, { error: "operator-scope-required" });
+        return;
+      }
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
+      } catch (err) {
+        if (payloadTooLarge(err)) {
+          sendJson(res, 413, { error: "payload-too-large" });
+          return;
+        }
         sendJson(res, 400, { error: "bad-request" });
         return;
       }
@@ -711,8 +831,32 @@ const server = createServer((req, res) => {
     }
     res.writeHead(404);
     res.end();
+    } catch (err) {
+      // One line on stderr, no stack to the client. The process stays up.
+      if (payloadTooLarge(err)) {
+        if (!res.headersSent) sendJson(res, 413, { error: "payload-too-large" });
+        return;
+      }
+      if (err && err.code === "BAD_REQUEST") {
+        if (!res.headersSent) sendJson(res, 400, { error: "bad-request" });
+        return;
+      }
+      process.stderr.write(`dev-issuer: request failed: ${oneLine(err)}\n`);
+      if (!res.headersSent) sendJson(res, 500, { error: "internal" });
+    }
   })();
 });
+
+// Fresh this run, mode 0600, beside the key. The desktop pins this file.
+// It does not fetch /.well-known/jwks.json: whoever bound the port could answer.
+const jwksPinPath = join(dir, "jwks.json");
+try {
+  unlinkSync(jwksPinPath);
+} catch (err) {
+  if (!err || err.code !== "ENOENT") throw err;
+}
+writeFileSync(jwksPinPath, `${JSON.stringify({ keys: [jwk] })}\n`, { encoding: "utf8", mode: 0o600 });
+chmodSync(jwksPinPath, 0o600);
 
 trace("listen-called");
 await new Promise((resolve, reject) => {

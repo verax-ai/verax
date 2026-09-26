@@ -52,6 +52,8 @@ export type DemoIo = {
 /** Test injection. The CLI never passes this; it is not read from argv or env. */
 export type DemoOpts = {
   conariumChild?: { command: string; args: string[] };
+  /** mkdtemp prefix. Tests pass a unique one so parallel files do not share verax-demo-. */
+  statePrefix?: string;
 };
 
 type PolicyDoc = {
@@ -266,6 +268,7 @@ async function readAnswer(stdin: NodeJS.ReadableStream): Promise<string> {
       resolve(value);
     };
     const onData = (chunk: Buffer | string) => {
+      if (typeof stdin.pause === "function") stdin.pause();
       done(String(chunk).split(/\r?\n/)[0] ?? "");
     };
     const onEnd = () => done("");
@@ -328,7 +331,8 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
   process.once("SIGTERM", onStop);
 
   try {
-    stateDir = mkdtempSync(join(tmpdir(), "verax-demo-"));
+    const statePrefix = opts?.statePrefix && opts.statePrefix.length > 0 ? opts.statePrefix : "verax-demo-";
+    stateDir = mkdtempSync(join(tmpdir(), statePrefix));
     const policyFile = writeDemoPolicy(stateDir, withConarium);
 
     const { privateKey, publicKey } = await generateKeyPair("ES256");
@@ -415,7 +419,10 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       writeOut("Approve this payment as the operator on this machine? [y/N]\n");
       const answer = await readAnswer(io.stdin);
       if (answer.trim().toLowerCase() === "y") {
-        const code = await runApprove(["approve", stateDir, held.ref], (s) => writeErr(s), () => undefined);
+        const code = await runApprove(["approve", stateDir, held.ref], writeErr, () => undefined, {
+          isTTY: io.isTTY,
+          ask: async () => readAnswer(io.stdin),
+        });
         if (code !== 0) throw new Error("demo: approve failed");
         approved = true;
       }

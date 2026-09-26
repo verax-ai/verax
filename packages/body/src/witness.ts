@@ -12,6 +12,7 @@ import {
 } from "@cedulon/checkpoint";
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
+import { assertEd25519PublicKey } from "./keys.ts";
 import { pidAlive } from "./unlock.ts";
 
 const WITNESS_CLASS = "same-org" as const;
@@ -52,19 +53,22 @@ export function loadOrCreateWitnessKeys(stateDir: string): { privateKeyPem: stri
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const priv = join(dir, "witness.private.pem");
   const pub = join(dir, "witness.public.pem");
-  if (existsSync(priv) && existsSync(pub)) {
-    return { privateKeyPem: readFileSync(priv, "utf8"), publicKeyPem: readFileSync(pub, "utf8") };
-  }
-  if (existsSync(priv) || existsSync(pub)) {
-    throw new Error("witness-keys-partial");
-  }
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const pair = {
-    publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-    privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-  };
-  writePemAtomic(priv, pair.privateKeyPem);
-  writePemAtomic(pub, pair.publicKeyPem);
+  const pair = existsSync(priv) && existsSync(pub)
+    ? { privateKeyPem: readFileSync(priv, "utf8"), publicKeyPem: readFileSync(pub, "utf8") }
+    : existsSync(priv) || existsSync(pub)
+      ? null
+      : (() => {
+          const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+          const created = {
+            publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+            privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+          };
+          writePemAtomic(priv, created.privateKeyPem);
+          writePemAtomic(pub, created.publicKeyPem);
+          return created;
+        })();
+  if (!pair) throw new Error("witness-keys-partial");
+  assertEd25519PublicKey(pair.publicKeyPem, "witness");
   return pair;
 }
 

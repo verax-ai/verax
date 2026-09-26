@@ -106,7 +106,7 @@ describe("VERAX_JWKS_FILE", () => {
           http?.close(() => resolve());
         });
       }
-      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 

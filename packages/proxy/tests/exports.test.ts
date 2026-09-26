@@ -13,6 +13,9 @@ const ALLOWED = new Set([
   "createProxy",
   "LedgerDenyUnrecorded",
   "loadPolicy",
+  // approve-cli escapes the same marks the spend gate refuses. The class
+  // lives here so body does not grow a second copy or a new dependency.
+  "TERMINAL_CONTROL_CLASS",
   "FileLedger",
   "MemoryLedger",
   "explain",
@@ -27,6 +30,9 @@ const ALLOWED = new Set([
   "parseChannelJsonl",
   "parseCardCsv",
   "reconcile",
+  // reconcile-cli passes the decision-ref set; the loader lists the same
+  // decision files verifyLedger reads, so it stays on this package's surface.
+  "loadDecisionRefsFromDir",
   "tenantKey",
   "spokenReason",
   "checkpointsPath",
@@ -66,7 +72,9 @@ describe("B1 exports map", () => {
   });
 
   it("npm pack --dry-run lists the package and no test fixtures", () => {
-    const packed = spawnSync("npm", ["pack", "--dry-run", "-w", "@verax-ai/proxy"], {
+    // --ignore-scripts: prepack would rebuild dist while other test files,
+    // running at the same time, load it.
+    const packed = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "-w", "@verax-ai/proxy"], {
       cwd: repoRoot,
       encoding: "utf8",
       shell: true,

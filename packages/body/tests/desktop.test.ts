@@ -6,7 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { desktopMode, issuerEnv, parseDesktopArgs } from "../src/desktop.ts";
+import { desktopMode, desktopPasskeyHint, issuerEnv, parseDesktopArgs } from "../src/desktop.ts";
+import { CREDENTIALS_FILE } from "../src/operator-credentials.ts";
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -129,6 +130,26 @@ describe("verax desktop args", () => {
     const parsed = parseDesktopArgs(["desktop", "--state", "s", "--inventory", "roster.json"]);
     assert.ok(!("error" in parsed));
     if (!("error" in parsed)) assert.equal(parsed.inventoryFile, "roster.json");
+  });
+});
+
+describe("verax desktop passkey hint", () => {
+  it("prints one line when the state has no enrolled operator", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-desktop-passkey-"));
+    const line = desktopPasskeyHint(dir);
+    assert.equal(
+      line,
+      "the panel reads the ledger after a passkey sign-in; run verax operator enroll\n",
+    );
+    assert.equal(line?.split("\n").filter((part) => part !== "").length, 1);
+  });
+
+  it("prints nothing when an operator is enrolled", () => {
+    // Presence of operator-credentials.json is the enrollment. The file is
+    // not parsed here: a truncated file still counts as an operator.
+    const dir = mkdtempSync(join(tmpdir(), "verax-desktop-passkey-"));
+    writeFileSync(join(dir, CREDENTIALS_FILE), "{}\n");
+    assert.equal(desktopPasskeyHint(dir), null);
   });
 });
 

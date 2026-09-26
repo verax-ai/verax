@@ -66,8 +66,9 @@ export function scanNoBypass(
     const rel = file.replace(/\\/g, "/");
     if (rel === "src/no-bypass-scan.ts") continue;
     const wiring = rel === "src/wiring.ts";
-    // Desktop supervises issuer/body/panel. It is not a tool-call path.
-    const desktop = rel === "src/desktop.ts";
+    // Desktop supervises issuer/body/panel. Install copies the body under another
+    // account. Neither file is a tool-call path.
+    const desktop = rel === "src/desktop.ts" || rel === "src/install.ts";
     // The downstream spike attaches one stdio MCP server. Not a tool-call path.
     const downstream = rel === "src/downstream.ts";
     const originalLines = text.split(/\r?\n/);

@@ -524,11 +524,35 @@ describe("approval queue", () => {
       });
       await proxy.call(putCall, principal);
       // What `verax approve` leaves behind when the body holds the lock.
-      enqueueApprovalCommand(dir, { ref: "d1", approverId: "op", atMs: 150 });
+      enqueueApprovalCommand(dir, { ref: "d1", approverId: "op", atMs: 150, via: "cli" });
       await proxy.call(putCall, principal);
       const inputs = await proxy.inputsLog.get("a1");
       assert.equal(inputs?.approver?.resolves, "d1");
       assert.equal(inputs?.approver?.via, "cli");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("p2: a queued command with no via is applied as cli-script", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-drain-via-old-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: loadPolicy(APPROVE_POLICY),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(100, 1),
+        nonce: queuedNonce(["d1", "a1", "d2"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call(putCall, principal);
+      enqueueApprovalCommand(dir, { ref: "d1", approverId: "op", atMs: 150 });
+      await proxy.call(putCall, principal);
+      const inputs = await proxy.inputsLog.get("a1");
+      assert.equal(inputs?.approver?.resolves, "d1");
+      assert.equal(inputs?.approver?.via, "cli-script");
     } finally {
       ledger.close();
     }

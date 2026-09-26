@@ -99,6 +99,7 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
+    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "probe-x" } })}\n`, "utf8");
     const out = join(dir, "report.json");
     const ran = await spawnCli(["reconcile", dir, csv, "--channel", "card", "--currency", "TRY", "--out", out]);
     assert.equal(ran.code, 0, ran.err);
@@ -124,6 +125,7 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
+    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
     writeFileSync(
       join(dir, "approvals.jsonl"),
       `${JSON.stringify({
@@ -254,6 +256,7 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
+    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
     writeFileSync(
       join(dir, "approvals.jsonl"),
       `${JSON.stringify({

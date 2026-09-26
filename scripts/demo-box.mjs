@@ -232,7 +232,8 @@ try {
     VERAX_DEV_REDIRECT_URIS: redirectUri,
     VERAX_DEV_SUB: "demo-brain",
     VERAX_DEV_OPERATOR_SUB: "demo-brain",
-    VERAX_DEV_SCOPE: "verax:read verax:memory verax:audit verax:pay",
+    // Audit is the passkey session, not this brain. The issuer would drop it anyway.
+    VERAX_DEV_SCOPE: "verax:read verax:memory verax:pay",
   };
   delete issuerEnv.VERAX_DEV_TOKEN;
   spawnChild(

@@ -1,0 +1,875 @@
+# Elevated install of the body under another account, then a probe that
+# is not that account. Windows runners are already Administrator.
+# Linux and macOS use sudo. Windows runs as Administrator.
+name: install-e2e
+
+env:
+  NODE_VERSION: "22.20.0"
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Account names in icacls output follow the Windows base language. `localized`
+        # renames the built-in groups the way a Turkish install names them, so every
+        # step below runs against names that are not English.
+        names: [default, localized]
+    env:
+      VERAX_INSTALL_DEBUG: "1"
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: localize built-in group names
+        if: matrix.names == 'localized'
+        shell: pwsh
+        run: |
+          Rename-LocalGroup -SID 'S-1-5-32-544' -NewName 'Yöneticiler'
+          Rename-LocalGroup -SID 'S-1-5-32-545' -NewName 'Kullanıcılar'
+          # Read the new names in Unicode; icacls prints through the OEM code page and folds ö and ı.
+          $admins = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+          $users = (Get-LocalGroup -SID 'S-1-5-32-545').Name
+          Write-Host "S-1-5-32-544 is now '$admins'; S-1-5-32-545 is now '$users'"
+          if ($admins -ne 'Yöneticiler' -or $users -ne 'Kullanıcılar') {
+            Write-Host "::error::the built-in groups were not renamed"
+            exit 1
+          }
+          $text = icacls "$env:ProgramData" | Out-String
+          Write-Host $text
+          if ($text -match 'BUILTIN\\Administrators|BUILTIN\\Users') {
+            Write-Host "::error::English built-in names are still printed"
+            exit 1
+          }
+          Write-Host "ok: icacls prints the localized built-in names"
+      - name: official Node
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:NODE_VERSION
+          $name = "node-v$ver-x64.msi"
+          $base = "https://nodejs.org/dist/v$ver"
+          $sums = Join-Path $env:RUNNER_TEMP "SHASUMS256.txt"
+          $msi = Join-Path $env:RUNNER_TEMP $name
+          $nodeExe = "C:\Program Files\nodejs\node.exe"
+          if (Test-Path -LiteralPath $nodeExe) {
+            Write-Host "node.exe already exists before msiexec: $nodeExe"
+            Write-Host "existing version: $(& $nodeExe -v)"
+            Write-Host "existing ACL:"
+            icacls $nodeExe
+            Write-Host "printed existing node version and ACL"
+            Write-Host "using existing node; msiexec not run"
+          } else {
+            Write-Host "node.exe does not exist before msiexec: $nodeExe"
+            Write-Host "downloading SHASUMS256.txt from $base/SHASUMS256.txt to $sums"
+            Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile $sums
+            Write-Host "downloaded SHASUMS256.txt to $sums"
+            Write-Host "downloading $name from $base/$name to $msi"
+            Invoke-WebRequest -Uri "$base/$name" -OutFile $msi
+            Write-Host "downloaded $name to $msi"
+            $line = @(Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape($name))$" })
+            if ($line.Count -ne 1) { Write-Host "SHASUMS256.txt has no $name"; exit 1 }
+            $expected = ($line[0] -split '\s+')[0].ToLower()
+            $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+            Write-Host "sha256 expected: $expected"
+            Write-Host "sha256 actual: $actual"
+            if ($expected -ne $actual) { Write-Host "sha256 mismatch for $name"; exit 1 }
+            Write-Host "sha256 match for $name"
+            $log = Join-Path $env:RUNNER_TEMP "node-msi.log"
+            Write-Host "running msiexec /i $msi /qn ALLUSERS=1 /norestart /l*v $log"
+            $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart', '/l*v', $log) -Wait -PassThru
+            Write-Host "msiexec exit code: $($proc.ExitCode)"
+            if ($proc.ExitCode -ne 0) {
+              Write-Host "msiexec failed with exit code $($proc.ExitCode)"
+              if (Test-Path -LiteralPath $log) {
+                Write-Host "last 60 lines of $log"
+                Get-Content -LiteralPath $log -Tail 60 | ForEach-Object { Write-Host $_ }
+              } else {
+                Write-Host "msi log missing: $log"
+              }
+              exit $proc.ExitCode
+            }
+            Write-Host "msiexec finished"
+          }
+          $node = "C:\Program Files\nodejs\node.exe"
+          $real = & $node -p "require('fs').realpathSync.native(process.execPath)"
+          Write-Host "node -v: $(& $node -v)"
+          Write-Host "realpath: $real"
+          icacls $real
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\nodejs"
+          Add-Content -Path $env:GITHUB_ENV -Value "VERAX_NODE=$node"
+      - name: npm ci
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
+          npm ci
+      - name: build:dist
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
+          npm run build:dist
+      - name: pack this pull request and lock the tarball directory
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
+          # An administrator-owned place: the owner of the directory and of every ancestor can rewrite
+          # its DACL, and the runner account (like an agent under a non-elevated token) must not own them.
+          $dir = Join-Path $env:ProgramData "verax-ci-tarballs"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          npm pack -w @verax-ai/inventory --pack-destination $dir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm pack -w @verax-ai/proxy --pack-destination $dir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm pack -w @verax-ai/body --pack-destination $dir
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls $dir /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls "$dir\*" /reset /T /C
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls $dir /setowner "*S-1-5-32-544" /T /C
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "VERAX_TARBALLS=$dir"
+      - name: diagnose tarball access
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Write-Host "=== 1. token groups ==="
+          try {
+            $capture = $false
+            $shown = 0
+            foreach ($line in @(whoami /groups /fo list)) {
+              if ($line -match '^\s*Group Name:\s*(.*)$') {
+                $g = $Matches[1]
+                $capture = ($g -like '*Mandatory Label*' -or $g -like '*BUILTIN\Administrators*')
+                if ($capture) { $shown++ }
+              }
+              if ($capture) { Write-Host $line }
+              if ($capture -and [string]::IsNullOrWhiteSpace($line)) { $capture = $false }
+            }
+            if ($shown -eq 0) {
+              Write-Host "no Mandatory Label or BUILTIN\Administrators group block matched"
+              whoami /groups /fo list
+            }
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "=== 2. acl, owner, attributes ==="
+          $dir = $env:VERAX_TARBALLS
+          Write-Host "tarball dir: $dir"
+          try {
+            icacls $dir
+            Write-Host ("Owner: " + (Get-Acl -LiteralPath $dir).Owner)
+            Get-Item -LiteralPath $dir | Format-List Attributes | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          $tarballs = @()
+          try {
+            $tarballs = @(Get-ChildItem -LiteralPath $dir -Filter *.tgz -File | Sort-Object Name)
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "tarball count: $($tarballs.Count)"
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "tarball: $path"
+            try {
+              icacls $path
+              Write-Host ("Owner: " + (Get-Acl -LiteralPath $path).Owner)
+              Get-Item -LiteralPath $path | Format-List Attributes | Out-String -Width 4096 | Write-Host
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 3. read each tarball ==="
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "pwsh ReadAllBytes: $path"
+            try {
+              $n = [IO.File]::ReadAllBytes($path).Length
+              Write-Host "OK $n bytes"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+            Write-Host "node ReadFileSync: $path"
+            try {
+              & $env:VERAX_NODE -e "require('fs').readFileSync(process.argv[1]);console.log('ok')" $path
+              Write-Host "node exit: $LASTEXITCODE"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 4. defender ==="
+          try {
+            Get-MpComputerStatus -ErrorAction Stop | Select-Object RealTimeProtectionEnabled, AMRunningMode | Format-List | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          try {
+            $cfa = Get-MpPreference -ErrorAction Stop | Select-Object -ExpandProperty EnableControlledFolderAccess
+            Write-Host "EnableControlledFolderAccess: $cfa"
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          exit 0
+      - name: install, probe, uninstall
+        id: install-probe
+        shell: pwsh
+        run: |
+          & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $rootAcl = (Get-Acl -LiteralPath "$env:ProgramData\Verax").Sddl
+          Write-Host $rootAcl
+          foreach ($banned in @('BU', 'S-1-5-32-545', 'WD', 'S-1-1-0', 'AU', 'S-1-5-11', 'CO', 'S-1-3-0', 'IU', 'S-1-5-4')) {
+            if ($rootAcl -match "(;;;${banned}\))") { Write-Host "::error::ProgramData\Verax ACL contains $banned"; exit 1 }
+          }
+          $acl = (Get-Acl -LiteralPath "$env:ProgramData\Verax\state").Sddl
+          Write-Host $acl
+          $svcSid = (Get-LocalUser -Name 'verax-svc').SID.Value
+          $aceSids = [regex]::Matches($acl, '\([AD];[^;]*;[^;]*;[^;]*;[^;]*;([^)]+)\)') | ForEach-Object { $_.Groups[1].Value }
+          if ($aceSids -contains 'LS' -or $aceSids -contains 'S-1-5-19') { Write-Host "::error::LOCAL SERVICE present"; exit 1 }
+          $allowed = @('BA', 'S-1-5-32-544', 'SY', 'S-1-5-18', $svcSid)
+          $hasSvc = $false
+          foreach ($p in $aceSids) {
+            if ($p -eq $svcSid) { $hasSvc = $true; continue }
+            if ($allowed -notcontains $p) { Write-Host "::error::unexpected principal: $p"; exit 1 }
+          }
+          if (-not $hasSvc) { Write-Host "::error::verax-svc missing"; exit 1 }
+          $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
+          New-LocalUser -Name veraxprobe -Password (ConvertTo-SecureString $pass -AsPlainText -Force) -PasswordNeverExpires -AccountNeverExpires
+          $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
+          $node = (Get-Command node).Source
+          $script = Join-Path $env:PUBLIC 'verax-probe.mjs'
+          $tokenSrc = Join-Path $env:USERPROFILE '.verax\agent.token'
+          $tokenDst = Join-Path $env:PUBLIC 'verax-agent.token'
+          Copy-Item $tokenSrc $tokenDst -Force
+          icacls $tokenDst /grant 'veraxprobe:(R)' | Out-Null
+          @'
+          import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+          const state = process.env.PROGRAMDATA + "\\Verax\\state";
+          const code = process.env.PROGRAMFILES + "\\Verax\\probe-write";
+          const token = readFileSync(process.env.PUBLIC + "\\verax-agent.token", "utf8").trim();
+          function denied(fn) { try { fn(); return false; } catch { return true; } }
+          if (!denied(() => readFileSync(state + "\\keys\\record.private.pem"))) process.exit(2);
+          if (!denied(() => appendFileSync(state + "\\approval-commands.jsonl", "x\n"))) process.exit(3);
+          if (!denied(() => writeFileSync(code, "x"))) process.exit(4);
+          const res = await fetch("http://127.0.0.1:8801/mcp", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              accept: "application/json, text/event-stream",
+              authorization: "Bearer " + token,
+            },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+          });
+          if (res.status !== 200) process.exit(5);
+          '@ | Set-Content -Encoding utf8 $script
+          $p = Start-Process -FilePath $node -ArgumentList @($script) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
+          if ($p.ExitCode -ne 0) { Write-Host "::error::probe exit $($p.ExitCode)"; exit $p.ExitCode }
+      - name: diagnose tarball access on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          Write-Host "=== 1. token groups ==="
+          try {
+            $capture = $false
+            $shown = 0
+            foreach ($line in @(whoami /groups /fo list)) {
+              if ($line -match '^\s*Group Name:\s*(.*)$') {
+                $g = $Matches[1]
+                $capture = ($g -like '*Mandatory Label*' -or $g -like '*BUILTIN\Administrators*')
+                if ($capture) { $shown++ }
+              }
+              if ($capture) { Write-Host $line }
+              if ($capture -and [string]::IsNullOrWhiteSpace($line)) { $capture = $false }
+            }
+            if ($shown -eq 0) {
+              Write-Host "no Mandatory Label or BUILTIN\Administrators group block matched"
+              whoami /groups /fo list
+            }
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "=== 2. acl, owner, attributes ==="
+          $dir = $env:VERAX_TARBALLS
+          Write-Host "tarball dir: $dir"
+          try {
+            icacls $dir
+            Write-Host ("Owner: " + (Get-Acl -LiteralPath $dir).Owner)
+            Get-Item -LiteralPath $dir | Format-List Attributes | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          $tarballs = @()
+          try {
+            $tarballs = @(Get-ChildItem -LiteralPath $dir -Filter *.tgz -File | Sort-Object Name)
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          Write-Host "tarball count: $($tarballs.Count)"
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "tarball: $path"
+            try {
+              icacls $path
+              Write-Host ("Owner: " + (Get-Acl -LiteralPath $path).Owner)
+              Get-Item -LiteralPath $path | Format-List Attributes | Out-String -Width 4096 | Write-Host
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 3. read each tarball ==="
+          foreach ($file in $tarballs) {
+            $path = $file.FullName
+            Write-Host "pwsh ReadAllBytes: $path"
+            try {
+              $n = [IO.File]::ReadAllBytes($path).Length
+              Write-Host "OK $n bytes"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+            Write-Host "node ReadFileSync: $path"
+            try {
+              & $env:VERAX_NODE -e "require('fs').readFileSync(process.argv[1]);console.log('ok')" $path
+              Write-Host "node exit: $LASTEXITCODE"
+            } catch {
+              Write-Host $_.Exception.ToString()
+            }
+          }
+          Write-Host "=== 4. defender ==="
+          try {
+            Get-MpComputerStatus -ErrorAction Stop | Select-Object RealTimeProtectionEnabled, AMRunningMode | Format-List | Out-String -Width 4096 | Write-Host
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          try {
+            $cfa = Get-MpPreference -ErrorAction Stop | Select-Object -ExpandProperty EnableControlledFolderAccess
+            Write-Host "EnableControlledFolderAccess: $cfa"
+          } catch {
+            Write-Host $_.Exception.ToString()
+          }
+          exit 0
+      - name: second run refuses a state dir the probe user pre-created
+        id: planted-dir
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            Write-Host "step: uninstall"
+            & $env:VERAX_NODE packages/body/dist/cli.js uninstall
+            Write-Host "LASTEXITCODE=$LASTEXITCODE"
+            Write-Host "step: remove leftover ProgramData\Verax"
+            if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
+            Write-Host "step: remove leftover ProgramFiles\Verax"
+            if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
+            Write-Host "step: rotate veraxprobe password"
+            $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
+            $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+            Set-LocalUser -Name veraxprobe -Password $sec
+            Write-Host "step: credential for veraxprobe"
+            $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
+            Write-Host "step: write pre-create script"
+            $mk = Join-Path $env:PUBLIC 'verax-precreate.ps1'
+          @'
+          New-Item -ItemType Directory -Force -Path (Join-Path $env:ProgramData 'Verax\state') | Out-Null
+          '@ | Set-Content -Encoding utf8 $mk
+            Write-Host "step: pre-create Verax\state as veraxprobe"
+            $pre = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$mk) -Credential $cred -Wait -PassThru -WorkingDirectory $env:PUBLIC
+            Write-Host "ExitCode=$($pre.ExitCode)"
+            if ($pre.ExitCode -ne 0) { Write-Host "::error::pre-create exit $($pre.ExitCode)"; exit 1 }
+            Write-Host "step: install"
+            $log = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            Write-Host "LASTEXITCODE=$code"
+            Write-Host "---- install output ----"
+            Write-Host $log
+            Write-Host "---- end install output ----"
+            if ($code -ne 78) { Write-Host "::error::install exit $code, want 78"; exit 1 }
+            if ($log -notmatch 'was not created by verax install') { Write-Host "::error::install did not name the pre-created directory"; exit 1 }
+            Write-Host "ok: install refused the pre-created state dir"
+            $global:LASTEXITCODE = 0
+            exit 0
+          } catch {
+            Write-Host "FAILED at: $($_.InvocationInfo.Line.Trim())"
+            Write-Host $_.Exception.Message
+            exit 1
+          }
+      - name: a probe user racing the install cannot plant inside the Verax root
+        id: install-race
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          try {
+            Write-Host "step: uninstall and clear leftovers"
+            & $env:VERAX_NODE packages/body/dist/cli.js uninstall | Out-Null
+            if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
+            if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
+            $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
+            $sec = ConvertTo-SecureString $pass -AsPlainText -Force
+            Set-LocalUser -Name veraxprobe -Password $sec
+            $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
+            $race = Join-Path $env:PUBLIC 'verax-race.ps1'
+            $log = Join-Path $env:PUBLIC 'verax-race.log'
+            $stop = Join-Path $env:PUBLIC 'verax-race.stop'
+            Remove-Item -Force -ErrorAction SilentlyContinue $log, $stop
+          @'
+          $root = Join-Path $env:ProgramData 'Verax'
+          $log = Join-Path $env:PUBLIC 'verax-race.log'
+          $stop = Join-Path $env:PUBLIC 'verax-race.stop'
+          $tries = 0
+          $deadline = (Get-Date).AddMinutes(10)
+          while (-not (Test-Path $stop) -and (Get-Date) -lt $deadline) {
+            if ([IO.Directory]::Exists($root)) {
+              foreach ($child in @('probe-planted', 'state\keys', 'state\local-issuer')) {
+                $target = Join-Path $root $child
+                $parent = Split-Path $target -Parent
+                if (-not [IO.Directory]::Exists($parent) -or [IO.Directory]::Exists($target)) { continue }
+                $tries += 1
+                try {
+                  [IO.Directory]::CreateDirectory($target) | Out-Null
+                  Add-Content -Path $log -Value "planted $target"
+                } catch {}
+              }
+            }
+          }
+          Add-Content -Path $log -Value "tries $tries"
+          '@ | Set-Content -Encoding utf8 $race
+            Write-Host "step: start the racer as veraxprobe"
+            $racer = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$race) -Credential $cred -PassThru -WorkingDirectory $env:PUBLIC
+            Start-Sleep -Seconds 3
+            Write-Host "step: install while the racer runs"
+            $out = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            New-Item -ItemType File -Force -Path $stop | Out-Null
+            $null = $racer.WaitForExit(30000)
+            Write-Host "install exit=$code"
+            Write-Host $out
+            $raceLog = if (Test-Path $log) { Get-Content -Raw $log } else { "" }
+            Write-Host "---- racer log ----"
+            Write-Host $raceLog
+            if ($raceLog -notmatch 'tries (\d+)' -or [int]$Matches[1] -lt 1) { Write-Host "::error::the racer never saw the root; the race did not happen"; exit 1 }
+            $root = "$env:ProgramData\Verax"
+            $foreign = @()
+            if (Test-Path $root) {
+              foreach ($item in Get-ChildItem -Recurse -Force $root) {
+                $owner = (Get-Acl -LiteralPath $item.FullName).Owner
+                if ($owner -match 'veraxprobe') { $foreign += "$($item.FullName) owner=$owner" }
+              }
+            }
+            if ($code -eq 0) {
+              if ($raceLog -match 'planted') { Write-Host "::error::install succeeded but the racer planted: $raceLog"; exit 1 }
+              if ($foreign.Count -gt 0) { Write-Host "::error::entries owned by veraxprobe under the root: $($foreign -join '; ')"; exit 1 }
+              Write-Host "ok: install won the race and nothing under the root belongs to veraxprobe"
+            } elseif ($code -eq 78) {
+              if ($out -notmatch 'appeared in|was not created by verax install') { Write-Host "::error::install refused without naming the planted entry"; exit 1 }
+              Write-Host "ok: the racer got in and install refused, naming it"
+            } else {
+              Write-Host "::error::install exit $code, want 0 or 78"; exit 1
+            }
+            $global:LASTEXITCODE = 0
+            exit 0
+          } catch {
+            Write-Host "FAILED at: $($_.InvocationInfo.Line.Trim())"
+            Write-Host $_.Exception.Message
+            exit 1
+          }
+      - name: uninstall
+        if: always()
+        shell: pwsh
+        run: |
+          & $env:VERAX_NODE packages/body/dist/cli.js uninstall
+          Remove-LocalUser -Name veraxprobe -ErrorAction SilentlyContinue
+          net user verax-svc /delete
+          Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1","$env:PUBLIC\verax-race.ps1","$env:PUBLIC\verax-race.log","$env:PUBLIC\verax-race.stop"
+          exit 0
+      - name: platform evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          trap { Write-Host $_.Exception.Message; exit 0 }
+          function Add-Evidence([string]$line) {
+            Write-Host $line
+            $path = $env:GITHUB_STEP_SUMMARY
+            if ([string]::IsNullOrWhiteSpace($path)) { return }
+            [System.IO.File]::AppendAllText($path, "$line`n", [System.Text.UTF8Encoding]::new($false))
+          }
+          function Mark([string]$outcome) {
+            if ($outcome -eq 'success') { return '✅' }
+            return '❌'
+          }
+          $caption = ''
+          $version = ''
+          try {
+            $caption = (Get-CimInstance Win32_OperatingSystem).Caption
+            $version = (Get-CimInstance Win32_OperatingSystem).Version
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $arch = [string]$env:PROCESSOR_ARCHITECTURE
+          $node = 'unavailable'
+          try {
+            $printed = (& node -v 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $printed) { $node = $printed }
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $osLine = ("$caption $version").Trim() -replace '\s+', ' '
+          Add-Evidence '### Platform evidence'
+          Add-Evidence "OS: $osLine"
+          Add-Evidence "Architecture: $arch"
+          Add-Evidence "Node: $node"
+          Add-Evidence 'Matrix leg: names: ${{ matrix.names }}'
+          Add-Evidence "Commit: $env:GITHUB_SHA"
+          Add-Evidence ''
+          $probe = '${{ steps.install-probe.outcome }}'
+          $planted = '${{ steps.planted-dir.outcome }}'
+          $race = '${{ steps.install-race.outcome }}'
+          Add-Evidence "$(Mark $probe) installs as a separate service account and starts the service"
+          Add-Evidence "$(Mark $probe) a non-admin user cannot read the signing key"
+          Add-Evidence "$(Mark $probe) a non-admin user cannot write the approval queue"
+          Add-Evidence "$(Mark $probe) a non-admin user cannot change the installed code"
+          Add-Evidence "$(Mark $probe) the agent token works through the service"
+          Add-Evidence "$(Mark $planted) a directory planted by a non-admin user is refused"
+          Add-Evidence "$(Mark $race) a non-admin user racing the install cannot plant inside the Verax root"
+          exit 0
+
+  linux:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two Ubuntu releases and ARM: the install touches useradd, systemd and file modes,
+        # which differ between releases and are untested on ARM otherwise.
+        os: [ubuntu-24.04, ubuntu-22.04, ubuntu-24.04-arm]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: official Node
+        run: |
+          set -euo pipefail
+          ver="$NODE_VERSION"
+          case "$(uname -m)" in
+            x86_64) arch="x64" ;;
+            aarch64) arch="arm64" ;;
+            *) echo "unsupported arch: $(uname -m)"; exit 1 ;;
+          esac
+          name="node-v${ver}-linux-${arch}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
+          curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
+          grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && sha256sum -c -)
+          sudo mkdir -p /usr/local/lib/nodejs
+          sudo tar -C /usr/local/lib/nodejs -xzf "/tmp/${name}"
+          sudo chown -R root:root /usr/local/lib/nodejs
+          sudo chmod -R go-w /usr/local/lib/nodejs
+          node="/usr/local/lib/nodejs/node-v${ver}-linux-${arch}/bin/node"
+          real="$(readlink -f "$node")"
+          echo "node -v: $("$node" -v)"
+          echo "realpath: $real"
+          stat -c '%U:%G %a %n' "$real"
+          echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
+          echo "$(dirname "$node")" >> "$GITHUB_PATH"
+      - name: npm ci
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm ci
+      - name: build:dist
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm run build:dist
+      - name: pack this pull request and lock the tarball directory
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          dir="${RUNNER_TEMP}/verax-tarballs"
+          mkdir -p "$dir"
+          npm pack -w @verax-ai/inventory --pack-destination "$dir"
+          npm pack -w @verax-ai/proxy --pack-destination "$dir"
+          npm pack -w @verax-ai/body --pack-destination "$dir"
+          sudo chown -R root:root "$dir"
+          sudo chmod -R a-w,u+rX "$dir"
+          echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
+      - name: install and probe as the invoking user
+        id: install-probe
+        run: |
+          set -euo pipefail
+          # sudo sets SUDO_USER to the invoking account (runner on this job).
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          curl -fsS http://127.0.0.1:8801/healthz >/dev/null
+          if cat /var/lib/verax/keys/record.private.pem; then echo "private key was readable"; exit 1; fi
+          if echo x >> /var/lib/verax/approval-commands.jsonl; then echo "approval log was writable"; exit 1; fi
+          if touch /opt/verax/probe-write; then echo "code dir was writable"; exit 1; fi
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const token = readFileSync(process.env.HOME + "/.verax/agent.token", "utf8").trim();
+            const res = await fetch("http://127.0.0.1:8801/mcp", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+                authorization: "Bearer " + token,
+              },
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+            });
+            if (res.status !== 200) process.exit(1);
+          '
+          set +e
+          node packages/body/dist/cli.js approve probe-ref
+          code=$?
+          set -e
+          test "$code" = "77"
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+      - name: reinstall after uninstall
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          curl -fsS http://127.0.0.1:8801/healthz >/dev/null
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+      - name: uninstall
+        if: always()
+        run: sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+      - name: platform evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=""
+          if [ -f /etc/os-release ]; then
+            pretty=$(grep '^PRETTY_NAME=' /etc/os-release | head -n 1 | cut -d= -f2- | tr -d '"')
+          fi
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          probe='${{ steps.install-probe.outcome }}'
+          add "$(mark "$probe") installs as a separate service account and starts the service"
+          add "$(mark "$probe") a non-admin user cannot read the signing key"
+          add "$(mark "$probe") a non-admin user cannot write the approval queue"
+          add "$(mark "$probe") a non-admin user cannot change the installed code"
+          add "$(mark "$probe") the agent token works through the service"
+          exit 0
+
+  macos:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # Apple Silicon (macos-15) and Intel (macos-15-intel). macos-13 was retired in December 2025 and never started.
+        os: [macos-15, macos-15-intel]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: official Node
+        run: |
+          set -euo pipefail
+          ver="$NODE_VERSION"
+          arch="$(uname -m)"
+          case "$arch" in
+            arm64) ;;
+            x86_64) arch="x64" ;;
+            *) echo "unsupported arch: $arch"; exit 1 ;;
+          esac
+          name="node-v${ver}-darwin-${arch}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
+          curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
+          grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && shasum -a 256 -c -)
+          sudo mkdir -p /opt/verax-node
+          sudo tar -C /opt/verax-node -xzf "/tmp/${name}"
+          sudo chown -R root:wheel /opt/verax-node
+          sudo chmod -R go-w /opt/verax-node
+          node="/opt/verax-node/node-v${ver}-darwin-${arch}/bin/node"
+          real="$("$node" -p "require('fs').realpathSync.native(process.execPath)")"
+          echo "node -v: $("$node" -v)"
+          echo "realpath: $real"
+          dir="$real"
+          while [ "$dir" != "/" ]; do
+            ls -ld "$dir"
+            dir="$(dirname "$dir")"
+          done
+          ls -ld /
+          echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
+          echo "$(dirname "$node")" >> "$GITHUB_PATH"
+      - name: npm ci
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm ci
+      - name: build:dist
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm run build:dist
+      - name: pack this pull request and lock the tarball directory
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          dir="${RUNNER_TEMP}/verax-tarballs"
+          mkdir -p "$dir"
+          npm pack -w @verax-ai/inventory --pack-destination "$dir"
+          npm pack -w @verax-ai/proxy --pack-destination "$dir"
+          npm pack -w @verax-ai/body --pack-destination "$dir"
+          sudo chown -R root:wheel "$dir"
+          sudo chmod -R go-w,u+rX "$dir"
+          echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
+      - name: install and probe as the invoking user
+        id: install-probe
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          curl -fsS http://127.0.0.1:8801/healthz >/dev/null
+          if cat "/Library/Application Support/Verax/state/keys/record.private.pem"; then echo "private key was readable"; exit 1; fi
+          if echo x >> "/Library/Application Support/Verax/state/approval-commands.jsonl"; then echo "approval log was writable"; exit 1; fi
+          if touch "/Library/Verax/code/probe-write"; then echo "code dir was writable"; exit 1; fi
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const token = readFileSync(process.env.HOME + "/.verax/agent.token", "utf8").trim();
+            const res = await fetch("http://127.0.0.1:8801/mcp", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+                accept: "application/json, text/event-stream",
+                authorization: "Bearer " + token,
+              },
+              body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+            });
+            if (res.status !== 200) process.exit(1);
+          '
+          set +e
+          node packages/body/dist/cli.js approve probe-ref
+          code=$?
+          set -e
+          test "$code" = "77"
+      - name: diagnose service on failure
+        if: failure()
+        run: |
+          set +e
+          echo "launchctl print system/com.verax-ai.body"
+          sudo /bin/launchctl print system/com.verax-ai.body
+          err="/Library/Application Support/Verax/state/body.err"
+          echo "StandardErrorPath $err"
+          if [ -f "$err" ]; then
+            sudo /usr/bin/tail -n 40 "$err"
+          else
+            echo "stderr log missing: $err"
+          fi
+          dir="/Library/Application Support/Verax/state"
+          while true; do
+            line="$(sudo /usr/bin/stat -f '%Su|%p|%N' "$dir" 2>/dev/null || true)"
+            owner="${line%%|*}"
+            rest="${line#*|}"
+            mode="${rest%%|*}"
+            name="${rest#*|}"
+            if [ -n "$mode" ]; then
+              perm=$((8#$mode & 511))
+              printf '%s %04o %s\n' "$owner" "$perm" "$name"
+            else
+              echo "stat failed $dir"
+            fi
+            if [ "$dir" = "/" ]; then break; fi
+            next="${dir%/*}"
+            if [ -z "$next" ]; then next="/"; fi
+            dir="$next"
+          done
+      - name: pre-created state dir is refused
+        run: |
+          set -euo pipefail
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+          sudo rm -rf "/Library/Application Support/Verax" /Library/Verax
+          sudo mkdir -p "/Library/Application Support/Verax/state"
+          set +e
+          log="$(sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801 2>&1)"
+          code=$?
+          set -e
+          test "$code" = "78"
+          printf '%s\n' "$log" | grep -q "was not created by verax install"
+      - name: uninstall
+        if: always()
+        run: |
+          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+          sudo /bin/launchctl bootout system/com.verax-ai.body || true
+          sudo rm -f /Library/LaunchDaemons/com.verax-ai.body.plist
+      - name: platform evidence
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=$(sw_vers 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          probe='${{ steps.install-probe.outcome }}'
+          add "$(mark "$probe") installs as a separate service account and starts the service"
+          add "$(mark "$probe") a non-admin user cannot read the signing key"
+          add "$(mark "$probe") a non-admin user cannot write the approval queue"
+          add "$(mark "$probe") a non-admin user cannot change the installed code"
+          add "$(mark "$probe") the agent token works through the service"
+          exit 0

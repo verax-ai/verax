@@ -49,7 +49,9 @@ export type Policy = {
   /** Document-root posture. Absent keeps today's optional `_inputs`. */
   requireInputs?: boolean;
   evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
-  rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number } } | null;
+  /** Spend-rule day bucket. Absent means UTC, the same as `dayOffsetMinutes: 0`. */
+  dayOffsetMinutes?: number;
+  rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number; dayOffsetMinutes?: number } } | null;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
@@ -113,8 +115,8 @@ export type DecisionInputs = {
   approver?: { id: string; via: ApprovalChannel | "proxy"; resolves: string };
 };
 
-/** How an operator's approval reached the ledger: `verax approve` on the machine, or the body's `/api/approve`. */
-export type ApprovalChannel = "cli" | "http";
+/** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */
+export type ApprovalChannel = "cli" | "cli-script" | "http";
 
 export type InputsLog = {
   append(ref: string, inputs: DecisionInputs): Promise<void>;

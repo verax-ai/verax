@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { beginWinOwnerRun, endWinOwnerRun, ensureTokenParent, mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
 import {
   calculateJwkThumbprint,
   exportJWK,
@@ -33,13 +34,17 @@ export function loadEnvFile(path: string, env: NodeJS.ProcessEnv = process.env):
   } catch {
     return { ok: false, reason: "env file is missing or unreadable" };
   }
+  const parsed: Array<[string, string]> = [];
   for (const line of text.split(/\r?\n/)) {
-    const trimmed = line.trim();
+    let trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("export ")) trimmed = trimmed.slice("export ".length).trim();
     const eq = trimmed.indexOf("=");
     if (eq <= 0) continue;
     const key = trimmed.slice(0, eq).trim();
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) continue;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !key.startsWith("VERAX_")) {
+      return { ok: false, reason: `env file refuses ${key}` };
+    }
     let value = trimmed.slice(eq + 1).trim();
     if (
       (value.startsWith('"') && value.endsWith('"') && value.length >= 2) ||
@@ -47,9 +52,21 @@ export function loadEnvFile(path: string, env: NodeJS.ProcessEnv = process.env):
     ) {
       value = value.slice(1, -1);
     }
-    env[key] = value;
+    parsed.push([key, value]);
   }
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("VERAX_")) delete env[key];
+  }
+  for (const [key, value] of parsed) env[key] = value;
   return { ok: true };
+}
+
+/** `serve --env-file` refuses a file that names neither JWKS source. */
+export function envFileJwksMissing(env: NodeJS.ProcessEnv): string | null {
+  const file = env.VERAX_JWKS_FILE?.trim() ?? "";
+  const url = env.VERAX_JWKS_URL?.trim() ?? "";
+  if (file === "" && url === "") return "env file sets neither VERAX_JWKS_FILE nor VERAX_JWKS_URL";
+  return null;
 }
 
 function shippedPolicyPath(): string | null {
@@ -71,7 +88,12 @@ function shippedPolicyPath(): string | null {
   return null;
 }
 
-function ownerOnly(path: string): void {
+/** POSIX keeps owner-only mode. Windows grants the current user only outside install mode. */
+function ownerOnly(path: string, grantOwner: boolean): void {
+  if (process.platform === "win32") {
+    if (grantOwner) restrictToOwnerWin32(path);
+    return;
+  }
   try {
     chmodSync(path, 0o600);
   } catch {
@@ -141,9 +163,38 @@ function parseInitArgs(
   return { stateDir: resolve(stateDir), force, days, port };
 }
 
+export type InitLocalOpts = {
+  /** Write the agent token here and leave no copy under the state directory. */
+  tokenPath?: string;
+  /** Installed body prints its own summary. Skip this command's user-facing text. */
+  quiet?: boolean;
+  /**
+   * Install mode. State files inherit the state directory ACL (svc, Administrators, SYSTEM).
+   * Do not grant the invoking user and do not call `restrictToOwnerWin32`.
+   * The profile token is locked by the install plan, not here.
+   */
+  noOwnerGrant?: boolean;
+  /** Install mode. Defaults to process.env. SUDO_USER names the POSIX owner. */
+  env?: NodeJS.ProcessEnv;
+};
+
 export async function runInitLocal(
   argv: readonly string[],
   io: InitIo = { stdout: process.stdout, stderr: process.stderr },
+  opts: InitLocalOpts = {},
+): Promise<number> {
+  beginWinOwnerRun();
+  try {
+  return await runInitLocalBody(argv, io, opts);
+  } finally {
+    endWinOwnerRun();
+  }
+}
+
+async function runInitLocalBody(
+  argv: readonly string[],
+  io: InitIo,
+  opts: InitLocalOpts,
 ): Promise<number> {
   const parsed = parseInitArgs(argv);
   if ("error" in parsed) {
@@ -183,21 +234,43 @@ export async function runInitLocal(
     .setExpirationTime(now + parsed.days * 24 * 60 * 60)
     .sign(key);
 
-  mkdirSync(issuerDir, { recursive: true, mode: 0o700 });
+  const createdState = !existsSync(stateDir);
+  const wrote: string[] = [];
+  const rollback = (): void => {
+    if (createdState) {
+      rmSync(stateDir, { recursive: true, force: true });
+      return;
+    }
+    for (const p of [...wrote].reverse()) rmSync(p, { force: true });
+    rmSync(issuerDir, { recursive: true, force: true });
+  };
+  const grantOwner = opts.noOwnerGrant !== true;
+  try {
+  if (createdState) mkdirLeaf(stateDir, 0o700);
+  if (process.platform === "win32" && grantOwner) restrictToOwnerWin32(stateDir);
+  mkdirLeaf(issuerDir, 0o700);
   const keyPath = join(issuerDir, "key.pem");
   const jwksPath = join(issuerDir, "jwks.json");
-  const tokenPath = join(issuerDir, "agent.token");
+  const insideToken = join(issuerDir, "agent.token");
+  const external = opts.tokenPath !== undefined && resolve(opts.tokenPath) !== resolve(insideToken);
+  const tokenPath = external ? resolve(opts.tokenPath!) : insideToken;
+  if (external) ensureTokenParent(dirname(tokenPath), opts.env ?? process.env);
   const envPath = join(stateDir, "verax.env");
   writeFileSync(keyPath, pem, { encoding: "utf8", mode: 0o600 });
-  ownerOnly(keyPath);
+  wrote.push(keyPath);
+  ownerOnly(keyPath, grantOwner);
   writeFileSync(jwksPath, `${JSON.stringify({ keys: [publicJwk] })}\n`, { encoding: "utf8", mode: 0o600 });
+  wrote.push(jwksPath);
+  ownerOnly(jwksPath, grantOwner);
   writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600 });
-  ownerOnly(tokenPath);
+  wrote.push(tokenPath);
+  ownerOnly(tokenPath, grantOwner);
+  if (external && existsSync(insideToken)) unlinkSync(insideToken);
 
-  const wrote: string[] = [keyPath, jwksPath, tokenPath];
   if (!existsSync(policyDest) && policySrc) {
     writeFileSync(policyDest, readFileSync(policySrc));
     wrote.push(policyDest);
+    ownerOnly(policyDest, grantOwner);
   }
   const envBody = [
     `VERAX_ISSUER=${ISSUER}`,
@@ -210,9 +283,12 @@ export async function runInitLocal(
   ].join("\n");
   writeFileSync(envPath, envBody, { encoding: "utf8" });
   wrote.push(envPath);
+  ownerOnly(envPath, grantOwner);
 
   const lines = [
     ...wrote.map((p) => `wrote ${p}`),
+    "",
+    "A shell as the same user can read this directory and approve its own calls, so for anything that matters run the body as another OS user or in a container, or keep the agent in a sandbox that cannot read the state directory.",
     "",
     "Start the body:",
     `verax serve --env-file ${shQuote(envPath)}`,
@@ -237,6 +313,14 @@ export async function runInitLocal(
     "A held call is approved on this machine with: verax approve",
     "",
   ];
-  io.stdout.write(lines.join("\n"));
+  if (!opts.quiet) io.stdout.write(lines.join("\n"));
   return 0;
+  } catch (err) {
+    const externalToken = wrote.find((p) => !p.startsWith(stateDir));
+    rollback();
+    if (externalToken) rmSync(externalToken, { force: true });
+    const detail = err instanceof Error ? err.message : "owner-only failed";
+    io.stderr.write(`${detail}\n`);
+    return err instanceof SystemToolError ? EX_CONFIG : 1;
+  }
 }
