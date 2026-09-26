@@ -33,6 +33,8 @@ export type ApprovalRow = {
   payee?: unknown;
   currency?: unknown;
   createdAtMs?: number;
+  /** Set when the row becomes approved. Missing on older files: those count toward today. */
+  approvedAtMs?: number;
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;
@@ -44,8 +46,25 @@ export type ApprovalsLog = {
   get(ref: string): Promise<ApprovalRow | null>;
   listPending(): Promise<ApprovalRow[]>;
   listAll(): Promise<ApprovalRow[]>;
-  updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void>;
+  updateStatus(
+    ref: string,
+    status: "approved" | "expired",
+    extra?: { allowRef?: string; approvedAtMs?: number },
+  ): Promise<void>;
 };
+
+function withStatus(
+  cur: ApprovalRow,
+  status: "approved" | "expired",
+  extra?: { allowRef?: string; approvedAtMs?: number },
+): ApprovalRow {
+  return {
+    ...cur,
+    status,
+    ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}),
+    ...(typeof extra?.approvedAtMs === "number" ? { approvedAtMs: extra.approvedAtMs } : {}),
+  };
+}
 
 function lastByRef(rows: ApprovalRow[]): Map<string, ApprovalRow> {
   const map = new Map<string, ApprovalRow>();
@@ -83,10 +102,14 @@ export class MemoryApprovalsLog implements ApprovalsLog {
     return [...this.byRef.values()];
   }
 
-  async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
+  async updateStatus(
+    ref: string,
+    status: "approved" | "expired",
+    extra?: { allowRef?: string; approvedAtMs?: number },
+  ): Promise<void> {
     const cur = this.byRef.get(ref);
     if (!cur) return;
-    await this.append({ ...cur, status, ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}) });
+    await this.append(withStatus(cur, status, extra));
   }
 }
 
@@ -116,10 +139,14 @@ export class FileApprovalsLog implements ApprovalsLog {
     return [...this.byRef.values()];
   }
 
-  async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
+  async updateStatus(
+    ref: string,
+    status: "approved" | "expired",
+    extra?: { allowRef?: string; approvedAtMs?: number },
+  ): Promise<void> {
     const cur = this.byRef.get(ref);
     if (!cur) return;
-    await this.append({ ...cur, status, ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}) });
+    await this.append(withStatus(cur, status, extra));
   }
 
   private read(): ApprovalRow[] {
@@ -167,6 +194,7 @@ export function spentTodayMinorOf(
     subject: string;
     status: string;
     createdAtMs?: number;
+    approvedAtMs?: number;
     expiresAtMs: number;
     args: Record<string, unknown>;
   }>,
@@ -182,9 +210,18 @@ export function spentTodayMinorOf(
   let sum = 0;
   for (const row of rows) {
     if (row.subject !== "spend") continue;
-    if (row.status !== "pending" && row.status !== "approved") continue;
-    const created = row.createdAtMs ?? row.expiresAtMs - approvalTtlMs;
-    if (created < start || created >= end) continue;
+    if (row.status === "approved") {
+      // Bucket by approval time. A row written before this field existed has
+      // no approvedAtMs and counts toward the day being checked.
+      if (typeof row.approvedAtMs === "number" && (row.approvedAtMs < start || row.approvedAtMs >= end)) {
+        continue;
+      }
+    } else if (row.status === "pending") {
+      const created = row.createdAtMs ?? row.expiresAtMs - approvalTtlMs;
+      if (created < start || created >= end) continue;
+    } else {
+      continue;
+    }
     if (row.args.currency !== currency) continue;
     const amt = row.args.amountMinor;
     if (typeof amt === "number") sum += amt;
@@ -285,11 +322,12 @@ async function approvePendingUnlocked(opts: {
   if (resolved || (await hasResolves(inputsLog, opts.ledger, opts.ref))) {
     const hit = resolved ?? lookupResolvedBy(opts.ledger, opts.ref);
     if (snap?.status === "pending" && hit) {
-      await opts.approvals.updateStatus(
-        opts.ref,
-        hit.kind === "allow" ? "approved" : "expired",
-        hit.kind === "allow" ? { allowRef: hit.ref } : undefined,
-      );
+      if (hit.kind === "allow") {
+        const stamped = (await lookupDecisionByRef(opts.ledger, hit.ref))?.timestampMs ?? opts.now();
+        await opts.approvals.updateStatus(opts.ref, "approved", { allowRef: hit.ref, approvedAtMs: stamped });
+      } else {
+        await opts.approvals.updateStatus(opts.ref, "expired");
+      }
     }
     return alreadyResolved(hit?.kind === "allow" ? hit.ref : snap?.allowRef);
   }
@@ -394,7 +432,7 @@ async function approvePendingUnlocked(opts: {
       resultHash,
     );
   }
-  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef });
+  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef, approvedAtMs: opts.now() });
   return { ok: true, allowRef };
 }
 

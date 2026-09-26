@@ -1,16 +1,20 @@
 import {
   explain,
   spokenReason,
+  tenantKey,
   type ExplainOpts,
   type Ledger,
+  type Principal,
   type ToolCall,
   type ToolResult,
 } from "@verax-ai/proxy";
+import { inputsPrincipal } from "../inputs-read.ts";
 
 export async function auditExplain(
   call: ToolCall,
   ledger: Ledger,
   opts?: ExplainOpts,
+  caller?: { principal: Principal; stateDir: string },
 ): Promise<ToolResult> {
   const ref = call.arguments.ref;
   if (typeof ref !== "string" || ref === "") {
@@ -18,6 +22,15 @@ export async function auditExplain(
       content: [{ type: "text", text: JSON.stringify({ error: "ref-required" }) }],
       isError: true,
     };
+  }
+  if (caller) {
+    const owner = await inputsPrincipal(caller.stateDir, ref);
+    if (owner !== null && tenantKey(owner) !== tenantKey(caller.principal)) {
+      return {
+        content: [{ type: "text", text: JSON.stringify({ error: spokenReason("tenant-mismatch") }) }],
+        isError: true,
+      };
+    }
   }
   let result;
   try {

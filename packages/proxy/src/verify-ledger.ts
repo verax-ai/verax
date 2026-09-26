@@ -100,6 +100,12 @@ export type VerifyResult = {
   checkpointTrust: VerifyTrust;
   /** What `index.jsonl` still names. Missing file is not a failure. */
   index: VerifyIndex;
+  /**
+   * Absent index: effect completeness was not checked, and that absence is
+   * not itself a failure. Present index: every ref it marks was compared to
+   * a bound effect row.
+   */
+  effectCompleteness: string;
   /** What the newest checkpoint covers, and the records after it. */
   tail: VerifyTail;
   problems: string[];
@@ -394,6 +400,8 @@ function effectTrustOf(pinned: string, taken: string | null, effectCount: number
 }
 
 const INDEX_NONE = "index: none (cannot check for removed records)";
+const EFFECT_COMPLETENESS_UNCHECKED = "effect completeness was not checked";
+const EFFECT_COMPLETENESS_CHECKED = "effect completeness checked";
 const TAIL_NONE =
   "tail: no checkpoint; removing the newest records with their effects is not detectable from these files";
 
@@ -422,32 +430,65 @@ function indexLineProblems(text: string): string[] {
   return problems;
 }
 
-function indexStatement(dir: string, decisionRefs: ReadonlySet<string>): { index: VerifyIndex; problems: string[] } {
+function effectRefsInIndex(text: string): Set<string> {
+  const refs = new Set<string>();
+  for (const line of parseIndexText(text)) {
+    if (line.hasEffect || line.kind === "effect") refs.add(line.ref);
+  }
+  return refs;
+}
+
+/**
+ * `null` means the index is not there or could not be read, so effect
+ * completeness was not checked. An empty set means it was checked and it
+ * marks no effect.
+ */
+function indexStatement(
+  dir: string,
+  decisionRefs: ReadonlySet<string>,
+): { index: VerifyIndex; problems: string[]; effectRefs: Set<string> | null } {
   if (!existsSync(indexPath(dir))) {
-    return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [] };
+    return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [], effectRefs: null };
   }
   let text = "";
   try {
     text = readFileSync(indexPath(dir), "utf8");
   } catch {
     const line = "index could not be read";
-    return { index: { present: true, missing: 0, line }, problems: [line] };
+    return { index: { present: true, missing: 0, line }, problems: [line], effectRefs: null };
   }
   const parseProblems = indexLineProblems(text);
+  const lines = parseIndexText(text);
   const named = new Set<string>();
-  for (const line of parseIndexText(text)) named.add(line.ref);
+  for (const line of lines) named.add(line.ref);
+  const effectRefs = effectRefsInIndex(text);
   let missing = 0;
   for (const ref of named) {
     if (!decisionRefs.has(ref)) missing += 1;
   }
   if (missing > 0) {
     const line = `index names ${missing} record(s) the ledger no longer holds`;
-    return { index: { present: true, missing, line }, problems: [...parseProblems, line] };
+    return { index: { present: true, missing, line }, problems: [...parseProblems, line], effectRefs };
   }
   return {
     index: { present: true, missing: 0, line: `index: ${named.size} ref(s), each still a decision` },
     problems: parseProblems,
+    effectRefs,
   };
+}
+
+function noteEffectCompleteness(
+  effectRefs: Set<string> | null,
+  bound: ReadonlySet<string>,
+  problems: string[],
+): string {
+  if (effectRefs === null) return EFFECT_COMPLETENESS_UNCHECKED;
+  for (const ref of effectRefs) {
+    if (!bound.has(ref)) {
+      problems.push(`index says ref ${ref} has an effect but no bound effect row`);
+    }
+  }
+  return EFFECT_COMPLETENESS_CHECKED;
 }
 
 function tailStatement(
@@ -533,6 +574,7 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     effectTrust: trust,
     checkpointTrust: trust,
     index: { present: false, missing: 0, line: INDEX_NONE },
+    effectCompleteness: EFFECT_COMPLETENESS_UNCHECKED,
     tail: { line: TAIL_NONE, checkpoint: null },
     problems: [problem],
   };
@@ -576,6 +618,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     noteEd25519(opts.effectPublicKeyPem, problems);
     const emptyIndex = indexStatement(dir, new Set());
     const emptyTail = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
+    const effectCompleteness = noteEffectCompleteness(emptyIndex.effectRefs, new Set(), problems);
     problems.push(...emptyIndex.problems, ...emptyTail.problems);
     return {
       ok: false,
@@ -591,6 +634,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       effectTrust: effectTrustOf(opts.effectPublicKeyPem?.trim() ?? "", null, 0),
       checkpointTrust: emptyTail.checkpointTrust,
       index: emptyIndex.index,
+      effectCompleteness,
       tail: emptyTail.tail,
       problems,
     };
@@ -692,6 +736,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   let effects = effectRows.length;
   let effectsBound = 0;
   let effectsOrphaned = 0;
+  const boundPrimaryRefs = new Set<string>();
   for (const e of effectRows) {
     const ref = typeof e.row?.ref === "string" ? e.row.ref : null;
     const effectHash = typeof e.row?.effectHash === "string" ? e.row.effectHash : null;
@@ -750,9 +795,11 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       continue;
     }
     effectsBound += 1;
+    if (ref !== null) boundPrimaryRefs.add(ref);
   }
 
   const indexed = indexStatement(dir, refler);
+  const effectCompleteness = noteEffectCompleteness(indexed.effectRefs, boundPrimaryRefs, problems);
   const tailed = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
   problems.push(...indexed.problems, ...tailed.problems);
 
@@ -773,6 +820,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     effectTrust,
     checkpointTrust: tailed.checkpointTrust,
     index: indexed.index,
+    effectCompleteness,
     tail: tailed.tail,
     problems,
   };

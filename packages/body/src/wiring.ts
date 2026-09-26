@@ -113,7 +113,9 @@ export function createBodyServices(opts: {
         : {}),
     };
   };
-  registry.set("audit.explain", async (call) => auditExplain(call, ledger, await explainOpts()));
+  registry.set("audit.explain", async (call, principal) =>
+    auditExplain(call, ledger, await explainOpts(), { principal, stateDir: opts.stateDir }),
+  );
   registry.set("message.read", (call, principal) => messageRead(call, opts.stateDir, principal));
   registry.set("message.send", (call, principal, ref) =>
     messageSend(call, opts.stateDir, ref ?? "", principal),

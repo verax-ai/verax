@@ -32,7 +32,7 @@ export type PolicyDocument = {
   default: "deny";
   approvalTtlMs?: number;
   egress?: readonly string[];
-  /** Body-wide: a call with no `_inputs` key is deny inputs-required. */
+  /** Body-wide: a call with no `_inputs` key, or an empty list, is deny inputs-required. */
   requireInputs?: true;
   limits?: {
     ratePerMinute?: number;
@@ -42,17 +42,47 @@ export type PolicyDocument = {
   rules: PolicyRule[];
 };
 
+/** One DNS label: letters, digits, hyphens; no leading or trailing hyphen. */
+function plainDnsLabel(label: string): boolean {
+  if (label.length === 0 || label.length > 63) return false;
+  return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label);
+}
+
+/** A hostname and nothing else: no port, path, whitespace, or trailing dot. */
+function plainDnsHost(host: string): string | undefined {
+  if (host.length === 0 || host.length > 253) return undefined;
+  const labels = host.split(".");
+  if (labels.length === 0 || labels.some((label) => !plainDnsLabel(label))) return undefined;
+  return host.toLowerCase();
+}
+
+/**
+ * `to` is one address. More than one `@`, a local part that carries a list
+ * separator or whitespace, or a host that is not a plain DNS name yields no
+ * host, and the egress rule then denies `egress-host-missing`.
+ */
+function hasControl(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return true;
+  }
+  return false;
+}
+
+function messageSendHost(args: Record<string, unknown>): string | undefined {
+  const to = args.to;
+  if (typeof to !== "string" || to === "") return undefined;
+  const at = to.indexOf("@");
+  if (at <= 0 || at !== to.lastIndexOf("@")) return undefined;
+  const local = to.slice(0, at);
+  const host = to.slice(at + 1);
+  if (local === "" || /[\s,;<>"]/.test(local) || hasControl(local)) return undefined;
+  return plainDnsHost(host);
+}
+
 /** Named per tool. Do not sniff `host` / `url` on arbitrary arguments. */
 export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => string | undefined> = {
-  "message.send": (args) => {
-    const to = args.to;
-    if (typeof to !== "string" || to === "") return undefined;
-    const at = to.lastIndexOf("@");
-    if (at < 0) return undefined;
-    const host = to.slice(at + 1).trim().toLowerCase();
-    if (host === "" || host.includes("/") || host.includes(" ")) return undefined;
-    return host;
-  },
+  "message.send": messageSendHost,
 };
 
 const DEFAULT_APPROVAL_TTL_MS = 86_400_000;

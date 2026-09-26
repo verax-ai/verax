@@ -82,6 +82,7 @@ export function renderVerify(r: VerifyResult): string {
   );
   lines.push(`              ${r.checkpointTrust.note}`);
   lines.push(r.index.line);
+  lines.push(r.effectCompleteness);
   if (r.tail.checkpoint) {
     const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
     const holds =
@@ -180,6 +181,7 @@ export async function runVerify(
       effectTrust: { source: "none", publicKeyPem: null, note: problem },
       checkpointTrust: { source: "none", publicKeyPem: null, note: problem },
       index: { present: false, missing: 0, line: "index: none (cannot check for removed records)" },
+      effectCompleteness: "effect completeness was not checked",
       tail: {
         line: "tail: no checkpoint; removing the newest records with their effects is not detectable from these files",
         checkpoint: null,
