@@ -115,7 +115,7 @@ describe("attack R12", () => {
         policyHash,
         approvals: proxy.approvals,
         inputsLog: proxy.inputsLog,
-        budgetGuard: createApprovalBudgetGuard({ policy, approvals: proxy.approvals, now: () => nowMs }),
+        budgetGuard: createApprovalBudgetGuard({ policy, approvals: proxy.approvals, now: () => nowMs, ledger }),
       });
     };
     const okA = await approve("spend-a", approveA);

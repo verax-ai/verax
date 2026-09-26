@@ -171,7 +171,8 @@ export type InitLocalOpts = {
   /**
    * Install mode. State files inherit the state directory ACL (svc, Administrators, SYSTEM).
    * Do not grant the invoking user and do not call `restrictToOwnerWin32`.
-   * The profile token is locked by the install plan, not here.
+   * Elevated install does not pass a token path under the invoking user's home.
+   * `tokenPath` remains for a non-elevated `verax init --local`.
    */
   noOwnerGrant?: boolean;
   /** Install mode. Defaults to process.env. SUDO_USER names the POSIX owner. */

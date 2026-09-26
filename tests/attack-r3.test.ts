@@ -27,6 +27,7 @@ const winOpts = {
   bodyVersion: "0.3.0",
   npmCli: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
   stateExists: false,
+  userSid: "S-1-5-21-1001",
 };
 
 const linuxOpts = {
@@ -105,6 +106,7 @@ describe("attack R3", () => {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: files, USERPROFILE: join(root, "home") },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },
         exec,
         io: {
@@ -135,6 +137,10 @@ describe("attack R3", () => {
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
         return { status: 1, stdout: "", stderr: "The user name could not be found." };
       }
+      // The agent token folder is named by the invoking SID (R14-8).
+      if (/whoami\.exe$/i.test(argv[0] ?? "") && argv.includes("/user")) {
+        return { status: 0, stdout: "desk\\operator S-1-5-21-1001\n", stderr: "" };
+      }
       const dirtyAcl = `${adminAcl}(A;OICI;FA;;;${ATTACKER_SID})`;
       const paths = sddlBatchPaths(stdin);
       if (paths) {
@@ -160,11 +166,12 @@ describe("attack R3", () => {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: files, USERPROFILE: join(root, "home") },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },
         exec,
         io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
       });
-      assert.ok(rootReads >= 2, `the lock did not re-read the root (${rootReads} reads)`);
+      assert.ok(rootReads >= 2, `the lock did not re-read the root (${rootReads} reads): ${err.join("")}`);
       assert.equal(code, EX_CONFIG, err.join(""));
       assert.match(err.join(""), /was not created by verax install/);
     } finally {
@@ -192,7 +199,7 @@ describe("attack R3", () => {
   it("R3-4 VERAX_INVOKING_HOME cannot move the agent token", () => {
     const plan = planInstall(
       "linux",
-      { SUDO_USER: "runner", VERAX_INVOKING_HOME: "/tmp/not-the-user" },
+      { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: "/tmp/not-the-user" },
       linuxOpts,
     );
     const blob = planText(plan);
@@ -206,8 +213,9 @@ describe("attack R3", () => {
     const seen: string[][] = [];
     const code = await runInstall(["install", "--port", "8801"], {
       platform: "linux",
-      env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: "/tmp/not-the-user" },
+      env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: "/tmp/not-the-user" },
       elevated: () => true,
+        codeProbe: () => false,
       layout: linuxOpts,
       exec: (argv: string[]) => {
         seen.push(argv);
@@ -221,7 +229,7 @@ describe("attack R3", () => {
   });
 
   it("R3-5 an existing Linux verax login that we did not create is refused", () => {
-    const plan = planInstall("linux", { SUDO_USER: "runner", VERAX_INVOKING_HOME: "/home/runner" }, {
+    const plan = planInstall("linux", { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: "/home/runner" }, {
       ...linuxOpts,
       linuxAccount: { exists: true, createdByUs: false },
     });
@@ -266,6 +274,7 @@ describe("attack R3", () => {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },
         exec,
         io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },

@@ -23,11 +23,16 @@ neither is a boundary.
 `verax install` puts the code and the state directory out of that shell's
 reach on Windows, Linux, and macOS. The body runs as the dedicated local
 user `verax-svc` on Windows, as the `verax` system user on Linux, or as
-the hidden `_verax` user on macOS. The agent token is the only credential
-left in the invoking user's profile. An administrator, or root, is outside
-this model: they can change the ACL, the task, the unit, or the launch
-daemon. An elevated terminal the operator leaves open for the agent is also
-outside it.
+the hidden `_verax` user on macOS. On Windows the agent token is
+`%ProgramData%\Verax\agent-token\<SID>\agent.token`, owned by
+Administrators, with read for the invoking user's SID. On Linux and macOS
+the elevated install does not write, chown, or chmod anything under the
+invoking user's home; a child with that user's uid and gid writes
+`~/.verax/agent.token`. Elevated `install`, `uninstall`, and `approve`
+refuse to run when the verax code they loaded can be changed by that user.
+An administrator, or root, is outside this model: they can change the ACL,
+the task, the unit, or the launch daemon. An elevated terminal the operator
+leaves open for the agent is also outside it.
 
 `verax init --local` still writes a state directory the same user can
 read. That is a way to try the body, not a boundary.

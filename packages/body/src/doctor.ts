@@ -1,5 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { windowsAgentTokenPath } from "./install.ts";
 import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
@@ -259,8 +261,11 @@ function jwksFileChecks(env: NodeJS.ProcessEnv, stateDir: string): DoctorCheck[]
     detail: parses ? `VERAX_JWKS_FILE ${file} parses kid ${kid}` : `VERAX_JWKS_FILE ${file} does not parse`,
   });
   if (stateDir === "") return out;
-  const tokenPath = join(stateDir, "local-issuer", "agent.token");
-  if (!existsSync(tokenPath)) return out;
+  const candidates = [agentTokenOnDisk(env), join(stateDir, "local-issuer", "agent.token")].filter(
+    (file): file is string => file !== null,
+  );
+  const tokenPath = candidates.find((file) => existsSync(file));
+  if (!tokenPath) return out;
   const exp = expFromToken(readFileSync(tokenPath, "utf8"));
   const weekSec = 7 * 24 * 60 * 60;
   if (exp !== null && exp <= Math.floor(Date.now() / 1000) + weekSec) {
@@ -271,6 +276,18 @@ function jwksFileChecks(env: NodeJS.ProcessEnv, stateDir: string): DoctorCheck[]
     });
   }
   return out;
+}
+
+/** Install token: ProgramData on Windows, `~/.verax/agent.token` on Linux and macOS. */
+function agentTokenOnDisk(env: NodeJS.ProcessEnv): string | null {
+  if (process.platform === "win32") {
+    const sid = env.VERAX_USER_SID?.trim().replace(/^\*/, "") ?? "";
+    if (!/^S-1-[0-9-]+$/i.test(sid)) return null;
+    return windowsAgentTokenPath(env, sid);
+  }
+  const home = env.HOME?.trim() || env.USERPROFILE?.trim() || homedir();
+  if (home === "") return null;
+  return join(home, ".verax", "agent.token");
 }
 
 function expFromToken(raw: string): number | null {

@@ -55,8 +55,11 @@ decides which of them a token's scopes may call, and a call can be held
 until an operator on this machine approves it.
 
 Other commands: `install`, `uninstall`, `approve`, `operator`, `reconcile`,
-`witness`, `halt`, `unlock`, `desktop`. `verax install` needs an elevated
-shell and is the boundary against an agent that has a shell as your user;
+`witness`, `halt`, `unlock`, `desktop`. `verax install` and an elevated
+`verax approve` need an administrator-owned copy of this program (Windows,
+Administrator PowerShell: `npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body`;
+Linux and macOS: `sudo npm install -g --prefix /opt/verax-cli @verax-ai/body`). That
+install is the boundary against an agent that has a shell as your user;
 `verax init --local` is not that boundary. `verax --help` lists them.
 
 ## License

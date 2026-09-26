@@ -37,6 +37,7 @@ import {
   systemToolName,
   systemToolPath,
   windowsUserCanWrite,
+  writeAgentTokenFile,
   windowsSddlBatchArgv,
   windowsSddlBatchStdin,
   sddlRightsMask,
@@ -54,6 +55,8 @@ const winEnv = {
 
 const linuxEnv = {
   SUDO_USER: "runner",
+  SUDO_UID: "1000",
+  SUDO_GID: "1000",
   VERAX_INVOKING_HOME: "/home/runner",
 };
 
@@ -65,6 +68,7 @@ const winOpts = {
   bodyVersion: "0.3.0",
   npmCli: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
   stateExists: false,
+  userSid: "S-1-5-21-1001",
 };
 
 const linuxOpts = {
@@ -79,6 +83,8 @@ const linuxOpts = {
 
 const darwinEnv = {
   SUDO_USER: "runner",
+  SUDO_UID: "1000",
+  SUDO_GID: "1000",
   VERAX_INVOKING_HOME: "/Users/runner",
 };
 
@@ -94,6 +100,14 @@ const darwinOpts = {
 
 /** `getent passwd runner` for a Linux runInstall mock: the plan confirms VERAX_INVOKING_HOME against it. */
 function getentAnswer(argv: readonly string[], home: string): { status: number; stdout: string; stderr: string } | null {
+  const toolName = systemToolName(argv[0] ?? "");
+  if (toolName === "powershell" && argv.join("\n").includes("ProfileImagePath")) {
+    return { status: 0, stdout: `${home}\n`, stderr: "" };
+  }
+  if (toolName === "id" && (argv[1] === "-u" || argv[1] === "-g")) {
+    const who = argv[2] ?? "";
+    if (who !== "" && who !== "verax" && who !== "_verax") return { status: 0, stdout: "1000\n", stderr: "" };
+  }
   const tool = argv[0] ?? "";
   if (tool.endsWith("getent") && argv[1] === "passwd") {
     // The account this install creates. A human-shaped verax must not satisfy uninstall.
@@ -228,18 +242,22 @@ describe("verax install plan", () => {
     assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chmod" && argv.includes("0700") && argv.includes(linux.stateDir)));
   });
 
-  it("2 agent token is in the invoking user's profile and not under the state dir", () => {
+  it("2 agent token is outside the state dir", () => {
     const win = okPlan("win32", winEnv, winOpts);
-    assert.equal(win.tokenPath, "C:\\Users\\operator\\.verax\\agent.token");
+    assert.equal(win.tokenPath, "C:\\ProgramData\\Verax\\agent-token\\S-1-5-21-1001\\agent.token");
     assert.equal(win.tokenPath.startsWith(win.stateDir), false);
+    assert.equal(win.tokenPath.includes("\\Users\\"), false);
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     assert.equal(linux.tokenPath, "/home/runner/.verax/agent.token");
     assert.equal(linux.tokenPath.startsWith(linux.stateDir), false);
     const init = linux.ops.find((op) => op.op === "init");
     assert.ok(init && init.op === "init");
-    assert.equal(init.tokenPath, linux.tokenPath);
-    assert.equal(init.tokenPath.startsWith(init.stateDir), false);
+    assert.equal("tokenPath" in init, false);
     assert.equal(init.noOwnerGrant, true);
+    const userToken = linux.ops.find((op) => op.op === "user-token");
+    assert.ok(userToken && userToken.op === "user-token");
+    assert.equal(userToken.uid, 1000);
+    assert.equal(userToken.gid, 1000);
   });
 
   it("install init carries no owner grant, and only the token icacls names the invoking user", () => {
@@ -274,8 +292,7 @@ describe("verax install plan", () => {
       if (tool === "chmod") assert.ok(argv.includes("0700"));
     }
     const tokenChowns = argvs(linux.ops).filter((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.includes(linux.tokenPath));
-    assert.equal(tokenChowns.length, 1);
-    assert.match(tokenChowns[0]!.join(" "), new RegExp(`${linuxEnv.SUDO_USER}:`));
+    assert.equal(tokenChowns.length, 0);
     const darwin = planInstall("darwin", darwinEnv, darwinOpts);
     if (!darwin.ok) throw new Error(darwin.message);
     const darwinInit = darwin.ops.find((op) => op.op === "init");
@@ -336,6 +353,7 @@ describe("verax install plan", () => {
   it("linux install under SELinux enforcing names an execmem denial when health fails", async (t) => {
     const root = mkdtempSync(join(tmpdir(), "verax-selinux-"));
     const home = join(root, "home").replaceAll("\\", "/");
+    mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
     const standIn = ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
       try {
@@ -355,8 +373,9 @@ describe("verax install plan", () => {
       }
       const code = await runInstall(["install", "--port", "8809"], {
         platform: "linux",
-        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
         healthTimeoutMs: 1,
@@ -420,6 +439,7 @@ describe("verax install plan", () => {
     }
     const root = mkdtempSync(join(tmpdir(), "verax-linux-rollback-"));
     const home = join(root, "home").replaceAll("\\", "/");
+    mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
     let user = false;
     let group = false;
@@ -454,8 +474,9 @@ describe("verax install plan", () => {
     };
     const run = async (err: string[]) => runInstall(["install", "--port", "8809"], {
       platform: "linux",
-      env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+      env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
       elevated: () => true,
+        codeProbe: () => false,
       layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
       posixRoot,
       healthTimeoutMs: 1,
@@ -543,14 +564,16 @@ describe("verax install plan", () => {
     if (standIn === undefined) return;
     const root = mkdtempSync(join(tmpdir(), "verax-selinux-libt-"));
     const home = join(root, "home").replaceAll("\\", "/");
+    mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
     const calls: string[][] = [];
     const err: string[] = [];
     try {
       const code = await runInstall(["install", "--port", "8809"], {
         platform: "linux",
-        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
         exec: (argv) => {
@@ -586,14 +609,16 @@ describe("verax install plan", () => {
     if (standIn === undefined) return;
     const root = mkdtempSync(join(tmpdir(), "verax-selinux-bint-"));
     const home = join(root, "home").replaceAll("\\", "/");
+    mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
     const calls: string[][] = [];
     const err: string[] = [];
     try {
       const code = await runInstall(["install", "--port", "8809"], {
         platform: "linux",
-        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
         healthTimeoutMs: 1,
@@ -635,14 +660,16 @@ describe("verax install plan", () => {
     if (standIn === undefined) return;
     const root = mkdtempSync(join(tmpdir(), "verax-selinux-permissive-"));
     const home = join(root, "home").replaceAll("\\", "/");
+    mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
     const calls: string[][] = [];
     const err: string[] = [];
     try {
       const code = await runInstall(["install", "--port", "8809"], {
         platform: "linux",
-        env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: home },
+        env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
         healthTimeoutMs: 1,
@@ -961,7 +988,7 @@ describe("verax install plan", () => {
     assert.match(plan.message, /root:wheel/);
     assert.match(plan.message, /SHASUMS256\.txt/);
     assert.match(plan.message, new RegExp(`node-v${process.versions.node.replaceAll(".", "\\.")}-darwin-${process.arch}\\.tar\\.gz`));
-    assert.match(plan.message, /\$\(which verax\) install/);
+    assert.match(plan.message, /npm install -g --prefix \/opt\/verax-cli @verax-ai\/body\n.*\/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js install/);
   });
 
   it("darwin refuses a Node under a user-owned /usr/local/lib ancestor and the remedy stays off /usr/local", () => {
@@ -1008,7 +1035,7 @@ describe("verax install plan", () => {
     assert.match(plan.message, /root:root/);
     assert.match(plan.message, /sha256sum -c -/);
     assert.match(plan.message, new RegExp(`node-v${process.versions.node.replaceAll(".", "\\.")}-linux-${process.arch}\\.tar\\.gz`));
-    assert.match(plan.message, /\$\(which verax\) install/);
+    assert.match(plan.message, /npm install -g --prefix \/opt\/verax-cli @verax-ai\/body\n.*\/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js install/);
   });
 
   it("darwin plist runs as _verax with the trusted Node and state is 0700", () => {
@@ -1071,8 +1098,8 @@ describe("verax install plan", () => {
       assert.match(printed, /agent token/);
       assert.match(printed, /Claude Code:/);
       assert.match(printed, /mcp\.json/);
-      if (platform === "win32") assert.match(printed, /Run as administrator: verax approve/);
-      else assert.match(printed, /Approve held calls from an elevated terminal: sudo verax approve/);
+      if (platform === "win32") assert.match(printed, /Administrator PowerShell: & "\$env:ProgramFiles\\verax-cli\\verax\.cmd" approve/);
+      else assert.match(printed, /Approve held calls from the root-owned copy: sudo \/opt\/verax-cli\/bin\/verax approve/);
     }
     const stateDir = mkdtempSync(join(tmpdir(), "verax-install-quiet-"));
     const out: string[] = [];
@@ -1101,9 +1128,10 @@ describe("verax install plan", () => {
     }
     const root = mkdtempSync(join(tmpdir(), "verax-install-init-"));
     const home = join(root, "home");
+    mkdirSync(home, { recursive: true });
     const env: NodeJS.ProcessEnv = platform === "win32"
       ? { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: home }
-      : { SUDO_USER: "runner", VERAX_INVOKING_HOME: home };
+      : { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home };
     const trustedStandIn = platform === "win32" ? undefined : ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
       try {
         const st = lstatSync(file);
@@ -1166,6 +1194,11 @@ describe("verax install plan", () => {
         platform,
         env,
         elevated: () => true,
+        codeProbe: () => false,
+        spawnUserToken: (spec) => {
+          const wrote = writeAgentTokenFile(spec.tokenDir, spec.tokenPath, spec.token);
+          return wrote.ok ? { status: 0, stdout: "", stderr: "" } : { status: 78, stdout: "", stderr: `${wrote.error}\n` };
+        },
         layout,
         posixRoot,
         exec: (argv, stdin) => {
@@ -1198,13 +1231,13 @@ describe("verax install plan", () => {
           stderr: { write: (s: string) => err.push(s) },
         },
       });
-      assert.equal(code, 0);
+      assert.equal(code, 0, err.join(""));
       const text = `${out.join("")}${err.join("")}`;
       assert.equal(text.includes("verax serve"), false);
       assert.equal(text.includes("A shell as the same user"), false);
-      if (platform === "win32") assert.match(text, /Run as administrator: verax approve/);
+      if (platform === "win32") assert.match(text, /verax-cli\\verax\.cmd" approve/);
       else {
-        assert.match(text, /Approve held calls from an elevated terminal: sudo verax approve/);
+        assert.match(text, /Approve held calls from the root-owned copy: sudo \/opt\/verax-cli\/bin\/verax approve/);
         assert.match(text, new RegExp(posixRoot!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       }
     } finally {
@@ -1223,9 +1256,10 @@ describe("verax install plan", () => {
     }
     const root = mkdtempSync(join(tmpdir(), "verax-install-version-"));
     const home = join(root, "home");
+    mkdirSync(home, { recursive: true });
     const env: NodeJS.ProcessEnv = platform === "win32"
       ? { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: home }
-      : { SUDO_USER: "runner", VERAX_INVOKING_HOME: home };
+      : { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home };
     const trustedStandIn = platform === "win32" ? undefined : ["/usr/bin/bash", "/bin/bash", "/usr/bin/dash", "/usr/bin/true", "/bin/true"].find((file) => {
       try {
         const st = lstatSync(file);
@@ -1249,6 +1283,7 @@ describe("verax install plan", () => {
         platform,
         env,
         elevated: () => true,
+        codeProbe: () => false,
         layout,
         posixRoot,
         exec: (argv, stdin) => {
@@ -1298,8 +1333,11 @@ describe("verax install plan", () => {
           USERPROFILE: join(root, "home"),
         },
         elevated: () => true,
+        codeProbe: () => false,
         layout: winOpts,
         exec: (argv, stdin) => {
+          const profile = getentAnswer(argv, join(root, "home"));
+          if (profile) return profile;
           const sddl = sddlStdout(argv, stdin);
           if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
@@ -1380,6 +1418,7 @@ describe("verax install plan", () => {
       platform: "linux",
       env: linuxEnv,
       elevated: () => true,
+        codeProbe: () => false,
       layout: linuxOpts,
       exec: () => {
         throw new Error("argv must not reach install");
@@ -1403,6 +1442,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
       elevated: () => true,
+        codeProbe: () => false,
       layout: winOpts,
       exec: (argv, stdin) => {
         const paths = sddlBatchPaths(stdin);
@@ -1494,6 +1534,7 @@ describe("verax install plan", () => {
         platform: "win32",
         env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
         elevated: () => true,
+        codeProbe: () => false,
         layout: winOpts,
         exec: (argv, stdin) => {
           // Read from a stock Windows 11 machine. C:\Windows, System32 and WindowsPowerShell\v1.0 carry the same
@@ -1559,6 +1600,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: winEnv,
       elevated: () => true,
+        codeProbe: () => false,
       layout: winOpts,
       exec: (argv) => {
         if (systemToolName(argv[0] ?? "") === "icacls") {
@@ -1584,6 +1626,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: winEnv,
       elevated: () => true,
+        codeProbe: () => false,
       layout: winOpts,
       exec: (argv) => {
         if (systemToolName(argv[0] ?? "") === "icacls") {
@@ -1632,6 +1675,7 @@ describe("verax install plan", () => {
         platform,
         env: platform === "win32" ? winEnv : linuxEnv,
         elevated: () => true,
+        codeProbe: () => false,
         layout: { execPath: link, bodyVersion: "0.3.0", npmCli: target },
         exec: (argv) => {
           const passwd = getentAnswer(argv, linuxEnv.VERAX_INVOKING_HOME);
@@ -1706,6 +1750,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
       elevated: () => true,
+        codeProbe: () => false,
       layout: winOpts,
       exec: (argv, stdin) => {
         const sddl = sddlStdout(argv, stdin);
@@ -1814,7 +1859,7 @@ describe("verax install plan", () => {
       const code = await runInstall(["install", "--port", "8801"], {
         platform: posix ?? "win32",
         env: posix
-          ? { SUDO_USER: "runner", VERAX_INVOKING_HOME: join(root, "home") }
+          ? { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: join(root, "home") }
           : {
               ...winEnv,
               ProgramData: join(root, "data"),
@@ -1822,6 +1867,7 @@ describe("verax install plan", () => {
               USERPROFILE: join(root, "home"),
             },
         elevated: () => true,
+        codeProbe: () => false,
         layout: posix
           ? { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! }
           : winOpts,
@@ -2195,9 +2241,12 @@ describe("verax install plan", () => {
     assert.ok(mode?.includes("0700") && mode.includes("/home/runner/.verax"));
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     const tokenDir = "/home/runner/.verax";
-    const planned = argvs(linux.ops).filter((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.includes(tokenDir));
-    assert.ok(planned.some((argv) => argv.includes(`${linuxEnv.SUDO_USER}:`)));
-    assert.ok(argvs(linux.ops).some((argv) => systemToolName(argv[0] ?? "") === "chmod" && argv.includes("0700") && argv.includes(tokenDir)));
+    // R14-8: the elevated plan leaves the home token folder to a child running as the user.
+    const planned = argvs(linux.ops).filter(
+      (argv) => ["chown", "chmod"].includes(systemToolName(argv[0] ?? "")) && argv.some((a) => a.startsWith(tokenDir)),
+    );
+    assert.deepEqual(planned, []);
+    assert.ok(linux.ops.some((op) => op.op === "user-token" && op.tokenDir === tokenDir && op.uid === 1000));
   });
 
   it("refuses a POSIX token folder owned by another uid", async () => {
@@ -2567,6 +2616,7 @@ describe("verax uninstall", () => {
         USERPROFILE: join(root, "home"),
       },
       elevated: () => true,
+        codeProbe: () => false,
       exec: () => ({ status: 1, stdout: "", stderr: "" }),
       io: ioOf(out, err),
     });
@@ -2589,6 +2639,7 @@ describe("verax uninstall", () => {
         USERPROFILE: join(root, "home"),
       },
       elevated: () => true,
+        codeProbe: () => false,
       exec: (argv) => {
         const tool = systemToolName(argv[0] ?? "");
         if (tool === "schtasks" || tool === "icacls") return { status: 5, stdout: "", stderr: "access denied\n" };
@@ -2710,6 +2761,7 @@ describe("verax uninstall", () => {
         platform: "win32",
         env,
         elevated: () => true,
+        codeProbe: () => false,
         layout: winOpts,
         exec: (argv, stdin) => {
           if (!locked && systemToolName(argv[0] ?? "") === "icacls") locked = true;
@@ -2813,6 +2865,7 @@ describe("verax uninstall", () => {
         env: linuxEnv,
         posixRoot,
         elevated: () => true,
+        codeProbe: () => false,
         exec: (argv) => {
           seen.push([...argv]);
           const passwd = getentAnswer(argv, linuxEnv.VERAX_INVOKING_HOME);

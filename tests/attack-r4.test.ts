@@ -271,6 +271,7 @@ describe("attack R4", () => {
         () => {},
         (line) => out.push(line),
         { isTTY: true, ask: async () => "100" },
+        { elevated: () => false },
       );
       const held = out.find((line) => line.startsWith("held ")) ?? "";
       assert.equal(held.includes("\r"), false, JSON.stringify(held));

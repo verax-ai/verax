@@ -176,6 +176,21 @@ function applyInputValidity(
   return verdict;
 }
 
+function inputIdentityHash(
+  rows: readonly { id: string; versionHash: string; source?: Record<string, unknown> }[],
+): string {
+  return sha256Canonical(
+    rows.map((row) => {
+      const id: { id: string; versionHash: string; source?: Record<string, unknown> } = {
+        id: row.id,
+        versionHash: row.versionHash,
+      };
+      if (row.source !== undefined) id.source = row.source;
+      return id;
+    }),
+  );
+}
+
 function toolCallOf(call: ToolCall): ToolCall {
   const args = { ...call.arguments };
   delete args._inputs;
@@ -192,6 +207,7 @@ export function createProxy(deps: ProxyDeps) {
     policy: deps.policy,
     approvals,
     now: deps.now,
+    ledger: deps.ledger,
   });
   (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   const ledgerDir = (deps.ledger as unknown as { dir?: unknown }).dir;
@@ -388,6 +404,54 @@ export function createProxy(deps: ProxyDeps) {
     };
   }
 
+  async function boundInputsReason(
+    rows: readonly { id: string; versionHash: string; validFromMs: number; validUntilMs: number }[],
+    timestampMs: number,
+    principal: Principal,
+  ): Promise<string | null> {
+    for (const item of rows) {
+      if (deps.resolveInput) {
+        const got = await deps.resolveInput(item.id, principal);
+        if (
+          !got ||
+          got.versionHash !== item.versionHash ||
+          got.validFromMs > timestampMs ||
+          got.validUntilMs < timestampMs
+        ) {
+          return "input-invalid";
+        }
+        continue;
+      }
+      if (item.validFromMs > timestampMs || item.validUntilMs < timestampMs) return "input-invalid";
+    }
+    return null;
+  }
+
+  async function signedRetryDeny(
+    reasonCode: string,
+    requestHash: string,
+    inputs: DecisionInputs,
+    timestampMs: number,
+    subject: string,
+    scopedRef: string,
+  ): Promise<ToolResult> {
+    const denyRef = deps.nonce();
+    await writeRecord({
+      decision: "deny",
+      reasonCode,
+      ref: denyRef,
+      requestHash,
+      inputs: {
+        ...inputs,
+        approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+      },
+      effectHash: null,
+      subject,
+      timestampMs,
+    });
+    return denied(reasonCode, denyRef);
+  }
+
   type AdmissionPlan =
     | { kind: "done"; result: ToolResult }
     | {
@@ -510,6 +574,21 @@ export function createProxy(deps: ProxyDeps) {
       const given = readRef(call.arguments);
 
       const plan = await admission.enqueue(async (): Promise<AdmissionPlan> => {
+        // A call that waited here behind another admission reads the halt flag again.
+        if (stateDir && existsSync(join(stateDir, "halted"))) {
+          const ref = deps.nonce();
+          await writeRecord({
+            decision: "deny",
+            reasonCode: "halted",
+            ref,
+            requestHash,
+            inputs: resolved.inputs,
+            effectHash: null,
+            subject: call.name,
+            timestampMs,
+          });
+          return { kind: "done", result: denied("halted", ref) };
+        }
         if (given === "invalid") {
           const ref = deps.nonce();
           await writeRecord({
@@ -625,26 +704,51 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("outcome-unknown", unknownRef) };
                 }
-                const gated = applyInputValidity(resolved.reasonCode, {
+                const declared = declaredInputs(call.arguments);
+                if (declared === "invalid") {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      "input-invalid",
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
+                }
+                const boundRows = bound?.inputs ?? [];
+                if (declared !== null && inputIdentityHash(declared) !== inputIdentityHash(boundRows)) {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      "inputs-changed",
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
+                }
+                const validityReason = await boundInputsReason(boundRows, timestampMs, principal);
+                const gated = applyInputValidity(validityReason, {
                   decision: "allow",
                   reasonCode: "approved-by-operator",
                 });
                 if (gated.decision !== "allow") {
-                  const denyRef = deps.nonce();
-                  await writeRecord({
-                    decision: "deny",
-                    reasonCode: gated.reasonCode,
-                    ref: denyRef,
-                    requestHash,
-                    inputs: {
-                      ...resolved.inputs,
-                      approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
-                    },
-                    effectHash: null,
-                    subject: call.name,
-                    timestampMs,
-                  });
-                  return { kind: "done", result: denied(gated.reasonCode, denyRef) };
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      gated.reasonCode,
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
                 }
                 if (
                   deps.checkTenantMismatch &&

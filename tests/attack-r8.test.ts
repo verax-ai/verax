@@ -31,10 +31,13 @@ const winOpts = {
   veraxRootExists: true,
   markerExists: true,
   winRootOwner: "S-1-5-32-544",
+  userSid: "S-1-5-21-1001",
 };
 
 const linuxEnv = {
   SUDO_USER: "runner",
+  SUDO_UID: "1000",
+  SUDO_GID: "1000",
   VERAX_INVOKING_HOME: "/home/runner",
 };
 
@@ -51,6 +54,8 @@ const linuxOpts = {
 
 const darwinEnv = {
   SUDO_USER: "runner",
+  SUDO_UID: "1000",
+  SUDO_GID: "1000",
   VERAX_INVOKING_HOME: "/Users/runner",
 };
 
@@ -212,6 +217,7 @@ describe("attack R8", () => {
         env: linuxEnv,
         posixRoot,
         elevated: () => true,
+        codeProbe: () => false,
         exec: (argv) => {
           linuxSeen.push([...argv]);
           const tool = systemToolName(argv[0] ?? "");
@@ -245,6 +251,7 @@ describe("attack R8", () => {
         env: { SUDO_USER: "runner", VERAX_INVOKING_HOME: "/Users/runner" },
         posixRoot,
         elevated: () => true,
+        codeProbe: () => false,
         exec: (argv) => {
           darwinSeen.push([...argv]);
           const tool = systemToolName(argv[0] ?? "");
@@ -276,6 +283,7 @@ describe("attack R8", () => {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
         elevated: () => true,
+        codeProbe: () => false,
         exec: (argv) => {
           winSeen.push([...argv]);
           const tool = systemToolName(argv[0] ?? "");

@@ -505,6 +505,8 @@ export async function runDesktop(
     let token: string | null = null;
     if (decided.mode === "spawn") {
       // A token or pin left on disk is the previous run's. This issuer must write both.
+      // This file is the dev issuer's --out token, not the install agent token
+      // (`%ProgramData%\Verax\agent-token\<SID>\agent.token` or `~/.verax/agent.token`).
       discardStaleFile(tokenPath);
       discardStaleFile(issuerJwksPinPath(opts.stateDir));
       if (await busy("issuer", opts.issuerPort)) return 1;

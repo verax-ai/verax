@@ -422,7 +422,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
         const code = await runApprove(["approve", stateDir, held.ref], writeErr, () => undefined, {
           isTTY: io.isTTY,
           ask: async () => readAnswer(io.stdin),
-        });
+        }, { elevated: () => false });
         if (code !== 0) throw new Error("demo: approve failed");
         approved = true;
       }

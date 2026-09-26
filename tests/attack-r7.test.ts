@@ -28,6 +28,7 @@ const winOpts = {
   bodyVersion: "0.3.0",
   npmCli: "C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js",
   stateExists: false,
+  userSid: "S-1-5-21-1001",
   veraxRootExists: true,
   markerExists: true,
   winRootOwner: "BUILTIN\\Administrators",

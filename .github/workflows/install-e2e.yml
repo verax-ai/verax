@@ -137,7 +137,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           icacls $dir /setowner "*S-1-5-32-544" /T /C
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $prefix = Join-Path $env:ProgramFiles "verax-cli"
+          New-Item -ItemType Directory -Force -Path $prefix | Out-Null
+          $packed = @(Get-ChildItem -LiteralPath $dir -Filter *.tgz | ForEach-Object { $_.FullName })
+          npm install -g --prefix $prefix @packed
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Add-Content -Path $env:GITHUB_ENV -Value "VERAX_TARBALLS=$dir"
+          Add-Content -Path $env:GITHUB_ENV -Value "VERAX_CLI=$prefix\verax.cmd"
       - name: diagnose tarball access
         shell: pwsh
         run: |
@@ -226,7 +232,7 @@ jobs:
         id: install-probe
         shell: pwsh
         run: |
-          & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801
+          & $env:VERAX_CLI install --from-tarballs $env:VERAX_TARBALLS --port 8801
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -253,7 +259,8 @@ jobs:
           $cred = New-Object System.Management.Automation.PSCredential('veraxprobe', $sec)
           $node = (Get-Command node).Source
           $script = Join-Path $env:PUBLIC 'verax-probe.mjs'
-          $tokenSrc = Join-Path $env:USERPROFILE '.verax\agent.token'
+          $invokingSid = ([System.Security.Principal.WindowsIdentity]::GetCurrent()).User.Value
+          $tokenSrc = Join-Path $env:ProgramData "Verax\agent-token\$invokingSid\agent.token"
           $tokenDst = Join-Path $env:PUBLIC 'verax-agent.token'
           Copy-Item $tokenSrc $tokenDst -Force
           icacls $tokenDst /grant 'veraxprobe:(R)' | Out-Null
@@ -372,7 +379,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           try {
             Write-Host "step: uninstall"
-            & $env:VERAX_NODE packages/body/dist/cli.js uninstall
+            & $env:VERAX_CLI uninstall
             Write-Host "LASTEXITCODE=$LASTEXITCODE"
             Write-Host "step: remove leftover ProgramData\Verax"
             if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
@@ -394,7 +401,7 @@ jobs:
             Write-Host "ExitCode=$($pre.ExitCode)"
             if ($pre.ExitCode -ne 0) { Write-Host "::error::pre-create exit $($pre.ExitCode)"; exit 1 }
             Write-Host "step: install"
-            $log = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+            $log = & $env:VERAX_CLI install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
             $code = $LASTEXITCODE
             Write-Host "LASTEXITCODE=$code"
             Write-Host "---- install output ----"
@@ -418,7 +425,7 @@ jobs:
           $PSNativeCommandUseErrorActionPreference = $false
           try {
             Write-Host "step: uninstall and clear leftovers"
-            & $env:VERAX_NODE packages/body/dist/cli.js uninstall | Out-Null
+            & $env:VERAX_CLI uninstall | Out-Null
             if (Test-Path "$env:ProgramData\Verax") { Remove-Item -Recurse -Force "$env:ProgramData\Verax" }
             if (Test-Path "$env:ProgramFiles\Verax") { Remove-Item -Recurse -Force "$env:ProgramFiles\Verax" }
             $pass = -join ((1..20) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) }) + 'Aa1'
@@ -455,7 +462,7 @@ jobs:
             $racer = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile','-File',$race) -Credential $cred -PassThru -WorkingDirectory $env:PUBLIC
             Start-Sleep -Seconds 3
             Write-Host "step: install while the racer runs"
-            $out = & $env:VERAX_NODE packages/body/dist/cli.js install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
+            $out = & $env:VERAX_CLI install --from-tarballs $env:VERAX_TARBALLS --port 8801 2>&1 | Out-String
             $code = $LASTEXITCODE
             New-Item -ItemType File -Force -Path $stop | Out-Null
             $null = $racer.WaitForExit(30000)
@@ -494,7 +501,7 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          & $env:VERAX_NODE packages/body/dist/cli.js uninstall
+          & $env:VERAX_CLI uninstall
           Remove-LocalUser -Name veraxprobe -ErrorAction SilentlyContinue
           net user verax-svc /delete
           Remove-Item -Force -ErrorAction SilentlyContinue "$env:PUBLIC\verax-probe.mjs","$env:PUBLIC\verax-agent.token","$env:PUBLIC\verax-precreate.ps1","$env:PUBLIC\verax-race.ps1","$env:PUBLIC\verax-race.log","$env:PUBLIC\verax-race.stop"
@@ -610,13 +617,17 @@ jobs:
           npm pack -w @verax-ai/body --pack-destination "$dir"
           sudo chown -R root:root "$dir"
           sudo chmod -R a-w,u+rX "$dir"
+          sudo mkdir -p /opt/verax-cli
+          sudo "$(dirname "$VERAX_NODE")/npm" install -g --prefix /opt/verax-cli "$dir"/*.tgz
+          sudo chown -R root:root /opt/verax-cli
+          sudo chmod -R go-w /opt/verax-cli
           echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
       - name: install and probe as the invoking user
         id: install-probe
         run: |
           set -euo pipefail
           # sudo sets SUDO_USER to the invoking account (runner on this job).
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801
           curl -fsS http://127.0.0.1:8801/healthz >/dev/null
           if cat /var/lib/verax/keys/record.private.pem; then echo "private key was readable"; exit 1; fi
           if echo x >> /var/lib/verax/approval-commands.jsonl; then echo "approval log was writable"; exit 1; fi
@@ -640,16 +651,16 @@ jobs:
           code=$?
           set -e
           test "$code" = "77"
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax uninstall
       - name: reinstall after uninstall
         run: |
           set -euo pipefail
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801
           curl -fsS http://127.0.0.1:8801/healthz >/dev/null
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax uninstall
       - name: uninstall
         if: always()
-        run: sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+        run: sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax uninstall || true
       - name: platform evidence
         if: always()
         shell: bash
@@ -756,12 +767,16 @@ jobs:
           npm pack -w @verax-ai/body --pack-destination "$dir"
           sudo chown -R root:wheel "$dir"
           sudo chmod -R go-w,u+rX "$dir"
+          sudo mkdir -p /opt/verax-cli
+          sudo "$(dirname "$VERAX_NODE")/npm" install -g --prefix /opt/verax-cli "$dir"/*.tgz
+          sudo chown -R root:wheel /opt/verax-cli
+          sudo chmod -R go-w /opt/verax-cli
           echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
       - name: install and probe as the invoking user
         id: install-probe
         run: |
           set -euo pipefail
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801
           curl -fsS http://127.0.0.1:8801/healthz >/dev/null
           if cat "/Library/Application Support/Verax/state/keys/record.private.pem"; then echo "private key was readable"; exit 1; fi
           if echo x >> "/Library/Application Support/Verax/state/approval-commands.jsonl"; then echo "approval log was writable"; exit 1; fi
@@ -819,11 +834,11 @@ jobs:
       - name: pre-created state dir is refused
         run: |
           set -euo pipefail
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax uninstall
           sudo rm -rf "/Library/Application Support/Verax" /Library/Verax
           sudo mkdir -p "/Library/Application Support/Verax/state"
           set +e
-          log="$(sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801 2>&1)"
+          log="$(sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801 2>&1)"
           code=$?
           set -e
           test "$code" = "78"
@@ -831,7 +846,7 @@ jobs:
       - name: uninstall
         if: always()
         run: |
-          sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js uninstall || true
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax uninstall || true
           sudo /bin/launchctl bootout system/com.verax-ai.body || true
           sudo rm -f /Library/LaunchDaemons/com.verax-ai.body.plist
       - name: platform evidence

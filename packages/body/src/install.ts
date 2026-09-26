@@ -13,6 +13,7 @@ import {
   realpathSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { get } from "node:http";
@@ -410,7 +411,9 @@ function officialNodeRemedy(platform: "linux" | "darwin"): string {
     `sudo tar -C ${dest} -xzf ${name}`,
     `sudo chown -R ${owner} ${dest}`,
     `sudo chmod -R go-w ${dest}`,
-    `sudo ${node} $(which verax) install`,
+    // The CLI goes into a root-owned prefix too: an elevated command refuses code the user can change.
+    `sudo ${node} ${dest}/node-v${ver}-${os}-${arch}/bin/npm install -g --prefix /opt/verax-cli @verax-ai/body`,
+    `sudo ${node} /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js install`,
   ].join("\n");
 }
 
@@ -424,6 +427,213 @@ function nodeTrustMessageFor(nodePath: string, platform: InstallPlatform): strin
   const owner = platform === "darwin" ? "root:wheel" : "root:root";
   const dest = officialNodeRoot(platform);
   return `${head}. An elevated install must not run a Node your account can swap. Download the official tarball and SHASUMS256.txt, check the sha256, and extract as root into ${dest} (${owner}, go-w), then run verax install from that Node:\n${officialNodeRemedy(platform)}`;
+}
+
+/** Account name printed when elevated code is writable by the invoking user. */
+export function codeTrustAccount(platform: NodeJS.Platform, env: NodeJS.ProcessEnv): string {
+  if (platform === "win32") {
+    const name = env.USERNAME?.trim() ?? "";
+    const domain = env.USERDOMAIN?.trim() ?? "";
+    if (name !== "") return domain !== "" ? `${domain}\\${name}` : name;
+    return "the invoking user";
+  }
+  const sudo = env.SUDO_USER?.trim() ?? "";
+  return sudo !== "" ? sudo : "the invoking user";
+}
+
+export function elevatedCodeMessage(dir: string, account: string, platform: InstallPlatform): string {
+  const head = `refusing: the verax code at ${dir} can be changed by ${account}; run elevated commands from a copy only administrators can write`;
+  if (platform === "win32") {
+    return [
+      head,
+      'In an Administrator PowerShell: npm install -g --prefix "$env:ProgramFiles\\verax-cli" @verax-ai/body',
+      'then: & "$env:ProgramFiles\\verax-cli\\verax.cmd" install',
+    ].join("\n");
+  }
+  return `${head}\n${officialNodeRemedy(platform)}`;
+}
+
+function packageRootOf(start: string): string | null {
+  let cur = start;
+  for (let i = 0; i < 8; i += 1) {
+    const pkg = path.join(cur, "package.json");
+    if (existsSync(pkg)) {
+      try {
+        const parsed = JSON.parse(readFileSync(pkg, "utf8")) as { name?: unknown };
+        if (typeof parsed.name === "string" && parsed.name.startsWith("@verax-ai/")) return cur;
+      } catch {
+        // A package.json that does not parse is not this package. Keep walking.
+      }
+    }
+    const parent = path.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return null;
+}
+
+/** Package directory of the running CLI, each `@verax-ai/*` it loads, and their `node_modules`. */
+export function veraxCodeDirectories(entryUrl: string = import.meta.url): string[] {
+  const start = path.dirname(fileURLToPath(entryUrl));
+  const body = packageRootOf(start);
+  const dirs = new Set<string>();
+  const add = (dir: string): void => {
+    try {
+      dirs.add(realpathSync(dir));
+    } catch {
+      dirs.add(dir);
+    }
+  };
+  if (!body) return [];
+  add(body);
+  add(path.join(body, "node_modules"));
+  let deps: string[] = [];
+  try {
+    const parsed = JSON.parse(readFileSync(path.join(body, "package.json"), "utf8")) as {
+      dependencies?: Record<string, string>;
+    };
+    deps = Object.keys(parsed.dependencies ?? {}).filter((name) => name.startsWith("@verax-ai/"));
+  } catch {
+    deps = [];
+  }
+  for (const name of deps) {
+    let dir = path.join(body, "node_modules", ...name.split("/"));
+    try {
+      dir = path.dirname(fileURLToPath(import.meta.resolve(`${name}/package.json`)));
+    } catch {
+      // The package is named but not resolvable from this file. The path under body still gets checked.
+    }
+    add(dir);
+    add(path.join(dir, "node_modules"));
+  }
+  return [...dirs];
+}
+
+/**
+ * `probe` returns true when that directory can be changed by the invoking user.
+ * Without a probe the caller supplies `userWritable` from the same ACL or mode
+ * check used for node.exe, ancestors included.
+ */
+export function elevatedCodeRefusal(
+  platform: InstallPlatform,
+  dirs: readonly string[],
+  opts: { account: string; probe?: (dir: string) => boolean; userWritable?: (dir: string) => boolean },
+): string | null {
+  // No directory found is not a directory that passed.
+  if (dirs.length === 0) return "refusing: the verax code directory could not be found, so its owner cannot be checked";
+  for (const dir of dirs) {
+    const writable = opts.probe ? opts.probe(dir) : opts.userWritable?.(dir) === true;
+    if (writable) return elevatedCodeMessage(dir, opts.account, platform);
+  }
+  return null;
+}
+
+/**
+ * The child that writes `~/.verax/agent.token`. It runs as the invoking uid.
+ * The token arrives on stdin. The directory and file paths arrive in the environment.
+ */
+const USER_TOKEN_WRITER = [
+  'import { lstatSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";',
+  "const dir = process.env.VERAX_TOKEN_DIR ?? \"\";",
+  "const file = process.env.VERAX_TOKEN_PATH ?? \"\";",
+  "const token = readFileSync(0, \"utf8\");",
+  "if (dir === \"\" || file === \"\") process.exit(78);",
+  "let st;",
+  "try { st = lstatSync(dir); } catch (err) {",
+  "  if (err && err.code !== \"ENOENT\") { console.error(err.message); process.exit(78); }",
+  "  mkdirSync(dir, { mode: 0o700 });",
+  "  st = lstatSync(dir);",
+  "}",
+  "if (st.isSymbolicLink()) { console.error(\"refusing: \" + dir + \" is a symbolic link\"); process.exit(78); }",
+  "if (!st.isDirectory()) { console.error(\"refusing: \" + dir + \" is not a directory\"); process.exit(78); }",
+  "if (typeof process.getuid === \"function\" && st.uid !== process.getuid()) { console.error(\"refusing: \" + dir + \" is not owned by the invoking user\"); process.exit(78); }",
+  "try { lstatSync(file); unlinkSync(file); } catch (err) {",
+  "  if (!err || err.code !== \"ENOENT\") { console.error(err && err.message ? err.message : \"token file\"); process.exit(78); }",
+  "}",
+  "writeFileSync(file, token, { encoding: \"utf8\", mode: 0o600, flag: \"wx\" });",
+].join("\n");
+
+export type UserTokenSpawn = {
+  uid: number;
+  gid: number;
+  tokenDir: string;
+  tokenPath: string;
+  token: string;
+};
+
+/** Same checks as the uid child. Tests call this in place of spawn. */
+export function writeAgentTokenFile(tokenDir: string, tokenPath: string, token: string): { ok: true } | { ok: false; error: string } {
+  let st: ReturnType<typeof lstatSync>;
+  try {
+    st = lstatSync(tokenDir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { ok: false, error: err instanceof Error ? err.message : "token directory unreadable" };
+    }
+    try {
+      mkdirSync(tokenDir, { mode: 0o700 });
+      st = lstatSync(tokenDir);
+    } catch (mk) {
+      return { ok: false, error: mk instanceof Error ? mk.message : "token directory was not created" };
+    }
+  }
+  if (st.isSymbolicLink()) return { ok: false, error: `refusing: ${tokenDir} is a symbolic link` };
+  if (!st.isDirectory()) return { ok: false, error: `refusing: ${tokenDir} is not a directory` };
+  if (typeof process.getuid === "function" && st.uid !== process.getuid()) {
+    return { ok: false, error: `refusing: ${tokenDir} is not owned by the invoking user` };
+  }
+  try {
+    lstatSync(tokenPath);
+    unlinkSync(tokenPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { ok: false, error: err instanceof Error ? err.message : "token file was not replaced" };
+    }
+  }
+  try {
+    writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "token file was not created" };
+  }
+  return { ok: true };
+}
+
+/** Copy the state-directory token into an administrator-owned file. Does not follow a link at the file. */
+function placeInstalledToken(
+  stateDir: string,
+  tokenPath: string,
+  platform: NodeJS.Platform,
+): { ok: true } | { ok: false; error: string } {
+  const stateToken = (platform === "win32" ? path.win32 : path.posix).join(stateDir, "local-issuer", "agent.token");
+  let token = "";
+  try {
+    token = readFileSync(stateToken, "utf8");
+  } catch {
+    return { ok: false, error: "agent token was not created in the state directory" };
+  }
+  const dir = path.dirname(tokenPath);
+  let parent: ReturnType<typeof lstatSync>;
+  try {
+    parent = lstatSync(dir);
+  } catch {
+    return { ok: false, error: `refusing: ${dir} is not a directory` };
+  }
+  if (parent.isSymbolicLink() || !parent.isDirectory()) return { ok: false, error: `refusing: ${dir} is a reparse point` };
+  try {
+    const cur = lstatSync(tokenPath);
+    if (!cur.isSymbolicLink() && !cur.isFile()) return { ok: false, error: `refusing: ${tokenPath} is not a file` };
+    unlinkSync(tokenPath);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+      return { ok: false, error: `refusing: ${tokenPath} was not replaced` };
+    }
+  }
+  try {
+    writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600, flag: "wx" });
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "token file was not created" };
+  }
+  return { ok: true };
 }
 
 export type InstallPlatform = "win32" | "linux" | "darwin";
@@ -486,6 +696,8 @@ export type PlanOpts = {
   darwinState?: { exists: boolean; symlink: boolean };
   /** `/Library/Verax` before this install. */
   darwinRoot?: { exists: boolean; symlink: boolean };
+  /** uid and gid of SUDO_USER, already checked against `id` and SUDO_UID/SUDO_GID. */
+  invokingIds?: { uid: number; gid: number };
 };
 
 export type PlanOp =
@@ -494,7 +706,9 @@ export type PlanOp =
   | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string }
   | { op: "write"; path: string; contents: string; mode?: number; exclusive?: boolean }
   | { op: "lock-root"; path: string; create: boolean }
-  | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean; noOwnerGrant: boolean }
+  | { op: "init"; stateDir: string; port: number; days: number; force: boolean; noOwnerGrant: boolean }
+  | { op: "user-token"; tokenDir: string; tokenPath: string; uid: number; gid: number }
+  | { op: "place-token"; path: string }
   | { op: "remove"; path: string }
   | { op: "wait-healthz"; port: number; timeoutMs: number; nonce: string }
   | { op: "print"; text: string }
@@ -542,6 +756,13 @@ export type InstallHooks = {
   copyFile?: (source: string, dest: string) => void;
   /** Test-only. Caps the post-start /healthz wait. CLI argv cannot set it. */
   healthTimeoutMs?: number;
+  /**
+   * True when that code directory can be changed by the invoking user.
+   * Absent means the install reads the real ACL or mode.
+   */
+  codeProbe?: (dir: string) => boolean;
+  /** Test-only stand-in for the uid/gid child that writes the POSIX agent token. */
+  spawnUserToken?: (spec: UserTokenSpawn) => ExecResult;
 };
 
 type Paths = { codeDir: string; stateDir: string; tokenPath: string };
@@ -635,11 +856,18 @@ function darwinHome(env: NodeJS.ProcessEnv, resolved?: string): { home: string }
   return { error: "verax install needs the invoking user's home from dscl" };
 }
 
+export function windowsAgentTokenPath(env: NodeJS.ProcessEnv, userSid: string): string {
+  const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
+  const sid = userSid.trim().replace(/^\*/, "");
+  return path.win32.join(data, "Verax", "agent-token", sid, "agent.token");
+}
+
 function pathsFor(
   platform: InstallPlatform,
   env: NodeJS.ProcessEnv,
   posixRoot?: string,
   invokingHome?: string,
+  userSid?: string,
 ): { ok: true; paths: Paths; home: string } | { ok: false; code: number; message: string } {
   if (platform === "darwin") {
     const home = darwinHome(env, invokingHome);
@@ -654,12 +882,13 @@ function pathsFor(
   }
   if (platform === "win32") {
     const profile = env.USERPROFILE?.trim() ?? "";
-    if (profile === "") return { ok: false, code: EX_CONFIG, message: "verax install needs USERPROFILE for the agent token\n" };
+    if (profile === "") return { ok: false, code: EX_CONFIG, message: "verax install needs USERPROFILE\n" };
+    const sid = userSid?.trim().replace(/^\*/, "") ?? "";
     try {
       const paths = {
         codeDir: codeDirFor("win32", env),
         stateDir: stateDirFor("win32", env),
-        tokenPath: path.win32.join(profile, ".verax", "agent.token"),
+        tokenPath: sid !== "" ? windowsAgentTokenPath(env, sid) : "",
       };
       return { ok: true, paths, home: profile };
     } catch (err) {
@@ -1148,6 +1377,36 @@ function resetInherit(dir: string): PlanOp {
 }
 
 /** A file ACE has no `(OI)` or `(CI)`. Those flags are only legal on a directory. */
+function adminOnlyDirGrant(dir: string): PlanOp {
+  return {
+    op: "argv",
+    argv: toolArgv("icacls", [
+      dir,
+      "/inheritance:r",
+      "/grant:r",
+      `${ADMINISTRATORS_SID}:(OI)(CI)F`,
+      "/grant:r",
+      `${SYSTEM_SID}:(OI)(CI)F`,
+    ], "win32"),
+  };
+}
+
+function tokenUserDirGrant(dir: string, principal: string): PlanOp {
+  return {
+    op: "argv",
+    argv: toolArgv("icacls", [
+      dir,
+      "/inheritance:r",
+      "/grant:r",
+      `${principal}:(OI)(CI)RX`,
+      "/grant:r",
+      `${ADMINISTRATORS_SID}:(OI)(CI)F`,
+      "/grant:r",
+      `${SYSTEM_SID}:(OI)(CI)F`,
+    ], "win32"),
+  };
+}
+
 function grantFile(file: string, principal: string, rights: "F" | "R"): PlanOp {
   const ace = rights === "R" ? `${principal}:(R)` : `${principal}:${rights}`;
   return {
@@ -1394,8 +1653,8 @@ export function successText(
   ].join("\n");
   const approve =
     platform === "win32"
-      ? "Run as administrator: verax approve"
-      : "Approve held calls from an elevated terminal: sudo verax approve";
+      ? 'Approve held calls in an Administrator PowerShell: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
+      : "Approve held calls from the root-owned copy: sudo /opt/verax-cli/bin/verax approve";
   return [
     `code ${info.codeDir}`,
     `state ${info.stateDir}`,
@@ -1427,6 +1686,18 @@ function bounds(opts: PlanOpts): { port: number; days: number } | { error: strin
 
 /** Well-known groups. `whoami` must not hand the token ACE to one of these. */
 const GROUP_TOKEN_SIDS = new Set(["S-1-1-0", "S-1-5-11", "S-1-5-32-545"]);
+
+function invokingIdsOf(env: NodeJS.ProcessEnv, opts: PlanOpts): { uid: number; gid: number } | { error: string } {
+  const uidText = opts.invokingIds ? String(opts.invokingIds.uid) : (env.SUDO_UID?.trim() ?? "");
+  const gidText = opts.invokingIds ? String(opts.invokingIds.gid) : (env.SUDO_GID?.trim() ?? "");
+  if (!/^\d+$/.test(uidText) || !/^\d+$/.test(gidText)) {
+    return { error: "verax install needs SUDO_UID and SUDO_GID for the invoking user" };
+  }
+  const uid = Number(uidText);
+  const gid = Number(gidText);
+  if (uid === 0) return { error: "refusing: the invoking uid is 0" };
+  return { uid, gid };
+}
 
 function tokenPrincipalFor(userSid: string | undefined): { principal: string } | { error: string } | null {
   const sid = userSid?.trim().replace(/^\*/, "").toUpperCase() ?? "";
@@ -1499,7 +1770,7 @@ function tarballAclRows(opts: PlanOpts): { path: string; sddl: string; ancestor:
 export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, opts: PlanOpts): InstallPlan {
   const posixRoot = platform === "win32" ? undefined : opts.posixRoot;
   const fixed = fixedPosix(posixRoot);
-  const located = pathsFor(platform, env, posixRoot, opts.invokingHome);
+  const located = pathsFor(platform, env, posixRoot, opts.invokingHome, opts.userSid);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -1725,10 +1996,31 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   }
   const healthNonce = randomBytes(32).toString("hex");
   const noncePath = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, INSTALL_HEALTH_NONCE);
+  let posixIds: { uid: number; gid: number } | null = null;
+  if (platform === "win32") {
+    if (!tokenWho || !("principal" in tokenWho) || paths.tokenPath === "") {
+      return fail(EX_CONFIG, "verax install needs the invoking user's SID for the agent token");
+    }
+    const tokenDir = path.win32.dirname(paths.tokenPath);
+    const tokenRoot = path.win32.dirname(tokenDir);
+    ops.push(
+      { op: "mkdir", path: tokenRoot, mode: 0o755 },
+      setOwner(tokenRoot),
+      adminOnlyDirGrant(tokenRoot),
+      resetInherit(tokenRoot),
+      { op: "mkdir", path: tokenDir, mode: 0o755 },
+      setOwner(tokenDir),
+      tokenUserDirGrant(tokenDir, tokenWho.principal),
+      resetInherit(tokenDir),
+    );
+  } else {
+    const ids = invokingIdsOf(env, opts);
+    if ("error" in ids) return fail(EX_CONFIG, ids.error);
+    posixIds = ids;
+  }
   ops.push({
     op: "init",
     stateDir: paths.stateDir,
-    tokenPath: paths.tokenPath,
     port: limited.port,
     days: limited.days,
     force: Boolean(opts.force),
@@ -1736,45 +2028,31 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   });
   // Before the service starts, so /healthz can echo a value only this install wrote.
   ops.push({ op: "write", path: noncePath, contents: `${healthNonce}\n`, mode: 0o600 });
-  if (platform === "win32") {
+  if (platform === "win32" && tokenWho && "principal" in tokenWho) {
     ops.push(
       resetInherit(paths.stateDir),
       setOwner(paths.stateDir),
-      {
-        op: "argv",
-        argv: toolArgv("icacls", [
-          paths.tokenPath,
-          "/inheritance:r",
-          ...(tokenWho && "principal" in tokenWho ? ["/grant:r", `${tokenWho.principal}:(R)`] : []),
-        ], "win32"),
-      },
+      { op: "place-token", path: paths.tokenPath },
+      grantFile(paths.tokenPath, tokenWho.principal, "R"),
     );
     ops.push(windowsTaskOp(winPassword, opts.execPath, cliBin, envFile, logFile, tempDir));
-  } else if (platform === "linux") {
-    const sudoUser = env.SUDO_USER!.trim();
+  } else if (platform === "linux" && posixIds) {
     const tokenDir = path.posix.dirname(paths.tokenPath);
     ops.push(
       { op: "argv", argv: toolArgv("chown", ["-R", "verax:verax", paths.stateDir], "linux") },
       { op: "argv", argv: toolArgv("chmod", ["0700", paths.stateDir], "linux") },
-      { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, tokenDir], "linux") },
-      { op: "argv", argv: toolArgv("chmod", ["0700", tokenDir], "linux") },
-      { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, paths.tokenPath], "linux") },
-      { op: "argv", argv: toolArgv("chmod", ["0600", paths.tokenPath], "linux") },
+      { op: "user-token", tokenDir, tokenPath: paths.tokenPath, uid: posixIds.uid, gid: posixIds.gid },
       { op: "write", path: fixed.systemdUnit, contents: unitText(opts.execPath, cliBin, envFile, paths.stateDir, logFile), mode: 0o644 },
       { op: "argv", argv: toolArgv("systemctl", ["daemon-reload"], "linux") },
       { op: "argv", argv: toolArgv("systemctl", ["enable", "--now", "verax"], "linux") },
     );
-  } else {
-    const sudoUser = env.SUDO_USER!.trim();
+  } else if (posixIds) {
     const tokenDir = path.posix.dirname(paths.tokenPath);
     const errFile = path.posix.join(paths.stateDir, "body.err");
     ops.push(
       { op: "argv", argv: toolArgv("chown", ["-R", `${DARWIN_USER}:${DARWIN_USER}`, paths.stateDir], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0700", paths.stateDir], "darwin") },
-      { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, tokenDir], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["0700", tokenDir], "darwin") },
-      { op: "argv", argv: toolArgv("chown", [`${sudoUser}:`, paths.tokenPath], "darwin") },
-      { op: "argv", argv: toolArgv("chmod", ["0600", paths.tokenPath], "darwin") },
+      { op: "user-token", tokenDir, tokenPath: paths.tokenPath, uid: posixIds.uid, gid: posixIds.gid },
       { op: "write", path: fixed.darwinPlist, contents: plistText(opts.execPath, cliBin, envFile, errFile, logFile), mode: 0o644 },
       { op: "argv", argv: toolArgv("chown", ["root:wheel", fixed.darwinPlist], "darwin") },
       { op: "argv", argv: toolArgv("chmod", ["0644", fixed.darwinPlist], "darwin") },
@@ -1994,9 +2272,11 @@ export function planUninstall(
     /** Linux `verax` group. Set only when the marker says `createdGroup`. */
     removeLinuxGroup?: boolean;
     posixRoot?: string;
+    /** Invoking user SID. Windows removes `%ProgramData%\\Verax\\agent-token\\<sid>`. */
+    userSid?: string;
   },
 ): InstallPlan {
-  const located = pathsFor(platform, env, opts.posixRoot);
+  const located = pathsFor(platform, env, opts.posixRoot, undefined, opts.userSid);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -2024,6 +2304,9 @@ export function planUninstall(
       { op: "argv", argv: toolArgv("launchctl", ["bootout", `system/${DARWIN_LABEL}`], "darwin"), optional: true },
       { op: "remove", path: DARWIN_PLIST },
     );
+  }
+  if (platform === "win32" && paths.tokenPath !== "") {
+    ops.push({ op: "remove", path: path.win32.dirname(paths.tokenPath) });
   }
   ops.push({ op: "remove", path: paths.codeDir });
   if (platform === "darwin") ops.push({ op: "remove", path: DARWIN_MARKER }, { op: "remove", path: DARWIN_ROOT });
@@ -3310,11 +3593,13 @@ export function serviceAclFiles(root: string, kind: "code" | "state"): string[] 
   return files;
 }
 
-function serviceGrantKind(argv: readonly string[]): "code" | "state" | null {
+/** A grant to the service account. Other `(OI)(CI)` grants (Administrators, the token folder's user) are not one. */
+function serviceGrantKind(argv: readonly string[], svcSid: string): "code" | "state" | null {
+  if (svcSid === "") return null;
   for (const arg of argv) {
-    const match = /^\*S-1-[0-9-]+:\(OI\)\(CI\)(RX|F)$/.exec(arg);
-    if (!match) continue;
-    return match[1] === "RX" ? "code" : "state";
+    const match = /^\*(S-1-[0-9-]+):\(OI\)\(CI\)(RX|F)$/.exec(arg);
+    if (!match || match[1]!.toUpperCase() !== svcSid.toUpperCase()) continue;
+    return match[2] === "RX" ? "code" : "state";
   }
   return null;
 }
@@ -3479,6 +3764,7 @@ async function execute(
   copyFile: (source: string, dest: string) => void = copyFileSync,
   installEnv?: NodeJS.ProcessEnv,
   healthTimeoutMs?: number,
+  spawnUserToken?: (spec: UserTokenSpawn) => ExecResult,
 ): Promise<number> {
   const tempStep = plan.ops.find((op): op is Extract<PlanOp, { op: "private-temp" }> => op.op === "private-temp");
   const tempDir = tempStep?.path;
@@ -3614,7 +3900,9 @@ async function execute(
         io.stderr.write(`${tool} exit ${code}${detail ? `: ${detail.split("\n")[0]}` : ""}\n`);
         return finish(1);
       }
-      const grantKind = platform === "win32" ? serviceGrantKind(resolved) : null;
+      // Only the service's own roots carry the svc grant; the agent-token folder does not.
+      const serviceRoot = resolved[1] === plan.stateDir || resolved[1] === plan.codeDir;
+      const grantKind = platform === "win32" && serviceRoot ? serviceGrantKind(resolved, svcSid) : null;
       if (grantKind) {
         const target = resolved[1] ?? "";
         const files = serviceAclFiles(target, grantKind).filter((file) => existsSync(file));
@@ -3698,9 +3986,55 @@ async function execute(
           ...(step.force ? ["--force"] : []),
         ],
         io,
-        { tokenPath: step.tokenPath, quiet: true, noOwnerGrant: step.noOwnerGrant, env: installEnv },
+        { quiet: true, noOwnerGrant: step.noOwnerGrant, env: installEnv },
       );
       if (code !== 0) return finish(code);
+      continue;
+    }
+    if (step.op === "place-token") {
+      const placed = placeInstalledToken(plan.stateDir, step.path, platform);
+      if (!placed.ok) {
+        io.stderr.write(placed.error.endsWith("\n") ? placed.error : `${placed.error}\n`);
+        return finish(EX_CONFIG);
+      }
+      continue;
+    }
+    if (step.op === "user-token") {
+      if (step.uid === 0) {
+        io.stderr.write("refusing: the invoking uid is 0\n");
+        return finish(EX_CONFIG);
+      }
+      const stateToken = path.posix.join(plan.stateDir, "local-issuer", "agent.token");
+      let token = "";
+      try {
+        token = readFileSync(stateToken, "utf8");
+      } catch {
+        io.stderr.write("agent token was not created in the state directory\n");
+        return finish(EX_CONFIG);
+      }
+      const spec: UserTokenSpawn = {
+        uid: step.uid,
+        gid: step.gid,
+        tokenDir: step.tokenDir,
+        tokenPath: step.tokenPath,
+        token,
+      };
+      const ran = spawnUserToken
+        ? spawnUserToken(spec)
+        : spawnSync(process.execPath, ["--input-type=module", "-e", USER_TOKEN_WRITER], {
+            uid: step.uid,
+            gid: step.gid,
+            input: token,
+            encoding: "utf8",
+            shell: false,
+            windowsHide: true,
+            env: { VERAX_TOKEN_DIR: step.tokenDir, VERAX_TOKEN_PATH: step.tokenPath },
+          });
+      if ((ran.status ?? 1) !== 0) {
+        const detail = `${ran.stderr || ran.stdout || "token was not written"}`.trim();
+        io.stderr.write(detail.endsWith("\n") ? detail : `${detail}\n`);
+        return finish(EX_CONFIG);
+      }
       continue;
     }
     if (step.op === "remove") {
@@ -4217,6 +4551,70 @@ function collectTarballs(
   return { error: true, code: EX_CONFIG };
 }
 
+function codeDirWritable(dir: string, platform: InstallPlatform, exec: ToolExec): boolean {
+  const targets = trustTargets(dir, platform);
+  if (platform === "win32") {
+    const sid = invokingSid(exec);
+    for (const file of targets) {
+      const ran = exec(windowsSddlArgv(file.path));
+      if ((ran.status ?? 1) !== 0 || windowsUserCanWrite(ran.stdout ?? "", { path: file.path, userSid: sid, ancestor: file.ancestor })) {
+        return true;
+      }
+    }
+    return false;
+  }
+  return targets.some((file) => posixEntryUntrusted(file.path));
+}
+
+export function refuseWritableCode(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  exec: ToolExec,
+  probe?: (dir: string) => boolean,
+): string | null {
+  if (platform !== "win32" && platform !== "linux" && platform !== "darwin") return null;
+  const spec = platform;
+  return elevatedCodeRefusal(spec, veraxCodeDirectories(), {
+    account: codeTrustAccount(platform, env),
+    ...(probe ? { probe } : { userWritable: (dir: string) => codeDirWritable(dir, spec, exec) }),
+  });
+}
+
+/** Elevated approve uses the process exec. Install and uninstall pass their own. */
+export function elevatedCommandCodeRefusal(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  probe?: (dir: string) => boolean,
+): string | null {
+  return refuseWritableCode(platform, env, defaultExec, probe);
+}
+
+function resolveInvokingIds(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  exec: ToolExec,
+): { uid: number; gid: number } | { error: string } {
+  const user = env.SUDO_USER?.trim() ?? "";
+  const sudoUid = env.SUDO_UID?.trim() ?? "";
+  const sudoGid = env.SUDO_GID?.trim() ?? "";
+  if (user === "" || !/^\d+$/.test(sudoUid) || !/^\d+$/.test(sudoGid)) {
+    return { error: "verax install needs SUDO_USER, SUDO_UID, and SUDO_GID" };
+  }
+  const spec = platform === "darwin" ? "darwin" : "linux";
+  const uidRan = exec(toolArgv("id", ["-u", user], spec));
+  const gidRan = exec(toolArgv("id", ["-g", user], spec));
+  const uid = (uidRan.stdout ?? "").trim();
+  const gid = (gidRan.stdout ?? "").trim();
+  if ((uidRan.status ?? 1) !== 0 || (gidRan.status ?? 1) !== 0 || !/^\d+$/.test(uid) || !/^\d+$/.test(gid)) {
+    return { error: `verax install could not read the uid of ${user} from id` };
+  }
+  if (uid !== sudoUid || gid !== sudoGid) {
+    return { error: `refusing: id for ${user} is ${uid}:${gid}, not SUDO_UID ${sudoUid} SUDO_GID ${sudoGid}` };
+  }
+  if (Number(uid) === 0) return { error: "refusing: the invoking uid is 0" };
+  return { uid: Number(uid), gid: Number(gid) };
+}
+
 export async function runInstall(argv: readonly string[], hooks: InstallHooks = {}): Promise<number> {
   beginWinOwnerRun();
   try {
@@ -4244,6 +4642,11 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
   if (!isElevated) {
     io.stderr.write(`${ELEVATION_LINE}\n`);
     return EX_ELEVATION;
+  }
+  const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
+  if (codeRefusal) {
+    io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
+    return EX_CONFIG;
   }
   const parsed = parseInstallArgs(argv);
   if ("error" in parsed) {
@@ -4411,6 +4814,8 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       "-Command",
       `(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\${sid}').ProfileImagePath`,
     ], "win32"));
+    // The agent token no longer lives in the profile (R14-8), so an unreadable
+    // ProfileImagePath is not a refusal; a readable one that disagrees still is.
     const image = (looked.stdout ?? "").trim().split(/\r?\n/).filter((line) => line.trim() !== "").pop() ?? "";
     if (/^[A-Za-z]:\\/.test(image)) {
       const profile = plannedEnv.USERPROFILE?.trim() ?? "";
@@ -4420,6 +4825,15 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       }
       profileImagePath = image;
     }
+  }
+  let invokingIds: { uid: number; gid: number } | undefined;
+  if (platform === "linux" || platform === "darwin") {
+    const checked = resolveInvokingIds(platform, plannedEnv, exec);
+    if ("error" in checked) {
+      io.stderr.write(`${checked.error}\n`);
+      return EX_CONFIG;
+    }
+    invokingIds = checked;
   }
   const packed = parsed.fromTarballs ? collectTarballs(parsed.fromTarballs, platform, exec, io, sddlPlan) : undefined;
   if (packed && "error" in packed) return packed.code;
@@ -4445,6 +4859,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     darwinAccount,
     darwinState,
     darwinRoot,
+    invokingIds,
     ...(packed && !("error" in packed)
       ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballDigests: packed.digests, tarballSddl: packed.sddl, tarballModes: packed.modes }
       : {}),
@@ -4453,7 +4868,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     io.stderr.write(plan.message);
     return plan.code;
   }
-  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv, hooks.healthTimeoutMs);
+  return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv, hooks.healthTimeoutMs, hooks.spawnUserToken);
 }
 
 /** A non-zero tool result that means the install artifact is already gone. */
@@ -4727,6 +5142,14 @@ function executeUninstall(
       return stateFailed;
     }
   }
+  if (platform === "win32" && plan.tokenPath.includes(`${path.win32.sep}agent-token${path.win32.sep}`)) {
+    const tokenDir = path.win32.dirname(plan.tokenPath);
+    const tokenFailed = note(existsSync(tokenDir), tokenDir, () => removeInstallPath(tokenDir, io));
+    if (tokenFailed !== null) {
+      writeLines();
+      return tokenFailed;
+    }
+  }
   if (platform === "win32" && opts.removeWinAccount) {
     const queryArgv = toolArgv("net", ["user", VERAX_SVC], "win32");
     const query = exec(queryArgv);
@@ -4885,6 +5308,11 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     io.stderr.write("verax uninstall needs an elevated shell (Administrator / root)\n");
     return EX_ELEVATION;
   }
+  const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
+  if (codeRefusal) {
+    io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
+    return EX_CONFIG;
+  }
   const body = argv[0] === "uninstall" ? argv.slice(1) : argv;
   const parsed = parseFlag(body, "--unused");
   if (parsed.error) {
@@ -4920,6 +5348,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     throw err;
   }
   const flags = markerFlags(markerFile);
+  const userSid = platform === "win32" ? invokingSid(exec) : undefined;
   const plan = planUninstall(platform as InstallPlatform, plannedEnv, {
     keepState: parsed.keepState,
     removeWinAccount: flags.createdAccount,
@@ -4928,6 +5357,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     removeLinuxUser: flags.createdUser,
     removeLinuxGroup: flags.createdGroup,
     posixRoot,
+    userSid,
   });
   if (!plan.ok) {
     io.stderr.write(plan.message);

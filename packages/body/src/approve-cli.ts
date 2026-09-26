@@ -14,7 +14,8 @@ import {
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
-import { directoryAccess, stateDirFor, SystemToolError, unreadableSentence } from "./install.ts";
+import { EX_CONFIG } from "./config.ts";
+import { defaultElevated, directoryAccess, elevatedCommandCodeRefusal, stateDirFor, SystemToolError, unreadableSentence } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
 function policyForApprove(stateDir: string, policyHash: string): Policy | null {
@@ -110,12 +111,39 @@ function defaultApproveIo(): ApproveIo {
   };
 }
 
+export type ApproveHooks = {
+  elevated?: () => boolean;
+  codeProbe?: (dir: string) => boolean;
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+};
+
 export async function runApprove(
   argv: string[],
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
   writeOut: (s: string) => void = (s) => process.stdout.write(s),
   io?: ApproveIo,
+  hooks?: ApproveHooks,
 ): Promise<number> {
+  const platform = hooks?.platform ?? process.platform;
+  const env = hooks?.env ?? process.env;
+  let isElevated = false;
+  try {
+    isElevated = hooks?.elevated ? hooks.elevated() : defaultElevated(platform);
+  } catch (err) {
+    if (err instanceof SystemToolError) {
+      writeErr(`${err.message}\n`);
+      return EX_CONFIG;
+    }
+    throw err;
+  }
+  if (isElevated) {
+    const refusal = elevatedCommandCodeRefusal(platform, env, hooks?.codeProbe);
+    if (refusal) {
+      writeErr(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
+      return EX_CONFIG;
+    }
+  }
   const terminal = io ?? defaultApproveIo();
   const rest = argv.slice(1).filter((a) => a !== "--from-script");
   const fromScript = argv.includes("--from-script");
@@ -217,7 +245,7 @@ export async function runApprove(
       policyHash: defer.claims.policyHash,
       approvals,
       ...(policy
-        ? { budgetGuard: createApprovalBudgetGuard({ policy, approvals, now: () => Date.now() }) }
+        ? { budgetGuard: createApprovalBudgetGuard({ policy, approvals, now: () => Date.now(), ledger }) }
         : {}),
     });
     if (!result.ok) {

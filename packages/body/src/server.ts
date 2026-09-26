@@ -647,6 +647,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             policy: services.policy,
             approvals,
             now: () => Date.now(),
+            ledger: services.ledger,
           }),
         });
         if (!outcome.ok) {

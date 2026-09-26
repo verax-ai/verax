@@ -233,19 +233,41 @@ export function createApprovalBudgetGuard(opts: {
   policy: Policy;
   approvals: ApprovalsLog;
   now: () => number;
-}): (snap: ApprovalRow) => Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }> {
+  ledger: Ledger;
+}): (snap: ApprovalRow) => Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }> {
   return async (snap) => {
     if (snap.subject !== "spend") return { ok: true };
-    const dailyMax = opts.policy.rule(snap.ruleId)?.spend?.dailyMaxMinor;
+    const rule = opts.policy.rule(snap.ruleId);
+    // A missing rule is not an uncapped rule. A rule that exists and names no
+    // dailyMaxMinor is the policy's choice to leave that spend uncapped.
+    if (rule === null) return { ok: false, reason: "rule-missing" };
+    const dailyMax = rule.spend?.dailyMaxMinor;
     if (dailyMax === undefined) return { ok: true };
     const currency = typeof snap.args.currency === "string" ? snap.args.currency : "";
     const amount = typeof snap.args.amountMinor === "number" ? snap.args.amountMinor : 0;
     // Sibling pending rows are not authorized yet. Counting them here would
-    // deadlock two 100-unit pendings against a later 150 cap; approved spend
-    // plus this amount is what the operator is about to commit.
-    const others = (await opts.approvals.listAll()).filter(
-      (row) => row.ref !== snap.ref && row.status === "approved",
-    );
+    // deadlock two 100-unit pendings against a later 150 cap. A pending row
+    // whose ref the ledger already resolved as allow was authorized; the
+    // approvals file may still say pending if the process stopped before
+    // updateStatus. That row counts. Other pendings do not.
+    const listed = await opts.approvals.listAll();
+    const others = [];
+    for (const row of listed) {
+      if (row.ref === snap.ref) continue;
+      if (row.status === "approved") {
+        others.push(row);
+        continue;
+      }
+      if (row.status !== "pending" || row.subject !== "spend") continue;
+      const hit = lookupResolvedBy(opts.ledger, row.ref);
+      if (hit?.kind !== "allow") continue;
+      const allow = await lookupDecisionByRef(opts.ledger, hit.ref);
+      others.push({
+        ...row,
+        status: "approved",
+        ...(typeof allow?.timestampMs === "number" ? { approvedAtMs: allow.timestampMs } : {}),
+      });
+    }
     const offset = opts.policy.rule(snap.ruleId)?.spend?.dayOffsetMinutes ?? opts.policy.dayOffsetMinutes ?? 0;
     const spent = spentTodayMinorOf(others, opts.now(), currency, opts.policy.approvalTtlMs, offset);
     if (spent + amount > dailyMax) return { ok: false, reason: "budget-exceeded" };
@@ -286,8 +308,8 @@ export async function approvePending(opts: {
     snap: ApprovalRow,
   ) =>
     | { ok: true }
-    | { ok: false; reason: "budget-exceeded" }
-    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }>;
+    | { ok: false; reason: "budget-exceeded" | "rule-missing" }
+    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }>;
 }): Promise<ApproveResult> {
   return approvalLockFor(opts.ledger).enqueue(() => approvePendingUnlocked(opts));
 }
@@ -307,8 +329,8 @@ async function approvePendingUnlocked(opts: {
     snap: ApprovalRow,
   ) =>
     | { ok: true }
-    | { ok: false; reason: "budget-exceeded" }
-    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }>;
+    | { ok: false; reason: "budget-exceeded" | "rule-missing" }
+    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }>;
 }): Promise<ApproveResult> {
   const inputsLog = opts.inputsLog ?? inputsLogFor(opts.ledger);
   const defer = await lookupDecisionByRef(opts.ledger, opts.ref);
@@ -411,6 +433,9 @@ async function approvePendingUnlocked(opts: {
     ),
   );
   noteResolution(opts.ledger, opts.ref, { ref: allowRef, kind: "allow" });
+  // The allow is on the ledger. Mark the snapshot approved before the effect
+  // row, so a stop during appendEffect still counts this spend.
+  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef, approvedAtMs: opts.now() });
   if (snap.subject === "spend") {
     const resultHash = sha256Canonical({
       authorized: true,
@@ -432,7 +457,6 @@ async function approvePendingUnlocked(opts: {
       resultHash,
     );
   }
-  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef, approvedAtMs: opts.now() });
   return { ok: true, allowRef };
 }
 

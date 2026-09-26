@@ -283,6 +283,7 @@ describe("attack R13", () => {
         USERNAME: "operator",
       },
       elevated: () => true,
+        codeProbe: () => false,
       layout: winLayout,
       exec: (argv, stdin) => {
         if (stdin && stdin.startsWith("[")) {
@@ -315,6 +316,7 @@ describe("attack R13", () => {
         USERPROFILE: "C:\\Users\\operator",
       },
       elevated: () => true,
+        codeProbe: () => false,
       layout: winLayout,
       exec: () => {
         ran += 1;
@@ -373,6 +375,7 @@ describe("attack R13", () => {
           USERPROFILE: "C:\\Users\\operator",
         },
         elevated: () => true,
+        codeProbe: () => false,
         layout: winLayout,
         exec: () => {
           ran += 1;
@@ -390,7 +393,7 @@ describe("attack R13", () => {
     const plan = planInstall(
       "win32",
       { ProgramData: "C:\\ProgramData", ProgramFiles: "C:\\Program Files", USERPROFILE: "C:\\Users\\operator" },
-      { ...winLayout, port: 8801, days: 30, force: false, stateExists: false },
+      { ...winLayout, port: 8801, days: 30, force: false, stateExists: false, userSid: "S-1-5-21-1001" },
     );
     assert.equal(plan.ok, true, plan.ok ? "" : plan.message);
     if (!plan.ok) return;

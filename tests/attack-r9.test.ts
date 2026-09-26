@@ -23,6 +23,8 @@ import type { ExecResult, PlanOp } from "../packages/body/src/install.ts";
 
 const linuxEnv = {
   SUDO_USER: "runner",
+  SUDO_UID: "1000",
+  SUDO_GID: "1000",
   VERAX_INVOKING_HOME: "/home/runner",
 };
 
@@ -108,6 +110,7 @@ describe("attack R9", () => {
         env: linuxEnv,
         posixRoot,
         elevated: () => true,
+        codeProbe: () => false,
         exec: (argv): ExecResult => {
           seen.push([...argv]);
           const tool = toolOf(argv);
@@ -152,6 +155,7 @@ describe("attack R9", () => {
         env: linuxEnv,
         posixRoot,
         elevated: () => true,
+        codeProbe: () => false,
         exec: (argv): ExecResult => {
           const tool = toolOf(argv);
           if (tool === "getent" && argv[1] === "passwd" && argv[2] === "runner") {

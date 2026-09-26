@@ -157,8 +157,9 @@ function symbolicLinkProblem(path: string): string | null {
 
 /**
  * A piece path that leaves the directory is a problem and is not opened.
- * A piece that is a symbolic link is named and is not opened. `existsSync`
- * runs only after both checks.
+ * A piece that is a symbolic link is named and is not opened. A decisions or
+ * effects file the manifest names and the disk lacks is `missing piece`.
+ * `existsSync` runs only after the path and link checks.
  */
 function takePieceFile(dir: string, rel: string, problems: string[], read: boolean): string | null {
   const problem = ledgerPiecePathProblem(dir, rel);
@@ -173,7 +174,14 @@ function takePieceFile(dir: string, rel: string, problems: string[], read: boole
     return null;
   }
   if (!read) return null;
-  return existsSync(path) ? path : null;
+  // The writer creates the effects file for every piece, including a piece
+  // that has no effects yet (an empty file). A name in the manifest with no
+  // file on disk is not that empty piece.
+  if (!existsSync(path)) {
+    problems.push(`missing piece: ${rel}`);
+    return null;
+  }
+  return path;
 }
 
 /** Decision and effect files this directory holds, oldest piece first. Inputs are confined and not read. */
@@ -561,7 +569,9 @@ function tailStatement(
   let brk: { index: number; reason: string } | null = null;
   try {
     brk = findCheckpointChainBreak(rows, key ?? undefined);
-  } catch {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    problems.push(`checkpoint chain could not be checked: ${message}`);
     brk = rows.length > 0 ? { index: 0, reason: "bad-signature" } : null;
   }
   if (brk && brk.reason !== "bad-signature") {
@@ -788,11 +798,19 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   let effectsOrphaned = 0;
   const boundPrimaryRefs = new Set<string>();
   const primarySeen = new Set<string>();
+  const duplicateSeen = new Set<string>();
   for (const e of effectRows) {
     const ref = typeof e.row?.ref === "string" ? e.row.ref : null;
     const effectHash = typeof e.row?.effectHash === "string" ? e.row.effectHash : null;
     const effectClass = typeof e.row?.effectClass === "string" ? e.row.effectClass : "";
     if (effectClass === "duplicate-effect") {
+      const sig = typeof e.attestation?.coseHex === "string" ? e.attestation.coseHex : "";
+      const dupKey = `${ref ?? ""}\0${sig}`;
+      if (sig !== "" && duplicateSeen.has(dupKey)) {
+        problems.push(`duplicate-effect row repeated: ref ${ref ?? "(missing)"}`);
+        continue;
+      }
+      if (sig !== "") duplicateSeen.add(dupKey);
       const fixed =
         ref === null ? null : sha256Canonical({ refused: "duplicate-effect", ref });
       const boundRefusal = ref !== null && refler.has(ref) && effectHash !== null && effectHash === fixed;

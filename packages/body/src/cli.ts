@@ -29,13 +29,20 @@ Usage: verax <command> [options]
                        write a loopback key, one agent token, and verax.env
   install [--port N] [--days N] [--force]
                        copy this body to an administrator-owned directory and run it
-                       as another account. Needs an elevated shell.
+                       as another account. Needs an elevated shell, and this program
+                       must live in a directory only an administrator can change.
+                       On Windows the agent token is under %ProgramData%\\Verax\\agent-token\\<SID>\\.
+                       On Linux and macOS a process running as the invoking user writes ~/.verax/agent.token.
   uninstall [--keep-state]
-                       stop that body and remove its code. Needs an elevated shell.
+                       stop that body and remove its code. Needs an elevated shell
+                       and the same administrator-owned copy.
   doctor [--json]      check the configuration this process would run with
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
        [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
-  approve <args>       approve a waiting request from this machine
+  approve <args>       approve a waiting request from this machine.
+                       An elevated approve must be the administrator-owned copy:
+                       Windows "%ProgramFiles%\\verax-cli\\verax.cmd" approve;
+                       Linux and macOS the root-owned Node under /opt/verax-node.
   operator <args>      enrol an operator and manage their passkeys
   reconcile <args>     compare the ledger against a statement
   verify <stateDir>    read a ledger back without a body: signatures, chain,

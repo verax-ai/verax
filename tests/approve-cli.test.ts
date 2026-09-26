@@ -226,6 +226,7 @@ describe("verax approve CLI", () => {
       (s) => yesErr.push(s),
       (s) => yesOut.push(s),
       { isTTY: true, ask: async () => "100" },
+      { elevated: () => false },
     );
     assert.equal(yesCode, 0, yesErr.join(""));
     assert.match(yesOut.join(""), /^held tool=spend /);
@@ -248,6 +249,7 @@ describe("verax approve CLI", () => {
       (s) => noErr.push(s),
       () => undefined,
       { isTTY: true, ask: async () => "5" },
+      { elevated: () => false },
     );
     assert.equal(noCode, 1);
     assert.match(noErr.join(""), /approve-amount-mismatch/);
@@ -316,6 +318,7 @@ describe("verax approve CLI", () => {
       (s) => missErr.push(s),
       () => undefined,
       { isTTY: true, ask: async () => "999" },
+      { elevated: () => false },
     );
     assert.equal(missCode, 1);
     assert.match(missErr.join(""), /approve-amount-mismatch/);
@@ -328,6 +331,7 @@ describe("verax approve CLI", () => {
       (s) => hitErr.push(s),
       (s) => hitOut.push(s),
       { isTTY: true, ask: async () => "100" },
+      { elevated: () => false },
     );
     assert.equal(hitCode, 0, hitErr.join(""));
     assert.match(hitOut.join(""), /approve-queued/);

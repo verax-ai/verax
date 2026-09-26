@@ -124,7 +124,7 @@ describe("attack R6", () => {
         await runApprove(["approve", stateDir, ref], () => {}, (line) => out.push(line), {
           isTTY: true,
           ask: async () => "100",
-        });
+        }, { elevated: () => false });
         const held = out.find((line) => line.startsWith("held ")) ?? "";
         const hex = mark.codePointAt(0)!.toString(16).padStart(4, "0");
         assert.equal(held.includes(mark), false, cls);

@@ -66,16 +66,23 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ## Connect your agent
 
-One elevated command installs the body where your agent's shell cannot read it. On Windows that is an Administrator terminal. On Linux and macOS it is root: `sudo verax install`.
+Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, in an Administrator PowerShell:
 
-```sh
-npm install -g @verax-ai/body
-verax install
+```powershell
+npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body
+& "$env:ProgramFiles\verax-cli\verax.cmd" install
 ```
 
-The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs the already-trusted system Node, keeps the ledger under a service account, and writes the agent token only into your profile (`%USERPROFILE%\.verax\agent.token` or `~/.verax/agent.token`). It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. Isolation is the service account and file permissions.
+On Linux and macOS, with a root-owned Node (the distribution's, or `/opt/verax-node`; the installer prints those steps when the Node it was started from can be changed by your account):
 
-Approve a held call from an elevated terminal: `verax approve` (Windows: Run as administrator; Linux and macOS: `sudo verax approve`).
+```sh
+sudo npm install -g --prefix /opt/verax-cli @verax-ai/body
+sudo /opt/verax-cli/bin/verax install
+```
+
+The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs that Node, and keeps the ledger under a service account. On Windows the agent token is `%ProgramData%\Verax\agent-token\<your SID>\agent.token` (Administrators and SYSTEM have full control, your SID can read the file and read-execute the directory). On Linux and macOS a child process running as your uid writes `~/.verax/agent.token` from its stdin. It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. The service account and the file permissions are the boundary.
+
+Approve a held call from that same administrator-owned copy. Windows, in an Administrator PowerShell: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS: `sudo /opt/verax-cli/bin/verax approve`.
 
 To try it in your own user, which is not a boundary:
 

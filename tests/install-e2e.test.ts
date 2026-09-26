@@ -22,8 +22,14 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /timeout-minutes:\s*15/);
     assert.match(workflow, /npm ci/);
     assert.match(workflow, /npm run build:dist/);
-    const installLines = workflow.split(/\r?\n/).filter((line) => line.includes("cli.js install"));
-    assert.ok(installLines.length > 0, "workflow has no cli.js install invocation");
+    // Elevated install runs from an administrator/root-owned copy of the CLI (R14-9), not the checkout.
+    assert.equal(/cli\.js (un)?install/.test(workflow), false, "elevated install must not run the checkout's cli.js");
+    assert.match(workflow, /\$prefix = Join-Path \$env:ProgramFiles "verax-cli"/);
+    assert.match(workflow, /--prefix \/opt\/verax-cli/);
+    const installLines = workflow
+      .split(/\r?\n/)
+      .filter((line) => /(VERAX_CLI|verax-cli\/bin\/verax) install\b/.test(line));
+    assert.ok(installLines.length > 0, "workflow has no install invocation from the administrator-owned copy");
     for (const line of installLines) {
       assert.match(line, /--from-tarballs\b/);
       assert.match(line, /--port 8801\b/);
@@ -64,7 +70,7 @@ describe("install-e2e workflow", () => {
     const rest = workflow.slice(at);
     const step = rest.slice(0, rest.indexOf("\n      - name: ", 1));
     assert.match(step, /Start-Process .* -Credential \$cred -PassThru/);
-    assert.match(step, /cli\.js install --from-tarballs/);
+    assert.match(step, /VERAX_CLI install --from-tarballs/);
     assert.match(step, /the racer never saw the root; the race did not happen/);
     assert.match(step, /entries owned by veraxprobe under the root/);
     assert.match(step, /appeared in\|was not created by verax install/);
@@ -107,14 +113,14 @@ describe("install-e2e workflow", () => {
   it("linux installs again after uninstall and checks healthz", () => {
     const linux = workflow.slice(workflow.indexOf("\n  linux:\n"), workflow.indexOf("\n  macos:\n"));
     const reinstallAt = linux.indexOf("- name: reinstall after uninstall\n");
-    assert.ok(reinstallAt > linux.indexOf("cli.js uninstall"), "reinstall must follow an uninstall");
+    assert.ok(reinstallAt > linux.indexOf("verax-cli/bin/verax uninstall"), "reinstall must follow an uninstall");
     const step = linux.slice(reinstallAt, linux.indexOf("\n      - name: ", reinstallAt + 1));
-    assert.match(step, /cli\.js install --from-tarballs "\$VERAX_TARBALLS" --port 8801/);
+    assert.match(step, /verax-cli\/bin\/verax install --from-tarballs "\$VERAX_TARBALLS" --port 8801/);
     assert.match(step, /curl -fsS http:\/\/127\.0\.0\.1:8801\/healthz/);
-    assert.match(step, /cli\.js uninstall/);
+    assert.match(step, /verax-cli\/bin\/verax uninstall/);
     assert.equal(step.includes("Write-Error"), false);
     assert.equal(step.includes("Write-Host"), false);
-    const installs = linux.split(/\r?\n/).filter((line) => line.includes("cli.js install"));
+    const installs = linux.split(/\r?\n/).filter((line) => line.includes("verax-cli/bin/verax install"));
     assert.equal(installs.length, 2);
   });
 
