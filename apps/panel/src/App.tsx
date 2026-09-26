@@ -14,7 +14,7 @@ import type {
   RailFinding,
 } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
-import { authorizedFetch, beginSession, sessionIssueError, sessionScopes } from "./session.ts";
+import { authorizedFetch, beginSession, restartCodeFlow, sessionIssueError, sessionScopes } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
 
@@ -51,6 +51,26 @@ function wantDemo(): boolean {
   return new URLSearchParams(window.location.search).get("demo") === "1";
 }
 
+async function readErrorBody(r: Response): Promise<string | null> {
+  try {
+    const errBody = (await r.json()) as { error?: unknown };
+    return typeof errBody.error === "string" ? errBody.error : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Audit doors (/api/ledger, /api/agents, /api/inventory, /api/contest) answer
+ * 403 scope-missing when the session has no verax:audit. Other 403s, including
+ * origin-not-allowed and local-mode-operator-scope, are not this case.
+ * /api/approve uses the same status for a missing verax:approve and is not an
+ * audit door.
+ */
+function isAuditScopeMissing(status: number, detail: string | null): boolean {
+  return status === 403 && detail === "scope-missing";
+}
+
 export function App() {
   const [status, setStatus] = useState<RailStatus>("loading");
   const [actions, setActions] = useState<RailAction[]>([]);
@@ -66,16 +86,25 @@ export function App() {
   // Whether the ledger goes on past the oldest row on screen.
   const [more, setMore] = useState(false);
   const [olderBusy, setOlderBusy] = useState(false);
-  const pollRef = useRef<() => Promise<void>>(async () => undefined);
   // The agents list is the body's reading of its ledger and roster; the
   // screen draws it, and says so when it could not be read.
   const [agents, setAgents] = useState<AgentsAnswer | null>(null);
   const [agentsFailed, setAgentsFailed] = useState(false);
+  const pollRef = useRef<() => Promise<void>>(async () => undefined);
+  const passkeyHeld = useRef(false);
+  const showPasskey = useCallback(() => {
+    if (wantDemo()) return;
+    passkeyHeld.current = true;
+    setStatus("error");
+    setError({ code: "passkey" });
+  }, []);
 
   const loadAgents = useCallback(async () => {
     try {
       const r = await authorizedFetch("/api/agents");
       if (!r.ok) {
+        const detail = await readErrorBody(r);
+        if (isAuditScopeMissing(r.status, detail)) showPasskey();
         setAgents(null);
         setAgentsFailed(true);
         return;
@@ -92,12 +121,14 @@ export function App() {
       setAgents(null);
       setAgentsFailed(true);
     }
-  }, []);
+  }, [showPasskey]);
 
   const loadInventory = useCallback(async () => {
     try {
       const invRes = await authorizedFetch("/api/inventory");
       if (!invRes.ok) {
+        const detail = await readErrorBody(invRes);
+        if (isAuditScopeMissing(invRes.status, detail)) showPasskey();
         setInventory(null);
         return;
       }
@@ -107,7 +138,7 @@ export function App() {
     } catch {
       setInventory(null);
     }
-  }, []);
+  }, [showPasskey]);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -130,28 +161,30 @@ export function App() {
   const readLedger = useCallback(async (query: string): Promise<LedgerBody | null> => {
     const r = await authorizedFetch(`/api/ledger?${query}`);
     if (!r.ok) {
-      let detail = "";
-      try {
-        const errBody = (await r.json()) as { error?: unknown };
-        if (typeof errBody.error === "string") detail = errBody.error;
-      } catch {
-        detail = "";
-      }
+      const detail = await readErrorBody(r);
       if (wantDemo()) {
         return null;
       }
-      setStatus("error");
-      setError({ code: "http", status: r.status, detail: detail || null });
+      if (isAuditScopeMissing(r.status, detail)) {
+        showPasskey();
+        return null;
+      }
+      if (!passkeyHeld.current) {
+        setStatus("error");
+        setError({ code: "http", status: r.status, detail: detail || null });
+      }
       return null;
     }
     try {
       return (await r.json()) as LedgerBody;
     } catch {
-      setStatus("error");
-      setError({ code: "invalid-json", detail: null });
+      if (!passkeyHeld.current) {
+        setStatus("error");
+        setError({ code: "invalid-json", detail: null });
+      }
       return null;
     }
-  }, []);
+  }, [showPasskey]);
 
   /** The newest page, replacing whatever the screen held. */
   const load = useCallback(async () => {
@@ -176,6 +209,7 @@ export function App() {
       }
       return;
     }
+    passkeyHeld.current = false;
     await loadInventory();
     // The status tab counts decisions out of /healthz and witnesses out of
     // the rows it has. Read once at mount, those two disagreed the moment a
@@ -185,25 +219,36 @@ export function App() {
     await loadAgents();
     try {
       const body = await readLedger(`from=0&to=${END_OF_TIME}&limit=${PAGE}`);
-      if (!body) return;
+      if (!body) {
+        if (passkeyHeld.current) showPasskey();
+        return;
+      }
       const parsed = rowsOf(body);
       setLastReadMs(Date.now());
-      setError(null);
       setDemo(false);
       setMore(body.more === true);
       setPending(Array.isArray(body.approvals) ? body.approvals : []);
+      if (passkeyHeld.current) {
+        // Another audit door closed this read. Keep its explanation; a good
+        // ledger page must not wipe it back to an empty or open screen.
+        showPasskey();
+      } else {
+        setError(null);
+      }
       if (parsed.length === 0) {
         setActions([]);
-        setStatus("empty");
+        if (!passkeyHeld.current) setStatus("empty");
         return;
       }
       setActions(parsed);
-      setStatus("ok");
+      if (!passkeyHeld.current) setStatus("ok");
     } catch {
-      setStatus("error");
-      setError({ code: "network", detail: null });
+      if (!passkeyHeld.current) {
+        setStatus("error");
+        setError({ code: "network", detail: null });
+      }
     }
-  }, [actions.length, loadAgents, loadHealth, loadInventory, readLedger]);
+  }, [actions.length, loadAgents, loadHealth, loadInventory, readLedger, showPasskey]);
 
   /**
    * What is new since the newest row held, folded into the rows on screen.
@@ -216,24 +261,33 @@ export function App() {
       await load();
       return;
     }
+    passkeyHeld.current = false;
     await loadInventory();
     await loadHealth();
     await loadAgents();
     try {
       const newestMs = actions[0]!.record.claims.timestampMs;
       const body = await readLedger(`from=${Math.max(0, newestMs - POLL_OVERLAP_MS)}&to=${END_OF_TIME}`);
-      if (!body) return;
+      if (!body) {
+        if (passkeyHeld.current) showPasskey();
+        return;
+      }
       setLastReadMs(Date.now());
-      setError(null);
       setPending(Array.isArray(body.approvals) ? body.approvals : []);
       const fresh = rowsOf(body);
       if (fresh.length > 0) setActions((held) => mergeActions(held, fresh));
-      setStatus("ok");
+      if (passkeyHeld.current) showPasskey();
+      else {
+        setError(null);
+        setStatus("ok");
+      }
     } catch {
-      setStatus("error");
-      setError({ code: "network", detail: null });
+      if (!passkeyHeld.current) {
+        setStatus("error");
+        setError({ code: "network", detail: null });
+      }
     }
-  }, [actions, load, loadAgents, loadHealth, loadInventory, readLedger]);
+  }, [actions, load, loadAgents, loadHealth, loadInventory, readLedger, showPasskey]);
 
   /** The page before the oldest row on screen, appended below it. */
   const loadOlder = useCallback(async () => {
@@ -247,8 +301,10 @@ export function App() {
       const older = rowsOf(body);
       if (older.length > 0) setActions((held) => mergeActions(held, older));
     } catch {
-      setStatus("error");
-      setError({ code: "network", detail: null });
+      if (!passkeyHeld.current) {
+        setStatus("error");
+        setError({ code: "network", detail: null });
+      }
     } finally {
       setOlderBusy(false);
     }
@@ -372,9 +428,13 @@ export function App() {
           setAgentsFailed(false);
           setDemo(true);
         }}
+        onSignIn={() => {
+          void restartCodeFlow();
+        }}
         onContest={async (ref) => {
           const res = await authorizedFetch(`/api/contest/${encodeURIComponent(ref)}`, { method: "POST" });
           const body = (await res.json().catch(() => ({}))) as {
+            error?: unknown;
             reAuditedAt?: number;
             finding?: RailFinding;
             guarantee?: "unconditional" | "conditional";
@@ -383,10 +443,23 @@ export function App() {
             trustRoot?: { pinned: boolean; issuerMatches: boolean | null; source: "env" | "own-key" | null };
             pair?: { defer: { decision: string; reasonCode: string } | null; resolution: { decision: string; reasonCode: string } | null };
           };
+          const detail = typeof body.error === "string" ? body.error : null;
+          if (isAuditScopeMissing(res.status, detail)) {
+            showPasskey();
+            return { error: "scope-missing" };
+          }
           if (!res.ok || typeof body.reAuditedAt !== "number") {
             return { error: `re-audit failed (${res.status})` };
           }
-          return body;
+          return {
+            reAuditedAt: body.reAuditedAt,
+            finding: body.finding,
+            guarantee: body.guarantee,
+            warnings: body.warnings,
+            witnessClass: body.witnessClass,
+            trustRoot: body.trustRoot,
+            pair: body.pair,
+          };
         }}
       />
     </main>

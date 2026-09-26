@@ -5,7 +5,21 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { systemToolPath } from "./install.ts";
+import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
+
+/** One stderr line when this state has no enrolled operator. */
+export const DESKTOP_PASSKEY_HINT =
+  "the panel reads the ledger after a passkey sign-in; run verax operator enroll\n";
+
+/**
+ * The credentials file is written only when an operator enrolls. Its presence
+ * is the whole answer; a missing file means the panel's audit doors will
+ * refuse the session that has no passkey.
+ */
+export function desktopPasskeyHint(stateDir: string): string | null {
+  return hasRegisteredOperator(stateDir) ? null : DESKTOP_PASSKEY_HINT;
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -279,6 +293,10 @@ export async function runDesktop(
     writeErr(cloneOnly);
     return 78;
   }
+  // Before the issuer, the body, or the window: a first run with no operator
+  // file otherwise opens a panel that cannot read the ledger and does not say why.
+  const passkeyHint = desktopPasskeyHint(opts.stateDir);
+  if (passkeyHint) writeErr(passkeyHint);
   mkdirSync(opts.stateDir, { recursive: true });
   const tokenPath = join(opts.stateDir, "dev-token");
   const issuerScript = join(repoRoot, "scripts", "dev-issuer.mjs");
@@ -321,6 +339,8 @@ export async function runDesktop(
         stopAll();
         return 1;
       }
+      // The --out file is the agent credential. It does not carry verax:audit.
+      // The panel reads the ledger with the passkey session, not this file.
       token = readFileSync(tokenPath, "utf8").trim();
       if (token === "") {
         writeErr("desktop-token-missing\n");

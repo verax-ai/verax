@@ -234,7 +234,7 @@ async function run(): Promise<void> {
   try {
     log(`body up in ${booted.bodyStartMs} ms; rss ${rssMb(booted.bodyPid)} MB`);
     const rssAfterStartMb = rssMb(booted.bodyPid);
-    const token = await booted.mintToken();
+    const token = await booted.mintAuditToken();
     const health: number[] = [];
     let healthDoc: unknown = null;
     for (let i = 0; i < ROUNDS; i += 1) {

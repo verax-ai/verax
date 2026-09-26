@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { EffectRow } from "@cedulon/effect-extract";
 
 import type { ApprovalRow } from "./approvals.ts";
-import { readLedgerManifest } from "./ledger-manifest.ts";
+import { readLedgerManifest, requireLedgerPiecePath } from "./ledger-manifest.ts";
 import type { LedgerEffect } from "./types.ts";
 
 export type ChannelRow = {
@@ -276,7 +276,9 @@ export function parseChannelJsonl(text: string): ChannelRow[] {
 function decisionPaths(dir: string): string[] {
   const manifest = readLedgerManifest(dir);
   if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
-    return manifest.pieces.map((p) => join(dir, p.decisions)).filter((p) => existsSync(p));
+    return manifest.pieces
+      .map((p) => requireLedgerPiecePath(dir, p.decisions))
+      .filter((p) => existsSync(p));
   }
   const tek = join(dir, "decisions.jsonl");
   return existsSync(tek) ? [tek] : [];

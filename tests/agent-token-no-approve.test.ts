@@ -106,11 +106,9 @@ describe("agent token never carries approve", () => {
         const agentToken = readFileSync(outPath, "utf8").trim();
         const claims = decodePayload(agentToken);
         assert.equal(claims.sub, "dev-brain");
-        assert.equal(
-          typeof claims.scope === "string" && claims.scope.split(/\s+/).includes("verax:approve"),
-          false,
-          `agent token still carries approve: ${claims.scope}`,
-        );
+        const agentParts = typeof claims.scope === "string" ? claims.scope.split(/\s+/) : [];
+        assert.equal(agentParts.includes("verax:approve"), false, `agent token still carries approve: ${claims.scope}`);
+        assert.equal(agentParts.includes("verax:audit"), false, `agent token still carries audit: ${claims.scope}`);
 
         const jwks = createRemoteJWKSet(new URL(`${origin}/.well-known/jwks.json`));
         const verified = await jwtVerify(agentToken, jwks, {
@@ -146,10 +144,16 @@ describe("agent token never carries approve", () => {
         const sessionClaims = decodePayload(session.access_token);
         assert.equal(sessionClaims.sub, "operator-1");
         assert.notEqual(sessionClaims.sub, claims.sub);
+        const sessionParts = typeof sessionClaims.scope === "string" ? sessionClaims.scope.split(/\s+/) : [];
         assert.equal(
-          typeof sessionClaims.scope === "string" && sessionClaims.scope.split(/\s+/).includes("verax:approve"),
+          sessionParts.includes("verax:approve"),
           false,
           `session without a passkey still carries approve: ${sessionClaims.scope}`,
+        );
+        assert.equal(
+          sessionParts.includes("verax:audit"),
+          false,
+          `session without a passkey still carries audit: ${sessionClaims.scope}`,
         );
 
         const body = await listen({
@@ -190,11 +194,14 @@ describe("agent token never carries approve", () => {
           const listed = await fetch(`${base}/api/ledger?from=0&to=${Number.MAX_SAFE_INTEGER}`, {
             headers: { authorization: `Bearer ${agentToken}` },
           });
-          assert.equal(listed.status, 200);
-          const ledger = (await listed.json()) as {
-            approvals?: { ref: string; requestHash: string; status?: string }[];
-          };
-          const waiting = (ledger.approvals ?? []).find((a) => a.status === "pending" || a.status === undefined);
+          assert.equal(listed.status, 403, `agent token read the ledger: ${listed.status}`);
+          const approvalText = readFileSync(join(stateDir, "body", "approvals.jsonl"), "utf8");
+          let waiting: { ref: string; requestHash: string } | undefined;
+          for (const line of approvalText.split("\n")) {
+            if (line === "") continue;
+            const row = JSON.parse(line) as { ref: string; requestHash: string; status?: string };
+            if (row.status === "pending") waiting = row;
+          }
           assert.ok(waiting, "nothing is waiting");
           const forbidden = await fetch(`${base}/api/approve`, {
             method: "POST",

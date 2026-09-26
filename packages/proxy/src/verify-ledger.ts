@@ -17,9 +17,11 @@
  *               `{ ref, effectHash, witnessClass, resultHash }`, compared after
  *               decode, and the receipt's effect (`body.effects[0]`, every
  *               field the writer put there) must be that same row. A
- *               thrown call relaxes only the hash: the decision keeps the
- *               pre-call hash and the effect is `<subject>:threw` with its own
- *               hash, but the signature is still required. A
+ *               thrown call relaxes only the hash, and only for the tool that
+ *               was allowed: some decision on that ref has `decision: "allow"`
+ *               and this row's class is exactly that decision's `effectClass`
+ *               plus `:threw`. A deny, or an allow of a different tool, does
+ *               not bind. The signature is still required. A
  *               `duplicate-effect` row is bound to the decision by ref and to
  *               the fixed refusal hash the writer stores, not to the
  *               decision's effectHash; the signature is still required.
@@ -60,7 +62,13 @@ import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-e
 
 import { loadCheckpoints } from "./checkpoints.ts";
 import { sha256Canonical } from "./hash.ts";
-import { indexPath, parseIndexText, readLedgerManifest } from "./ledger-manifest.ts";
+import {
+  ledgerPiecePathProblem,
+  readLedgerManifest,
+  requireLedgerPiecePath,
+  indexPath,
+  parseIndexText,
+} from "./ledger-manifest.ts";
 
 export type VerifyTrust = {
   /** `pinned`: the caller supplied the key. `in-ledger`: read from the records. */
@@ -119,23 +127,42 @@ export type VerifyOptions = {
   checkpointPublicKeyPem?: string;
 };
 
-/** Every decisions file this directory holds, oldest piece first. */
-function decisionFiles(dir: string): string[] {
-  const manifest = readLedgerManifest(dir);
-  if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
-    return manifest.pieces.map((p) => join(dir, p.decisions)).filter((p) => existsSync(p));
+/**
+ * A piece path that leaves the directory is a problem and is not opened.
+ * `existsSync` runs only after the path has been confined.
+ */
+function takePieceFile(dir: string, rel: string, problems: string[], read: boolean): string | null {
+  const problem = ledgerPiecePathProblem(dir, rel);
+  if (problem !== null) {
+    problems.push(problem);
+    return null;
   }
-  const tek = join(dir, "decisions.jsonl");
-  return existsSync(tek) ? [tek] : [];
+  if (!read) return null;
+  const path = requireLedgerPiecePath(dir, rel);
+  return existsSync(path) ? path : null;
 }
 
-function effectFiles(dir: string): string[] {
+/** Decision and effect files this directory holds, oldest piece first. Inputs are confined and not read. */
+function ledgerFiles(dir: string, problems: string[]): { decisions: string[]; effects: string[] } {
   const manifest = readLedgerManifest(dir);
   if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
-    return manifest.pieces.map((p) => join(dir, p.effects)).filter((p) => existsSync(p));
+    const decisions: string[] = [];
+    const effects: string[] = [];
+    for (const p of manifest.pieces) {
+      const decision = takePieceFile(dir, p.decisions, problems, true);
+      if (decision) decisions.push(decision);
+      const effect = takePieceFile(dir, p.effects, problems, true);
+      if (effect) effects.push(effect);
+      takePieceFile(dir, p.inputs, problems, false);
+    }
+    return { decisions, effects };
   }
-  const tek = join(dir, "effects.jsonl");
-  return existsSync(tek) ? [tek] : [];
+  const decisionsPath = join(dir, "decisions.jsonl");
+  const effectsPath = join(dir, "effects.jsonl");
+  return {
+    decisions: existsSync(decisionsPath) ? [decisionsPath] : [],
+    effects: existsSync(effectsPath) ? [effectsPath] : [],
+  };
 }
 
 /** Parses JSONL, reporting the line a bad row sits on rather than throwing. */
@@ -404,7 +431,8 @@ function tailStatement(
 
 export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promise<VerifyResult> {
   const problems: string[] = [];
-  const kararDosyalari = decisionFiles(dir);
+  const files = ledgerFiles(dir, problems);
+  const kararDosyalari = files.decisions;
   const records: SignedDecisionRecord[] = [];
   for (const path of kararDosyalari) {
     for (const row of readJsonl(path, problems)) {
@@ -485,23 +513,33 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
   }
 
   // An effect is bound only when a decision with that ref records the same
-  // effectHash (a `:threw` row may carry its own hash; a `duplicate-effect`
-  // row must carry the writer's fixed refusal hash) and the attestation plus
-  // receipt verify under one effect key. A mismatch is named and counts as
-  // orphaned.
+  // effectHash. A `:threw` row relaxes the hash and nothing else: it binds
+  // only when some decision on that ref is an allow and the row's class is
+  // exactly that decision's effectClass plus `:threw`. A deny did not throw,
+  // and an allow of a different tool is not this class. A `duplicate-effect`
+  // row must carry the writer's fixed refusal hash. The attestation plus
+  // receipt still verify under one effect key. A mismatch is named and counts
+  // as orphaned.
   const refler = new Set<string>();
   const hashesByRef = new Map<string, Set<string>>();
+  const allowedClassesByRef = new Map<string, Set<string>>();
   for (const r of records) {
     if (typeof r.claims?.ref !== "string") continue;
     refler.add(r.claims.ref);
     const recorded = r.claims?.effectHash;
-    if (typeof recorded !== "string") continue;
-    const bag = hashesByRef.get(r.claims.ref) ?? new Set<string>();
-    bag.add(recorded);
-    hashesByRef.set(r.claims.ref, bag);
+    if (typeof recorded === "string") {
+      const bag = hashesByRef.get(r.claims.ref) ?? new Set<string>();
+      bag.add(recorded);
+      hashesByRef.set(r.claims.ref, bag);
+    }
+    if (r.claims.decision === "allow" && typeof r.claims.effectClass === "string" && r.claims.effectClass !== "") {
+      const allowed = allowedClassesByRef.get(r.claims.ref) ?? new Set<string>();
+      allowed.add(r.claims.effectClass);
+      allowedClassesByRef.set(r.claims.ref, allowed);
+    }
   }
   const effectRows: EffectOnDisk[] = [];
-  for (const path of effectFiles(dir)) {
+  for (const path of files.effects) {
     for (const row of readJsonl(path, problems)) effectRows.push(row as EffectOnDisk);
   }
   const pinnedEffect = opts.effectPublicKeyPem?.trim() ?? "";
@@ -537,8 +575,23 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
     }
     const hashes = ref === null ? undefined : hashesByRef.get(ref);
     const hashMatch = effectHash !== null && hashes?.has(effectHash) === true;
-    const thrown = effectClass.endsWith(":threw") && ref !== null && refler.has(ref);
-    if (!hashMatch && !thrown) {
+    if (effectClass.endsWith(":threw")) {
+      const allowed = ref === null ? undefined : allowedClassesByRef.get(ref);
+      let thrownOk = false;
+      if (allowed) {
+        for (const cls of allowed) {
+          if (`${cls}:threw` === effectClass) {
+            thrownOk = true;
+            break;
+          }
+        }
+      }
+      if (!thrownOk) {
+        effectsOrphaned += 1;
+        problems.push(`thrown effect does not match an allowed decision: ref ${ref ?? "(missing)"}`);
+        continue;
+      }
+    } else if (!hashMatch) {
       effectsOrphaned += 1;
       problems.push(
         ref === null || !refler.has(ref)

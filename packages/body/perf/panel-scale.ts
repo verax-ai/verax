@@ -5,6 +5,8 @@
 // would feel: time until the record list is on screen, size and duration of
 // the /api/ledger fetch, DOM node count, JS heap, and the longest frame gap
 // over two polling rounds (the panel refetches every five seconds).
+// The panel's code flow without a passkey no longer carries verax:audit, so
+// this headless run sees 403 on /api/ledger until it drives a passkey sign-in.
 //
 // VERAX_SCALE_N      which ledger (default 10000)
 // VERAX_SCALE_DIR    state directory (default <tmp>/verax-scale-<N>)

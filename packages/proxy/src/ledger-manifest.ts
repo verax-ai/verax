@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix, relative, resolve, win32 } from "node:path";
 
 import { writeFileAtomic } from "./atomic-write.ts";
 
@@ -176,16 +176,66 @@ export function writeLedgerManifest(dir: string, manifest: LedgerManifest): void
   writeFileAtomic(manifestPath(dir), `${JSON.stringify(manifest)}\n`);
 }
 
+const PIECE_SEP = /[/\\]/;
+
+function piecePathRefusal(rel: string): string {
+  return `manifest piece path leaves the ledger directory: ${rel}`;
+}
+
+function looksUnc(rel: string): boolean {
+  return rel.startsWith("\\\\") || rel.startsWith("//") || rel.startsWith("\\/") || rel.startsWith("/\\");
+}
+
+function looksDrive(rel: string): boolean {
+  return /^[A-Za-z]:/.test(rel);
+}
+
+function hasDotDot(rel: string): boolean {
+  return rel.split(PIECE_SEP).some((part) => part === "..");
+}
+
+/**
+ * A manifest piece path is usable only when it stays inside `dir` after
+ * normalization. Absolute paths, drive letters, UNC (`\\host\share`,
+ * `//host/share`) and `..` are refused here, before any filesystem call.
+ * Null means the path is confined; the string is the problem to report.
+ */
+export function ledgerPiecePathProblem(dir: string, rel: string): string | null {
+  if (typeof rel !== "string" || rel === "" || rel.includes("\0")) return piecePathRefusal(String(rel));
+  if (looksUnc(rel) || looksDrive(rel) || hasDotDot(rel) || win32.isAbsolute(rel) || posix.isAbsolute(rel)) {
+    return piecePathRefusal(rel);
+  }
+  const root = resolve(dir);
+  const target = resolve(dir, rel);
+  const fromRoot = relative(root, target);
+  if (
+    fromRoot === "" ||
+    win32.isAbsolute(fromRoot) ||
+    posix.isAbsolute(fromRoot) ||
+    fromRoot.split(PIECE_SEP).some((part) => part === "..")
+  ) {
+    return piecePathRefusal(rel);
+  }
+  return null;
+}
+
+/** Confined absolute path, or a thrown error. Does not touch the filesystem. */
+export function requireLedgerPiecePath(dir: string, rel: string): string {
+  const problem = ledgerPiecePathProblem(dir, rel);
+  if (problem !== null) throw new Error(problem);
+  return resolve(dir, rel);
+}
+
 export function listPieceFiles(dir: string): PieceFiles[] {
   const manifest = readLedgerManifest(dir);
   const pieces = manifest?.pieces ?? [legacyPieceRow()];
   return pieces.map((p) => ({
     id: p.id,
-    decisions: join(dir, p.decisions),
-    effects: join(dir, p.effects),
-    inputs: join(dir, p.inputs),
-    copyDecisions: join(dir, copyRel(p.id, "decisions.jsonl")),
-    copyEffects: join(dir, copyRel(p.id, "effects.jsonl")),
+    decisions: requireLedgerPiecePath(dir, p.decisions),
+    effects: requireLedgerPiecePath(dir, p.effects),
+    inputs: requireLedgerPiecePath(dir, p.inputs),
+    copyDecisions: requireLedgerPiecePath(dir, copyRel(p.id, "decisions.jsonl")),
+    copyEffects: requireLedgerPiecePath(dir, copyRel(p.id, "effects.jsonl")),
     closed: p.closed,
     firstMs: p.firstMs,
     lastMs: p.lastMs,

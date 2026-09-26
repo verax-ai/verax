@@ -72,7 +72,9 @@ describe("B1 exports map", () => {
   });
 
   it("npm pack --dry-run lists the package and no test fixtures", () => {
-    const packed = spawnSync("npm", ["pack", "--dry-run", "-w", "@verax-ai/proxy"], {
+    // --ignore-scripts: prepack would rebuild dist while other test files,
+    // running at the same time, load it.
+    const packed = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "-w", "@verax-ai/proxy"], {
       cwd: repoRoot,
       encoding: "utf8",
       shell: true,

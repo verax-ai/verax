@@ -224,6 +224,19 @@ async function beginSessionOnce(): Promise<"ok" | "redirect" | "demo" | "error">
   return "redirect";
 }
 
+/**
+ * Start the code flow again. A session minted without a passkey is already
+ * in memory, so beginSession would keep it; the audit doors stay closed
+ * until this tab asks the issuer once more.
+ */
+export async function restartCodeFlow(): Promise<void> {
+  token = null;
+  boot = null;
+  sessionError = null;
+  const issuer = (await issuerFromPrm()) ?? fallbackIssuer();
+  await startAuthorize(issuer);
+}
+
 export function authorizedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (token && !headers.has("Authorization")) {

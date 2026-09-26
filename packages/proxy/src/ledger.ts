@@ -39,6 +39,7 @@ import {
   pieceOverlaps,
   readLedgerIndex,
   readLedgerManifest,
+  requireLedgerPiecePath,
   writeLedgerManifest,
   type LedgerIndexLine,
   type LedgerManifest,
@@ -118,7 +119,7 @@ async function readPieceWindow<T>(
   tsOf: (row: T) => number,
   visit: (row: T) => TailVisit,
 ): Promise<T[]> {
-  const path = join(dir, fileRel);
+  const path = requireLedgerPiecePath(dir, fileRel);
   const seekTarget = toMs + WINDOW_SLACK_MS;
   if (piece.lastMs !== null && seekTarget < piece.lastMs) {
     const endOffset = await seekOffsetByTimestamp(path, seekTarget, tsOf, { open: ledgerFs.open });
@@ -522,7 +523,7 @@ export class FileLedger implements Ledger {
   inputsPaths(): { active: string; all: string[] } {
     return {
       active: this.inputsPath,
-      all: this.pieces.map((p) => join(this.dir, p.inputs)),
+      all: this.pieces.map((p) => this.pieceFile(p.inputs)),
     };
   }
 
@@ -594,11 +595,16 @@ export class FileLedger implements Ledger {
   private applyActivePaths(): void {
     const piece = this.pieces.find((p) => p.id === this.activeId) ?? this.pieces[this.pieces.length - 1]!;
     this.activeId = piece.id;
-    this.decisionsPath = join(this.dir, piece.decisions);
-    this.effectsPath = join(this.dir, piece.effects);
-    this.inputsPath = join(this.dir, piece.inputs);
-    this.copyDecisionsPath = join(this.dir, copyRel(piece.id, "decisions.jsonl"));
-    this.copyEffectsPath = join(this.dir, copyRel(piece.id, "effects.jsonl"));
+    this.decisionsPath = this.pieceFile(piece.decisions);
+    this.effectsPath = this.pieceFile(piece.effects);
+    this.inputsPath = this.pieceFile(piece.inputs);
+    this.copyDecisionsPath = this.pieceFile(copyRel(piece.id, "decisions.jsonl"));
+    this.copyEffectsPath = this.pieceFile(copyRel(piece.id, "effects.jsonl"));
+  }
+
+  /** Manifest piece path, refused before any filesystem call when it leaves this directory. */
+  private pieceFile(rel: string): string {
+    return requireLedgerPiecePath(this.dir, rel);
   }
 
   private activePiece(): LedgerPieceRow {
@@ -648,11 +654,11 @@ export class FileLedger implements Ledger {
   private rebuildIndex(activeDecisions: SignedDecisionRecord[]): LedgerIndexLine[] {
     const lines: LedgerIndexLine[] = [];
     for (const piece of this.pieces) {
-      const path = join(this.dir, piece.decisions);
+      const path = this.pieceFile(piece.decisions);
       const recs =
         piece.id === this.activeId ? activeDecisions : readJsonlSync<SignedDecisionRecord>(path);
-      const inputLists = inputsByRef(join(this.dir, piece.inputs));
-      const effectSet = primaryEffectRefs(join(this.dir, piece.effects));
+      const inputLists = inputsByRef(this.pieceFile(piece.inputs));
+      const effectSet = primaryEffectRefs(this.pieceFile(piece.effects));
       const seen = new Map<string, number>();
       for (const rec of recs) {
         const row = indexRowOf(rec);
@@ -777,10 +783,10 @@ export class FileLedger implements Ledger {
   }
 
   private ensurePieceFiles(piece: LedgerPieceRow): void {
-    mkdirSync(join(this.dir, dirname(piece.decisions)), { recursive: true, mode: 0o700 });
-    mkdirSync(join(this.dir, dirname(copyRel(piece.id, "decisions.jsonl"))), { recursive: true, mode: 0o700 });
+    mkdirSync(dirname(this.pieceFile(piece.decisions)), { recursive: true, mode: 0o700 });
+    mkdirSync(dirname(this.pieceFile(copyRel(piece.id, "decisions.jsonl"))), { recursive: true, mode: 0o700 });
     for (const rel of [piece.decisions, piece.effects, piece.inputs, copyRel(piece.id, "decisions.jsonl"), copyRel(piece.id, "effects.jsonl")]) {
-      const path = join(this.dir, rel);
+      const path = this.pieceFile(rel);
       if (!existsSync(path)) writeFileSync(path, "", { encoding: "utf8", mode: 0o600 });
     }
   }
@@ -1089,7 +1095,7 @@ export class FileLedger implements Ledger {
   async decisions(): Promise<SignedDecisionRecord[]> {
     const out: SignedDecisionRecord[] = [];
     for (const piece of this.pieces) {
-      out.push(...(await readJsonl<SignedDecisionRecord>(join(this.dir, piece.decisions))));
+      out.push(...(await readJsonl<SignedDecisionRecord>(this.pieceFile(piece.decisions))));
     }
     return out;
   }
@@ -1097,7 +1103,7 @@ export class FileLedger implements Ledger {
   async effects(): Promise<LedgerEffect[]> {
     const out: LedgerEffect[] = [];
     for (const piece of this.pieces) {
-      out.push(...(await readJsonl<LedgerEffect>(join(this.dir, piece.effects))));
+      out.push(...(await readJsonl<LedgerEffect>(this.pieceFile(piece.effects))));
     }
     return out;
   }

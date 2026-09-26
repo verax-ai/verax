@@ -99,19 +99,23 @@ const audience = process.env.VERAX_AUDIENCE ?? "http://127.0.0.1:8787";
 const issuer = process.env.VERAX_ISSUER ?? "http://127.0.0.1:8790";
 const agentSub = process.env.VERAX_DEV_SUB ?? "dev-brain";
 const operatorSub = process.env.VERAX_DEV_OPERATOR_SUB ?? "operator-1";
+// The ask may name audit. agentScope drops it: the agent file and a session
+// without a passkey never carry verax:audit or verax:approve. There is no
+// env switch that puts either back onto that file.
 const requestedScope = process.env.VERAX_DEV_SCOPE ?? "verax:read verax:memory verax:audit";
 
-/** The file written for the agent never carries approve, even when the env asks. */
+/** The file written for the agent never carries approve or audit, even when the env asks. */
 function agentScope(raw) {
   return raw
     .split(/\s+/)
-    .filter((part) => part !== "" && part !== "verax:approve")
+    .filter((part) => part !== "" && part !== "verax:approve" && part !== "verax:audit")
     .join(" ");
 }
 
 async function mintAccessToken(kind, extra = {}) {
   // A session without a passkey is read-only, even when VERAX_DEV_SCOPE asks
-  // for approve. Approve is minted only after a registered operator signs in.
+  // for approve or audit. Both are minted only after a registered operator
+  // signs in (grantApprove).
   let tokenScope = kind === "agent" ? agentScope(requestedScope) : requestedScope;
   if (kind === "session" && extra.grantApprove !== true) {
     tokenScope = agentScope(tokenScope);

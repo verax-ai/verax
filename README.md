@@ -192,6 +192,13 @@ the same result for a
 pipeline; the exit code is 0 when it verifies and 1 when it does not, and a
 directory with no ledger in it is never quiet success.
 
+Records are COSE_Sign1 with algorithm `-19` (Ed25519, RFC 9864), not the
+older polymorphic `-8` (EdDSA). Some COSE libraries do not know `-19` yet:
+as of go-cose 1.3.0 and pycose 1.1.0 both reject it, and support is tracked
+in [go-cose#224](https://github.com/veraison/go-cose/issues/224) and
+[pycose#126](https://github.com/TimothyClaeys/pycose/issues/126).
+`verax verify` does not depend on either library.
+
 ## Install
 
 ```sh

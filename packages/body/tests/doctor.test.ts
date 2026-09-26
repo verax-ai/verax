@@ -144,7 +144,7 @@ describe("doctor", () => {
     assert.equal(same?.level, "ok");
   });
 
-  it("warns when the development token scope lacks verax:audit and does not print the token", () => {
+  it("warns when a development token carries verax:audit and does not print the token", () => {
     const base = {
       VERAX_ISSUER: "http://127.0.0.1:8790",
       VERAX_JWKS_URL: "http://127.0.0.1:8790/.well-known/jwks.json",
@@ -152,26 +152,36 @@ describe("doctor", () => {
       VERAX_STATE_DIR: ".",
       VERAX_POLICY_FILE: "x",
     };
-    const missing = runDoctor({ ...base, VERAX_DEV_SCOPE: "verax:read" }, ["node", "cli.ts", "doctor"]).find(
-      (c) => c.id === "dev-token-audit",
-    );
-    assert.equal(missing?.level, "warn");
-    assert.match(missing?.detail ?? "", /verax:audit/);
-
-    const ok = runDoctor(
+    // The scope string is not the agent token. Asking for audit does not grant it.
+    const asked = runDoctor(
       { ...base, VERAX_DEV_SCOPE: "verax:read verax:memory verax:audit" },
       ["node", "cli.ts", "doctor"],
     ).find((c) => c.id === "dev-token-audit");
-    assert.equal(ok?.level, "ok");
+    assert.equal(asked?.level, "ok");
+    assert.match(asked?.detail ?? "", /passkey/);
 
-    const payload = Buffer.from(JSON.stringify({ scope: "verax:read" })).toString("base64url");
-    const token = `eyJhbGciOiJub25lIn0.${payload}.x`;
-    const fromTok = runDoctor({ ...base, VERAX_DEV_TOKEN: token }, ["node", "cli.ts", "doctor"]);
-    const dumped = JSON.stringify(fromTok);
-    assert.equal(dumped.includes(token), false, dumped);
-    assert.equal(dumped.includes(payload), false, dumped);
+    const bare = runDoctor({ ...base, VERAX_DEV_SCOPE: "verax:read" }, ["node", "cli.ts", "doctor"]).find(
+      (c) => c.id === "dev-token-audit",
+    );
+    assert.equal(bare?.level, "ok");
+
+    const safePayload = Buffer.from(JSON.stringify({ scope: "verax:read" })).toString("base64url");
+    const safeToken = `eyJhbGciOiJub25lIn0.${safePayload}.x`;
+    const fromSafe = runDoctor({ ...base, VERAX_DEV_TOKEN: safeToken }, ["node", "cli.ts", "doctor"]);
+    const dumped = JSON.stringify(fromSafe);
+    assert.equal(dumped.includes(safeToken), false, dumped);
+    assert.equal(dumped.includes(safePayload), false, dumped);
+    assert.equal(fromSafe.find((c) => c.id === "dev-token-audit")?.level, "ok");
+
+    const auditPayload = Buffer.from(JSON.stringify({ scope: "verax:read verax:audit" })).toString("base64url");
+    const auditToken = `eyJhbGciOiJub25lIn0.${auditPayload}.x`;
+    const fromTok = runDoctor({ ...base, VERAX_DEV_TOKEN: auditToken }, ["node", "cli.ts", "doctor"]);
+    const dumpedAudit = JSON.stringify(fromTok);
+    assert.equal(dumpedAudit.includes(auditToken), false, dumpedAudit);
+    assert.equal(dumpedAudit.includes(auditPayload), false, dumpedAudit);
     const tokCheck = fromTok.find((c) => c.id === "dev-token-audit");
     assert.equal(tokCheck?.level, "warn");
+    assert.match(tokCheck?.detail ?? "", /verax:audit/);
   });
 
   it("adds no downstream check when VERAX_DOWNSTREAM is unset", () => {
