@@ -14,7 +14,7 @@ import {
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
-import { directoryAccess, stateDirFor, unreadableSentence } from "./install.ts";
+import { directoryAccess, stateDirFor, SystemToolError, unreadableSentence } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
 function policyForApprove(stateDir: string, policyHash: string): Policy | null {
@@ -122,7 +122,13 @@ export async function runApprove(
   let stateDir = rest[0];
   let given = rest[1];
   if (rest.length === 1 && stateDir) {
-    const installed = stateDirFor(process.platform);
+    let installed: string;
+    try {
+      installed = stateDirFor(process.platform);
+    } catch (err) {
+      writeErr(`${err instanceof SystemToolError ? err.message : "refusing install root"}\n`);
+      return 78;
+    }
     const access = directoryAccess(installed);
     if (access === "unreadable") {
       writeErr(`${unreadableSentence(installed)}\n`);

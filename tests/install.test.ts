@@ -1123,12 +1123,44 @@ describe("verax install plan", () => {
     const posixRoot = platform === "win32" ? undefined : join(root, "fsroot");
     const out: string[] = [];
     const err: string[] = [];
-    const health = createServer((req, res) => {
-      res.writeHead(req.url === "/healthz" ? 200 : 404);
-      res.end();
+    const port = await new Promise<number>((resolve, reject) => {
+      const probe = createServer();
+      probe.once("error", reject);
+      probe.listen(0, "127.0.0.1", () => {
+        const bound = probe.address() as AddressInfo;
+        probe.close(() => resolve(bound.port));
+      });
     });
-    await new Promise<void>((resolve) => health.listen(0, "127.0.0.1", () => resolve()));
-    const port = (health.address() as AddressInfo).port;
+    let healthListening = false;
+    const health = createServer((req, res) => {
+      if (req.url !== "/healthz") {
+        res.writeHead(404);
+        res.end();
+        return;
+      }
+      let nonce = "";
+      const candidates = [
+        join(root, "data", "Verax", "state", "install-health-nonce"),
+        ...(posixRoot
+          ? [
+              `${posixRoot.replaceAll("\\", "/")}/var/lib/verax/install-health-nonce`,
+              `${posixRoot.replaceAll("\\", "/")}/Library/Application Support/Verax/state/install-health-nonce`,
+            ]
+          : []),
+      ];
+      for (const file of candidates) {
+        if (!existsSync(file)) continue;
+        nonce = readFileSync(file, "utf8").trim();
+        break;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, nonce }));
+    });
+    const ensureHealth = () => {
+      if (healthListening) return;
+      healthListening = true;
+      health.listen(port, "127.0.0.1");
+    };
     try {
       const code = await runInstall(["install", "--port", String(port)], {
         platform,
@@ -1137,6 +1169,14 @@ describe("verax install plan", () => {
         layout,
         posixRoot,
         exec: (argv, stdin) => {
+          const joined = argv.join("\n");
+          if (
+            joined.includes("Start-ScheduledTask")
+            || (joined.includes("systemctl") && joined.includes("--now"))
+            || (joined.includes("launchctl") && joined.includes("bootstrap"))
+          ) {
+            ensureHealth();
+          }
           const passwd = getentAnswer(argv, home);
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
@@ -1456,9 +1496,23 @@ describe("verax install plan", () => {
         elevated: () => true,
         layout: winOpts,
         exec: (argv, stdin) => {
+          // Read from a stock Windows 11 machine. C:\Windows, System32 and WindowsPowerShell\v1.0 carry the same
+          // DACL as Program Files; the tools are TrustedInstaller files; ProgramData lets Users create folders.
+          const stockTool =
+            "O:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464G:S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464D:P(A;;0x1200a9;;;SY)(A;;0x1200a9;;;BA)(A;;0x1200a9;;;BU)(A;;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;;0x1200a9;;;AC)(A;;0x1200a9;;;S-1-15-2-2)";
+          const stockWps =
+            "O:SYG:SYD:AI(A;ID;FA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;CIIOID;GA;;;S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464)(A;ID;FA;;;SY)(A;OICIIOID;GA;;;SY)(A;ID;FA;;;BA)(A;OICIIOID;GA;;;BA)(A;ID;0x1200a9;;;BU)(A;OICIIOID;GXGR;;;BU)(A;OICIIOID;GA;;;CO)(A;ID;0x1200a9;;;AC)(A;OICIIOID;GXGR;;;AC)(A;ID;0x1200a9;;;S-1-15-2-2)(A;OICIIOID;GXGR;;;S-1-15-2-2)";
+          const stockProgramData = "O:SYG:SYD:PAI(A;OICIIO;GA;;;CO)(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)(A;CI;DCLCRPCR;;;BU)";
           const stockSddl = (target: string): string => {
-            if (target.toLowerCase().includes("nodejs")) return nodejs;
-            if (target.toLowerCase().includes("program files")) return programFiles;
+            const t = target.toLowerCase().replace(/\//g, "\\");
+            if (t.includes("nodejs")) return nodejs;
+            if (t.includes("\\windows")) {
+              if (t.endsWith(".exe")) return stockTool;
+              if (t.endsWith("\\windowspowershell")) return stockWps;
+              return programFiles;
+            }
+            if (t.endsWith("\\programdata") || t === join(root, "data").toLowerCase()) return stockProgramData;
+            if (t.includes("program files")) return programFiles;
             return drive;
           };
           const paths = sddlBatchPaths(stdin);

@@ -4,7 +4,7 @@
 
 import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
-import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync, unlinkSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8, jwtVerify } from "jose";
@@ -846,6 +846,17 @@ const server = createServer((req, res) => {
     }
   })();
 });
+
+// Fresh this run, mode 0600, beside the key. The desktop pins this file.
+// It does not fetch /.well-known/jwks.json: whoever bound the port could answer.
+const jwksPinPath = join(dir, "jwks.json");
+try {
+  unlinkSync(jwksPinPath);
+} catch (err) {
+  if (!err || err.code !== "ENOENT") throw err;
+}
+writeFileSync(jwksPinPath, `${JSON.stringify({ keys: [jwk] })}\n`, { encoding: "utf8", mode: 0o600 });
+chmodSync(jwksPinPath, 0o600);
 
 trace("listen-called");
 await new Promise((resolve, reject) => {

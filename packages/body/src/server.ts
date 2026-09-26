@@ -21,7 +21,7 @@ import { isRevokedJti } from "./revoke.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
-import { readHeartbeat, readWitnessPulse } from "./health-extras.ts";
+import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
@@ -467,8 +467,10 @@ export async function listen(config: BodyConfig): Promise<Server> {
       if (req.method === "GET" && url.pathname === "/healthz") {
       // Local mode reads VERAX_JWKS_FILE. Any process that can read that key
       // file can mint verax:audit, so counts are not a door here: liveness only.
+      const installNonce = readInstallHealthNonce(config.stateDir);
+      const nonceField = installNonce === null ? {} : { nonce: installNonce };
       if (config.jwksFile) {
-        send(res, 200, { ok: true });
+        send(res, 200, { ok: true, ...nonceField });
         return;
       }
       const token = readBearer(req.headers.authorization);
@@ -490,7 +492,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         }
       }
       if (!canRead) {
-        send(res, 200, { ok: true });
+        send(res, 200, { ok: true, ...nonceField });
         return;
       }
       // The ledger counts its own lines as it writes them; asking it is free.
@@ -513,6 +515,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       }
       send(res, 200, {
         ok: true,
+        ...nonceField,
         ...counted,
         lock: services.ledger.lockStatus(),
         heartbeat: readHeartbeat(config.stateDir),

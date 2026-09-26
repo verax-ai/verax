@@ -16,9 +16,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import { get } from "node:http";
+import { createServer as createNetServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { EX_CONFIG } from "./config.ts";
+import { INSTALL_HEALTH_NONCE } from "./health-extras.ts";
 import { runInitLocal } from "./init-local.ts";
 
 export const EX_ELEVATION = 77;
@@ -80,17 +82,79 @@ export function systemToolName(argv0: string): string {
   return base.toLowerCase().replace(/\.exe$/, "");
 }
 
-function driveRootAbsolute(value: string): boolean {
-  if (!path.win32.isAbsolute(value)) return false;
-  return /^[A-Za-z]:[\\/]$/.test(path.win32.parse(value).root);
+function pathHasDotDot(value: string): boolean {
+  return value.split(/[\\/]/).some((part) => part === "..");
 }
 
-function windowsSystemRoot(): string {
-  const root = process.env.SystemRoot ?? "C:\\Windows";
-  if (!driveRootAbsolute(root)) {
-    throw new SystemToolError(`refusing: SystemRoot ${root} is not an absolute path under a drive root`);
+/** `X:\Windows` after a `..`-free normalisation. Anything else is refused before a tool runs. */
+function requireWindowsDir(value: string): string {
+  const raw = value.trim();
+  if (pathHasDotDot(raw)) throw new SystemToolError(`refusing: SystemRoot ${raw} contains ..`);
+  const norm = path.win32.normalize(raw).replace(/[\\/]+$/, "");
+  // Only C:\Windows. Any other drive letter could be a data drive where a user can create `\Windows\System32`,
+  // and the trust check itself runs PowerShell from this directory, so it cannot vouch for it.
+  if (pathHasDotDot(norm) || !/^C:\\Windows$/i.test(norm)) {
+    throw new SystemToolError(
+      `refusing: SystemRoot ${raw} is not C:\\Windows; this installer runs system tools only from C:\\Windows\\System32`,
+    );
   }
+  return "C:\\Windows";
+}
+
+/**
+ * Windows directory for system tools. An env value is accepted only when it is
+ * `X:\\Windows` and contains no `..`. A value that points elsewhere is refused
+ * before any process is started. `exec`, when passed, then applies the same
+ * administrator-only DACL check used for node.exe to System32 and each tool,
+ * ancestors included.
+ */
+export function windowsSystemRoot(env: NodeJS.ProcessEnv = process.env, exec?: ToolExec): string {
+  const hinted = [env.SystemRoot, env.windir].filter((value): value is string => typeof value === "string" && value.trim() !== "");
+  const root = hinted.length === 0 ? "C:\\Windows" : requireWindowsDir(hinted[0]!);
+  for (const value of hinted.slice(1)) {
+    const next = requireWindowsDir(value);
+    if (next.toLowerCase() !== root.toLowerCase()) {
+      throw new SystemToolError(`refusing: SystemRoot ${hinted[0]} is not the Windows directory`);
+    }
+  }
+  if (exec) assertAdminWritableTree(root, exec);
   return root;
+}
+
+/** Install root taken from the environment. `..` is refused. The trust check is separate. */
+export function windowsInstallRoot(raw: string | undefined, fallback: string, label: string): string {
+  const text = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
+  if (pathHasDotDot(text)) throw new SystemToolError(`refusing: ${label} ${text} contains ..`);
+  const norm = path.win32.normalize(text).replace(/[\\/]+$/, "");
+  // On Windows the root must carry a drive letter. A Windows plan built on another host (tests) only needs an
+  // absolute path; the trust check applies to it either way.
+  const absolute = process.platform === "win32" ? /^[A-Za-z]:\\/.test(norm) : path.win32.isAbsolute(norm);
+  if (pathHasDotDot(norm) || !absolute) {
+    throw new SystemToolError(`refusing: ${label} ${text} is not an absolute path`);
+  }
+  return norm;
+}
+
+function winToolUnder(root: string, name: string): string {
+  if (name === "powershell") return path.win32.join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+  return path.win32.join(root, "System32", `${name}.exe`);
+}
+
+/** System32 and every Windows install tool, each with its ancestors. */
+function assertAdminWritableTree(root: string, exec: ToolExec): void {
+  const targets = [
+    path.win32.join(root, "System32"),
+    ...WIN32_TOOLS.map((name) => winToolUnder(root, name)),
+  ];
+  for (const file of targets) {
+    for (const entry of trustTargets(file, "win32")) {
+      const ran = exec(windowsSddlArgv(entry.path));
+      const text = `${ran.stdout ?? ""}`;
+      if ((ran.status ?? 1) !== 0 || windowsUserCanWrite(text, { path: entry.path, ancestor: entry.ancestor })) {
+        throw new SystemToolError(refuseAcl(text, `refusing: ${entry.path} can be changed by a non-administrator`).trimEnd());
+      }
+    }
+  }
 }
 
 /**
@@ -150,11 +214,11 @@ export const PS_ERROR_MARK = "verax-ps-error:";
  */
 export function systemToolEnv(platform: NodeJS.Platform = process.platform, tempDir?: string): NodeJS.ProcessEnv {
   if (platform === "win32") {
-    const root = process.env.SystemRoot?.trim() || "C:\\Windows";
+    const root = windowsSystemRoot();
     const drive = path.win32.parse(root).root.replace(/[\\/]+$/, "") || "C:";
     const env: NodeJS.ProcessEnv = {
-      SystemRoot: process.env.SystemRoot ?? root,
-      windir: process.env.windir ?? root,
+      SystemRoot: root,
+      windir: root,
       PATHEXT: WIN32_PATHEXT,
       ComSpec: path.win32.join(root, "System32", "cmd.exe"),
       SystemDrive: drive,
@@ -432,7 +496,7 @@ export type PlanOp =
   | { op: "lock-root"; path: string; create: boolean }
   | { op: "init"; stateDir: string; tokenPath: string; port: number; days: number; force: boolean; noOwnerGrant: boolean }
   | { op: "remove"; path: string }
-  | { op: "wait-healthz"; port: number; timeoutMs: number }
+  | { op: "wait-healthz"; port: number; timeoutMs: number; nonce: string }
   | { op: "print"; text: string }
   | { op: "stage-tarballs"; files: { source: string; sha256: string; dest: string }[] }
   | {
@@ -524,7 +588,7 @@ export function stateDirFor(
   posixRoot?: string,
 ): string {
   if (platform === "win32") {
-    const data = env.ProgramData || "C:\\ProgramData";
+    const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
     return path.win32.join(data, "Verax", "state");
   }
   if (platform === "darwin") return fixedPosix(posixRoot).darwinState;
@@ -537,7 +601,7 @@ export function codeDirFor(
   posixRoot?: string,
 ): string {
   if (platform === "win32") {
-    const files = env.ProgramFiles || "C:\\Program Files";
+    const files = windowsInstallRoot(env.ProgramFiles, "C:\\Program Files", "ProgramFiles");
     return path.win32.join(files, "Verax");
   }
   if (platform === "darwin") return fixedPosix(posixRoot).darwinCode;
@@ -591,12 +655,19 @@ function pathsFor(
   if (platform === "win32") {
     const profile = env.USERPROFILE?.trim() ?? "";
     if (profile === "") return { ok: false, code: EX_CONFIG, message: "verax install needs USERPROFILE for the agent token\n" };
-    const paths = {
-      codeDir: codeDirFor("win32", env),
-      stateDir: stateDirFor("win32", env),
-      tokenPath: path.win32.join(profile, ".verax", "agent.token"),
-    };
-    return { ok: true, paths, home: profile };
+    try {
+      const paths = {
+        codeDir: codeDirFor("win32", env),
+        stateDir: stateDirFor("win32", env),
+        tokenPath: path.win32.join(profile, ".verax", "agent.token"),
+      };
+      return { ok: true, paths, home: profile };
+    } catch (err) {
+      if (err instanceof SystemToolError) {
+        return { ok: false, code: EX_CONFIG, message: err.message.endsWith("\n") ? err.message : `${err.message}\n` };
+      }
+      throw err;
+    }
   }
   if (platform !== "linux") {
     return { ok: false, code: EX_CONFIG, message: "verax install does not run on this operating system\n" };
@@ -1652,6 +1723,8 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0700", paths.stateDir], "darwin") },
     );
   }
+  const healthNonce = randomBytes(32).toString("hex");
+  const noncePath = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, INSTALL_HEALTH_NONCE);
   ops.push({
     op: "init",
     stateDir: paths.stateDir,
@@ -1661,6 +1734,8 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     force: Boolean(opts.force),
     noOwnerGrant: true,
   });
+  // Before the service starts, so /healthz can echo a value only this install wrote.
+  ops.push({ op: "write", path: noncePath, contents: `${healthNonce}\n`, mode: 0o600 });
   if (platform === "win32") {
     ops.push(
       resetInherit(paths.stateDir),
@@ -1709,7 +1784,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     );
   }
   ops.push(
-    { op: "wait-healthz", port: limited.port, timeoutMs: HEALTH_WAIT_MS },
+    { op: "wait-healthz", port: limited.port, timeoutMs: HEALTH_WAIT_MS, nonce: healthNonce },
     {
       op: "print",
       text: successText(platform, { ...paths, port: limited.port }),
@@ -1727,7 +1802,7 @@ const PRIVATE_TEMP_ACL = [ADMINISTRATORS_SID, SYSTEM_SID] as const;
 function privateTempPath(platform: InstallPlatform, env: NodeJS.ProcessEnv, posixRoot?: string): string {
   const id = randomBytes(16).toString("hex");
   if (platform === "win32") {
-    const data = env.ProgramData || "C:\\ProgramData";
+    const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
     return path.win32.join(data, "Verax", `install-tmp-${id}`);
   }
   const prefix = posixRoot?.trim().replace(/\/+$/, "") ?? "";
@@ -2463,11 +2538,28 @@ export function mkdirLeaf(target: string, mode: number): void {
   }
 }
 
-function healthOnce(port: number): Promise<boolean> {
+/** True when the body answered /healthz with this install's nonce. A bare 200 is not the service. */
+export function healthzProvesService(body: string, nonce: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { ok?: unknown; nonce?: unknown };
+    return parsed.ok === true && parsed.nonce === nonce;
+  } catch {
+    return false;
+  }
+}
+
+function healthOnce(port: number, nonce: string): Promise<boolean> {
   return new Promise((resolve) => {
     const req = get({ host: "127.0.0.1", port, path: "/healthz", timeout: 1_000 }, (res) => {
-      res.resume();
-      resolve(res.statusCode === 200);
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        if (res.statusCode !== 200) {
+          resolve(false);
+          return;
+        }
+        resolve(healthzProvesService(Buffer.concat(chunks).toString("utf8"), nonce));
+      });
     });
     req.once("timeout", () => {
       req.destroy();
@@ -2477,11 +2569,26 @@ function healthOnce(port: number): Promise<boolean> {
   });
 }
 
-async function waitHealth(port: number, timeoutMs: number, io: InstallIo): Promise<boolean> {
+/** Bind and release. False when something is already listening. */
+export function loopbackPortFree(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createNetServer();
+    server.once("error", () => resolve(false));
+    server.listen(port, "127.0.0.1", () => {
+      server.close(() => resolve(true));
+    });
+  });
+}
+
+export function serviceHealthIsNonce(port: number, nonce: string, timeoutMs = 1_000): Promise<boolean> {
+  return waitHealth(port, timeoutMs, { stdout: { write() { return undefined; } }, stderr: { write() { return undefined; } } }, nonce);
+}
+
+async function waitHealth(port: number, timeoutMs: number, io: InstallIo, nonce: string): Promise<boolean> {
   const start = Date.now();
   let nextMark = 10_000;
   while (Date.now() - start < timeoutMs) {
-    if (await healthOnce(port)) return true;
+    if (await healthOnce(port, nonce)) return true;
     const elapsed = Date.now() - start;
     while (elapsed >= nextMark && nextMark < timeoutMs) {
       io.stderr.write(`waiting for the body (${nextMark / 1000} s)…\n`);
@@ -3601,7 +3708,7 @@ async function execute(
       continue;
     }
     if (step.op === "wait-healthz") {
-      if (!(await waitHealth(step.port, healthTimeoutMs ?? step.timeoutMs, io))) {
+      if (!(await waitHealth(step.port, healthTimeoutMs ?? step.timeoutMs, io, step.nonce))) {
         io.stderr.write(`install-health-timeout:${step.port}\n`);
         reportHealthTimeout(platform, plan.stateDir, step.port, call, io);
         return finish(1);
@@ -4143,6 +4250,10 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     io.stderr.write(`${parsed.error}\n`);
     return EX_CONFIG;
   }
+  if (!(await loopbackPortFree(parsed.port))) {
+    io.stderr.write(`port-busy:${parsed.port}\n`);
+    return EX_CONFIG;
+  }
   const exec = hooks.exec ?? defaultExec;
   const resolvedEnv = invokingEnv(platform, env, exec);
   if ("error" in resolvedEnv) {
@@ -4159,10 +4270,40 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
   const layout = discovered;
   const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
   const fixed = fixedPosix(posixRoot);
-  const stateDir = stateDirFor(platform, plannedEnv, posixRoot);
+  let stateDir: string;
+  try {
+    if (platform === "win32") windowsSystemRoot(plannedEnv);
+    stateDir = stateDirFor(platform, plannedEnv, posixRoot);
+  } catch (err) {
+    if (err instanceof SystemToolError) {
+      io.stderr.write(err.message.endsWith("\n") ? err.message : `${err.message}\n`);
+      return EX_CONFIG;
+    }
+    throw err;
+  }
   const exists = hooks.stateExists ? hooks.stateExists(stateDir) : existsSync(stateDir);
   const trustPlat = platform === "win32" || platform === "linux" || platform === "darwin" ? platform as InstallPlatform : null;
   const trustFiles = trustPlat ? [...trustTargets(layout.execPath, trustPlat), ...trustTargets(layout.npmCli, trustPlat)] : [];
+  if (platform === "win32") {
+    try {
+      const sys = windowsSystemRoot(plannedEnv);
+      const data = windowsInstallRoot(plannedEnv.ProgramData, "C:\\ProgramData", "ProgramData");
+      const filesRoot = windowsInstallRoot(plannedEnv.ProgramFiles, "C:\\Program Files", "ProgramFiles");
+      trustFiles.push(...trustTargets(path.win32.join(sys, "System32"), "win32"));
+      for (const name of WIN32_TOOLS) trustFiles.push(...trustTargets(winToolUnder(sys, name), "win32"));
+      // The install roots are parents of what the installer creates and locks, and stock ProgramData lets Users create
+      // folders. They are judged by the ancestor rule (no write-DAC, owner or delete-child for a non-admin), not as objects.
+      for (const root of [data, filesRoot]) {
+        trustFiles.push(...trustTargets(root, "win32").map((entry) => ({ ...entry, ancestor: true })));
+      }
+    } catch (err) {
+      if (err instanceof SystemToolError) {
+        io.stderr.write(err.message.endsWith("\n") ? err.message : `${err.message}\n`);
+        return EX_CONFIG;
+      }
+      throw err;
+    }
+  }
   let sddlPlan: Map<string, SddlHit> | null = null;
   if (platform === "win32") {
     const root = path.win32.dirname(stateDir);
@@ -4764,11 +4905,20 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
   const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
   const fixed = fixedPosix(posixRoot);
   // Linux install.json lives in the code dir. Read it before that dir is removed.
-  const markerFile = platform === "win32"
-    ? path.win32.join(path.win32.dirname(stateDirFor(platform, plannedEnv)), "install.json")
-    : platform === "darwin"
-      ? fixed.darwinMarker
-      : path.posix.join(fixed.linuxCode, "install.json");
+  let markerFile: string;
+  try {
+    markerFile = platform === "win32"
+      ? path.win32.join(path.win32.dirname(stateDirFor(platform, plannedEnv)), "install.json")
+      : platform === "darwin"
+        ? fixed.darwinMarker
+        : path.posix.join(fixed.linuxCode, "install.json");
+  } catch (err) {
+    if (err instanceof SystemToolError) {
+      io.stderr.write(err.message.endsWith("\n") ? err.message : `${err.message}\n`);
+      return EX_CONFIG;
+    }
+    throw err;
+  }
   const flags = markerFlags(markerFile);
   const plan = planUninstall(platform as InstallPlatform, plannedEnv, {
     keepState: parsed.keepState,
@@ -4810,8 +4960,17 @@ export function liveInstalledChecks(
   env: NodeJS.ProcessEnv = process.env,
   exec: ToolExec = defaultExec,
 ): BoundaryCheck[] {
-  const codeDir = codeDirFor(platform, env);
-  const stateDir = stateDirFor(platform, env);
+  let codeDir: string;
+  let stateDir: string;
+  try {
+    codeDir = codeDirFor(platform, env);
+    stateDir = stateDirFor(platform, env);
+  } catch (err) {
+    if (err instanceof SystemToolError) {
+      return [{ id: "install-root", level: "fail", detail: err.message.trim() }];
+    }
+    throw err;
+  }
   if (!existsSync(codeDir)) return [];
   let manifest: string | null = null;
   try {
@@ -4894,6 +5053,11 @@ export function liveInstalledChecks(
 export function doctorStateTarget(env: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): string | null {
   const named = env.VERAX_STATE_DIR?.trim() ?? "";
   if (named !== "") return named;
-  const installed = stateDirFor(platform, env);
-  return directoryAccess(installed) === "missing" ? null : installed;
+  try {
+    const installed = stateDirFor(platform, env);
+    return directoryAccess(installed) === "missing" ? null : installed;
+  } catch (err) {
+    if (err instanceof SystemToolError) return null;
+    throw err;
+  }
 }
