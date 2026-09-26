@@ -191,6 +191,71 @@ export async function desktopMode(
   return { error: "desktop-body-locked", pid: lock.pid };
 }
 
+export type DesktopChildName = "issuer" | "body" | "panel";
+
+export type SupervisedChild = {
+  name: DesktopChildName;
+  /** Registers the listener invoked when this child exits. May run it immediately if it already has. */
+  onExit: (listener: () => void) => void;
+};
+
+/**
+ * The first of the issuer, the body or the panel to exit stops the rest.
+ * A later exit does not stop again. `stillWatching` is false once this run
+ * is shutting down on purpose, so those exits are not a child failure.
+ */
+export function superviseDesktopChildren(
+  children: readonly SupervisedChild[],
+  stopAll: () => void,
+  stillWatching: () => boolean = () => true,
+): Promise<DesktopChildName> {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (name: DesktopChildName) => {
+      if (done || !stillWatching()) return;
+      done = true;
+      stopAll();
+      resolve(name);
+    };
+    for (const child of children) child.onExit(() => finish(child.name));
+  });
+}
+
+export function desktopChildExitedLine(name: DesktopChildName): string {
+  return `desktop-child-exited:${name}\n`;
+}
+
+/** The issuer's JWKS, fetched once. Compact JSON, or a rejection when it is not a key set. */
+export function fetchIssuerJwks(port: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const req = get({ host: "127.0.0.1", port, path: "/.well-known/jwks.json", timeout: 5_000 }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (chunk: Buffer) => chunks.push(chunk));
+      res.on("end", () => {
+        if (res.statusCode !== 200) {
+          reject(new Error("desktop-jwks-pin-failed"));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { keys?: unknown };
+          if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
+            reject(new Error("desktop-jwks-pin-failed"));
+            return;
+          }
+          resolve(JSON.stringify({ keys: parsed.keys }));
+        } catch {
+          reject(new Error("desktop-jwks-pin-failed"));
+        }
+      });
+    });
+    req.once("timeout", () => {
+      req.destroy();
+      reject(new Error("desktop-jwks-pin-failed"));
+    });
+    req.once("error", () => reject(new Error("desktop-jwks-pin-failed")));
+  });
+}
+
 export function killTree(pid: number | undefined): void {
   if (pid == null) return;
   if (process.platform === "win32") {
@@ -308,8 +373,12 @@ export async function runDesktop(
   const issuerUrl = `http://127.0.0.1:${opts.issuerPort}`;
   const kids: ChildProcess[] = [];
   const log = { text: "" };
+  const gate = { watch: true };
+  let issuerChild: ChildProcess | undefined;
+  let bodyChild: ChildProcess | undefined;
 
   const stopAll = () => {
+    gate.watch = false;
     for (const c of kids) killTree(c.pid);
   };
 
@@ -332,6 +401,7 @@ export async function runDesktop(
         issuerEnv(cleanEnv(), opts, audience, issuerUrl),
         repoRoot,
       );
+      issuerChild = issuer;
       kids.push(issuer);
       collectOutput(issuer, log);
       if (!(await waitPort(opts.issuerPort, 15_000))) {
@@ -348,6 +418,19 @@ export async function runDesktop(
         return 1;
       }
 
+      // The body must verify with the keys the issuer held when this run
+      // started. jose's remote JWKS refetches an unknown kid, so a later
+      // occupant of the issuer's port could publish a key of its own.
+      // VERAX_JWKS_FILE is not this pin: that mode refuses operator scopes.
+      let pinnedJwks: string;
+      try {
+        pinnedJwks = await fetchIssuerJwks(opts.issuerPort);
+      } catch {
+        writeErr("desktop-jwks-pin-failed\n");
+        stopAll();
+        return 1;
+      }
+
       const body = spawnLogged(
         process.execPath,
         ["--experimental-strip-types", mainTs],
@@ -356,6 +439,7 @@ export async function runDesktop(
           VERAX_STATE_DIR: opts.stateDir,
           VERAX_ISSUER: issuerUrl,
           VERAX_JWKS_URL: `${issuerUrl}/.well-known/jwks.json`,
+          VERAX_JWKS_PIN: pinnedJwks,
           VERAX_AUDIENCE: audience,
           VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
           VERAX_POLICY_FILE: policy,
@@ -363,6 +447,7 @@ export async function runDesktop(
         },
         repoRoot,
       );
+      bodyChild = body;
       kids.push(body);
       collectOutput(body, log);
       if (!(await waitPort(opts.bodyPort, 15_000))) {
@@ -451,22 +536,50 @@ export async function runDesktop(
     const closed = new Promise<void>((resolve) => {
       browser.once("close", () => resolve());
     });
+    const supervised: SupervisedChild[] = [];
+    const watchProc = (name: DesktopChildName, child: ChildProcess | undefined) => {
+      if (!child) return;
+      supervised.push({
+        name,
+        onExit: (listener) => {
+          if (child.exitCode !== null || child.signalCode !== null) listener();
+          else child.once("exit", () => listener());
+        },
+      });
+    };
+    watchProc("issuer", issuerChild);
+    watchProc("body", bodyChild);
+    watchProc("panel", panel);
+    const childGone = superviseDesktopChildren(supervised, stopAll, () => gate.watch);
+    const childExit = async (name: DesktopChildName): Promise<number> => {
+      writeErr(desktopChildExitedLine(name));
+      process.removeListener("SIGINT", onSignal);
+      process.removeListener("SIGTERM", onSignal);
+      stopAll();
+      return 1;
+    };
     const exitedEarly = await Promise.race([
-      closed.then(() => true),
-      new Promise<boolean>((resolve) => {
-        setTimeout(() => resolve(false), 3_000);
+      closed.then(() => ({ kind: "browser" as const })),
+      childGone.then((name) => ({ kind: "child" as const, name })),
+      new Promise<{ kind: "stay" }>((resolve) => {
+        setTimeout(() => resolve({ kind: "stay" }), 3_000);
       }),
     ]);
-    if (exitedEarly) {
+    if (exitedEarly.kind === "child") return childExit(exitedEarly.name);
+    if (exitedEarly.kind === "browser") {
       writeErr("desktop-browser-exited-early\n");
       process.removeListener("SIGINT", onSignal);
       process.removeListener("SIGTERM", onSignal);
       stopAll();
       return 1;
     }
-    await closed;
+    const ended = await Promise.race([
+      closed.then(() => ({ kind: "browser" as const })),
+      childGone.then((name) => ({ kind: "child" as const, name })),
+    ]);
     process.removeListener("SIGINT", onSignal);
     process.removeListener("SIGTERM", onSignal);
+    if (ended.kind === "child") return childExit(ended.name);
     stopAll();
     return 0;
   } catch (err) {

@@ -243,6 +243,21 @@ function sendJson(res, status, obj) {
   res.end(JSON.stringify(obj));
 }
 
+/** A JSON body is usable only when it is a plain object. null, arrays, strings and numbers are not. */
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function oneLine(err) {
+  const message = err instanceof Error ? err.message : "error";
+  return message.replace(/\s+/g, " ").slice(0, 300);
+}
+
+function rejectBody(res, err) {
+  const error = err && err.code === "BAD_REQUEST" ? "bad-request" : "invalid_request";
+  sendJson(res, 400, { error });
+}
+
 function redirectWith(res, redirectUri, params) {
   let loc;
   try {
@@ -267,7 +282,13 @@ async function readBody(req) {
 async function readJson(req) {
   const text = await readBody(req);
   if (text === "") return {};
-  return JSON.parse(text);
+  const parsed = JSON.parse(text);
+  if (!isPlainObject(parsed)) {
+    const err = new Error("bad-request");
+    err.code = "BAD_REQUEST";
+    throw err;
+  }
+  return parsed;
 }
 
 function parseForm(text) {
@@ -322,6 +343,7 @@ async function bearerRevokeRole(req) {
 
 const server = createServer((req, res) => {
   void (async () => {
+    try {
     const bound = server.address();
     const listenPort = bound && typeof bound === "object" ? bound.port : port;
     const hostHeader = Array.isArray(req.headers.host) ? req.headers.host[0] : req.headers.host;
@@ -448,6 +470,10 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "invalid_request" });
         return;
       }
+      if (!isPlainObject(parsed)) {
+        sendJson(res, 400, { error: "bad-request" });
+        return;
+      }
       const grant = parsed.grant_type;
       const code = parsed.code;
       const redirectUri = parsed.redirect_uri;
@@ -555,8 +581,8 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
-        sendJson(res, 400, { error: "invalid_request" });
+      } catch (err) {
+        rejectBody(res, err);
         return;
       }
       const code = typeof parsed.code === "string" ? parsed.code : "";
@@ -587,8 +613,8 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
-        sendJson(res, 400, { error: "invalid_request" });
+      } catch (err) {
+        rejectBody(res, err);
         return;
       }
       const code = typeof parsed.code === "string" ? parsed.code : "";
@@ -668,8 +694,8 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
-        sendJson(res, 400, { error: "invalid_request" });
+      } catch (err) {
+        rejectBody(res, err);
         return;
       }
       const responseType = parsed.response_type;
@@ -775,6 +801,15 @@ const server = createServer((req, res) => {
     }
     res.writeHead(404);
     res.end();
+    } catch (err) {
+      // One line on stderr, no stack to the client. The process stays up.
+      if (err && err.code === "BAD_REQUEST") {
+        if (!res.headersSent) sendJson(res, 400, { error: "bad-request" });
+        return;
+      }
+      process.stderr.write(`dev-issuer: request failed: ${oneLine(err)}\n`);
+      if (!res.headersSent) sendJson(res, 500, { error: "internal" });
+    }
   })();
 });
 

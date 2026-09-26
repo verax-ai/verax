@@ -18,6 +18,7 @@ import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { approvalForRef } from "../records/approval-state.ts";
 import { approveFailureText, approveOutcomeText } from "../records/approve-outcome.ts";
+import { usePinnedApproval } from "../records/approve-pin.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
 import { LANGS, readLang, writeLang, type Lang } from "../lang.ts";
@@ -521,20 +522,18 @@ function ApproveControl({
   row: PendingApproval;
   onApprove: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
 }) {
-  const [asking, setAsking] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
+  const pin = usePinnedApproval(row);
 
-  if (said !== null) {
+  if (pin.said !== null) {
     return (
       <p data-testid="approve-outcome" className="approve-outcome">
-        {said}
+        {pin.said}
       </p>
     );
   }
-  if (!asking) {
+  if (!pin.asking) {
     return (
-      <button type="button" className="approve focusable" onClick={() => setAsking(true)}>
+      <button type="button" className="approve focusable" onClick={() => pin.ask()}>
         {copy["approve.button"]}
       </button>
     );
@@ -552,18 +551,25 @@ function ApproveControl({
       <button
         type="button"
         className="approve focusable"
-        disabled={sending}
+        disabled={pin.sending}
         onClick={() => {
-          setSending(true);
-          void onApprove(row.ref, row.requestHash).then(
-            (out) => setSaid(approveOutcomeText(copy, out)),
-            (err: unknown) => setSaid(approveFailureText(copy, err)),
+          const started = pin.beginSend();
+          if (!started) return;
+          void onApprove(started.row.ref, started.row.requestHash).then(
+            (out) => {
+              if (!pin.acceptResult(started.epoch)) return;
+              pin.setSaid(approveOutcomeText(copy, out));
+            },
+            (err: unknown) => {
+              if (!pin.acceptResult(started.epoch)) return;
+              pin.setSaid(approveFailureText(copy, err));
+            },
           );
         }}
       >
-        {sending ? copy["approve.sending"] : copy["approve.yes"]}
+        {pin.sending ? copy["approve.sending"] : copy["approve.yes"]}
       </button>
-      <button type="button" className="focusable" onClick={() => setAsking(false)}>
+      <button type="button" className="focusable" onClick={() => pin.dismiss()}>
         {copy["approve.no"]}
       </button>
     </div>
@@ -668,11 +674,11 @@ function StatusView({
         {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (
           <ul>
             {open.map((p) => (
-              <li key={p.ref}>
+              <li key={`${p.ref}:${p.requestHash}`}>
                 {p.ref} · {p.subject} · {p.ruleText ?? ""} · {p.brain}
                 {pendingMoney(copy, p)}
                 {canApprove && onApprove ? (
-                  <ApproveControl copy={copy} row={p} onApprove={onApprove} />
+                  <ApproveControl key={`${p.ref}:${p.requestHash}`} copy={copy} row={p} onApprove={onApprove} />
                 ) : null}
               </li>
             ))}
@@ -959,7 +965,7 @@ function DetailPane({
           <p data-testid="detail-result">{outcomeText(copy, action, pending)}</p>
           {canApprove && onApprove && waiting ? (
             <div ref={approveRef} data-testid="record-approve">
-              <ApproveControl copy={copy} row={waiting} onApprove={onApprove} />
+              <ApproveControl key={`${waiting.ref}:${waiting.requestHash}`} copy={copy} row={waiting} onApprove={onApprove} />
             </div>
           ) : null}
           {ledgerPair.defer && ledgerPair.resolution ? (

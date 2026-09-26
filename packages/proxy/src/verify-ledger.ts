@@ -32,7 +32,10 @@
  *
  * Checkpoints are a fifth statement. Each row in `checkpoints.jsonl` must
  * verify under one witness key: `checkpointPublicKeyPem` when the reader
- * pins one, otherwise the first key the file carries. A row that does not
+ * pins one, otherwise the first key the file carries. A line that does not
+ * parse, or that parses but is not a checkpoint, is named and `ok` is false.
+ * A missing file is not that: the tail line says there is no checkpoint.
+ * A row that does not
  * verify is named and `ok` is false. The `prevCheckpointHash` chain is
  * checked with `findCheckpointChainBreak`. The tail uses only the prefix
  * that verified. A key taken from the file shows the checkpoints agree
@@ -46,6 +49,7 @@
  * the answer rather than a footnote, and `publicKeyPem` lets a reader pin a
  * copy they hold themselves.
  */
+import { createPublicKey } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -60,13 +64,14 @@ import type { SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-extract";
 
-import { loadCheckpoints } from "./checkpoints.ts";
+import { readCheckpointFile } from "./checkpoints.ts";
 import { sha256Canonical } from "./hash.ts";
 import {
   ledgerPiecePathProblem,
   readLedgerManifest,
   requireLedgerPiecePath,
   indexPath,
+  manifestPath,
   parseIndexText,
 } from "./ledger-manifest.ts";
 
@@ -144,19 +149,21 @@ function takePieceFile(dir: string, rel: string, problems: string[], read: boole
 
 /** Decision and effect files this directory holds, oldest piece first. Inputs are confined and not read. */
 function ledgerFiles(dir: string, problems: string[]): { decisions: string[]; effects: string[] } {
-  const manifest = readLedgerManifest(dir);
-  if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
-    const decisions: string[] = [];
-    const effects: string[] = [];
-    for (const p of manifest.pieces) {
-      const decision = takePieceFile(dir, p.decisions, problems, true);
-      if (decision) decisions.push(decision);
-      const effect = takePieceFile(dir, p.effects, problems, true);
-      if (effect) effects.push(effect);
-      takePieceFile(dir, p.inputs, problems, false);
+  if (existsSync(manifestPath(dir))) {
+    try {
+      const manifest = readLedgerManifest(dir);
+      if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
+        return pieceFiles(dir, manifest.pieces, problems);
+      }
+    } catch (err) {
+      problems.push(err instanceof Error ? err.message : "ledger-manifest-unreadable");
+      return { decisions: [], effects: [] };
     }
-    return { decisions, effects };
   }
+  return legacyFiles(dir);
+}
+
+function legacyFiles(dir: string): { decisions: string[]; effects: string[] } {
   const decisionsPath = join(dir, "decisions.jsonl");
   const effectsPath = join(dir, "effects.jsonl");
   return {
@@ -165,10 +172,33 @@ function ledgerFiles(dir: string, problems: string[]): { decisions: string[]; ef
   };
 }
 
+function pieceFiles(
+  dir: string,
+  pieces: { decisions: string; effects: string; inputs: string }[],
+  problems: string[],
+): { decisions: string[]; effects: string[] } {
+  const decisions: string[] = [];
+  const effects: string[] = [];
+  for (const p of pieces) {
+    const decision = takePieceFile(dir, p.decisions, problems, true);
+    if (decision) decisions.push(decision);
+    const effect = takePieceFile(dir, p.effects, problems, true);
+    if (effect) effects.push(effect);
+    takePieceFile(dir, p.inputs, problems, false);
+  }
+  return { decisions, effects };
+}
+
 /** Parses JSONL, reporting the line a bad row sits on rather than throwing. */
 function readJsonl(path: string, problems: string[]): unknown[] {
   const out: unknown[] = [];
-  const text = readFileSync(path, "utf8");
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    problems.push(`unreadable file: ${path}`);
+    return out;
+  }
   const lines = text.split("\n");
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!.trim();
@@ -195,6 +225,28 @@ function isPublicKeyPem(pem: unknown): pem is string {
 }
 
 /**
+ * RFC 9864 assigns alg -19 to Ed25519 only. A key that parses as something
+ * else is refused here. The same check belongs in `verifyCoseSign1`; this
+ * package does not patch that dependency.
+ * A PEM that does not parse is left to the verifier, which already fails it.
+ */
+function ed25519Refusal(pem: string | null | undefined): string | null {
+  if (typeof pem !== "string" || pem.trim() === "") return null;
+  try {
+    const key = createPublicKey(pem);
+    if (key.asymmetricKeyType === "ed25519") return null;
+    return "public key is not ed25519";
+  } catch {
+    return null;
+  }
+}
+
+function noteEd25519(pem: string | null | undefined, problems: string[]): void {
+  const refusal = ed25519Refusal(pem);
+  if (refusal) problems.push(refusal);
+}
+
+/**
  * The writer signs `{ ref, effectHash, witnessClass, resultHash }` as COSE
  * Sign1 and a one-row extract with the same effect key. A row with either
  * missing is not bound. Both must verify under the one key the caller
@@ -205,6 +257,7 @@ function effectSignatureCoversRow(effect: EffectOnDisk, effectKey: string | null
   const hasAtt = typeof coseHex === "string" && coseHex !== "";
   const hasReceipt = effect.receipt !== undefined;
   if (!hasAtt || !hasReceipt || !effect.receipt || !isPublicKeyPem(effectKey)) return false;
+  if (ed25519Refusal(effectKey)) return false;
   const ref = effect.row?.ref;
   const effectHash = effect.row?.effectHash;
   const witnessClass = effect.witnessClass;
@@ -239,8 +292,13 @@ function effectSignatureCoversRow(effect: EffectOnDisk, effectKey: string | null
   } catch {
     return false;
   }
-  const signedRow = effect.receipt.body.effects[0];
-  if (!signedRow || !effect.row) return false;
+  let signedRow: unknown;
+  try {
+    signedRow = effect.receipt.body.effects[0];
+  } catch {
+    return false;
+  }
+  if (signedRow == null || !effect.row) return false;
   try {
     if (canonical(signedRow) !== canonical(effect.row)) return false;
   } catch {
@@ -250,7 +308,7 @@ function effectSignatureCoversRow(effect: EffectOnDisk, effectKey: string | null
 }
 
 function effectProblem(effect: EffectOnDisk, ref: string | null): string {
-  const signedClass = effect.receipt?.body.effects[0]?.effectClass;
+  const signedClass = effect.receipt?.body?.effects?.[0]?.effectClass;
   const diskClass = effect.row?.effectClass;
   if (typeof signedClass === "string" && signedClass !== diskClass) {
     return `effect class is not the signed class: ref ${ref ?? "(missing)"}`;
@@ -303,6 +361,7 @@ function checkpointTrustOf(pinned: string, taken: string | null, checkpointCount
 /** One key for every row. A pin ignores the key a row carries. */
 function checkpointRowVerifies(row: SignedCheckpoint, key: string | null): boolean {
   try {
+    if (key && ed25519Refusal(key)) return false;
     if (key) return verifyCheckpointUnderPin(row, key) && verifyCheckpoint(row, key);
     return verifyCheckpoint(row);
   } catch {
@@ -338,6 +397,31 @@ const INDEX_NONE = "index: none (cannot check for removed records)";
 const TAIL_NONE =
   "tail: no checkpoint; removing the newest records with their effects is not detectable from these files";
 
+/**
+ * A torn last line is the crash the writer already documents: earlier lines
+ * parsed, so that tail is skipped. Any other line that is not JSON, and a
+ * file whose every line fails to parse, is a problem.
+ */
+function indexLineProblems(text: string): string[] {
+  const lines = text.split("\n");
+  const filled: { n: number; line: string }[] = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i] !== "") filled.push({ n: i + 1, line: lines[i]! });
+  }
+  const problems: string[] = [];
+  let parsedOk = 0;
+  for (let i = 0; i < filled.length; i += 1) {
+    const last = i === filled.length - 1;
+    try {
+      JSON.parse(filled[i]!.line);
+      parsedOk += 1;
+    } catch {
+      if (!last || parsedOk === 0) problems.push(`index line ${filled[i]!.n} is not JSON`);
+    }
+  }
+  return problems;
+}
+
 function indexStatement(dir: string, decisionRefs: ReadonlySet<string>): { index: VerifyIndex; problems: string[] } {
   if (!existsSync(indexPath(dir))) {
     return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [] };
@@ -346,8 +430,10 @@ function indexStatement(dir: string, decisionRefs: ReadonlySet<string>): { index
   try {
     text = readFileSync(indexPath(dir), "utf8");
   } catch {
-    return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [] };
+    const line = "index could not be read";
+    return { index: { present: true, missing: 0, line }, problems: [line] };
   }
+  const parseProblems = indexLineProblems(text);
   const named = new Set<string>();
   for (const line of parseIndexText(text)) named.add(line.ref);
   let missing = 0;
@@ -356,11 +442,11 @@ function indexStatement(dir: string, decisionRefs: ReadonlySet<string>): { index
   }
   if (missing > 0) {
     const line = `index names ${missing} record(s) the ledger no longer holds`;
-    return { index: { present: true, missing, line }, problems: [line] };
+    return { index: { present: true, missing, line }, problems: [...parseProblems, line] };
   }
   return {
     index: { present: true, missing: 0, line: `index: ${named.size} ref(s), each still a decision` },
-    problems: [],
+    problems: parseProblems,
   };
 }
 
@@ -369,12 +455,14 @@ function tailStatement(
   records: readonly SignedDecisionRecord[],
   checkpointPublicKeyPem: string,
 ): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[] } {
-  const rows = loadCheckpoints(dir);
+  const loaded = readCheckpointFile(dir);
+  const rows = loaded.rows;
   const pinned = checkpointPublicKeyPem.trim();
   const taken = firstCheckpointKey(rows);
   const key = pinned !== "" ? pinned : taken;
   const checkpointTrust = checkpointTrustOf(pinned, taken, rows.length);
-  const problems: string[] = [];
+  const problems: string[] = [...loaded.problems];
+  noteEd25519(key, problems);
   for (let i = 0; i < rows.length; i += 1) {
     if (!checkpointRowVerifies(rows[i]!, key)) {
       problems.push(`checkpoint signature does not verify: checkpoint ${i}`);
@@ -429,14 +517,54 @@ function tailStatement(
   };
 }
 
+function unreadableResult(dir: string, problem: string): VerifyResult {
+  const trust = { source: "none" as const, publicKeyPem: null, note: problem };
+  return {
+    ok: false,
+    directory: dir,
+    decisions: 0,
+    effects: 0,
+    signaturesValid: 0,
+    signaturesInvalid: 0,
+    chainBreakAt: null,
+    effectsBound: 0,
+    effectsOrphaned: 0,
+    trust,
+    effectTrust: trust,
+    checkpointTrust: trust,
+    index: { present: false, missing: 0, line: INDEX_NONE },
+    tail: { line: TAIL_NONE, checkpoint: null },
+    problems: [problem],
+  };
+}
+
+function isDecisionRow(row: unknown): row is SignedDecisionRecord {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return false;
+  const claims = (row as { claims?: unknown }).claims;
+  return claims !== null && typeof claims === "object";
+}
+
 export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promise<VerifyResult> {
+  try {
+    return await verifyLedgerUnchecked(dir, opts);
+  } catch (err) {
+    const problem = err instanceof Error ? err.message : "ledger could not be read";
+    return unreadableResult(dir, problem);
+  }
+}
+
+async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Promise<VerifyResult> {
   const problems: string[] = [];
   const files = ledgerFiles(dir, problems);
   const kararDosyalari = files.decisions;
   const records: SignedDecisionRecord[] = [];
   for (const path of kararDosyalari) {
     for (const row of readJsonl(path, problems)) {
-      records.push(row as SignedDecisionRecord);
+      if (!isDecisionRow(row)) {
+        problems.push("record is not a decision");
+        continue;
+      }
+      records.push(row);
     }
   }
 
@@ -444,6 +572,8 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
   // would let a deleted ledger pass as a verified one.
   if (records.length === 0) {
     problems.push("no decisions found: this directory holds no ledger to verify");
+    noteEd25519(opts.publicKeyPem, problems);
+    noteEd25519(opts.effectPublicKeyPem, problems);
     const emptyIndex = indexStatement(dir, new Set());
     const emptyTail = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
     problems.push(...emptyIndex.problems, ...emptyTail.problems);
@@ -486,11 +616,13 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
 
   let signaturesValid = 0;
   let signaturesInvalid = 0;
+  const recordRefused = ed25519Refusal(anahtar);
+  if (recordRefused) problems.push(recordRefused);
   for (let i = 0; i < records.length; i += 1) {
     const rec = records[i]!;
     let gecerli = false;
     try {
-      gecerli = verifyDecisionRecord(rec, anahtar ?? undefined);
+      gecerli = !recordRefused && verifyDecisionRecord(rec, anahtar ?? undefined);
     } catch {
       gecerli = false;
     }
@@ -506,7 +638,12 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
   // Returns `{ index, reason }` or null. The reason is carried through: a
   // broken link and a bad signature are different accidents, and a reader
   // chasing one should not be told the other.
-  const brk = findDecisionRecordChainBreak(records, anahtar ? [anahtar] : undefined);
+  let brk: ReturnType<typeof findDecisionRecordChainBreak> = null;
+  try {
+    brk = findDecisionRecordChainBreak(records, anahtar ? [anahtar] : undefined);
+  } catch (err) {
+    problems.push(err instanceof Error ? err.message : "record shape is not a decision");
+  }
   const chainBreakAt = brk ? brk.index : null;
   if (brk) {
     problems.push(`chain breaks at record ${brk.index} (${brk.reason}): a row was changed, removed or inserted`);
@@ -540,11 +677,18 @@ export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promi
   }
   const effectRows: EffectOnDisk[] = [];
   for (const path of files.effects) {
-    for (const row of readJsonl(path, problems)) effectRows.push(row as EffectOnDisk);
+    for (const row of readJsonl(path, problems)) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) {
+        problems.push("effect is not an effect row");
+        continue;
+      }
+      effectRows.push(row as EffectOnDisk);
+    }
   }
   const pinnedEffect = opts.effectPublicKeyPem?.trim() ?? "";
   const effectKey = pinnedEffect !== "" ? pinnedEffect : firstEffectKey(effectRows);
   const effectTrust = effectTrustOf(pinnedEffect, effectKey, effectRows.length);
+  noteEd25519(effectKey, problems);
   let effects = effectRows.length;
   let effectsBound = 0;
   let effectsOrphaned = 0;

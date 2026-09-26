@@ -157,11 +157,38 @@ export async function runVerify(
     return 77;
   }
 
-  const result = await verifyLedger(dir, {
-    ...(publicKeyPem ? { publicKeyPem } : {}),
-    ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
-    ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
-  });
+  let result: VerifyResult;
+  try {
+    result = await verifyLedger(dir, {
+      ...(publicKeyPem ? { publicKeyPem } : {}),
+      ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
+      ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
+    });
+  } catch (err) {
+    const problem = err instanceof Error ? err.message : "ledger could not be read";
+    const failed: VerifyResult = {
+      ok: false,
+      directory: dir,
+      decisions: 0,
+      effects: 0,
+      signaturesValid: 0,
+      signaturesInvalid: 0,
+      chainBreakAt: null,
+      effectsBound: 0,
+      effectsOrphaned: 0,
+      trust: { source: "none", publicKeyPem: null, note: problem },
+      effectTrust: { source: "none", publicKeyPem: null, note: problem },
+      checkpointTrust: { source: "none", publicKeyPem: null, note: problem },
+      index: { present: false, missing: 0, line: "index: none (cannot check for removed records)" },
+      tail: {
+        line: "tail: no checkpoint; removing the newest records with their effects is not detectable from these files",
+        checkpoint: null,
+      },
+      problems: [problem],
+    };
+    out(json ? JSON.stringify(failed, null, 2) : renderVerify(failed));
+    return EX_VERIFY_FAILED;
+  }
   out(json ? JSON.stringify(result, null, 2) : renderVerify(result));
   return result.ok ? 0 : EX_VERIFY_FAILED;
 }
