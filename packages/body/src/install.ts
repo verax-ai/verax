@@ -394,6 +394,11 @@ export type PlanOpts = {
   tarballFiles?: string[];
   /** Injected icacls text for the tarball directory. A user write ACE refuses. */
   tarballIcacls?: string;
+  /**
+   * One SDDL per path. A newline-joined blob is not one descriptor.
+   * `ancestor` is true only for the tarball directory.
+   */
+  tarballSddl?: { path: string; sddl: string; ancestor: boolean }[];
   /** Linux uid/mode of the tarball directory and each tarball. */
   tarballModes?: { uid: number; mode: number }[];
   /** sha256 of each tarball at trust-check time. npm installs the private-temp copies. */
@@ -665,14 +670,29 @@ function uniquePaths(paths: readonly string[]): string[] {
 }
 
 /**
- * One PowerShell process reads every path. The command carries a base64 UTF-8 JSON
- * array, never a raw path. Stdout is one JSON object: `{ "<path>": "<sddl>" | { "error": "<msg>" } }`.
+ * UTF-8 JSON array for the batch reader's stdin. The command line never carries it:
+ * a real install tree is far past CreateProcess's 32,767 characters.
+ */
+export function windowsSddlBatchStdin(paths: readonly string[]): string {
+  return JSON.stringify(uniquePaths(paths));
+}
+
+/**
+ * One PowerShell process reads every path. `paths` is not placed on this argv;
+ * the caller passes `windowsSddlBatchStdin(paths)` as stdin. Stdout is one JSON
+ * object: `{ "<path>": "<sddl>" | { "error": "<msg>" } }`.
+ * PowerShell 5.1 unwraps a one-element JSON array, so the script re-wraps with
+ * `| ForEach-Object { $_ }`.
  */
 export function windowsSddlBatchArgv(paths: readonly string[]): string[] {
-  const payload = Buffer.from(JSON.stringify(uniquePaths(paths)), "utf8").toString("base64");
+  // Intentionally unused. Interpolating `paths` here is the overflow F17b closes.
+  void paths;
   const script = `$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
-$raw = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${payload}'))
+$utf8 = New-Object System.Text.UTF8Encoding $false
+[Console]::InputEncoding = $utf8
+[Console]::OutputEncoding = $utf8
+$OutputEncoding = $utf8
+$raw = [Console]::In.ReadToEnd()
 $paths = @($raw | ConvertFrom-Json | ForEach-Object { $_ })
 $result = @{}
 foreach ($p in $paths) {
@@ -727,7 +747,7 @@ function readSddlBatch(exec: ToolExec, paths: readonly string[]): Map<string, Sd
   const wanted = uniquePaths(paths);
   const map = new Map<string, SddlHit>();
   if (wanted.length === 0) return map;
-  const ran = exec(windowsSddlBatchArgv(wanted));
+  const ran = exec(windowsSddlBatchArgv(wanted), windowsSddlBatchStdin(wanted));
   const combined = `${ran.stdout ?? ""}\n${ran.stderr ?? ""}`;
   if ((ran.status ?? 1) !== 0) {
     for (const file of wanted) map.set(file, { status: 1, text: combined });
@@ -1388,6 +1408,23 @@ function linuxOwnedByUs(fact: { exists: boolean; symlink: boolean; owner: string
   return null;
 }
 
+/** One SDDL per line. Joined descriptors are not judged as a single ACL. */
+function sddlDescriptorLines(text: string): string[] {
+  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "");
+  return lines.length > 0 ? lines : [text];
+}
+
+function tarballAclRows(opts: PlanOpts): { path: string; sddl: string; ancestor: boolean }[] {
+  if (opts.tarballSddl !== undefined) return opts.tarballSddl;
+  if (opts.tarballIcacls === undefined || opts.fromTarballs === undefined) return [];
+  const lines = sddlDescriptorLines(opts.tarballIcacls);
+  const paths = [opts.fromTarballs, ...(opts.tarballFiles ?? [])];
+  if (lines.length === paths.length) {
+    return lines.map((sddl, index) => ({ path: paths[index]!, sddl, ancestor: index === 0 }));
+  }
+  return lines.map((sddl) => ({ path: opts.fromTarballs!, sddl, ancestor: true }));
+}
+
 export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, opts: PlanOpts): InstallPlan {
   const posixRoot = platform === "win32" ? undefined : opts.posixRoot;
   const fixed = fixedPosix(posixRoot);
@@ -1406,15 +1443,21 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   }
   const limited = bounds(opts);
   if ("error" in limited) return fail(EX_CONFIG, limited.error);
-  if (opts.nodeIcacls !== undefined && windowsUserCanWrite(opts.nodeIcacls, { userSid: opts.userSid })) {
-    return fail(EX_CONFIG, refuseAcl(opts.nodeIcacls, nodeTrustMessageFor(opts.execPath, platform)));
+  if (opts.nodeIcacls !== undefined) {
+    for (const line of sddlDescriptorLines(opts.nodeIcacls)) {
+      if (windowsUserCanWrite(line, { userSid: opts.userSid })) {
+        return fail(EX_CONFIG, refuseAcl(line, nodeTrustMessageFor(opts.execPath, platform)));
+      }
+    }
   }
   if (opts.nodeModes !== undefined && linuxNodeUntrusted(opts.nodeModes)) {
     return fail(EX_CONFIG, nodeTrustMessageFor(opts.execPath, platform));
   }
   if (opts.fromTarballs) {
-    if (opts.tarballIcacls !== undefined && windowsUserCanWrite(opts.tarballIcacls, { path: opts.fromTarballs, userSid: opts.userSid, ancestor: true })) {
-      return fail(EX_CONFIG, refuseAcl(opts.tarballIcacls, tarballTrustMessage(opts.fromTarballs)));
+    for (const row of tarballAclRows(opts)) {
+      if (windowsUserCanWrite(row.sddl, { path: row.path, userSid: opts.userSid, ancestor: row.ancestor })) {
+        return fail(EX_CONFIG, refuseAcl(row.sddl, tarballTrustMessage(row.path)));
+      }
     }
     if (opts.tarballModes !== undefined && linuxNodeUntrusted(opts.tarballModes)) {
       return fail(EX_CONFIG, tarballTrustMessage(opts.fromTarballs));
@@ -1555,7 +1598,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     if (createAccount) {
       ops.push({
         op: "argv",
-        argv: toolArgv("useradd", ["--system", "--no-create-home", "-d", "/", "--shell", "/usr/sbin/nologin", "verax"], "linux"),
+        argv: toolArgv("useradd", ["--system", "-U", "--no-create-home", "-d", "/", "--shell", "/usr/sbin/nologin", "verax"], "linux"),
       });
     }
     ops.push(
@@ -1564,7 +1607,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
         path: path.posix.join(paths.codeDir, "install.json"),
         contents: installMarkerText(opts, paths, {
           createdUser: true,
-          // useradd without -N creates the matching group. A later uninstall removes it only when the marker says so.
+          // -U creates the group in this install. Uninstall removes it only when the marker's gid matches.
           createdGroup: createAccount || Boolean(opts.linuxAccount?.createdGroup),
         }),
         mode: 0o644,
@@ -2761,7 +2804,7 @@ export function linuxSelinuxCheck(
   if (mode === null) return { id: "selinux", level: "ok", detail: "SELinux is not present" };
   if (mode !== "Enforcing") return { id: "selinux", level: "ok", detail: `SELinux is ${mode}` };
   const label = serviceSelinuxLabel(exec);
-  if (label === null) return { id: "selinux", level: "ok", detail: "SELinux is Enforcing; service domain is unknown" };
+  if (label === null) return { id: "selinux", level: "warn", detail: "SELinux is Enforcing; service domain is unknown" };
   const domain = selinuxType(label);
   return {
     id: "selinux",
@@ -3099,10 +3142,46 @@ function inheritResetDir(argv: readonly string[]): string | null {
   return star ? star.slice(0, -2) : null;
 }
 
+/** Relative paths in MANIFEST.sha256. The manifest is written with forward slashes. */
+function manifestCodeFiles(root: string): string[] {
+  let text: string;
+  try {
+    text = readFileSync(path.win32.join(root, "MANIFEST.sha256"), "utf8");
+  } catch {
+    return [];
+  }
+  const files: string[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#")) continue;
+    const sp = line.indexOf("  ");
+    if (sp < 0) continue;
+    const rel = line.slice(sp + 2).trim().replaceAll("\\", "/");
+    const parts = rel.split("/");
+    if (rel === "" || parts.some((part) => part === "" || part === "." || part === "..")) continue;
+    files.push(path.win32.join(root, ...parts));
+  }
+  return files;
+}
+
 /** Files whose DACL must match the directory grant. Missing files are skipped by the caller. */
 export function serviceAclFiles(root: string, kind: "code" | "state"): string[] {
   if (kind === "code") {
-    return [path.win32.join(root, "node_modules", "@verax-ai", "body", "package.json")];
+    const body = path.win32.join(root, "node_modules", "@verax-ai", "body");
+    const listed = [
+      path.win32.join(body, "package.json"),
+      path.win32.join(body, "dist", "cli.js"),
+      ...manifestCodeFiles(root),
+    ];
+    const seen = new Set<string>();
+    const files: string[] = [];
+    for (const file of listed) {
+      const key = file.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      files.push(file);
+    }
+    return files;
   }
   const files = [
     path.win32.join(root, "local-issuer", "key.pem"),
@@ -3136,6 +3215,9 @@ function serviceGrantKind(argv: readonly string[]): "code" | "state" | null {
 type CreatedThisRun = {
   linuxUser: boolean;
   linuxGroup: boolean;
+  /** uid/gid read after this run's useradd. Rollback deletes only these ids. */
+  linuxUid?: number;
+  linuxGid?: number;
   linuxService: boolean;
   darwinUser: boolean;
   darwinGroup: boolean;
@@ -3151,8 +3233,11 @@ function rememberCreatedAccount(created: CreatedThisRun, argv: readonly string[]
   const tool = systemToolName(argv[0] ?? "");
   if (tool === "useradd" && argv[argv.length - 1] === "verax") {
     created.linuxUser = true;
-    if (!argv.includes("-N") && !argv.includes("--no-user-group")) created.linuxGroup = true;
+    const pinsGroup = argv.includes("-U") || argv.includes("--user-group");
+    const suppressesGroup = argv.includes("-N") || argv.includes("--no-user-group");
+    if (pinsGroup && !suppressesGroup) created.linuxGroup = true;
   }
+  if (tool === "groupadd" && argv[argv.length - 1] === "verax") created.linuxGroup = true;
   if (tool === "dscl" && argv.includes("-create")) {
     if (argv.includes(`/Users/${DARWIN_USER}`)) created.darwinUser = true;
     if (argv.includes(`/Groups/${DARWIN_USER}`)) created.darwinGroup = true;
@@ -3161,6 +3246,18 @@ function rememberCreatedAccount(created: CreatedThisRun, argv: readonly string[]
   if (tool === "powershell" && argv.some((arg) => arg.includes("Register-ScheduledTask"))) created.winTask = true;
   if (tool === "launchctl" && argv.includes("bootstrap")) created.darwinService = true;
   if (tool === "systemctl" && argv.includes("enable") && argv.includes("--now")) created.linuxService = true;
+}
+
+/** Read the ids useradd just produced. Uninstall and rollback delete only these. */
+function captureLinuxIds(created: CreatedThisRun, exec: ToolExec): void {
+  if (created.linuxUser && created.linuxUid === undefined) {
+    const account = linuxPasswdLine(exec);
+    if (account) created.linuxUid = account.uid;
+  }
+  if (created.linuxGroup && created.linuxGid === undefined) {
+    const gid = linuxGroupGid(exec);
+    if (gid !== null) created.linuxGid = gid;
+  }
 }
 
 function removeRollbackPath(target: string, io: InstallIo): void {
@@ -3198,6 +3295,22 @@ function stampAccountSid(contents: string, sid: string): string {
   }
 }
 
+/** Record the uid and gid this run's useradd produced. A later reinstall keeps ids already in the text. */
+function stampLinuxAccountIds(contents: string, created: CreatedThisRun): string {
+  try {
+    const parsed = JSON.parse(contents) as Record<string, unknown>;
+    if (parsed.createdUser === true && created.linuxUid !== undefined && typeof parsed.accountUid !== "number") {
+      parsed.accountUid = created.linuxUid;
+    }
+    if (parsed.createdGroup === true && created.linuxGid !== undefined && typeof parsed.accountGid !== "number") {
+      parsed.accountGid = created.linuxGid;
+    }
+    return `${JSON.stringify(parsed, null, 2)}\n`;
+  } catch {
+    return contents;
+  }
+}
+
 function restoreInstallMarker(saved: MarkerPrior | null, io: InstallIo): void {
   if (!saved) return;
   if (saved.prior === null) {
@@ -3225,7 +3338,7 @@ function rollbackCreatedThisRun(
   };
   const best = (argv: string[]): void => {
     const ran = call(argv);
-    if ((ran.status ?? 1) === 0 || toolAlreadyAbsent(ran)) return;
+    if ((ran.status ?? 1) === 0 || removalAlreadyGone(argv, ran)) return;
     reportToolFailure(io, argv, ran);
   };
   if (created.linuxService || created.linuxUser) ignore(toolArgv("systemctl", ["disable", "--now", "verax"], "linux"));
@@ -3234,8 +3347,14 @@ function rollbackCreatedThisRun(
     ignore(toolArgv("schtasks", ["/End", "/TN", TASK_NAME], "win32"));
     ignore(toolArgv("schtasks", ["/Delete", "/TN", TASK_NAME, "/F"], "win32"));
   }
-  if (created.linuxUser) best(toolArgv("userdel", ["verax"], "linux"));
-  if (created.linuxGroup) best(toolArgv("groupdel", ["verax"], "linux"));
+  if (created.linuxUser) {
+    const verdict = linuxUserVerdict(call, created.linuxUid);
+    if (verdict.remove) best(toolArgv("userdel", ["verax"], "linux"));
+  }
+  if (created.linuxGroup) {
+    const verdict = linuxGroupVerdict(call, created.linuxGid);
+    if (verdict.remove) best(toolArgv("groupdel", ["verax"], "linux"));
+  }
   if (created.darwinUser) best(toolArgv("dscl", [".", "-delete", `/Users/${DARWIN_USER}`], "darwin"));
   if (created.darwinGroup) best(toolArgv("dscl", [".", "-delete", `/Groups/${DARWIN_USER}`], "darwin"));
   if (created.winAccount) best(toolArgv("net", ["user", VERAX_SVC, "/delete"], "win32"));
@@ -3435,6 +3554,7 @@ async function execute(
         }
       }
       rememberCreatedAccount(created, resolved);
+      if (platform === "linux") captureLinuxIds(created, call);
       continue;
     }
     if (step.op === "write") {
@@ -3452,6 +3572,7 @@ async function execute(
           markerPrior = { path: step.path, prior };
         }
         if (winSid !== "") contents = stampAccountSid(contents, winSid);
+        if (platform === "linux") contents = stampLinuxAccountIds(contents, created);
       }
       mkdirSync(path.dirname(step.path), { recursive: true });
       writeFileSync(step.path, contents, { encoding: "utf8", mode: step.mode ?? 0o644, flag: step.exclusive ? "wx" : "w" });
@@ -3936,7 +4057,7 @@ function collectTarballs(
   exec: (argv: string[]) => ExecResult,
   io: InstallIo,
   sddl: Map<string, SddlHit> | null = null,
-): { dir: string; files: string[]; digests: { file: string; sha256: string }[]; icacls?: string; modes?: { uid: number; mode: number }[] } | { error: true; code: number } {
+): { dir: string; files: string[]; digests: { file: string; sha256: string }[]; sddl?: { path: string; sddl: string; ancestor: boolean }[]; modes?: { uid: number; mode: number }[] } | { error: true; code: number } {
   const listed = listedTarballTargets(dirArg);
   if ("missing" in listed) {
     io.stderr.write(`--from-tarballs ${listed.dir} is not a directory\n`);
@@ -3950,23 +4071,23 @@ function collectTarballs(
   const targets = [dir, ...files];
   if (platform === "win32") {
     const sid = invokingSid(exec);
-    const chunks: string[] = [];
+    const rows: { path: string; sddl: string; ancestor: boolean }[] = [];
     for (const file of targets) {
       const acl = sddl?.get(file) ?? { status: 1, text: "" };
       const text = acl.text;
-      chunks.push(text);
       const ancestor = file === dir;
       if (acl.status !== 0 || windowsUserCanWrite(text, { path: file, userSid: sid, ancestor })) {
         io.stderr.write(`${refuseAcl(text, tarballTrustMessage(file))}\n`);
         return { error: true, code: EX_CONFIG };
       }
+      rows.push({ path: file, sddl: text, ancestor });
     }
     const hashed = hashTarballDigests(files, io);
     if ("error" in hashed) {
       io.stderr.write(hashed.error.endsWith("\n") ? hashed.error : `${hashed.error}\n`);
       return { error: true, code: EX_CONFIG };
     }
-    return { dir, files, digests: hashed.digests, icacls: chunks.join("\n") };
+    return { dir, files, digests: hashed.digests, sddl: rows };
   }
   if (platform === "linux" || platform === "darwin") {
     const modes: { uid: number; mode: number }[] = [];
@@ -4184,7 +4305,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     darwinState,
     darwinRoot,
     ...(packed && !("error" in packed)
-      ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballDigests: packed.digests, tarballIcacls: packed.icacls, tarballModes: packed.modes }
+      ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballDigests: packed.digests, tarballSddl: packed.sddl, tarballModes: packed.modes }
       : {}),
   });
   if (!plan.ok) {
@@ -4200,6 +4321,34 @@ function toolAlreadyAbsent(ran: ExecResult): boolean {
   const text = `${ran.stdout ?? ""}\n${ran.stderr ?? ""}`.toLowerCase();
   if (text.trim() === "") return true;
   return /cannot find the file specified|does not exist|could not be found|could not find|no such file|not found|not loaded|isn't loaded|is not loaded/.test(text);
+}
+
+/** userdel, groupdel, `net user /delete`, and `dscl -delete`. Empty output is not absence. */
+function isAccountDeleteArgv(argv: readonly string[]): boolean {
+  const tool = systemToolName(argv[0] ?? "");
+  if (tool === "userdel" || tool === "groupdel") return true;
+  if (tool === "net" && argv.some((arg) => arg.toLowerCase() === "/delete")) return true;
+  if (tool === "dscl" && argv.includes("-delete")) return true;
+  return false;
+}
+
+/**
+ * A delete that failed is not "already gone".
+ * userdel and groupdel document exit 6 as "no such user/group".
+ * Other tools need text that names a missing account.
+ */
+function accountDeleteAlreadyGone(argv: readonly string[], ran: ExecResult): boolean {
+  if ((ran.status ?? 1) === 0) return false;
+  const tool = systemToolName(argv[0] ?? "");
+  if ((tool === "userdel" || tool === "groupdel") && ran.status === 6) return true;
+  const text = `${ran.stdout ?? ""}\n${ran.stderr ?? ""}`.toLowerCase();
+  if (text.trim() === "") return false;
+  return /cannot find the file specified|does not exist|could not be found|could not find|no such (user|group|file)|not found|the user name could not be found|edsrecordnotfound/.test(text);
+}
+
+function removalAlreadyGone(argv: readonly string[], ran: ExecResult): boolean {
+  if (isAccountDeleteArgv(argv)) return accountDeleteAlreadyGone(argv, ran);
+  return toolAlreadyAbsent(ran);
 }
 
 function reportToolFailure(io: InstallIo, argv: readonly string[], ran: ExecResult): void {
@@ -4228,22 +4377,39 @@ function linuxPasswdLine(exec: ToolExec): { uid: number; home: string; shell: st
   return { uid, home: parts[5] ?? "", shell: parts[6] ?? "" };
 }
 
-/** The login useradd creates: system uid, nologin shell, home `/` or none. */
-function linuxUserVerdict(exec: ToolExec): { remove: true } | { remove: false; line: string } {
+function linuxGroupGid(exec: ToolExec): number | null {
+  const ran = exec(toolArgv("getent", ["group", "verax"], "linux"));
+  const line = (ran.status ?? 1) === 0 ? (ran.stdout ?? "").split(/\r?\n/).find((row) => row.startsWith("verax:")) : undefined;
+  const gid = Number(line?.split(":")[2]);
+  return Number.isInteger(gid) ? gid : null;
+}
+
+/**
+ * The login useradd creates: system uid, nologin shell, home `/` or none.
+ * When the marker recorded a uid, the live uid must be that uid.
+ */
+function linuxUserVerdict(exec: ToolExec, recordedUid?: number): { remove: true } | { remove: false; line: string } {
   const account = linuxPasswdLine(exec);
   if (!account) return { remove: false, line: "not removing account verax: live account is not the system user this install creates" };
   const homeOk = account.home === "/" || account.home === "";
-  if (linuxSystemId(account.uid) && account.shell === LINUX_NOLOGIN && homeOk) return { remove: true };
+  const shape = linuxSystemId(account.uid) && account.shell === LINUX_NOLOGIN && homeOk;
+  if (shape && (recordedUid === undefined || account.uid === recordedUid)) return { remove: true };
+  if (recordedUid !== undefined && account.uid !== recordedUid) {
+    return { remove: false, line: `not removing account verax: live uid ${account.uid} does not match marker uid ${recordedUid}` };
+  }
   const home = account.home === "" ? "none" : account.home;
   return { remove: false, line: `not removing account verax: uid ${account.uid}, shell ${account.shell}, home ${home}` };
 }
 
-function linuxGroupVerdict(exec: ToolExec): { remove: true } | { remove: false; line: string } {
-  const ran = exec(toolArgv("getent", ["group", "verax"], "linux"));
-  const line = (ran.status ?? 1) === 0 ? (ran.stdout ?? "").split(/\r?\n/).find((row) => row.startsWith("verax:")) : undefined;
-  const gid = Number(line?.split(":")[2]);
-  if (linuxSystemId(gid)) return { remove: true };
-  const shown = Number.isInteger(gid) ? String(gid) : "unknown";
+/** System gid, and when the marker recorded one, that gid. */
+function linuxGroupVerdict(exec: ToolExec, recordedGid?: number): { remove: true } | { remove: false; line: string } {
+  const gid = linuxGroupGid(exec);
+  if (gid !== null && linuxSystemId(gid) && (recordedGid === undefined || gid === recordedGid)) return { remove: true };
+  if (recordedGid !== undefined && gid !== recordedGid) {
+    const shown = gid === null ? "unknown" : String(gid);
+    return { remove: false, line: `not removing group verax: live gid ${shown} does not match marker gid ${recordedGid}` };
+  }
+  const shown = gid === null ? "unknown" : String(gid);
   return { remove: false, line: `not removing group verax: gid ${shown} is outside the system range` };
 }
 
@@ -4300,7 +4466,7 @@ function windowsAccountVerdict(exec: ToolExec, recordedSid: string | undefined):
 /** Run one uninstall tool. Absent artifacts are not failures. Returns a non-zero code when the tool failed. */
 function runUninstallTool(exec: ToolExec, io: InstallIo, argv: string[]): number | null {
   const ran = exec(argv);
-  if ((ran.status ?? 1) === 0 || toolAlreadyAbsent(ran)) return null;
+  if ((ran.status ?? 1) === 0 || removalAlreadyGone(argv, ran)) return null;
   reportToolFailure(io, argv, ran);
   return ran.status ?? 1;
 }
@@ -4509,7 +4675,7 @@ function executeUninstall(
     if (query.status !== 0) {
       note(false, "account verax", () => null);
     } else {
-      const verdict = linuxUserVerdict(exec);
+      const verdict = linuxUserVerdict(exec, opts.accountUid);
       if (!verdict.remove) {
         any = true;
         lines.push(verdict.line);
@@ -4535,7 +4701,7 @@ function executeUninstall(
     if (query.status !== 0) {
       note(false, "group verax", () => null);
     } else {
-      const verdict = linuxGroupVerdict(exec);
+      const verdict = linuxGroupVerdict(exec, opts.accountGid);
       if (!verdict.remove) {
         any = true;
         lines.push(verdict.line);
@@ -4642,7 +4808,7 @@ function hashUnder(dir: string, rel: string): string | null {
 export function liveInstalledChecks(
   platform: NodeJS.Platform = process.platform,
   env: NodeJS.ProcessEnv = process.env,
-  exec: (argv: string[]) => ExecResult = defaultExec,
+  exec: ToolExec = defaultExec,
 ): BoundaryCheck[] {
   const codeDir = codeDirFor(platform, env);
   const stateDir = stateDirFor(platform, env);

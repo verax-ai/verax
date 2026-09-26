@@ -42,13 +42,12 @@ const linuxOpts = {
 const adminAcl = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
 const ATTACKER_SID = "S-1-5-21-1111111111-2222222222-3333333333-1001";
 
-function sddlBatchPaths(line: string): string[] | null {
-  const matched = line.match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/);
-  if (!matched?.[1]) return null;
+function sddlBatchPaths(stdin: string | undefined): string[] | null {
+  if (stdin === undefined || stdin === "") return null;
   try {
-    const parsed = JSON.parse(Buffer.from(matched[1], "base64").toString("utf8")) as unknown;
+    const parsed = JSON.parse(stdin) as unknown;
     if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) return null;
-    return parsed as string[];
+    return parsed;
   } catch {
     return null;
   }
@@ -84,14 +83,14 @@ describe("attack R3", () => {
         createdAccount: true,
       }),
     );
-    const exec = (argv: string[]): ExecResult => {
+    const exec = (argv: string[], stdin?: string): ExecResult => {
       const line = argv.join(" ");
       if (line.includes("reparsepoint")) return { status: 1, stdout: "", stderr: "not a reparse" };
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
         return { status: 1, stdout: "", stderr: "The user name could not be found." };
       }
       const attacker = `O:${ATTACKER_SID}G:${ATTACKER_SID}D:(A;OICI;FA;;;${ATTACKER_SID})(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)`;
-      const paths = sddlBatchPaths(line);
+      const paths = sddlBatchPaths(stdin);
       if (paths) {
         return { status: 0, stdout: sddlJson(paths, (file) => (sameWinPath(file, verax) ? attacker : adminAcl)), stderr: "" };
       }
@@ -130,14 +129,14 @@ describe("attack R3", () => {
     mkdirSync(verax, { recursive: true });
     writeFileSync(join(verax, "install.json"), JSON.stringify({ version: "0.3.0", codeDir: join(files, "Verax") }));
     let rootReads = 0;
-    const exec = (argv: string[]): ExecResult => {
+    const exec = (argv: string[], stdin?: string): ExecResult => {
       const line = argv.join(" ");
       if (line.includes("reparsepoint")) return { status: 1, stdout: "", stderr: "not a reparse" };
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) {
         return { status: 1, stdout: "", stderr: "The user name could not be found." };
       }
       const dirtyAcl = `${adminAcl}(A;OICI;FA;;;${ATTACKER_SID})`;
-      const paths = sddlBatchPaths(line);
+      const paths = sddlBatchPaths(stdin);
       if (paths) {
         if (paths.some((file) => sameWinPath(file, verax))) rootReads += 1;
         const dirty = rootReads >= 2;
@@ -250,7 +249,7 @@ describe("attack R3", () => {
     const data = join(root, "data");
     const verax = join(data, "Verax");
     const err: string[] = [];
-    const exec = (argv: string[]): ExecResult => {
+    const exec = (argv: string[], stdin?: string): ExecResult => {
       if (argv.includes("/setowner") && argv[1] === verax) {
         mkdirSync(join(verax, "keys"));
         return { status: 0, stdout: "", stderr: "" };
@@ -258,7 +257,7 @@ describe("attack R3", () => {
       if (argv.join(" ").includes("reparsepoint")) return { status: 1, stdout: "", stderr: "" };
       if (/net\.exe/i.test(argv[0] ?? "") && argv.includes("user")) return { status: 1, stdout: "", stderr: "not found" };
       if (/whoami/i.test(argv[0] ?? "")) return { status: 0, stdout: "S-1-5-21-1001\n", stderr: "" };
-      const paths = sddlBatchPaths(argv.join("\n"));
+      const paths = sddlBatchPaths(stdin);
       if (paths) return { status: 0, stdout: sddlJson(paths, () => adminAcl), stderr: "" };
       return { status: 0, stdout: adminAcl, stderr: "" };
     };

@@ -32,17 +32,33 @@ export type BodyConfig = {
    * Default is 1 MiB. `VERAX_MEMORY_QUOTA_BYTES` overrides it.
    */
   memoryQuotaBytes?: number;
+  /**
+   * Bytes one tenant may append to `outbox.jsonl`.
+   * Default is 1 MiB. `VERAX_MESSAGE_QUOTA_BYTES` overrides it.
+   */
+  messageQuotaBytes?: number;
 };
 
 /** Per-tenant `memory.put` cap. The HTTP body cap does not reset this total. */
 export const DEFAULT_MEMORY_QUOTA_BYTES = 1024 * 1024;
 
-export function memoryQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
-  const raw = env.VERAX_MEMORY_QUOTA_BYTES?.trim() ?? "";
-  if (raw === "") return DEFAULT_MEMORY_QUOTA_BYTES;
-  const n = Number(raw);
-  if (!Number.isInteger(n) || n <= 0) return DEFAULT_MEMORY_QUOTA_BYTES;
+/** Per-tenant `message.send` cap. The HTTP body cap does not reset this total. */
+export const DEFAULT_MESSAGE_QUOTA_BYTES = 1024 * 1024;
+
+function positiveIntQuota(raw: string | undefined, fallback: number): number {
+  const text = raw?.trim() ?? "";
+  if (text === "") return fallback;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
   return n;
+}
+
+export function memoryQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntQuota(env.VERAX_MEMORY_QUOTA_BYTES, DEFAULT_MEMORY_QUOTA_BYTES);
+}
+
+export function messageQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntQuota(env.VERAX_MESSAGE_QUOTA_BYTES, DEFAULT_MESSAGE_QUOTA_BYTES);
 }
 
 export type ConfigResult =
@@ -147,6 +163,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
         .map((item) => item.trim())
         .filter((item) => item !== ""),
       memoryQuotaBytes: memoryQuotaBytes(env),
+      messageQuotaBytes: messageQuotaBytes(env),
     },
   };
 }

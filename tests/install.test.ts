@@ -38,6 +38,7 @@ import {
   systemToolPath,
   windowsUserCanWrite,
   windowsSddlBatchArgv,
+  windowsSddlBatchStdin,
   sddlRightsMask,
   type PlanOp,
 } from "../packages/body/src/install.ts";
@@ -133,7 +134,7 @@ function argvs(ops: PlanOp[]): string[][] {
  */
 function winServiceAcl(dir: string): string {
   const base = dir.replace(/[\\/]+$/, "");
-  const codeFile = /[/\\]node_modules[/\\]@verax-ai[/\\]body[/\\]package\.json$/i.test(base);
+  const codeFile = /[/\\]node_modules[/\\]@verax-ai[/\\]body[/\\]/i.test(base);
   const code = codeFile || /[/\\]Verax$/i.test(base);
   const state = /[/\\]state([/\\]|$)/i.test(base) || /install\.json$/i.test(base);
   if (!code && !state) return "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)";
@@ -142,14 +143,13 @@ function winServiceAcl(dir: string): string {
   return `O:BAG:SYD:PAI(A;${flags};${rights};;;S-1-5-21-1)(A;${flags};FA;;;BA)(A;${flags};FA;;;SY)`;
 }
 
-/** Paths inside `windowsSddlBatchArgv`: base64 JSON, not a raw path. */
-function sddlBatchPaths(argv: readonly string[]): string[] | null {
-  const matched = argv.join("\n").match(/FromBase64String\('([A-Za-z0-9+/=]+)'\)/);
-  if (!matched?.[1]) return null;
+/** Path list on the batch reader's stdin: a JSON array. */
+function sddlBatchPaths(stdin: string | undefined): string[] | null {
+  if (stdin === undefined || stdin === "") return null;
   try {
-    const parsed = JSON.parse(Buffer.from(matched[1], "base64").toString("utf8")) as unknown;
+    const parsed = JSON.parse(stdin) as unknown;
     if (!Array.isArray(parsed) || !parsed.every((item) => typeof item === "string")) return null;
-    return parsed as string[];
+    return parsed;
   } catch {
     return null;
   }
@@ -165,10 +165,13 @@ function sddlPowerShell(argv: readonly string[]): boolean {
   return systemToolName(argv[0] ?? "") === "powershell" && argv.join("\n").includes(".Sddl");
 }
 
-function sddlStdout(argv: readonly string[]): string | null {
-  const paths = sddlBatchPaths(argv);
-  if (paths) return sddlJson(paths, winServiceAcl);
-  const cmd = argv.join(" ");
+function sddlStdout(argv: readonly string[], stdin?: string): string | null {
+  const cmd = argv.join("\n");
+  if (cmd.includes("[Console]::In.ReadToEnd()")) {
+    const paths = sddlBatchPaths(stdin);
+    if (!paths) return null;
+    return sddlJson(paths, winServiceAcl);
+  }
   if (!cmd.includes(".Sddl")) return null;
   const matched = cmd.match(/LiteralPath '([^']*)'/);
   const target = (matched?.[1] ?? "").replace(/''/g, "'");
@@ -220,7 +223,7 @@ describe("verax install plan", () => {
 
     const linux = okPlan("linux", linuxEnv, linuxOpts);
     const lines = argvs(linux.ops);
-    assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "useradd" && argv.slice(1).join(" ") === "--system --no-create-home -d / --shell /usr/sbin/nologin verax"));
+    assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "useradd" && argv.slice(1).join(" ") === "--system -U --no-create-home -d / --shell /usr/sbin/nologin verax"));
     assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chown" && argv.join(" ").includes("verax:verax") && argv.includes(linux.stateDir)));
     assert.ok(lines.some((argv) => systemToolName(argv[0] ?? "") === "chmod" && argv.includes("0700") && argv.includes(linux.stateDir)));
   });
@@ -834,6 +837,51 @@ describe("verax install plan", () => {
     assert.match(plan.message, /from-tarballs/);
   });
 
+  it("joined admin-only tarball SDDLs are accepted and one writable member is named", () => {
+    const admin = "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)";
+    const dir = "C:\\pack";
+    const files = ["C:\\pack\\a.tgz", "C:\\pack\\b.tgz", "C:\\pack\\c.tgz"];
+    const accepted = planInstall("win32", winEnv, {
+      ...winOpts,
+      fromTarballs: dir,
+      tarballFiles: files,
+      tarballIcacls: [admin, admin, admin, admin].join("\n"),
+    });
+    assert.equal(accepted.ok, true, accepted.ok ? "" : accepted.message);
+    const writable = "O:BAG:SYD:PAI(A;;FA;;;BU)";
+    const refused = planInstall("win32", winEnv, {
+      ...winOpts,
+      fromTarballs: dir,
+      tarballFiles: files,
+      tarballIcacls: [admin, admin, writable, admin].join("\n"),
+    });
+    assert.equal(refused.ok, false);
+    if (refused.ok) return;
+    assert.equal(refused.code, 78);
+    assert.match(refused.message, /C:\\pack\\b\.tgz/);
+    assert.match(refused.message, /from-tarballs/);
+  });
+
+  it("per-path tarball SDDL rows, as collectTarballs passes them, are judged one by one", () => {
+    // The shape a real install hands the plan: one row per path. Judging the rows joined refused real Windows.
+    const admin = "O:BAG:SYD:PAI(A;;FA;;;BA)(A;;FA;;;SY)";
+    const dir = "C:\\pack";
+    const files = ["C:\\pack\\a.tgz", "C:\\pack\\b.tgz", "C:\\pack\\c.tgz"];
+    const rows = (sddl: (i: number) => string) =>
+      [dir, ...files].map((path, i) => ({ path, sddl: sddl(i), ancestor: i === 0 }));
+    const accepted = planInstall("win32", winEnv, { ...winOpts, fromTarballs: dir, tarballFiles: files, tarballSddl: rows(() => admin) });
+    assert.equal(accepted.ok, true, accepted.ok ? "" : accepted.message);
+    const refused = planInstall("win32", winEnv, {
+      ...winOpts,
+      fromTarballs: dir,
+      tarballFiles: files,
+      tarballSddl: rows((i) => (i === 2 ? "O:BAG:SYD:PAI(A;;FA;;;BU)" : admin)),
+    });
+    assert.equal(refused.ok, false);
+    if (refused.ok) return;
+    assert.match(refused.message, /C:\\pack\\b\.tgz/);
+  });
+
   it("doctor shows the red line for a tarball install", () => {
     const checks = installedBoundaryChecks({
       codeDir: "C:\\Program Files\\Verax",
@@ -1088,11 +1136,11 @@ describe("verax install plan", () => {
         elevated: () => true,
         layout,
         posixRoot,
-        exec: (argv) => {
+        exec: (argv, stdin) => {
           const passwd = getentAnswer(argv, home);
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
-          const sddl = sddlStdout(argv);
+          const sddl = sddlStdout(argv, stdin);
           if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
@@ -1163,11 +1211,11 @@ describe("verax install plan", () => {
         elevated: () => true,
         layout,
         posixRoot,
-        exec: (argv) => {
+        exec: (argv, stdin) => {
           const passwd = getentAnswer(argv, home);
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
-          const sddl = sddlStdout(argv);
+          const sddl = sddlStdout(argv, stdin);
           if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
@@ -1212,7 +1260,7 @@ describe("verax install plan", () => {
         elevated: () => true,
         layout: winOpts,
         exec: (argv, stdin) => {
-          const sddl = sddlStdout(argv);
+          const sddl = sddlStdout(argv, stdin);
           if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
             seen = (stdin ?? "").replace(/\r?\n$/, "");
@@ -1316,8 +1364,8 @@ describe("verax install plan", () => {
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
       elevated: () => true,
       layout: winOpts,
-      exec: (argv) => {
-        const paths = sddlBatchPaths(argv);
+      exec: (argv, stdin) => {
+        const paths = sddlBatchPaths(stdin);
         if (paths) return { status: 0, stdout: sddlJson(paths, () => nodejs), stderr: "" };
         if (argv.join(" ").includes(".Sddl")) return { status: 0, stdout: `${nodejs}\n`, stderr: "" };
         if (systemToolName(argv[0] ?? "") === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
@@ -1407,13 +1455,13 @@ describe("verax install plan", () => {
         env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
         elevated: () => true,
         layout: winOpts,
-        exec: (argv) => {
+        exec: (argv, stdin) => {
           const stockSddl = (target: string): string => {
             if (target.toLowerCase().includes("nodejs")) return nodejs;
             if (target.toLowerCase().includes("program files")) return programFiles;
             return drive;
           };
-          const paths = sddlBatchPaths(argv);
+          const paths = sddlBatchPaths(stdin);
           if (paths) return { status: 0, stdout: sddlJson(paths, stockSddl), stderr: "" };
           const blob = argv.join(" ");
           if (blob.includes(".Sddl")) {
@@ -1606,7 +1654,7 @@ describe("verax install plan", () => {
       elevated: () => true,
       layout: winOpts,
       exec: (argv, stdin) => {
-        const sddl = sddlStdout(argv);
+        const sddl = sddlStdout(argv, stdin);
         if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
         if (systemToolName(argv[0] ?? "") === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
           password = stdin ?? "";
@@ -1724,11 +1772,11 @@ describe("verax install plan", () => {
           ? { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! }
           : winOpts,
         posixRoot: posix ? join(root, "fsroot") : undefined,
-        exec: (argv) => {
+        exec: (argv, stdin) => {
           const passwd = getentAnswer(argv, join(root, "home"));
           if (passwd) return passwd;
           const tool = systemToolName(argv[0] ?? "");
-          const sddl = sddlStdout(argv);
+          const sddl = sddlStdout(argv, stdin);
           if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           if (tool === "whoami" || tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
           if (tool === "net" && argv[1] === "user" && argv[2] === "verax-svc" && argv.length === 3) {
@@ -2528,19 +2576,66 @@ describe("verax uninstall", () => {
     assert.deepEqual(bare, []);
   });
 
+  it("F17b five thousand paths leave the batch SDDL argv under 8000 characters", () => {
+    const paths = Array.from({ length: 5000 }, (_, i) => {
+      const tail = i.toString(36).padStart(4, "0");
+      return `${"C:\\verax\\".padEnd(120 - tail.length, "n")}${tail}`;
+    });
+    assert.ok(paths.every((file) => file.length === 120));
+    const argv = windowsSddlBatchArgv(paths);
+    const chars = argv.reduce((sum, arg, index) => sum + arg.length + (index === 0 ? 0 : 1), 0);
+    assert.ok(chars < 8000, `argv is ${chars} characters`);
+    assert.equal(argv.join("\n").includes(paths[0]!), false);
+    assert.deepEqual(JSON.parse(windowsSddlBatchStdin(paths)), paths);
+  });
+
   it("the batch SDDL reader runs in the real Windows PowerShell and answers each path by its own key", { skip: process.platform !== "win32" && "runs powershell.exe" }, () => {
     // Mocks cannot see Windows PowerShell 5.1 quirks: an unrolled JSON array once joined every path into one.
+    const takeFiles = (dir: string, into: string[], cap: number): void => {
+      if (into.length >= cap) return;
+      let names: string[];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        return;
+      }
+      for (const name of names) {
+        if (into.length >= cap) return;
+        const full = join(dir, name);
+        let st;
+        try {
+          st = lstatSync(full);
+        } catch {
+          continue;
+        }
+        if (st.isSymbolicLink()) continue;
+        if (st.isDirectory()) takeFiles(full, into, cap);
+        else if (st.isFile()) into.push(full);
+      }
+    };
     const root = process.env.SystemRoot ?? "C:\\Windows";
     const files = process.env.ProgramFiles ?? "C:\\Program Files";
     const missing = `${root}\\Yok'Olan Klasör [x]\\y`;
-    const paths = [root, files, missing];
+    const realFiles: string[] = [];
+    takeFiles(join(root, "System32", "drivers", "etc"), realFiles, 300);
+    takeFiles(dirname(process.execPath), realFiles, 300);
+    assert.equal(realFiles.length, 300, `found ${realFiles.length} real paths under drivers\\etc and the node install dir`);
+    const paths = [...realFiles, root, files, missing];
     const argv = windowsSddlBatchArgv(paths);
+    const stdin = windowsSddlBatchStdin(paths);
+    assert.equal(argv.join("\n").includes("Yok"), false);
     // The same clean environment the installer gives system tools. An inherited PowerShell 7
     // PSModulePath makes Windows PowerShell 5.1 fail to load Get-Acl's module.
-    const r = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env: systemToolEnv("win32") });
+    const r = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env: systemToolEnv("win32"), input: stdin });
     assert.equal(r.status, 0, r.stderr);
     const map = JSON.parse(r.stdout) as Record<string, unknown>;
     assert.deepEqual(Object.keys(map).sort(), [...paths].sort());
+    for (const p of paths) {
+      const value = map[p];
+      const answered = typeof value === "string"
+        || (value !== null && typeof value === "object" && typeof (value as { error?: unknown }).error === "string");
+      assert.equal(answered, true, `${p}: ${JSON.stringify(value)}`);
+    }
     for (const p of [root, files]) {
       assert.equal(typeof map[p], "string", `${p}: ${JSON.stringify(map[p])}`);
       assert.match(map[p] as string, /^O:/);
@@ -2550,25 +2645,27 @@ describe("verax uninstall", () => {
   });
 
   it("F10e the plan reads every SDDL in one PowerShell call", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
-    const countPlan = async (env: NodeJS.ProcessEnv): Promise<{ acl: number; paths: number; locked: boolean; err: string; batch: string }> => {
+    const countPlan = async (env: NodeJS.ProcessEnv): Promise<{ acl: number; paths: number; locked: boolean; err: string; batch: string; listed: string }> => {
       let acl = 0;
       let paths = 0;
       let locked = false;
       let batch = "";
+      let listed = "";
       const err: string[] = [];
       await runInstall(["install", "--port", "8801"], {
         platform: "win32",
         env,
         elevated: () => true,
         layout: winOpts,
-        exec: (argv) => {
+        exec: (argv, stdin) => {
           if (!locked && systemToolName(argv[0] ?? "") === "icacls") locked = true;
           if (!locked && sddlPowerShell(argv)) {
             acl += 1;
-            paths = sddlBatchPaths(argv)?.length ?? 1;
+            paths = sddlBatchPaths(stdin)?.length ?? 1;
             batch = argv.join("\n");
+            listed = stdin ?? "";
           }
-          const sddl = sddlStdout(argv);
+          const sddl = sddlStdout(argv, stdin);
           if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
           const tool = systemToolName(argv[0] ?? "");
           if (tool === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
@@ -2579,7 +2676,7 @@ describe("verax uninstall", () => {
         },
         io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
       });
-      return { acl, paths, locked, err: err.join(""), batch };
+      return { acl, paths, locked, err: err.join(""), batch, listed };
     };
 
     const fresh = mkdtempSync(join(tmpdir(), "verax-f10e-plan-"));
@@ -2615,7 +2712,7 @@ describe("verax uninstall", () => {
       assert.equal(early.acl, 1, early.err);
       assert.equal(early.locked, false, early.err);
       assert.match(early.err, /was not created by verax install/);
-      const covered = sddlBatchPaths(early.batch.split("\n")) ?? [];
+      const covered = sddlBatchPaths(early.listed) ?? [];
       assert.ok(covered.some((file) => file.replace(/[\\/]+$/, "").toLowerCase() === verax.toLowerCase()));
     } finally {
       rmSync(refused, { recursive: true, force: true });
