@@ -32,8 +32,27 @@ Four high findings. Two medium findings.
   only a checkpoint held elsewhere detects removal.
 - R12-6: an empty `_inputs` list is `inputs-required` when inputs are required.
 
-## Not covered by this round
+## Second pass
 
-`packages/body/src/server.ts` was read by one model only (the others ran out of budget, time or credits on it), and the
-Codex pass did not reach `dev-issuer.mjs`, `verify-ledger.ts`, `auth.ts` or `operator-pairing.ts`. These are not
-claimed as checked here.
+The first pass read `packages/body/src/server.ts` with one model only (the others ran out of budget, time or credits on
+it), and Codex did not reach `dev-issuer.mjs`, `verify-ledger.ts`, `auth.ts` or `operator-pairing.ts`. A second pass read
+`server.ts` with every model and the other four with Codex, against 9ca2bb5.
+
+One high finding. Two medium findings.
+
+| id | severity | attacker | description | file | measured |
+| --- | --- | --- | --- | --- | --- |
+| R12b-2 | high | Another local user while the dev issuer runs (Windows) | The issuer's `/vendor/@simplewebauthn/browser/<rel>` route refused `..` and `\` but not `D:/…` or `//host/share/…`; on Windows `path.relative` returns those absolute paths, which do not start with `..`, so a file on another drive was read without authentication, and a UNC path made the issuer open an SMB connection. | `scripts/dev-issuer.mjs` | path check computed at the gate for both forms |
+| R12b-1 | medium | The agent, after its token is revoked or expires | The bearer and its `jti` were checked before the request body was read and not again after, so a request opened before revocation could carry a call chosen after it, bounded only by Node's default 300 s request timeout. | `packages/body/src/server.ts` | read at the gate |
+| R12b-3 | medium | Whoever can write the ledger directory | Appending copies of one signed effect row counted each copy: one call, `effectsBound: 3`, `ok: true`. | `packages/proxy/src/verify-ledger.ts` | reproduced |
+
+Fixes: the vendor route serves only an allow-list of the package's `esm` files built at start and refuses a drive
+letter, a leading `/`, `:`, `%`, `..` and `\` before any filesystem call; the bearer is checked again after the body and
+before anything is dispatched or approved, with `requestTimeout` 30 s and `headersTimeout` 20 s; at most one primary
+effect row per ref is bound and any further one is a named problem. Hardening in the same change: the issuer's
+`/revoke` refuses a bearer whose `jti` is already revoked, the issuer caps a request body at 64 KiB while reading, and
+`verify` names a ledger file that is a symbolic link and does not read it.
+
+Candidates rejected in this pass after reading the rest of the code include an unbounded chunked body in `server.ts`
+(the reader counts bytes per chunk against the cap), a race on the pairing attempt counter (the check is synchronous in a
+single process), and path traversal through `/api/contest/:ref` (the ref is a ledger key, not a path).

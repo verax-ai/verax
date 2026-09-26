@@ -206,6 +206,10 @@ export const TOOL_META = [
 ];
 
 const MAX_BODY_BYTES = 1024 * 1024;
+// Node's default requestTimeout is 300s. A stalled body would otherwise stay
+// authorised until that default. Headers are bounded tighter than the body.
+const REQUEST_TIMEOUT_MS = 30_000;
+const HEADERS_TIMEOUT_MS = 20_000;
 // Unbounded GET /api/ledger stringified ~690 MB at 200k rows and threw Invalid string length (HTTP 500).
 const DEFAULT_LEDGER_LIMIT = 1000;
 const MAX_LEDGER_LIMIT = 5000;
@@ -271,6 +275,20 @@ async function readJsonBody(
   } catch {
     return { ok: false, bad: true };
   }
+}
+
+/**
+ * Second look at a bearer that already verified. The first look runs before
+ * the body is read; this one runs after the body and before dispatch or
+ * approval. `exp` is seconds since the epoch. A passed `exp` is dead even
+ * inside the verifier's clock tolerance: that tolerance applied at the door,
+ * and the body has since arrived. A missing `exp` is dead too.
+ */
+export function bearerStillLive(payload: { jti?: unknown; exp?: unknown }, stateDir: string): boolean {
+  const jti = typeof payload.jti === "string" ? payload.jti : "";
+  if (jti === "" || isRevokedJti(stateDir, jti)) return false;
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return false;
+  return payload.exp * 1000 > Date.now();
 }
 
 function isProtectedResourcePath(pathname: string, audience: string): boolean {
@@ -551,6 +569,12 @@ export async function listen(config: BodyConfig): Promise<Server> {
       send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
       return;
     }
+    const refuseStaleBearer = async (): Promise<boolean> => {
+      if (bearerStillLive(verified.payload, config.stateDir)) return false;
+      await bumpUnauthenticated(config.stateDir);
+      send(res, 401, { error: "unauthorized" }, { "www-authenticate": wwwAuthenticate(config.audience) });
+      return true;
+    };
     // Local mode: any process that can read the key file can mint
     // verax:approve or verax:audit, so those scopes are not honoured at all.
     // Nothing is written; the refusal is the whole answer.
@@ -571,6 +595,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           return;
         }
         const parsed = await readJsonBody(req, MAX_BODY_BYTES);
+        if (await refuseStaleBearer()) return;
         if (!parsed.ok) {
           send(res, 400, { error: "bad-body" });
           return;
@@ -633,6 +658,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         return;
       }
       if (apiLedger || apiInventory || contest || apiAgents) {
+        if (await refuseStaleBearer()) return;
         // The audit doors hand out the whole ledger: every tenant's decisions, the
         // inputs documents that name their principals, and the approval snapshots
         // that carry spend arguments. `verax:read` is a brain scope, so it cannot be
@@ -734,6 +760,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       });
       await mcp.connect(transport);
       const parsed = req.method === "POST" ? await readJsonBody(req, MAX_BODY_BYTES) : { ok: true as const, value: undefined };
+      if (await refuseStaleBearer()) return;
       if (parsed.ok === false && "tooLarge" in parsed) {
         send(res, 413, { error: "payload-too-large" });
         req.destroy();
@@ -813,6 +840,9 @@ export async function listen(config: BodyConfig): Promise<Server> {
       // Swallow so a bad Host cannot reject the request listener.
     }
   });
+
+  server.requestTimeout = REQUEST_TIMEOUT_MS;
+  server.headersTimeout = HEADERS_TIMEOUT_MS;
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);

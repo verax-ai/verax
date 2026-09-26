@@ -5,7 +5,7 @@
 import { createHash, createPublicKey, randomBytes, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, existsSync, chmodSync } from "node:fs";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { generateKeyPair, exportJWK, exportPKCS8, exportSPKI, SignJWT, importPKCS8, jwtVerify } from "jose";
 import { checkPairing, consumePairing } from "../packages/body/src/operator-pairing.ts";
@@ -17,6 +17,8 @@ import {
   updateCounter,
 } from "../packages/body/src/operator-credentials.ts";
 import { readRpConfig } from "../packages/body/src/rp-config.ts";
+import { payloadTooLarge, readIssuerBody as readBody } from "./issuer-body.mjs";
+import { collectVendorEsm, readVendorFile } from "./vendor-allow.mjs";
 
 // Off by default. With VERAX_DEV_ISSUER_TRACE=1 the issuer names each phase and
 // the time since it started, on stderr. It exists because a gate run twice saw
@@ -50,6 +52,7 @@ if (!outPath) {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, "..");
+const vendorFiles = collectVendorEsm(resolve(repoRoot, "node_modules", "@simplewebauthn", "browser"));
 const rp = readRpConfig(process.env);
 if (!rp.ok) {
   process.stderr.write(`dev-issuer: passkey enroll and sign-in are closed: ${rp.reason}\n`);
@@ -254,6 +257,10 @@ function oneLine(err) {
 }
 
 function rejectBody(res, err) {
+  if (payloadTooLarge(err)) {
+    sendJson(res, 413, { error: "payload-too-large" });
+    return;
+  }
   const error = err && err.code === "BAD_REQUEST" ? "bad-request" : "invalid_request";
   sendJson(res, 400, { error });
 }
@@ -271,12 +278,6 @@ function redirectWith(res, redirectUri, params) {
   }
   res.writeHead(302, { location: loc.toString() });
   res.end();
-}
-
-async function readBody(req) {
-  const chunks = [];
-  for await (const chunk of req) chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
 }
 
 async function readJson(req) {
@@ -326,6 +327,33 @@ function issuerHostDecision(hostHeader, bindPort) {
   return port === bindPort ? "allow" : "deny";
 }
 
+/**
+ * True when this jti is already on the revocation list. An unreadable list
+ * is treated as revoked: a role is not granted on a check that could not
+ * be finished. A missing file is an empty list.
+ */
+function bearerJtiRevoked(jti) {
+  if (jti === "") return false;
+  const path = join(stateDir, "revoked-jti.jsonl");
+  if (!existsSync(path)) return false;
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return true;
+  }
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    try {
+      const row = JSON.parse(line);
+      if (row && row.jti === jti) return true;
+    } catch {
+      // A torn line does not grant the role.
+    }
+  }
+  return false;
+}
+
 /** `operator` carries `verax:approve`. `agent` is a valid issuer token without it. `none` did not verify. */
 async function bearerRevokeRole(req) {
   const raw = req.headers.authorization;
@@ -333,6 +361,8 @@ async function bearerRevokeRole(req) {
   if (typeof header !== "string" || !header.startsWith("Bearer ")) return "none";
   try {
     const { payload } = await jwtVerify(header.slice("Bearer ".length), verifyKey, { issuer, audience });
+    const jti = typeof payload.jti === "string" ? payload.jti : "";
+    if (bearerJtiRevoked(jti)) return "none";
     const scope = typeof payload.scope === "string" ? payload.scope : "";
     const parts = scope.split(/\s+/).filter((part) => part !== "");
     return parts.includes("verax:approve") ? "operator" : "agent";
@@ -466,7 +496,11 @@ const server = createServer((req, res) => {
         const text = await readBody(req);
         const ctype = String(req.headers["content-type"] ?? "");
         parsed = ctype.includes("application/json") ? JSON.parse(text || "{}") : parseForm(text);
-      } catch {
+      } catch (err) {
+        if (payloadTooLarge(err)) {
+          sendJson(res, 413, { error: "payload-too-large" });
+          return;
+        }
         sendJson(res, 400, { error: "invalid_request" });
         return;
       }
@@ -509,20 +543,12 @@ const server = createServer((req, res) => {
     }
     if (req.method === "GET" && url.pathname.startsWith("/vendor/@simplewebauthn/browser/")) {
       const rel = url.pathname.slice("/vendor/@simplewebauthn/browser/".length);
-      if (rel.includes("..") || rel.includes("\\")) {
+      const body = readVendorFile(rel, vendorFiles, readFileSync);
+      if (body === null) {
         res.writeHead(404);
         res.end();
         return;
       }
-      const vendorRoot = resolve(repoRoot, "node_modules", "@simplewebauthn", "browser");
-      const file = resolve(vendorRoot, rel);
-      const relToRoot = relative(vendorRoot, file);
-      if (relToRoot.startsWith("..") || relToRoot === "" || !existsSync(file)) {
-        res.writeHead(404);
-        res.end();
-        return;
-      }
-      const body = readFileSync(file);
       res.writeHead(200, { "content-type": rel.endsWith(".js") ? "text/javascript; charset=utf-8" : "application/octet-stream" });
       res.end(body);
       return;
@@ -783,7 +809,11 @@ const server = createServer((req, res) => {
       let parsed;
       try {
         parsed = await readJson(req);
-      } catch {
+      } catch (err) {
+        if (payloadTooLarge(err)) {
+          sendJson(res, 413, { error: "payload-too-large" });
+          return;
+        }
         sendJson(res, 400, { error: "bad-request" });
         return;
       }
@@ -803,6 +833,10 @@ const server = createServer((req, res) => {
     res.end();
     } catch (err) {
       // One line on stderr, no stack to the client. The process stays up.
+      if (payloadTooLarge(err)) {
+        if (!res.headersSent) sendJson(res, 413, { error: "payload-too-large" });
+        return;
+      }
       if (err && err.code === "BAD_REQUEST") {
         if (!res.headersSent) sendJson(res, 400, { error: "bad-request" });
         return;

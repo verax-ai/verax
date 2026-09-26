@@ -25,7 +25,11 @@
  *               `duplicate-effect` row is bound to the decision by ref and to
  *               the fixed refusal hash the writer stores, not to the
  *               decision's effectHash; the signature is still required.
- *               Anything else that claims that class is named. The effect key is
+ *               Anything else that claims that class is named. A ref has at
+ *               most one primary effect row (a row that is not
+ *               `duplicate-effect`). A further primary row for that ref is
+ *               named `ref X has more than one effect row` and is not bound.
+ *               The effect key is
  *               `effectPublicKeyPem` when the reader pins one; otherwise the
  *               first receipt key in the ledger, and every effect row is
  *               checked against that same key.
@@ -50,7 +54,7 @@
  * copy they hold themselves.
  */
 import { createPublicKey } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -64,7 +68,7 @@ import type { SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-extract";
 
-import { readCheckpointFile } from "./checkpoints.ts";
+import { checkpointsPath, readCheckpointFile } from "./checkpoints.ts";
 import { sha256Canonical } from "./hash.ts";
 import {
   ledgerPiecePathProblem,
@@ -139,8 +143,22 @@ export type VerifyOptions = {
 };
 
 /**
+ * A symbolic link is a named problem and is not read. Missing files are not
+ * this case. `lstatSync` does not follow the link.
+ */
+function symbolicLinkProblem(path: string): string | null {
+  try {
+    if (lstatSync(path).isSymbolicLink()) return `symbolic link: ${path}`;
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
  * A piece path that leaves the directory is a problem and is not opened.
- * `existsSync` runs only after the path has been confined.
+ * A piece that is a symbolic link is named and is not opened. `existsSync`
+ * runs only after both checks.
  */
 function takePieceFile(dir: string, rel: string, problems: string[], read: boolean): string | null {
   const problem = ledgerPiecePathProblem(dir, rel);
@@ -148,14 +166,25 @@ function takePieceFile(dir: string, rel: string, problems: string[], read: boole
     problems.push(problem);
     return null;
   }
-  if (!read) return null;
   const path = requireLedgerPiecePath(dir, rel);
+  const link = symbolicLinkProblem(path);
+  if (link !== null) {
+    problems.push(link);
+    return null;
+  }
+  if (!read) return null;
   return existsSync(path) ? path : null;
 }
 
 /** Decision and effect files this directory holds, oldest piece first. Inputs are confined and not read. */
 function ledgerFiles(dir: string, problems: string[]): { decisions: string[]; effects: string[] } {
-  if (existsSync(manifestPath(dir))) {
+  const manifestFile = manifestPath(dir);
+  const manifestLink = symbolicLinkProblem(manifestFile);
+  if (manifestLink !== null) {
+    problems.push(manifestLink);
+    return { decisions: [], effects: [] };
+  }
+  if (existsSync(manifestFile)) {
     try {
       const manifest = readLedgerManifest(dir);
       if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
@@ -198,6 +227,11 @@ function pieceFiles(
 /** Parses JSONL, reporting the line a bad row sits on rather than throwing. */
 function readJsonl(path: string, problems: string[]): unknown[] {
   const out: unknown[] = [];
+  const link = symbolicLinkProblem(path);
+  if (link !== null) {
+    problems.push(link);
+    return out;
+  }
   let text: string;
   try {
     text = readFileSync(path, "utf8");
@@ -447,12 +481,17 @@ function indexStatement(
   dir: string,
   decisionRefs: ReadonlySet<string>,
 ): { index: VerifyIndex; problems: string[]; effectRefs: Set<string> | null } {
-  if (!existsSync(indexPath(dir))) {
+  const indexFile = indexPath(dir);
+  const indexLink = symbolicLinkProblem(indexFile);
+  if (indexLink !== null) {
+    return { index: { present: true, missing: 0, line: indexLink }, problems: [indexLink], effectRefs: null };
+  }
+  if (!existsSync(indexFile)) {
     return { index: { present: false, missing: 0, line: INDEX_NONE }, problems: [], effectRefs: null };
   }
   let text = "";
   try {
-    text = readFileSync(indexPath(dir), "utf8");
+    text = readFileSync(indexFile, "utf8");
   } catch {
     const line = "index could not be read";
     return { index: { present: true, missing: 0, line }, problems: [line], effectRefs: null };
@@ -496,6 +535,16 @@ function tailStatement(
   records: readonly SignedDecisionRecord[],
   checkpointPublicKeyPem: string,
 ): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[] } {
+  const checkpointFile = checkpointsPath(dir);
+  const checkpointLink = symbolicLinkProblem(checkpointFile);
+  if (checkpointLink !== null) {
+    const pinned = checkpointPublicKeyPem.trim();
+    return {
+      tail: { line: TAIL_NONE, checkpoint: null },
+      checkpointTrust: checkpointTrustOf(pinned, null, 0),
+      problems: [checkpointLink],
+    };
+  }
   const loaded = readCheckpointFile(dir);
   const rows = loaded.rows;
   const pinned = checkpointPublicKeyPem.trim();
@@ -700,7 +749,8 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   // and an allow of a different tool is not this class. A `duplicate-effect`
   // row must carry the writer's fixed refusal hash. The attestation plus
   // receipt still verify under one effect key. A mismatch is named and counts
-  // as orphaned.
+  // as orphaned. A second primary row for a ref that already has one is named
+  // and is not bound, even when the first row itself did not bind.
   const refler = new Set<string>();
   const hashesByRef = new Map<string, Set<string>>();
   const allowedClassesByRef = new Map<string, Set<string>>();
@@ -737,6 +787,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   let effectsBound = 0;
   let effectsOrphaned = 0;
   const boundPrimaryRefs = new Set<string>();
+  const primarySeen = new Set<string>();
   for (const e of effectRows) {
     const ref = typeof e.row?.ref === "string" ? e.row.ref : null;
     const effectHash = typeof e.row?.effectHash === "string" ? e.row.effectHash : null;
@@ -762,6 +813,11 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       effectsBound += 1;
       continue;
     }
+    if (ref !== null && primarySeen.has(ref)) {
+      problems.push(`ref ${ref} has more than one effect row`);
+      continue;
+    }
+    if (ref !== null) primarySeen.add(ref);
     const hashes = ref === null ? undefined : hashesByRef.get(ref);
     const hashMatch = effectHash !== null && hashes?.has(effectHash) === true;
     if (effectClass.endsWith(":threw")) {
