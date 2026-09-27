@@ -16,7 +16,9 @@ permissions:
 jobs:
   windows:
     runs-on: windows-latest
-    timeout-minutes: 15
+    # Every elevated command first checks who can change its code (one PowerShell), and
+    # this job runs many of them; 15 minutes no longer covered it.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
