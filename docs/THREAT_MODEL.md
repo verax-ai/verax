@@ -10,6 +10,40 @@ decision, not a mood. A refusal is recorded the same way. Prompt
 injection through tool results is not filtered by policy; policy sees
 tool name and scopes only.
 
+## a brain with a shell
+
+The brain is assumed to speak MCP only. An agent that also has a shell or
+file tool running as the same OS user as the body can read the state
+directory: the keys, the local issuer key, the policy and the ledger. It
+can then mint tokens, edit the policy and rewrite the ledger with the
+body's own keys. Local mode does not honour `verax:approve` or
+`verax:audit` over HTTP, and `verax approve` asks for a terminal, but
+neither is a boundary.
+
+`verax install` puts the code and the state directory out of that shell's
+reach on Windows, Linux, and macOS. The body runs as the dedicated local
+user `verax-svc` on Windows, as the `verax` system user on Linux, or as
+the hidden `_verax` user on macOS. On Windows the agent token is
+`%ProgramData%\Verax\agent-token\<SID>\agent.token`, owned by
+Administrators, with read for the invoking user's SID. On Linux and macOS
+the elevated install does not write, chown, or chmod anything under the
+invoking user's home; a child with that user's uid and gid writes
+`~/.verax/agent.token`. Elevated commands refuse to run when the verax
+code they loaded can be changed by that user. On Windows the supported way
+to approve is the panel with a passkey. An elevated CLI `approve` stays as a
+fallback and has to be run from a separate administrator account, not the
+agent's own account elevated, because a same-user elevated shell inherits
+that user's environment variables and PowerShell profile, which the agent
+can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`).
+The code check does not see a preload that already ran. Start that other
+account's copy from a PowerShell opened with `-NoProfile` (Run as
+administrator). An administrator, or root, is outside this model: they can change the ACL,
+the task, the unit, or the launch daemon. An elevated terminal the operator
+leaves open for the agent is also outside it.
+
+`verax init --local` still writes a state directory the same user can
+read. That is a way to try the body, not a boundary.
+
 ## the tool server is hostile
 
 Code behind `inner` may lie, hang, or write outside the declared effect.
@@ -33,6 +67,8 @@ happened" if the only copy lives on the same host.
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
+
+Exception: `src/install.ts` may import `node:child_process` to install and remove the body under another account. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
 The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
 

@@ -29,7 +29,12 @@ import { createProxy, loadPolicy, FileLedger, explain } from "@verax-ai/proxy";
 ```
 
 - `loadPolicy` reads a policy file. `policy/default.json` in this package is
-  the one the body starts from.
+  the one the body starts from. Two rules with the same `id`, or two rules for
+  the same `tool`, are refused at load and the error names both ids.
+- A `spend` rule may set `dayOffsetMinutes` (integer, −720..840, default 0).
+  The daily cap buckets `createdAtMs` shifted by that many minutes, so 0 is a
+  UTC day and 180 is the operator's day in UTC+3. Approval re-checks the same
+  bucket.
 - `createProxy` wraps tool functions: each call is decided and recorded, then
   run or refused.
 - `FileLedger` and `MemoryLedger` hold the records, one `FileLedger` per

@@ -51,7 +51,7 @@ async function run(): Promise<void> {
     quiet: true,
   });
   try {
-    const token = await booted.mintToken();
+    const token = await booted.mintAuditToken();
     const day: number[] = [];
     let dayShape = { bytes: 0, agents: null as number | null, status: 0 };
     for (let i = 0; i < ROUNDS; i += 1) {

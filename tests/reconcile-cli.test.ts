@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
 const stateDir = join(root, "packages", "proxy", "tests", "fixtures", "ledger-golden");
@@ -29,6 +31,7 @@ describe("verax reconcile CLI", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-reconcile-cli-"));
     const out = join(dir, "report.json");
     const ran = await spawnCli(["reconcile", stateDir, channel, "--out", out]);
+    if (refusedAsElevated(ran.code, ran.err)) return;
     assert.equal(ran.code, 0, ran.err);
     const report = JSON.parse(readFileSync(out, "utf8")) as {
       matched: unknown[];
@@ -63,6 +66,7 @@ describe("verax reconcile CLI", () => {
       "--out",
       out,
     ]);
+    if (refusedAsElevated(ran.code, ran.err)) return;
     assert.equal(ran.code, 0, ran.err);
     const report = JSON.parse(readFileSync(out, "utf8")) as {
       ghost: { externalId: string }[];
@@ -78,6 +82,7 @@ describe("verax reconcile CLI", () => {
 
   it("usage without --out exits 78", async () => {
     const ran = await spawnCli(["reconcile", stateDir, channel]);
+    if (refusedAsElevated(ran.code, ran.err)) return;
     assert.equal(ran.code, 78);
     assert.match(ran.err, /verax reconcile /);
   });
@@ -99,8 +104,10 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
+    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "probe-x" } })}\n`, "utf8");
     const out = join(dir, "report.json");
     const ran = await spawnCli(["reconcile", dir, csv, "--channel", "card", "--currency", "TRY", "--out", out]);
+    if (refusedAsElevated(ran.code, ran.err)) return;
     assert.equal(ran.code, 0, ran.err);
     assert.match(ran.err, /unknown 1/);
     assert.match(ran.err, /matched 0/);
@@ -124,6 +131,7 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
+    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
     writeFileSync(
       join(dir, "approvals.jsonl"),
       `${JSON.stringify({
@@ -159,6 +167,7 @@ describe("verax reconcile CLI", () => {
       "--out",
       out,
     ]);
+    if (refusedAsElevated(withOffset.code, withOffset.err)) return;
     assert.equal(withOffset.code, 0, withOffset.err);
     assert.match(withOffset.err, /matched 1/);
     const report = JSON.parse(readFileSync(out, "utf8")) as {
@@ -178,6 +187,7 @@ describe("verax reconcile CLI", () => {
       "--out",
       out,
     ]);
+    if (refusedAsElevated(naive.code, naive.err)) return;
     assert.equal(naive.code, 0, naive.err);
     assert.match(naive.err, /matched 1/);
     const dayReport = JSON.parse(readFileSync(out, "utf8")) as { matched: { datePrecision?: string }[] };
@@ -186,6 +196,7 @@ describe("verax reconcile CLI", () => {
 
   it("a tz offset outside a day is refused", async () => {
     const ran = await spawnCli(["reconcile", stateDir, channel, "--tz-offset", "2000", "--out", "x.json"]);
+    if (refusedAsElevated(ran.code, ran.err)) return;
     assert.equal(ran.code, 78);
     assert.match(ran.err, /tz-offset-invalid/);
   });
@@ -254,6 +265,7 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
+    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
     writeFileSync(
       join(dir, "approvals.jsonl"),
       `${JSON.stringify({
@@ -277,6 +289,7 @@ describe("verax reconcile CLI", () => {
     );
     const out = join(dir, "report.json");
     const ran = await spawnCli(["reconcile", dir, csv, "--channel", "card", "--currency", "TRY", "--out", out]);
+    if (refusedAsElevated(ran.code, ran.err)) return;
     assert.equal(ran.code, 0, ran.err);
     const report = JSON.parse(readFileSync(out, "utf8")) as {
       scope: { policyHash?: string };

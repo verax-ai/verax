@@ -2,6 +2,9 @@
 // against a state directory that already holds a ledger, wait for /healthz,
 // and mint a session token through the issuer's code flow. Mirrors what
 // scripts/demo-box.mjs does, minus the stdio bridge. Development only.
+// mintToken is the session with no passkey: it does not carry verax:audit.
+// mintAuditToken enrolls a software passkey and uses that session. The
+// credential is removed on stop so a later probe is not stuck at sign-in.
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
@@ -11,6 +14,10 @@ import { createConnection } from "node:net";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath } from "node:url";
+import { CREDENTIALS_FILE } from "../src/operator-credentials.ts";
+import { PAIRING_FILE, beginPairing } from "../src/operator-pairing.ts";
+import { systemToolPath } from "../src/install.ts";
+import { assertWithSoftwarePasskey, mintSoftwarePasskey, registerWithSoftwarePasskey } from "../../../tests/software-passkey.ts";
 
 export const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
@@ -20,7 +27,10 @@ export type Booted = {
   bodyPid: number;
   /** Milliseconds from spawning the body until /healthz answered 200. */
   bodyStartMs: number;
+  /** No passkey. Does not carry verax:audit or verax:approve. */
   mintToken: () => Promise<string>;
+  /** Passkey session. Carries verax:audit and verax:approve. */
+  mintAuditToken: () => Promise<string>;
   stop: () => void;
 };
 
@@ -61,14 +71,16 @@ async function waitFor(probe: () => Promise<boolean>, ms: number): Promise<boole
 /** Resident set of a process in MB, read from the OS (Windows tasklist / ps). */
 export function rssMb(pid: number): number | null {
   if (process.platform === "win32") {
-    const out = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+    const out = spawnSync(systemToolPath("tasklist", "win32"), ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], {
+      encoding: "utf8",
+    });
     const line = out.stdout.split(/\r?\n/).find((l) => l.includes(`"${pid}"`));
     if (!line) return null;
     const cols = line.split('","');
     const mem = cols[cols.length - 1]?.replace(/[^0-9]/g, "");
     return mem ? Math.round(Number(mem) / 1024) : null;
   }
-  const out = spawnSync("ps", ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
+  const out = spawnSync(systemToolPath("ps"), ["-o", "rss=", "-p", String(pid)], { encoding: "utf8" });
   const kb = Number(out.stdout.trim());
   return Number.isFinite(kb) && kb > 0 ? Math.round(kb / 1024) : null;
 }
@@ -90,6 +102,7 @@ export async function bootBody(opts: {
   const kids: ChildProcess[] = [];
   let stopping = false;
   let token = "";
+  let enrolledAudit = false;
 
   // Quiet keeps the children's chatter off the console but not off the
   // record: the last lines are printed when a child dies.
@@ -112,6 +125,15 @@ export async function bootBody(opts: {
         kid.kill();
       } catch {
         // gone
+      }
+    }
+    if (enrolledAudit) {
+      for (const name of [CREDENTIALS_FILE, PAIRING_FILE]) {
+        try {
+          unlinkSync(join(opts.stateDir, name));
+        } catch {
+          // already gone
+        }
       }
     }
   };
@@ -144,6 +166,8 @@ export async function bootBody(opts: {
     VERAX_DEV_SUB: "scale-operator",
     VERAX_DEV_OPERATOR_SUB: "scale-operator",
     VERAX_DEV_SCOPE: "verax:read verax:memory verax:audit verax:pay verax:approve",
+    VERAX_RP_ID: "localhost",
+    VERAX_RP_ORIGINS: issuerUrl,
   };
   delete issuerEnv.VERAX_DEV_TOKEN;
   spawnChild(
@@ -205,5 +229,72 @@ export async function bootBody(opts: {
     return token;
   };
 
-  return { issuerUrl, bodyUrl, bodyPid: body.pid ?? 0, bodyStartMs, mintToken, stop };
+  const mintAuditToken = async (): Promise<string> => {
+    const rpID = "localhost";
+    const { code } = beginPairing(opts.stateDir);
+    const passkey = mintSoftwarePasskey();
+    const opt = await fetch(`${issuerUrl}/enroll/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const options = (await opt.json()) as { challenge?: string; error?: string };
+    if (!opt.ok || typeof options.challenge !== "string") throw new Error(`enroll options ${opt.status} ${options.error ?? ""}`);
+    const registered = await fetch(`${issuerUrl}/enroll/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code,
+        response: registerWithSoftwarePasskey(passkey, { challenge: options.challenge, rpID, origin: issuerUrl }),
+      }),
+    });
+    if (!registered.ok) throw new Error(`enroll verify ${registered.status}`);
+    enrolledAudit = true;
+    const signOpt = await fetch(`${issuerUrl}/authorize/options`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    const signOptions = (await signOpt.json()) as { challenge?: string; error?: string };
+    if (!signOpt.ok || typeof signOptions.challenge !== "string") {
+      throw new Error(`signin options ${signOpt.status} ${signOptions.error ?? ""}`);
+    }
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const signed = await fetch(`${issuerUrl}/authorize/verify`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        response: assertWithSoftwarePasskey(passkey, { challenge: signOptions.challenge, rpID, origin: issuerUrl }),
+        response_type: "code",
+        client_id: "scale-probe",
+        redirect_uri: redirectUri,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+        state: "scale",
+      }),
+    });
+    const signedBody = (await signed.json()) as { location?: string; error?: string };
+    if (!signed.ok || typeof signedBody.location !== "string") {
+      throw new Error(`signin verify ${signed.status} ${signedBody.error ?? ""}`);
+    }
+    const authCode = new URL(signedBody.location).searchParams.get("code");
+    if (!authCode) throw new Error("signin gave no code");
+    const tok = await fetch(`${issuerUrl}/token`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "authorization_code",
+        code: authCode,
+        redirect_uri: redirectUri,
+        code_verifier: verifier,
+      }),
+    });
+    const parsed = (await tok.json()) as { access_token?: unknown };
+    if (!tok.ok || typeof parsed.access_token !== "string") throw new Error(`audit token ${tok.status}`);
+    token = parsed.access_token;
+    return token;
+  };
+
+  return { issuerUrl, bodyUrl, bodyPid: body.pid ?? 0, bodyStartMs, mintToken, mintAuditToken, stop };
 }

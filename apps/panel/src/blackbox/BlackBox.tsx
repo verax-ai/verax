@@ -8,6 +8,7 @@ import { fillCopy } from "../fill.ts";
 import type { ApproveOutcome } from "../observatory/Observatory.tsx";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
 import { approveFailureText, approveOutcomeText } from "../records/approve-outcome.ts";
+import { usePinnedApproval } from "../records/approve-pin.ts";
 import { formatMinor } from "../records/money.ts";
 import { formatStamp } from "../records/timeline.ts";
 import { consoleView, layerCounts, splitMoney, type ConsoleView } from "./console.ts";
@@ -469,7 +470,14 @@ function ConsoleBody({
         </div>
         {waiting ? (
           canApprove && onApprove ? (
-            <ConsoleApprove copy={copy} row={row} money={money} payee={payee} onApprove={onApprove} />
+            <ConsoleApprove
+              key={`${row.ref}:${row.requestHash}`}
+              copy={copy}
+              row={row}
+              money={money}
+              payee={payee}
+              onApprove={onApprove}
+            />
           ) : (
             <p className="decision-scope" data-testid="box-no-scope">
               {copy["box.request.noScope"]}
@@ -565,21 +573,19 @@ function ConsoleApprove({
   payee: string | null;
   onApprove: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
 }) {
-  const [asking, setAsking] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
+  const pin = usePinnedApproval(row);
 
-  if (said !== null) {
+  if (pin.said !== null) {
     return (
       <p className="decision-said" data-testid="box-approve-outcome">
-        {said}
+        {pin.said}
       </p>
     );
   }
-  if (!asking) {
+  if (!pin.asking) {
     return (
       <div className="decision-buttons">
-        <button type="button" className="button blue" onClick={() => setAsking(true)}>
+        <button type="button" className="button blue" onClick={() => pin.ask()}>
           {copy["approve.button"]} <span>✓</span>
         </button>
       </div>
@@ -598,18 +604,25 @@ function ConsoleApprove({
       <button
         type="button"
         className="button blue"
-        disabled={sending}
+        disabled={pin.sending}
         onClick={() => {
-          setSending(true);
-          void onApprove(row.ref, row.requestHash).then(
-            (out) => setSaid(approveOutcomeText(copy, out)),
-            (err: unknown) => setSaid(approveFailureText(copy, err)),
+          const started = pin.beginSend();
+          if (!started) return;
+          void onApprove(started.row.ref, started.row.requestHash).then(
+            (out) => {
+              if (!pin.acceptResult(started.epoch)) return;
+              pin.setSaid(approveOutcomeText(copy, out));
+            },
+            (err: unknown) => {
+              if (!pin.acceptResult(started.epoch)) return;
+              pin.setSaid(approveFailureText(copy, err));
+            },
           );
         }}
       >
-        {sending ? copy["approve.sending"] : copy["approve.yes"]} <span>✓</span>
+        {pin.sending ? copy["approve.sending"] : copy["approve.yes"]} <span>✓</span>
       </button>
-      <button type="button" className="button outline" onClick={() => setAsking(false)}>
+      <button type="button" className="button outline" onClick={() => pin.dismiss()}>
         {copy["approve.no"]} <span>×</span>
       </button>
     </div>

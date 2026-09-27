@@ -1,7 +1,15 @@
 import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadApprovalsFromDir, loadEffectsFromDir, loadPolicy, parseCardCsv, parseChannelJsonl, reconcile } from "@verax-ai/proxy";
+import {
+  loadApprovalsFromDir,
+  loadDecisionRefsFromDir,
+  loadEffectsFromDir,
+  loadPolicy,
+  parseCardCsv,
+  parseChannelJsonl,
+  reconcile,
+} from "@verax-ai/proxy";
 
 const SNAPSHOT_NAME = /^[0-9a-f]{64}\.json$/;
 
@@ -238,12 +246,14 @@ export function runReconcile(
         : undefined;
     const channel = card ?? parseChannelJsonl(raw);
     const effects = loadEffectsFromDir(parsed.stateDir);
+    const decisionRefs = loadDecisionRefsFromDir(parsed.stateDir);
     const loaded =
       parsed.channel === "card" ? loadDescriptorsFromDir(parsed.stateDir) : undefined;
     const descriptorsByPayee = loaded?.descriptorsByPayee;
     const report = reconcile(channel, effects, {
       toleranceMs: parsed.toleranceMs,
       window: parsed.window,
+      decisionRefs,
       approvals: parsed.channel === "card" ? loadApprovalsFromDir(parsed.stateDir) : undefined,
       skipped: card?.skipped,
       ...(descriptorsByPayee && Object.keys(descriptorsByPayee).length > 0

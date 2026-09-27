@@ -10,6 +10,7 @@ import { explain } from "@verax-ai/proxy";
 
 import { createBodyServices } from "../packages/body/src/wiring.ts";
 import { requestWitnessCheckpoint } from "../packages/body/src/witness.ts";
+import { refusedAsElevated, skipIfElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -84,11 +85,21 @@ describe("durable checkpoint", () => {
     }
   });
 
-  it("a witness-signed covering checkpoint makes window-coverage applicable", async () => {
+  it("a witness-signed covering checkpoint makes window-coverage applicable", async (t) => {
+    if (skipIfElevated(t)) return;
     const dir = mkdtempSync(join(tmpdir(), "verax-cp-ok-"));
     const child = spawnWitness(dir);
+    let stderr = "";
+    child.stderr?.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
     try {
-      await waitFile(join(dir, "witness.listen.json"), child);
+      try {
+        await waitFile(join(dir, "witness.listen.json"), child);
+      } catch (err) {
+        if (child.exitCode !== null && refusedAsElevated(child.exitCode, stderr)) return;
+        throw err;
+      }
       const services = await putNote(dir, "cover-1");
       try {
         const decisions = await services.ledger.decisions();

@@ -9,10 +9,9 @@ import { fileURLToPath } from "node:url";
 import { runDemo } from "../packages/body/src/demo.ts";
 import { runVerify } from "../packages/body/src/verify-cli.ts";
 
-// node --test runs files side by side, and tests/demo.test.ts counts the
-// verax-demo-* directories left in the temp dir. This file makes them too, so
-// it works under a temp root of its own: neither file's leftover check can see
-// the other's runs. os.tmpdir() reads these on every call.
+// node --test runs files side by side. tests/demo.test.ts counts only
+// verax-demo-body-* dirs. This file creates verax-demo-conarium-* and keeps a
+// private temp root so leftover checks measure this file's runs only.
 const privateTmp = mkdtempSync(join(tmpdir(), "verax-conarium-suite-"));
 for (const name of ["TMPDIR", "TMP", "TEMP"]) process.env[name] = privateTmp;
 after(() => rmSync(privateTmp, { recursive: true, force: true }));
@@ -70,8 +69,19 @@ function keepDir(text: string): string | null {
   return m ? m[1]! : null;
 }
 
+const DEMO_PREFIX = "verax-demo-conarium-";
+
+function runOwnedDemo(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  io: Parameters<typeof runDemo>[2],
+  opts: { conariumChild?: { command: string; args: string[] } } = {},
+): Promise<number> {
+  return runDemo(argv, env, io, { ...opts, statePrefix: DEMO_PREFIX });
+}
+
 function demoDirs(): string[] {
-  return readdirSync(tmpdir()).filter((name) => name.startsWith("verax-demo-"));
+  return readdirSync(tmpdir()).filter((name) => name.startsWith(DEMO_PREFIX));
 }
 
 function readDecisions(dir: string): Claims[] {
@@ -151,7 +161,7 @@ function childFor(countFile: string, extra: string[] = []) {
 describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K1: a run without the flag still prints the old footer and no conarium.query", { timeout: DEMO_MS }, async () => {
     const io = ioFor();
-    const code = await runDemo(["demo"], {}, io);
+    const code = await runOwnedDemo(["demo"], {}, io);
     assert.equal(code, 0, io.err());
     assert.match(io.out(), /data masking arrives with a downstream server such as Conarium/);
     assert.equal(io.out().includes("conarium.query"), false, io.out());
@@ -161,7 +171,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K2: flagged run exits 0 and the ledger has two query allows and one list_tables deny", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium", "--keep"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium", "--keep"], {}, io, {
       conariumChild: childFor(countFile),
     });
     const dir = keepDir(io.out());
@@ -187,7 +197,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K3: list_tables never reaches the child; query is called twice", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium"], {}, io, {
       conariumChild: childFor(countFile),
     });
     try {
@@ -211,7 +221,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K4: unmasked rows skip the masked line and exit 1", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium"], {}, io, {
       conariumChild: childFor(countFile, ["--unmasked"]),
     });
     try {
@@ -226,7 +236,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K5: public.secrets comes back as Conarium's error, and the ledger row is allow", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium", "--keep"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium", "--keep"], {}, io, {
       conariumChild: childFor(countFile),
     });
     const dir = keepDir(io.out());
@@ -256,7 +266,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K6: flagged stdout is at most 40 lines and carries none of the banned words", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium"], {}, io, {
       conariumChild: childFor(countFile),
     });
     try {
@@ -275,7 +285,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
     const before = new Set(demoDirs());
     const missing = join(tmpdir(), "verax-no-such-conarium-child");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium", "--keep"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium", "--keep"], {}, io, {
       conariumChild: { command: missing, args: [] },
     });
     assert.equal(code, 1);
@@ -290,7 +300,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
     const io = ioFor();
     let dir: string | null = null;
     try {
-      const code = await runDemo(["demo", "--with-conarium", "--keep"], {}, io, {
+      const code = await runOwnedDemo(["demo", "--with-conarium", "--keep"], {}, io, {
         conariumChild: childFor(countFile),
       });
       assert.equal(code, 0, io.err());
@@ -326,7 +336,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
     try {
-      const code = await runDemo(["demo", "--with-conarium"], { NODE_ENV: "production" }, io, {
+      const code = await runOwnedDemo(["demo", "--with-conarium"], { NODE_ENV: "production" }, io, {
         conariumChild: childFor(countFile),
       });
       assert.notEqual(code, 0);
@@ -341,7 +351,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K11: a child that dies on the secrets query is not reported as Conarium's answer", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium"], {}, io, {
       conariumChild: childFor(countFile, ["--die-on-secrets"]),
     });
     try {
@@ -368,13 +378,13 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
     assert.equal(blocks.length, 2, "See it run should carry two text blocks");
 
     const plain = ioFor();
-    assert.equal(await runDemo(["demo"], {}, plain), 0, plain.err());
+    assert.equal(await runOwnedDemo(["demo"], {}, plain), 0, plain.err());
     assert.equal(words(blocks[0]!), words(plain.out()));
 
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const flagged = ioFor();
     try {
-      const code = await runDemo(["demo", "--with-conarium"], {}, flagged, { conariumChild: childFor(countFile) });
+      const code = await runOwnedDemo(["demo", "--with-conarium"], {}, flagged, { conariumChild: childFor(countFile) });
       assert.equal(code, 0, flagged.err());
       assert.equal(words(blocks[1]!), words(flagged.out()));
     } finally {
@@ -385,7 +395,7 @@ describe("verax demo --with-conarium", { concurrency: 1 }, () => {
   it("K10: --with-conarium --keep then runVerify returns 0", { timeout: DEMO_MS }, async () => {
     const countFile = join(mkdtempSync(join(tmpdir(), "verax-conarium-count-")), "count.jsonl");
     const io = ioFor();
-    const code = await runDemo(["demo", "--with-conarium", "--keep"], {}, io, {
+    const code = await runOwnedDemo(["demo", "--with-conarium", "--keep"], {}, io, {
       conariumChild: childFor(countFile),
     });
     const dir = keepDir(io.out());

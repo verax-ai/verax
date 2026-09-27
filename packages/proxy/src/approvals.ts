@@ -1,10 +1,17 @@
 import {
   appendFileSync,
+  closeSync,
+  constants,
   existsSync,
+  fchownSync,
+  fstatSync,
+  lstatSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
+  writeSync,
 } from "node:fs";
 
 /** I/O seam so drain-busy tests can inject rename failures. */
@@ -33,6 +40,8 @@ export type ApprovalRow = {
   payee?: unknown;
   currency?: unknown;
   createdAtMs?: number;
+  /** Set when the row becomes approved. Missing on older files: those count toward today. */
+  approvedAtMs?: number;
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;
@@ -44,8 +53,25 @@ export type ApprovalsLog = {
   get(ref: string): Promise<ApprovalRow | null>;
   listPending(): Promise<ApprovalRow[]>;
   listAll(): Promise<ApprovalRow[]>;
-  updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void>;
+  updateStatus(
+    ref: string,
+    status: "approved" | "expired",
+    extra?: { allowRef?: string; approvedAtMs?: number },
+  ): Promise<void>;
 };
+
+function withStatus(
+  cur: ApprovalRow,
+  status: "approved" | "expired",
+  extra?: { allowRef?: string; approvedAtMs?: number },
+): ApprovalRow {
+  return {
+    ...cur,
+    status,
+    ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}),
+    ...(typeof extra?.approvedAtMs === "number" ? { approvedAtMs: extra.approvedAtMs } : {}),
+  };
+}
 
 function lastByRef(rows: ApprovalRow[]): Map<string, ApprovalRow> {
   const map = new Map<string, ApprovalRow>();
@@ -83,10 +109,14 @@ export class MemoryApprovalsLog implements ApprovalsLog {
     return [...this.byRef.values()];
   }
 
-  async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
+  async updateStatus(
+    ref: string,
+    status: "approved" | "expired",
+    extra?: { allowRef?: string; approvedAtMs?: number },
+  ): Promise<void> {
     const cur = this.byRef.get(ref);
     if (!cur) return;
-    await this.append({ ...cur, status, ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}) });
+    await this.append(withStatus(cur, status, extra));
   }
 }
 
@@ -116,10 +146,14 @@ export class FileApprovalsLog implements ApprovalsLog {
     return [...this.byRef.values()];
   }
 
-  async updateStatus(ref: string, status: "approved" | "expired", extra?: { allowRef?: string }): Promise<void> {
+  async updateStatus(
+    ref: string,
+    status: "approved" | "expired",
+    extra?: { allowRef?: string; approvedAtMs?: number },
+  ): Promise<void> {
     const cur = this.byRef.get(ref);
     if (!cur) return;
-    await this.append({ ...cur, status, ...(extra?.allowRef !== undefined ? { allowRef: extra.allowRef } : {}) });
+    await this.append(withStatus(cur, status, extra));
   }
 
   private read(): ApprovalRow[] {
@@ -167,22 +201,34 @@ export function spentTodayMinorOf(
     subject: string;
     status: string;
     createdAtMs?: number;
+    approvedAtMs?: number;
     expiresAtMs: number;
     args: Record<string, unknown>;
   }>,
   nowMs: number,
   currency: string,
   approvalTtlMs: number,
+  dayOffsetMinutes = 0,
 ): number {
-  const d = new Date(nowMs);
-  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+  const shift = dayOffsetMinutes * 60_000;
+  const d = new Date(nowMs + shift);
+  const start = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - shift;
   const end = start + 86_400_000;
   let sum = 0;
   for (const row of rows) {
     if (row.subject !== "spend") continue;
-    if (row.status !== "pending" && row.status !== "approved") continue;
-    const created = row.createdAtMs ?? row.expiresAtMs - approvalTtlMs;
-    if (created < start || created >= end) continue;
+    if (row.status === "approved") {
+      // Bucket by approval time. A row written before this field existed has
+      // no approvedAtMs and counts toward the day being checked.
+      if (typeof row.approvedAtMs === "number" && (row.approvedAtMs < start || row.approvedAtMs >= end)) {
+        continue;
+      }
+    } else if (row.status === "pending") {
+      const created = row.createdAtMs ?? row.expiresAtMs - approvalTtlMs;
+      if (created < start || created >= end) continue;
+    } else {
+      continue;
+    }
     if (row.args.currency !== currency) continue;
     const amt = row.args.amountMinor;
     if (typeof amt === "number") sum += amt;
@@ -194,20 +240,43 @@ export function createApprovalBudgetGuard(opts: {
   policy: Policy;
   approvals: ApprovalsLog;
   now: () => number;
-}): (snap: ApprovalRow) => Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }> {
+  ledger: Ledger;
+}): (snap: ApprovalRow) => Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }> {
   return async (snap) => {
     if (snap.subject !== "spend") return { ok: true };
-    const dailyMax = opts.policy.rule(snap.ruleId)?.spend?.dailyMaxMinor;
+    const rule = opts.policy.rule(snap.ruleId);
+    // A missing rule is not an uncapped rule. A rule that exists and names no
+    // dailyMaxMinor is the policy's choice to leave that spend uncapped.
+    if (rule === null) return { ok: false, reason: "rule-missing" };
+    const dailyMax = rule.spend?.dailyMaxMinor;
     if (dailyMax === undefined) return { ok: true };
     const currency = typeof snap.args.currency === "string" ? snap.args.currency : "";
     const amount = typeof snap.args.amountMinor === "number" ? snap.args.amountMinor : 0;
     // Sibling pending rows are not authorized yet. Counting them here would
-    // deadlock two 100-unit pendings against a later 150 cap; approved spend
-    // plus this amount is what the operator is about to commit.
-    const others = (await opts.approvals.listAll()).filter(
-      (row) => row.ref !== snap.ref && row.status === "approved",
-    );
-    const spent = spentTodayMinorOf(others, opts.now(), currency, opts.policy.approvalTtlMs);
+    // deadlock two 100-unit pendings against a later 150 cap. A pending row
+    // whose ref the ledger already resolved as allow was authorized; the
+    // approvals file may still say pending if the process stopped before
+    // updateStatus. That row counts. Other pendings do not.
+    const listed = await opts.approvals.listAll();
+    const others = [];
+    for (const row of listed) {
+      if (row.ref === snap.ref) continue;
+      if (row.status === "approved") {
+        others.push(row);
+        continue;
+      }
+      if (row.status !== "pending" || row.subject !== "spend") continue;
+      const hit = lookupResolvedBy(opts.ledger, row.ref);
+      if (hit?.kind !== "allow") continue;
+      const allow = await lookupDecisionByRef(opts.ledger, hit.ref);
+      others.push({
+        ...row,
+        status: "approved",
+        ...(typeof allow?.timestampMs === "number" ? { approvedAtMs: allow.timestampMs } : {}),
+      });
+    }
+    const offset = opts.policy.rule(snap.ruleId)?.spend?.dayOffsetMinutes ?? opts.policy.dayOffsetMinutes ?? 0;
+    const spent = spentTodayMinorOf(others, opts.now(), currency, opts.policy.approvalTtlMs, offset);
     if (spent + amount > dailyMax) return { ok: false, reason: "budget-exceeded" };
     return { ok: true };
   };
@@ -246,10 +315,21 @@ export async function approvePending(opts: {
     snap: ApprovalRow,
   ) =>
     | { ok: true }
-    | { ok: false; reason: "budget-exceeded" }
-    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }>;
+    | { ok: false; reason: "budget-exceeded" | "rule-missing" }
+    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }>;
 }): Promise<ApproveResult> {
   return approvalLockFor(opts.ledger).enqueue(() => approvePendingUnlocked(opts));
+}
+
+function ledgerStateDir(ledger: object): string | null {
+  const dir = (ledger as { dir?: unknown }).dir;
+  return typeof dir === "string" && dir !== "" ? dir : null;
+}
+
+function approvalsHalted(ledger: object): boolean {
+  const dir = ledgerStateDir(ledger);
+  if (!dir) return false;
+  return existsSync(join(dir, "halted"));
 }
 
 async function approvePendingUnlocked(opts: {
@@ -267,9 +347,10 @@ async function approvePendingUnlocked(opts: {
     snap: ApprovalRow,
   ) =>
     | { ok: true }
-    | { ok: false; reason: "budget-exceeded" }
-    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" }>;
+    | { ok: false; reason: "budget-exceeded" | "rule-missing" }
+    | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }>;
 }): Promise<ApproveResult> {
+  if (approvalsHalted(opts.ledger)) return { ok: false, reason: "halted" };
   const inputsLog = opts.inputsLog ?? inputsLogFor(opts.ledger);
   const defer = await lookupDecisionByRef(opts.ledger, opts.ref);
   if (!defer || defer.decision !== "defer") return { ok: false, reason: "unknown-ref" };
@@ -282,11 +363,12 @@ async function approvePendingUnlocked(opts: {
   if (resolved || (await hasResolves(inputsLog, opts.ledger, opts.ref))) {
     const hit = resolved ?? lookupResolvedBy(opts.ledger, opts.ref);
     if (snap?.status === "pending" && hit) {
-      await opts.approvals.updateStatus(
-        opts.ref,
-        hit.kind === "allow" ? "approved" : "expired",
-        hit.kind === "allow" ? { allowRef: hit.ref } : undefined,
-      );
+      if (hit.kind === "allow") {
+        const stamped = (await lookupDecisionByRef(opts.ledger, hit.ref))?.timestampMs ?? opts.now();
+        await opts.approvals.updateStatus(opts.ref, "approved", { allowRef: hit.ref, approvedAtMs: stamped });
+      } else {
+        await opts.approvals.updateStatus(opts.ref, "expired");
+      }
     }
     return alreadyResolved(hit?.kind === "allow" ? hit.ref : snap?.allowRef);
   }
@@ -370,6 +452,9 @@ async function approvePendingUnlocked(opts: {
     ),
   );
   noteResolution(opts.ledger, opts.ref, { ref: allowRef, kind: "allow" });
+  // The allow is on the ledger. Mark the snapshot approved before the effect
+  // row, so a stop during appendEffect still counts this spend.
+  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef, approvedAtMs: opts.now() });
   if (snap.subject === "spend") {
     const resultHash = sha256Canonical({
       authorized: true,
@@ -391,17 +476,54 @@ async function approvePendingUnlocked(opts: {
       resultHash,
     );
   }
-  await opts.approvals.updateStatus(opts.ref, "approved", { allowRef });
   return { ok: true, allowRef };
 }
 
-export type ApprovalCommand = { ref: string; approverId: string; atMs: number };
+export type ApprovalCommand = {
+  ref: string;
+  approverId: string;
+  atMs: number;
+  /** Absent on a command written before this field existed; drain applies that as `cli-script`. */
+  via?: "cli" | "cli-script";
+};
 
 export function enqueueApprovalCommand(dir: string, cmd: ApprovalCommand): void {
-  appendFileSync(join(dir, "approval-commands.jsonl"), `${JSON.stringify(cmd)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const file = join(dir, "approval-commands.jsonl");
+  const payload = Buffer.from(`${JSON.stringify(cmd)}\n`, "utf8");
+  const dirStat = lstatSync(dir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error(`refusing: ${dir} is a link`);
+  }
+  let existing: ReturnType<typeof lstatSync> | undefined;
+  try {
+    existing = lstatSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (existing?.isSymbolicLink()) {
+    throw new Error(`refusing: ${file} is a link`);
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const chownToDir = process.platform !== "win32" && uid !== undefined && uid !== dirStat.uid;
+  if (process.platform === "win32") {
+    appendFileSync(file, payload, { mode: 0o600 });
+    return;
+  }
+  const nofollow = constants.O_NOFOLLOW ?? 0;
+  const flags =
+    (existing
+      ? constants.O_WRONLY | constants.O_APPEND
+      : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL) | nofollow;
+  const fd = openSync(file, flags, 0o600);
+  try {
+    // A hard link would carry the chown to another file; only a single-link regular file is written.
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.nlink !== 1) throw new Error(`refusing: ${file} is not a single-link file`);
+    if (chownToDir) fchownSync(fd, dirStat.uid, dirStat.gid);
+    writeSync(fd, payload);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export async function drainApprovalCommands(
@@ -436,8 +558,21 @@ export async function drainApprovalCommands(
   const poisonPath = join(dir, "approval-commands.poison.jsonl");
   for (const name of names) {
     const file = join(dir, name);
+    let text: string;
     try {
-      const text = readFileSync(file, "utf8");
+      text = readFileSync(file, "utf8");
+    } catch (err) {
+      const kept = join(dir, `approval-commands.unreadable-${Date.now()}`);
+      try {
+        renameSync(file, kept);
+      } catch {
+        // Leave the processing name in place. The bytes stay either way.
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`verax-drain: unreadable ${file}: ${message}\n`);
+      continue;
+    }
+    try {
       for (const line of text.split("\n")) {
         if (line === "") continue;
         try {

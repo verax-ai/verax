@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from "node:crypto";
+import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { EX_CONFIG } from "./config.ts";
@@ -11,6 +11,25 @@ export class KeysPartialError extends Error {
     super("keys-partial");
     this.name = "KeysPartialError";
   }
+}
+
+export class KeyAlgorithmError extends Error {
+  readonly code = EX_CONFIG;
+  constructor(which: string) {
+    super(`${which} public key is not ed25519`);
+    this.name = "KeyAlgorithmError";
+  }
+}
+
+/** A public key this process will verify with. Anything but Ed25519 stops start. */
+export function assertEd25519PublicKey(pem: string, which: string): void {
+  let type: string | undefined;
+  try {
+    type = createPublicKey(pem).asymmetricKeyType;
+  } catch {
+    throw new KeyAlgorithmError(which);
+  }
+  if (type !== "ed25519") throw new KeyAlgorithmError(which);
 }
 
 function pair(): KeyPair {
@@ -42,23 +61,28 @@ export function loadOrCreateSigners(stateDir: string): {
   if (present !== 0 && present !== 4) {
     throw new KeysPartialError();
   }
-  if (present === 0) {
-    const record = pair();
-    const effect = pair();
-    writePemAtomic(recPriv, record.privateKeyPem);
-    writePemAtomic(recPub, record.publicKeyPem);
-    writePemAtomic(effPriv, effect.privateKeyPem);
-    writePemAtomic(effPub, effect.publicKeyPem);
-    return { recordSigner: record, effectSigner: effect };
-  }
-  return {
-    recordSigner: {
-      privateKeyPem: readFileSync(recPriv, "utf8"),
-      publicKeyPem: readFileSync(recPub, "utf8"),
-    },
-    effectSigner: {
-      privateKeyPem: readFileSync(effPriv, "utf8"),
-      publicKeyPem: readFileSync(effPub, "utf8"),
-    },
-  };
+  const loaded =
+    present === 0
+      ? (() => {
+          const record = pair();
+          const effect = pair();
+          writePemAtomic(recPriv, record.privateKeyPem);
+          writePemAtomic(recPub, record.publicKeyPem);
+          writePemAtomic(effPriv, effect.privateKeyPem);
+          writePemAtomic(effPub, effect.publicKeyPem);
+          return { recordSigner: record, effectSigner: effect };
+        })()
+      : {
+          recordSigner: {
+            privateKeyPem: readFileSync(recPriv, "utf8"),
+            publicKeyPem: readFileSync(recPub, "utf8"),
+          },
+          effectSigner: {
+            privateKeyPem: readFileSync(effPriv, "utf8"),
+            publicKeyPem: readFileSync(effPub, "utf8"),
+          },
+        };
+  assertEd25519PublicKey(loaded.recordSigner.publicKeyPem, "record");
+  assertEd25519PublicKey(loaded.effectSigner.publicKeyPem, "effect");
+  return loaded;
 }

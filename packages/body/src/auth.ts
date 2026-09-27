@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import type { Principal } from "@verax-ai/proxy";
 
 const ALGS = ["ES256", "EdDSA"] as const;
@@ -53,8 +53,18 @@ export function createVerifier(
   issuer: string,
   audience: string,
   jwksFile?: string | null,
+  /**
+   * Keys fetched once, before this process started accepting tokens.
+   * `createLocalJWKSet` does not refetch. A `kid` that was not in this set
+   * fails closed. This is not `VERAX_JWKS_FILE`: that mode refuses operator scopes.
+   */
+  jwksPin?: { keys: Record<string, unknown>[] } | null,
 ) {
-  const jwks = jwksFile ? localJwks(jwksFile) : createRemoteJWKSet(new URL(jwksUrl));
+  const jwks = jwksFile
+    ? localJwks(jwksFile)
+    : jwksPin
+      ? createLocalJWKSet(jwksPin as JSONWebKeySet)
+      : createRemoteJWKSet(new URL(jwksUrl));
   return async (token: string): Promise<VerifiedBearer> => {
     const { payload } = await jwtVerify(token, jwks, {
       issuer,

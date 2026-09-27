@@ -16,6 +16,12 @@ export type BodyConfig = {
    * Loopback binds only.
    */
   jwksFile?: string | null;
+  /**
+   * JWKS captured once at desktop start. Verification uses this set and does
+   * not refetch `jwksUrl`. Null when the body should use the remote set.
+   * Not a substitute for `jwksFile` (that mode refuses operator scopes).
+   */
+  jwksPin?: { keys: Record<string, unknown>[] } | null;
   /** Path to an inventory JSON file. Missing file is absence, not a fault. */
   inventoryFile?: string | null;
   /**
@@ -25,7 +31,41 @@ export type BodyConfig = {
    * no downstream; a named file that cannot be attached stops the body.
    */
   downstreamFile?: string | null;
+  /** Origins allowed to call this HTTP server. Empty means no browser origin. */
+  allowedOrigins?: readonly string[];
+  /**
+   * Bytes one tenant may keep under `memory/`, summed across stored versions.
+   * Default is 1 MiB. `VERAX_MEMORY_QUOTA_BYTES` overrides it.
+   */
+  memoryQuotaBytes?: number;
+  /**
+   * Bytes one tenant may append to `outbox.jsonl`.
+   * Default is 1 MiB. `VERAX_MESSAGE_QUOTA_BYTES` overrides it.
+   */
+  messageQuotaBytes?: number;
 };
+
+/** Per-tenant `memory.put` cap. The HTTP body cap does not reset this total. */
+export const DEFAULT_MEMORY_QUOTA_BYTES = 1024 * 1024;
+
+/** Per-tenant `message.send` cap. The HTTP body cap does not reset this total. */
+export const DEFAULT_MESSAGE_QUOTA_BYTES = 1024 * 1024;
+
+function positiveIntQuota(raw: string | undefined, fallback: number): number {
+  const text = raw?.trim() ?? "";
+  if (text === "") return fallback;
+  const n = Number(text);
+  if (!Number.isInteger(n) || n <= 0) return fallback;
+  return n;
+}
+
+export function memoryQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntQuota(env.VERAX_MEMORY_QUOTA_BYTES, DEFAULT_MEMORY_QUOTA_BYTES);
+}
+
+export function messageQuotaBytes(env: NodeJS.ProcessEnv = process.env): number {
+  return positiveIntQuota(env.VERAX_MESSAGE_QUOTA_BYTES, DEFAULT_MESSAGE_QUOTA_BYTES);
+}
 
 export type ConfigResult =
   | { ok: true; value: BodyConfig }
@@ -49,6 +89,17 @@ export function isLoopbackHost(host: string): boolean {
   return LOOPBACK.has(stripped);
 }
 
+function jwksPinParses(raw: string): { keys: Record<string, unknown>[] } | null {
+  try {
+    const parsed = JSON.parse(raw) as { keys?: unknown };
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.keys) || parsed.keys.length === 0) return null;
+    if (!parsed.keys.every((key) => key !== null && typeof key === "object" && !Array.isArray(key))) return null;
+    return { keys: parsed.keys as Record<string, unknown>[] };
+  } catch {
+    return null;
+  }
+}
+
 function jwksFileParses(path: string): boolean {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { keys?: unknown };
@@ -62,7 +113,15 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   const issuer = env.VERAX_ISSUER?.trim() ?? "";
   const jwksUrl = env.VERAX_JWKS_URL?.trim() ?? "";
   const jwksFile = env.VERAX_JWKS_FILE?.trim() ?? "";
+  const jwksPinRaw = env.VERAX_JWKS_PIN?.trim() ?? "";
   const audience = env.VERAX_AUDIENCE?.trim() ?? "";
+  let jwksPin: { keys: Record<string, unknown>[] } | null = null;
+  if (jwksPinRaw !== "") {
+    jwksPin = jwksPinParses(jwksPinRaw);
+    if (!jwksPin) {
+      return { ok: false, code: EX_CONFIG, reason: "VERAX_JWKS_PIN is unparsable" };
+    }
+  }
   if (jwksUrl !== "" && jwksFile !== "") {
     return {
       ok: false,
@@ -116,6 +175,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       issuer,
       jwksUrl,
       jwksFile: jwksFile === "" ? null : jwksFile,
+      jwksPin,
       audience,
       stateDir,
       bindHost: bind.host,
@@ -124,6 +184,12 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       tlsTerminated,
       inventoryFile: inventoryRaw === "" ? null : inventoryRaw,
       downstreamFile: downstreamRaw === "" ? null : downstreamRaw,
+      allowedOrigins: (env.VERAX_ALLOWED_ORIGINS ?? "")
+        .split(",")
+        .map((item) => item.trim())
+        .filter((item) => item !== ""),
+      memoryQuotaBytes: memoryQuotaBytes(env),
+      messageQuotaBytes: messageQuotaBytes(env),
     },
   };
 }

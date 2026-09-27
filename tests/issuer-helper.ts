@@ -12,6 +12,8 @@ export type DevIssuer = {
   sign: (over?: {
     aud?: string;
     exp?: string;
+    /** Seconds added to now for `exp`. Negative is already in the past. */
+    expSkewSec?: number;
     alg?: string;
     scope?: string;
     omitExp?: boolean;
@@ -66,6 +68,8 @@ export async function startDevIssuer(bindPort: number, audience: string): Promis
       }
       if (over.omitExp === true) {
         // Intentionally unsigned exp: the verifier must reject this.
+      } else if (typeof over.expSkewSec === "number") {
+        jwt.setExpirationTime(nowSec + over.expSkewSec);
       } else if (over.exp === "past") {
         jwt.setExpirationTime(nowSec - 60);
       } else {

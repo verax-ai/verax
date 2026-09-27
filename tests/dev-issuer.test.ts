@@ -103,14 +103,17 @@ describe("6 dev-issuer.mjs", () => {
 
       const revoke = await fetch(`${origin}/revoke`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({ jti: payload.jti }),
         signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
-      assert.equal(revoke.status, 200);
+      assert.equal(revoke.status, 403);
       const revokedPath = join(stateDir, "revoked-jti.jsonl");
-      assert.equal(existsSync(revokedPath), true);
-      assert.match(readFileSync(revokedPath, "utf8"), new RegExp(`"jti":"${payload.jti}"`));
+      const revokedText = existsSync(revokedPath) ? readFileSync(revokedPath, "utf8") : "";
+      assert.equal(revokedText.includes(String(payload.jti)), false);
     } finally {
       child.kill("SIGTERM");
       await closed;

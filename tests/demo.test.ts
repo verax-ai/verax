@@ -23,12 +23,14 @@ type Claims = {
   subject: string;
 };
 
-function ioFor(opts: { isTTY?: boolean; answer?: string } = {}) {
+function ioFor(opts: { isTTY?: boolean; answer?: string | string[] } = {}) {
   const stdout: string[] = [];
   const stderr: string[] = [];
+  const answers =
+    opts.answer === undefined ? undefined : Array.isArray(opts.answer) ? opts.answer : [opts.answer];
   const stdin =
-    opts.answer !== undefined
-      ? Readable.from([opts.answer.endsWith("\n") ? opts.answer : `${opts.answer}\n`])
+    answers !== undefined
+      ? Readable.from(answers.map((answer) => (answer.endsWith("\n") ? answer : `${answer}\n`)))
       : new Readable({
           read() {
             this.push(null);
@@ -60,8 +62,14 @@ function keepDir(text: string): string | null {
   return m ? m[1]! : null;
 }
 
+const DEMO_PREFIX = "verax-demo-body-";
+
+function runOwnedDemo(argv: string[], env: NodeJS.ProcessEnv, io: Parameters<typeof runDemo>[2]): Promise<number> {
+  return runDemo(argv, env, io, { statePrefix: DEMO_PREFIX });
+}
+
 function demoDirs(): string[] {
-  return readdirSync(tmpdir()).filter((name) => name.startsWith("verax-demo-"));
+  return readdirSync(tmpdir()).filter((name) => name.startsWith(DEMO_PREFIX));
 }
 
 function readDecisions(dir: string): Claims[] {
@@ -150,7 +158,7 @@ describe("verax demo", { concurrency: 1 }, () => {
   it("T1: TTY-less run exits 0 with allow, one deny, one held spend", { timeout: DEMO_MS }, async () => {
     const started = Date.now();
     const io = ioFor();
-    const code = await runDemo(["demo", "--keep"], {}, io);
+    const code = await runOwnedDemo(["demo", "--keep"], {}, io);
     const dir = keepDir(io.out());
     try {
       assert.equal(code, 0, io.err());
@@ -176,7 +184,7 @@ describe("verax demo", { concurrency: 1 }, () => {
     const io = ioFor();
     let dir: string | null = null;
     try {
-      const code = await runDemo(["demo", "--keep"], {}, io);
+      const code = await runOwnedDemo(["demo", "--keep"], {}, io);
       assert.equal(code, 0, io.err());
       dir = keepDir(io.out());
       assert.ok(dir && existsSync(dir), io.out());
@@ -210,13 +218,13 @@ describe("verax demo", { concurrency: 1 }, () => {
   it("T3: default run removes the temp dir; --keep leaves it and verify returns 0", { timeout: DEMO_MS * 2 }, async () => {
     const before = new Set(demoDirs());
     const goneIo = ioFor();
-    const goneCode = await runDemo(["demo"], {}, goneIo);
+    const goneCode = await runOwnedDemo(["demo"], {}, goneIo);
     assert.equal(goneCode, 0, goneIo.err());
     const leftover = demoDirs().filter((name) => !before.has(name));
     assert.deepEqual(leftover, [], leftover.join(", "));
 
     const keepIo = ioFor();
-    const keepCode = await runDemo(["demo", "--keep"], {}, keepIo);
+    const keepCode = await runOwnedDemo(["demo", "--keep"], {}, keepIo);
     const dir = keepDir(keepIo.out());
     try {
       assert.equal(keepCode, 0, keepIo.err());
@@ -232,7 +240,7 @@ describe("verax demo", { concurrency: 1 }, () => {
     const listen = installListenSpy();
     const io = ioFor();
     try {
-      const code = await runDemo(["demo"], { NODE_ENV: "production" }, io);
+      const code = await runOwnedDemo(["demo"], { NODE_ENV: "production" }, io);
       assert.notEqual(code, 0);
       assert.equal(listen.hosts.length, 0, JSON.stringify(listen.hosts));
     } finally {
@@ -240,9 +248,9 @@ describe("verax demo", { concurrency: 1 }, () => {
     }
   });
 
-  it("T5: TTY y binds an operator id; TTY N leaves spend held", { timeout: DEMO_MS * 2 }, async () => {
-    const yesIo = ioFor({ isTTY: true, answer: "y" });
-    const yesCode = await runDemo(["demo", "--keep"], {}, yesIo);
+  it("T5: TTY y binds an operator id; TTY N leaves spend held", { timeout: DEMO_MS * 3 }, async () => {
+    const yesIo = ioFor({ isTTY: true, answer: ["y", "100"] });
+    const yesCode = await runOwnedDemo(["demo", "--keep"], {}, yesIo);
     const yesDir = keepDir(yesIo.out());
     try {
       assert.equal(yesCode, 0, yesIo.err());
@@ -266,8 +274,27 @@ describe("verax demo", { concurrency: 1 }, () => {
       removeDir(yesDir);
     }
 
+    const wrongIo = ioFor({ isTTY: true, answer: ["y", "999"] });
+    const beforeWrong = new Set(demoDirs());
+    const wrongCode = await runOwnedDemo(["demo", "--keep"], {}, wrongIo);
+    const wrongName = demoDirs().find((name) => !beforeWrong.has(name)) ?? null;
+    const wrongDir = wrongName ? join(tmpdir(), wrongName) : null;
+    try {
+      assert.notEqual(wrongCode, 0, wrongIo.out());
+      assert.ok(wrongDir && existsSync(wrongDir), wrongIo.err());
+      const heldSpend = loadApprovalsFromDir(wrongDir!).filter((r) => r.subject === "spend");
+      assert.equal(heldSpend.length, 1, JSON.stringify(heldSpend));
+      assert.equal(heldSpend[0]!.status, "pending");
+      assert.equal(
+        readDecisions(wrongDir!).some((row) => row.decision === "allow" && row.subject === "spend"),
+        false,
+      );
+    } finally {
+      removeDir(wrongDir);
+    }
+
     const noIo = ioFor({ isTTY: true, answer: "N" });
-    const noCode = await runDemo(["demo", "--keep"], {}, noIo);
+    const noCode = await runOwnedDemo(["demo", "--keep"], {}, noIo);
     const noDir = keepDir(noIo.out());
     try {
       assert.equal(noCode, 0, noIo.err());
@@ -282,7 +309,7 @@ describe("verax demo", { concurrency: 1 }, () => {
   it("T6: listen addresses are loopback, not 0.0.0.0", { timeout: DEMO_MS }, async () => {
     const listen = installListenSpy();
     const io = ioFor();
-    const code = await runDemo(["demo"], {}, io);
+    const code = await runOwnedDemo(["demo"], {}, io);
     try {
       assert.equal(code, 0, io.err());
       assert.ok(listen.hosts.length > 0, "listen was not called");
@@ -296,7 +323,7 @@ describe("verax demo", { concurrency: 1 }, () => {
 
   it("T7: output is at most 40 lines and carries none of the banned words", { timeout: DEMO_MS }, async () => {
     const io = ioFor();
-    const code = await runDemo(["demo"], {}, io);
+    const code = await runOwnedDemo(["demo"], {}, io);
     assert.equal(code, 0, io.err());
     const text = io.both();
     const lines = text.split(/\r?\n/).filter((line) => line !== "");
@@ -307,7 +334,7 @@ describe("verax demo", { concurrency: 1 }, () => {
   it("T8: a TTY-less run finishes within 15s", { timeout: DEMO_MS }, async () => {
     const started = Date.now();
     const io = ioFor();
-    const code = await runDemo(["demo"], {}, io);
+    const code = await runOwnedDemo(["demo"], {}, io);
     const elapsed = Date.now() - started;
     assert.equal(code, 0, io.err());
     assert.ok(elapsed <= DEMO_MS, `elapsed=${elapsed}`);
@@ -316,8 +343,8 @@ describe("verax demo", { concurrency: 1 }, () => {
   // docs/demo.svg is a recording the README shows. It is a second copy of what
   // the command prints, so it is held against a run: same words, same order.
   it("T9: docs/demo.svg carries what a terminal run answered with y prints", { timeout: DEMO_MS }, async () => {
-    const io = ioFor({ isTTY: true, answer: "y" });
-    const code = await runDemo(["demo"], {}, io);
+    const io = ioFor({ isTTY: true, answer: ["y", "100"] });
+    const code = await runOwnedDemo(["demo"], {}, io);
     assert.equal(code, 0, io.err());
 
     const words = (s: string) =>

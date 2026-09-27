@@ -1,5 +1,8 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
+import { readWindowsMachineRoots, SystemToolError, windowsAgentTokenPath } from "./install.ts";
+import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
@@ -177,22 +180,31 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
 
   const tokenScope = scopeFromDevToken(env.VERAX_DEV_TOKEN);
   const mintScope = env.VERAX_DEV_SCOPE?.trim() ?? "";
-  const seenScope = tokenScope ?? (mintScope !== "" ? mintScope : null);
-  if (seenScope !== null) {
-    const parts = seenScope.split(/\s+/).filter((s) => s !== "");
+  // VERAX_DEV_SCOPE cannot put verax:audit on the agent file or on a session
+  // that has not passed a passkey. The panel reads the ledger with that session.
+  if (tokenScope !== null) {
+    const parts = tokenScope.split(/\s+/).filter((s) => s !== "");
     if (parts.includes("verax:audit")) {
       checks.push({
         id: "dev-token-audit",
-        level: "ok",
-        detail: "development token scope includes verax:audit",
+        level: "warn",
+        detail:
+          "development token carries verax:audit; that scope belongs on the passkey session, not the agent token. The panel reads /api/ledger only after a passkey sign-in",
       });
     } else {
       checks.push({
         id: "dev-token-audit",
-        level: "warn",
-        detail: "development token scope lacks verax:audit; the panel cannot read /api/ledger or /healthz counts",
+        level: "ok",
+        detail: "development token does not carry verax:audit",
       });
     }
+  } else if (mintScope !== "") {
+    checks.push({
+      id: "dev-token-audit",
+      level: "ok",
+      detail:
+        "VERAX_DEV_SCOPE does not mint verax:audit onto the agent token or a session without a passkey; the panel reads /api/ledger with the passkey session",
+    });
   }
 
   const downstreamPath = env.VERAX_DOWNSTREAM?.trim() ?? "";
@@ -249,8 +261,11 @@ function jwksFileChecks(env: NodeJS.ProcessEnv, stateDir: string): DoctorCheck[]
     detail: parses ? `VERAX_JWKS_FILE ${file} parses kid ${kid}` : `VERAX_JWKS_FILE ${file} does not parse`,
   });
   if (stateDir === "") return out;
-  const tokenPath = join(stateDir, "local-issuer", "agent.token");
-  if (!existsSync(tokenPath)) return out;
+  const candidates = [agentTokenOnDisk(env), join(stateDir, "local-issuer", "agent.token")].filter(
+    (file): file is string => file !== null,
+  );
+  const tokenPath = candidates.find((file) => existsSync(file));
+  if (!tokenPath) return out;
   const exp = expFromToken(readFileSync(tokenPath, "utf8"));
   const weekSec = 7 * 24 * 60 * 60;
   if (exp !== null && exp <= Math.floor(Date.now() / 1000) + weekSec) {
@@ -261,6 +276,23 @@ function jwksFileChecks(env: NodeJS.ProcessEnv, stateDir: string): DoctorCheck[]
     });
   }
   return out;
+}
+
+/** Install token: ProgramData on Windows, `~/.verax/agent.token` on Linux and macOS. */
+function agentTokenOnDisk(env: NodeJS.ProcessEnv): string | null {
+  if (process.platform === "win32") {
+    const sid = env.VERAX_USER_SID?.trim().replace(/^\*/, "") ?? "";
+    if (!/^S-1-[0-9-]+$/i.test(sid)) return null;
+    try {
+      return windowsAgentTokenPath(env, sid, readWindowsMachineRoots());
+    } catch (err) {
+      if (err instanceof SystemToolError) return null;
+      throw err;
+    }
+  }
+  const home = env.HOME?.trim() || env.USERPROFILE?.trim() || homedir();
+  if (home === "") return null;
+  return join(home, ".verax", "agent.token");
 }
 
 function expFromToken(raw: string): number | null {
@@ -322,6 +354,14 @@ function scopeFromDevToken(raw: string | undefined): string | null {
   }
 }
 
+/** Last 20 lines of `<stateDir>/body.log`, or a missing-file sentence. */
+export function doctorBodyLog(stateDir: string): string {
+  const file = join(stateDir, "body.log");
+  const tail = readLogTail(file, 20);
+  if (tail === null) return `body.log missing: ${file}\n`;
+  return tail;
+}
+
 export function doctorExit(checks: readonly DoctorCheck[]): number {
   return checks.some((c) => c.level === "fail") ? 1 : 0;
 }
@@ -351,6 +391,9 @@ function heartbeatMaxMs(env: NodeJS.ProcessEnv): number {
   return Number.isFinite(n) && n > 0 ? n : 30_000;
 }
 
+/** A pulse this far ahead of the clock is still treated as now. */
+const HEARTBEAT_FUTURE_SKEW_MS = 60_000;
+
 function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   let pieces: ReturnType<typeof listPieceFiles>;
@@ -362,7 +405,22 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
   }
   const srcLines = pieces.reduce((s, p) => s + countJsonl(p.decisions).lines, 0);
   const decisionN = pieces.reduce((s, p) => s + (p.closed ? p.n : countJsonl(p.decisions).lines), 0);
-  if (decisionN > 0) {
+  let closedOff: { id: string; lines: number; n: number } | null = null;
+  for (const piece of pieces) {
+    if (!piece.closed) continue;
+    const lines = countJsonl(piece.decisions).lines;
+    if (lines !== piece.n) {
+      closedOff = { id: piece.id, lines, n: piece.n };
+      break;
+    }
+  }
+  if (closedOff) {
+    checks.push({
+      id: "ledger-index",
+      level: "fail",
+      detail: `piece ${closedOff.id} has ${closedOff.lines} decision line(s), the manifest says ${closedOff.n}`,
+    });
+  } else if (decisionN > 0) {
     const known = new Set(pieces.map((p) => p.id));
     const cov = indexCoverage(stateDir);
     if (cov === null) {
@@ -410,6 +468,12 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
         level: "fail",
         detail: "ledger has rows but no readable heartbeat; the evidence service looks silent",
       });
+    } else if (!Number.isFinite(hb.atMs) || hb.atMs > Date.now() + HEARTBEAT_FUTURE_SKEW_MS) {
+      checks.push({
+        id: "heartbeat",
+        level: "fail",
+        detail: "heartbeat time is in the future",
+      });
     } else if (Date.now() - hb.atMs > heartbeatMaxMs(env)) {
       checks.push({
         id: "heartbeat",
@@ -442,12 +506,21 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       srcEffects.lines > 0 ||
       copy.lines > 0 ||
       copyEffects.lines > 0 ||
+      src.corrupt ||
+      srcEffects.corrupt ||
       copy.corrupt ||
       copyEffects.corrupt;
     if (!pieceAnything) continue;
     anything = true;
     if (fail) continue;
-    if (copy.corrupt || copyEffects.corrupt) {
+    if (src.corrupt || srcEffects.corrupt) {
+      const file = src.corrupt ? "decisions.jsonl" : "effects.jsonl";
+      fail = {
+        id: "evidence-copy",
+        level: "fail",
+        detail: `source ${file} on piece ${piece.id} is corrupt`,
+      };
+    } else if (copy.corrupt || copyEffects.corrupt) {
       fail = {
         id: "evidence-copy",
         level: "fail",
@@ -464,6 +537,12 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
         id: "evidence-copy",
         level: "fail",
         detail: `evidence copy is stale on piece ${piece.id} effects: ${copyEffects.lines} effect line(s) behind source ${srcEffects.lines}`,
+      };
+    } else if (copy.lines > src.lines || copyEffects.lines > srcEffects.lines) {
+      fail = {
+        id: "evidence-copy",
+        level: "fail",
+        detail: `source is shorter than its evidence copy on piece ${piece.id}`,
       };
     }
   }

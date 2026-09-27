@@ -18,6 +18,7 @@ import { RecordList } from "../records/RecordList.tsx";
 import { exhibitAction, exhibitRef } from "../records/exhibit.ts";
 import { approvalForRef } from "../records/approval-state.ts";
 import { approveFailureText, approveOutcomeText } from "../records/approve-outcome.ts";
+import { usePinnedApproval } from "../records/approve-pin.ts";
 import { pairFromLedger } from "../records/pair.ts";
 import { outcomeText, recordLine } from "../records/line.ts";
 import { LANGS, readLang, writeLang, type Lang } from "../lang.ts";
@@ -57,12 +58,13 @@ export type ApproveOutcome = { ok: true; allowRef: string } | { ok: false; error
  * message from the server - ride along in `detail` and are not translated.
  */
 export type LedgerError = {
-  code: "http" | "invalid-json" | "network" | "session";
+  code: "http" | "invalid-json" | "network" | "session" | "passkey";
   status?: number;
   detail?: string | null;
 };
 
 function errorReason(copy: ReturnType<typeof panelCopy>, error: LedgerError): string {
+  if (error.code === "passkey") return copy["passkey.needed"];
   if (error.code === "http") return fillCopy(copy["error.http"], { code: error.status ?? "" });
   if (error.code === "invalid-json") return copy["error.invalidJson"];
   if (error.code === "network") return copy["error.network"];
@@ -131,6 +133,7 @@ export function Observatory({
   ageMs = null,
   onRefresh,
   onShowDemo,
+  onSignIn,
   onContest,
   canApprove = false,
   onApprove,
@@ -162,6 +165,8 @@ export function Observatory({
   nowMs?: number;
   onRefresh?: () => void;
   onShowDemo?: () => void;
+  /** Starts the code flow again, so a passkey session can replace this one. */
+  onSignIn?: () => void;
   onContest?: (ref: string) => Promise<RailContestResult | void>;
   /**
    * Whether this session carries the approve scope. The body decides for real;
@@ -313,7 +318,9 @@ export function Observatory({
           ))}
         </div>
         <p className={`rail-status ${status}${stale ? " stale" : ""}`} data-status={status}>
-          {status === "error" ? (
+          {status === "error" && error?.code === "passkey" && !demo ? (
+            <span>{copy["passkey.needed"]}</span>
+          ) : status === "error" ? (
             <>
               <span>{copy["status.error"]}</span>{" "}
               {error ? errorReason(copy, error) : null}
@@ -339,6 +346,15 @@ export function Observatory({
           </button>
         ) : null}
       </div>
+      {error?.code === "passkey" && !demo ? (
+        <section className="passkey-needed" data-testid="passkey-required">
+          <p>{copy["passkey.needed"]}</p>
+          <p>{copy["passkey.how"]}</p>
+          <button type="button" className="refresh focusable" onClick={() => onSignIn?.()}>
+            {copy["passkey.signIn"]}
+          </button>
+        </section>
+      ) : null}
       {/* The rail is the only way into a record from the status tab. On the
           records tab the middle pane is that way in, and what was left -- two
           lines about the ledger -- now sits under the sentence there. A column
@@ -410,7 +426,7 @@ export function Observatory({
       </aside>
       )}
       <section className="obs-main" id={`panel-${tab}`} role="tabpanel" aria-labelledby={`tab-${tab}`}>
-        {tab === "records" ? (
+        {tab === "records" && !(error?.code === "passkey" && !demo && actions.length === 0) ? (
           <RecordList
             actions={actions}
             status={status}
@@ -506,20 +522,18 @@ function ApproveControl({
   row: PendingApproval;
   onApprove: (ref: string, requestHash: string) => Promise<ApproveOutcome>;
 }) {
-  const [asking, setAsking] = useState(false);
-  const [sending, setSending] = useState(false);
-  const [said, setSaid] = useState<string | null>(null);
+  const pin = usePinnedApproval(row);
 
-  if (said !== null) {
+  if (pin.said !== null) {
     return (
       <p data-testid="approve-outcome" className="approve-outcome">
-        {said}
+        {pin.said}
       </p>
     );
   }
-  if (!asking) {
+  if (!pin.asking) {
     return (
-      <button type="button" className="approve focusable" onClick={() => setAsking(true)}>
+      <button type="button" className="approve focusable" onClick={() => pin.ask()}>
         {copy["approve.button"]}
       </button>
     );
@@ -537,18 +551,25 @@ function ApproveControl({
       <button
         type="button"
         className="approve focusable"
-        disabled={sending}
+        disabled={pin.sending}
         onClick={() => {
-          setSending(true);
-          void onApprove(row.ref, row.requestHash).then(
-            (out) => setSaid(approveOutcomeText(copy, out)),
-            (err: unknown) => setSaid(approveFailureText(copy, err)),
+          const started = pin.beginSend();
+          if (!started) return;
+          void onApprove(started.row.ref, started.row.requestHash).then(
+            (out) => {
+              if (!pin.acceptResult(started.epoch)) return;
+              pin.setSaid(approveOutcomeText(copy, out));
+            },
+            (err: unknown) => {
+              if (!pin.acceptResult(started.epoch)) return;
+              pin.setSaid(approveFailureText(copy, err));
+            },
           );
         }}
       >
-        {sending ? copy["approve.sending"] : copy["approve.yes"]}
+        {pin.sending ? copy["approve.sending"] : copy["approve.yes"]}
       </button>
-      <button type="button" className="focusable" onClick={() => setAsking(false)}>
+      <button type="button" className="focusable" onClick={() => pin.dismiss()}>
         {copy["approve.no"]}
       </button>
     </div>
@@ -653,11 +674,11 @@ function StatusView({
         {open.length === 0 ? <p className="muted">{copy["pending.empty"]}</p> : (
           <ul>
             {open.map((p) => (
-              <li key={p.ref}>
+              <li key={`${p.ref}:${p.requestHash}`}>
                 {p.ref} · {p.subject} · {p.ruleText ?? ""} · {p.brain}
                 {pendingMoney(copy, p)}
                 {canApprove && onApprove ? (
-                  <ApproveControl copy={copy} row={p} onApprove={onApprove} />
+                  <ApproveControl key={`${p.ref}:${p.requestHash}`} copy={copy} row={p} onApprove={onApprove} />
                 ) : null}
               </li>
             ))}
@@ -944,7 +965,7 @@ function DetailPane({
           <p data-testid="detail-result">{outcomeText(copy, action, pending)}</p>
           {canApprove && onApprove && waiting ? (
             <div ref={approveRef} data-testid="record-approve">
-              <ApproveControl copy={copy} row={waiting} onApprove={onApprove} />
+              <ApproveControl key={`${waiting.ref}:${waiting.requestHash}`} copy={copy} row={waiting} onApprove={onApprove} />
             </div>
           ) : null}
           {ledgerPair.defer && ledgerPair.resolution ? (

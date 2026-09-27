@@ -51,7 +51,8 @@ describe("B8 FileLedger append cost and durability", () => {
   it("2000 chained appends reread decisions.jsonl zero times (wall-clock ratio is printed, not asserted)", () => {
     const ran = spawnSync(process.execPath, ["--experimental-strip-types", worker], {
       encoding: "utf8",
-      timeout: 60_000,
+      // 2000 fsync appends took 26 s on a Windows runner and passed 60 s on a loaded one; the ratio is printed, not asserted.
+      timeout: 180_000,
     });
     const text = `${ran.stdout}${ran.stderr}`;
     const line = text.split(/\r?\n/).find((row) => row.startsWith("ledger-perf "));

@@ -71,9 +71,10 @@ describe("policy.requireInputs", () => {
     assert.equal((await ledger.effects()).length, 0);
   });
 
-  it("an empty _inputs array is a declaration, not inputs-required", async () => {
+  it("an empty _inputs array is inputs-required when the policy requires inputs", async () => {
     const policy = policyWith({ requireInputs: true });
     const ledger = new MemoryLedger();
+    let inner = 0;
     const proxy = createProxy({
       policy,
       recordSigner: RECORD_SIGNER,
@@ -81,16 +82,21 @@ describe("policy.requireInputs", () => {
       ledger,
       now: tickingNow(),
       nonce: queuedNonce(["empty-1"]),
-      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      inner: async () => {
+        inner += 1;
+        return { content: [{ type: "text", text: "ok" }], isError: false };
+      },
     });
     const out = await proxy.call(
       { name: "memory.get", arguments: { id: "x", _inputs: [] } },
       SCOPED,
     );
-    assert.equal(out.isError, false, out.content[0]?.text);
+    assert.equal(out.isError, true);
+    assert.match(out.content[0]?.text ?? "", /denied:inputs-required:empty-1/);
+    assert.equal(inner, 0);
     const rec = (await ledger.decisions())[0];
-    assert.equal(rec?.claims.decision, "allow");
-    assert.equal(rec?.claims.reasonCode, "allow");
+    assert.equal(rec?.claims.decision, "deny");
+    assert.equal(rec?.claims.reasonCode, "inputs-required");
   });
 
   it("a broken _inputs declaration stays input-invalid", async () => {

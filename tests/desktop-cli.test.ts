@@ -9,10 +9,13 @@ import { fileURLToPath } from "node:url";
 
 import { desktopCloneError, portOpen } from "../packages/body/src/desktop.ts";
 import { listen } from "../packages/body/src/server.ts";
+import { elevatedRunner, refusedAsElevated } from "./elevated-refusal.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
+import { privateTempDir } from "./private-temp.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "..", "packages", "body", "src", "cli.ts");
+const desktopEntry = join(here, "desktop-entry.ts");
 const fakeBrowser = join(here, "..", "packages", "body", "tests", "fixtures", "fake-browser.mjs");
 const fakeBrowserExit = join(here, "..", "packages", "body", "tests", "fixtures", "fake-browser-exit.mjs");
 const policyFile = join(here, "..", "packages", "proxy", "policy", "default.json");
@@ -75,6 +78,31 @@ function commandLines(): string {
 }
 
 describe("verax desktop CLI", () => {
+  it("0.4.0 refuses `verax desktop` and creates nothing, and the help does not list it", () => {
+    const parent = privateTempDir("verax-desktop-off-");
+    const stateDir = join(parent, "state");
+    try {
+      const r = spawnSync(process.execPath, ["--experimental-strip-types", cli, "desktop", "--state", stateDir], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 60_000,
+      });
+      assert.equal(existsSync(stateDir), false);
+      // An elevated runner refuses this checkout's code before any command (R15-1).
+      if (refusedAsElevated(r.status, r.stderr)) return;
+      assert.equal(r.status, 64, `${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /^desktop-not-in-0\.4\.0: the desktop panel ships in 0\.4\.1\n$/);
+      const help = spawnSync(process.execPath, ["--experimental-strip-types", cli, "--help"], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 60_000,
+      });
+      assert.equal(/^\s+desktop\b/m.test(`${help.stdout}${help.stderr}`), false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it("names a directory that is not a clone and accepts this repository", () => {
     const outside = mkdtempSync(join(tmpdir(), "verax-not-a-clone-"));
     try {
@@ -92,7 +120,7 @@ describe("verax desktop CLI", () => {
     "starts issuer, body and panel, then tears them down when the fake browser exits",
     { timeout: 180_000 },
     async () => {
-      const stateDir = mkdtempSync(join(tmpdir(), "verax-desktop-"));
+      const stateDir = privateTempDir("verax-desktop-");
       const pidPath = join(stateDir, "fake-browser.pid");
       const [issuerPort, bodyPort, panelPort] = await Promise.all([
         freePort(),
@@ -106,8 +134,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -137,11 +164,13 @@ describe("verax desktop CLI", () => {
         child.stderr?.on("data", feed);
 
         const up = await waitUntil(async () => {
+          if (elevatedRunner && child?.exitCode === 78) return true;
           const a = await portOpen(issuerPort);
           const b = await portOpen(bodyPort);
           const c = await portOpen(panelPort);
           return a && b && c && existsSync(pidPath);
         }, 150_000);
+        if (child?.exitCode === 78 && refusedAsElevated(child.exitCode, sink.text)) return;
         assert.equal(up, true, `ports-not-ready\n${sink.text}`);
 
         const token = readFileSync(join(stateDir, "dev-token"), "utf8").trim();
@@ -183,11 +212,11 @@ describe("verax desktop CLI", () => {
   );
 
   it(
-    "joins a body that already holds the ledger instead of starting a second one",
+    "refuses a body that already holds the ledger instead of joining it",
+    // Same budget as the other tests here that start real children; a loaded Windows runner passed 60 s.
     { timeout: 180_000 },
     async () => {
-      const stateDir = mkdtempSync(join(tmpdir(), "verax-desktop-attach-"));
-      const pidPath = join(stateDir, "fake-browser.pid");
+      const stateDir = privateTempDir("verax-desktop-attach-");
       const audience = "http://127.0.0.1/verax-desktop-attach";
       // A body in this process: its Ledger takes <state>/ledger.lock with our pid.
       const issuer = await startDevIssuer(0, audience);
@@ -211,8 +240,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -229,7 +257,6 @@ describe("verax desktop CLI", () => {
               ...process.env,
               NO_COLOR: "1",
               FORCE_COLOR: "0",
-              VERAX_FAKE_BROWSER_PID: pidPath,
             },
             stdio: ["ignore", "pipe", "pipe"],
             windowsHide: true,
@@ -240,50 +267,35 @@ describe("verax desktop CLI", () => {
         };
         child.stdout?.on("data", feed);
         child.stderr?.on("data", feed);
-
-        const up = await waitUntil(
-          async () => (await portOpen(panelPort)) && existsSync(pidPath) && /desktop-ready/.test(sink.text),
-          150_000,
-        );
-        assert.equal(up, true, `panel-not-ready\n${sink.text}`);
-        assert.match(sink.text, /desktop-ready body=\d+ panel=\d+ attached=1 pid=\d+/, sink.text);
-        // No second issuer, no second token: the running body's are not ours.
-        assert.equal(await portOpen(issuerPort), false, "second-issuer-started");
-        assert.equal(existsSync(join(stateDir, "dev-token")), false, "second-token-minted");
-        // The panel is served against the body that holds the ledger.
-        const health = await fetch(`http://127.0.0.1:${panelPort}/healthz`);
-        assert.equal(health.status, 200, `panel-proxy-healthz ${health.status}`);
-
-        const fakePid = Number(readFileSync(pidPath, "utf8").trim());
-        assert.ok(Number.isInteger(fakePid) && fakePid > 0, "fake-pid");
-        // A window that closes inside the first 3 s is the early-exit case,
-        // tested below; this is the ordinary close of a window that stayed up.
-        await new Promise((r) => setTimeout(r, 3_500));
-        killTree(fakePid);
         const code = await new Promise<number>((resolve) => {
           child!.on("close", (exit) => resolve(exit ?? 1));
         });
-        assert.equal(code, 0, `expected-exit-0\n${sink.text}`);
-        const panelDown = await waitUntil(async () => !(await portOpen(panelPort)), 30_000);
-        assert.equal(panelDown, true, `panel-still-open\n${sink.text}`);
-        // Closing the window is not a shutdown of a body this run did not start.
-        assert.equal(await portOpen(bodyPort), true, "joined-body-killed-on-close");
+        if (code === 78 && refusedAsElevated(code, sink.text)) return;
+        assert.equal(code, 1, `expected-exit-1\n${sink.text}`);
+        assert.match(sink.text, new RegExp(`desktop-body-running:${bodyPort}`), sink.text);
+        assert.match(sink.text, /verax unlock is for a dead lock only/, sink.text);
+        assert.equal(sink.text.includes("attached=1"), false, sink.text);
+        assert.equal(await portOpen(issuerPort), false, "second-issuer-started");
+        assert.equal(await portOpen(panelPort), false, "panel-started-over-lock");
+        assert.equal(existsSync(join(stateDir, "dev-token")), false, "second-token-minted");
+        assert.equal(await portOpen(bodyPort), true, "running-body-stopped");
       } finally {
         if (child?.pid) killTree(child.pid);
         await new Promise<void>((resolve) => {
           server.close(() => resolve());
         });
         await issuer.close();
-        rmSync(stateDir, { recursive: true, force: true });
+        rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
   );
 
   it(
     "refuses a live lock whose body does not answer on the port it was given",
-    { timeout: 60_000 },
+    // Same budget as the other tests here that start real children; a loaded Windows runner passed 60 s.
+    { timeout: 180_000 },
     async () => {
-      const stateDir = mkdtempSync(join(tmpdir(), "verax-desktop-locked-"));
+      const stateDir = privateTempDir("verax-desktop-locked-");
       const audience = "http://127.0.0.1/verax-desktop-locked";
       const issuer = await startDevIssuer(0, audience);
       const server = await listen({
@@ -308,8 +320,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -331,6 +342,7 @@ describe("verax desktop CLI", () => {
         const code = await new Promise<number>((resolve) => {
           child!.on("close", (exit) => resolve(exit ?? 1));
         });
+        if (code === 78 && refusedAsElevated(code, sink.text)) return;
         assert.equal(code, 1, `expected-exit-1\n${sink.text}`);
         assert.match(sink.text, new RegExp(`desktop-body-locked:${process.pid}\\b`), sink.text);
         // Nothing was started over the lock: no issuer, no panel, no token.
@@ -343,7 +355,7 @@ describe("verax desktop CLI", () => {
           server.close(() => resolve());
         });
         await issuer.close();
-        rmSync(stateDir, { recursive: true, force: true });
+        rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
       }
     },
   );
@@ -352,7 +364,7 @@ describe("verax desktop CLI", () => {
     "treats a browser that exits within 3s as desktop-browser-exited-early",
     { timeout: 180_000 },
     async () => {
-      const stateDir = mkdtempSync(join(tmpdir(), "verax-desktop-early-"));
+      const stateDir = privateTempDir("verax-desktop-early-");
       const [issuerPort, bodyPort, panelPort] = await Promise.all([
         freePort(),
         freePort(),
@@ -365,8 +377,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -393,6 +404,7 @@ describe("verax desktop CLI", () => {
         const code = await new Promise<number>((resolve) => {
           child!.on("close", (exit) => resolve(exit ?? 1));
         });
+        if (code === 78 && refusedAsElevated(code, sink.text)) return;
         assert.equal(code, 1, `expected-exit-1\n${sink.text}`);
         assert.match(sink.text, /desktop-browser-exited-early/);
         const empty = await waitUntil(async () => {

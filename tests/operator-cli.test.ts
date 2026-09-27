@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { pairingPath } from "../packages/body/src/operator-pairing.ts";
+import { refusedAsElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -19,6 +20,7 @@ describe("verax operator enroll", () => {
       ["--experimental-strip-types", cli, "operator", "enroll", "--state", stateDir],
       { encoding: "utf8", windowsHide: true },
     );
+    if (refusedAsElevated(ran.status, ran.stderr ?? "")) return;
     assert.equal(ran.status, 0, ran.stderr);
     const code = (ran.stdout ?? "").trim();
     assert.match(code, /^\d{8}$/);

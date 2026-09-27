@@ -11,15 +11,18 @@ import { exportPKCS8, generateKeyPair, importPKCS8, SignJWT } from "jose";
 import { loadConfig } from "../packages/body/src/config.ts";
 import { loadEnvFile } from "../packages/body/src/init-local.ts";
 import { listen } from "../packages/body/src/server.ts";
+import { refusedAsElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
 
-function init(stateDir: string): void {
+function init(stateDir: string): boolean {
   const r = spawnSync(process.execPath, ["--experimental-strip-types", cli, "init", "--local", stateDir], {
     encoding: "utf8",
   });
+  if (refusedAsElevated(r.status, r.stderr ?? "")) return false;
   assert.equal(r.status, 0, r.stderr);
+  return true;
 }
 
 function envFromFile(stateDir: string): NodeJS.ProcessEnv {
@@ -74,7 +77,7 @@ describe("VERAX_JWKS_FILE", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-jwks-"));
     let http: Awaited<ReturnType<typeof listen>> | undefined;
     try {
-      init(stateDir);
+      if (!init(stateDir)) return;
       const env = envFromFile(stateDir);
       env.VERAX_BIND = "127.0.0.1:0";
       const loaded = loadConfig(env);
@@ -106,7 +109,7 @@ describe("VERAX_JWKS_FILE", () => {
           http?.close(() => resolve());
         });
       }
-      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     }
   });
 
@@ -142,7 +145,7 @@ describe("VERAX_JWKS_FILE", () => {
     const port = await freePort();
     let child: ChildProcess | undefined;
     try {
-      init(stateDir);
+      if (!init(stateDir)) return;
       const policyPath = join(stateDir, "policy.json");
       const policy = JSON.parse(readFileSync(policyPath, "utf8")) as { rules: unknown[] };
       policy.rules.push({
@@ -190,8 +193,10 @@ describe("VERAX_JWKS_FILE", () => {
         } catch {
           // not listening yet
         }
+        if (child.exitCode !== null) break;
         await new Promise((r) => setTimeout(r, 50));
       }
+      if (child.exitCode !== null && refusedAsElevated(child.exitCode, log)) return;
       assert.equal(up, true, log);
       const mcp = `http://127.0.0.1:${port}/mcp`;
       const token = readFileSync(join(stateDir, "local-issuer", "agent.token"), "utf8").trim();

@@ -8,6 +8,18 @@ import type { ApprovalRow } from "../src/approvals.ts";
 import { parseCardCsv, parseChannelJsonl, reconcile } from "../src/reconcile.ts";
 import type { LedgerEffect } from "../src/types.ts";
 
+/** These fixtures name the effect ref as its decision. The attack test does not. */
+function reconcileDecided(
+  channelRows: Parameters<typeof reconcile>[0],
+  effects: Parameters<typeof reconcile>[1],
+  opts?: Parameters<typeof reconcile>[2],
+) {
+  return reconcile(channelRows, effects, {
+    ...opts,
+    decisionRefs: opts?.decisionRefs ?? new Set(effects.map((e) => e.row.ref)),
+  });
+}
+
 const here = dirname(fileURLToPath(import.meta.url));
 const goldenEffects = join(here, "fixtures", "ledger-golden", "effects.jsonl");
 const sentPath = join(here, "fixtures", "channel-sent.jsonl");
@@ -23,7 +35,7 @@ describe("reconcile channel export against the ledger", () => {
   it("sent fixture: 3 matched, 2 ghost, 1 unsent, 0 outOfScope; msg-far is ghost", () => {
     const channel = parseChannelJsonl(readFileSync(sentPath, "utf8"));
     assert.equal(channel.length, 5);
-    const report = reconcile(channel, loadEffects());
+    const report = reconcileDecided(channel, loadEffects());
     assert.deepEqual(report.scope, {
       channel: "sent",
       windowStartMs: 20,
@@ -51,10 +63,10 @@ describe("reconcile channel export against the ledger", () => {
 
   it("a class match outside toleranceMs is ghost when no explicit window", () => {
     const channel = parseChannelJsonl(readFileSync(sentPath, "utf8"));
-    const tight = reconcile(channel, loadEffects(), { toleranceMs: 1 });
+    const tight = reconcileDecided(channel, loadEffects(), { toleranceMs: 1 });
     assert.equal(tight.outOfScope.length, 0);
     assert.ok(tight.ghost.some((r) => r.externalId === "msg-far"));
-    const loose = reconcile(channel, loadEffects(), { toleranceMs: 200_000 });
+    const loose = reconcileDecided(channel, loadEffects(), { toleranceMs: 200_000 });
     assert.equal(
       loose.ghost.some((r) => r.externalId === "msg-far"),
       false,
@@ -64,7 +76,7 @@ describe("reconcile channel export against the ledger", () => {
 
   it("an explicit window puts rows outside it in outOfScope", () => {
     const channel = parseChannelJsonl(readFileSync(sentPath, "utf8"));
-    const report = reconcile(channel, loadEffects(), { window: { startMs: 20, endMs: 60 } });
+    const report = reconcileDecided(channel, loadEffects(), { window: { startMs: 20, endMs: 60 } });
     assert.deepEqual(report.scope, {
       channel: "sent",
       windowStartMs: 20,
@@ -141,7 +153,7 @@ describe("card:", () => {
     const d2 = spend("d2", "a2", 10_000);
     const d3 = spend("d3", "a3", 5_000);
     const unpaid = spend("d4", "a4", 9_000);
-    const report = reconcile(channel, [d1.effect, d2.effect, d3.effect, unpaid.effect], {
+    const report = reconcileDecided(channel, [d1.effect, d2.effect, d3.effect, unpaid.effect], {
       toleranceMs: 3 * 86_400_000,
       approvals: [d1.approval, d2.approval, d3.approval, unpaid.approval],
     });
@@ -150,7 +162,7 @@ describe("card:", () => {
     assert.equal(report.authorizedUnpaid.length, 1);
     assert.equal(report.authorizedUnpaid[0]?.ref, "a4");
     const refundRows = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;IADE;100,00\n", { currency: "TRY" });
-    const refunded = reconcile(refundRows, [], { toleranceMs: 3 * 86_400_000 });
+    const refunded = reconcileDecided(refundRows, [], { toleranceMs: 3 * 86_400_000 });
     assert.equal(refunded.outOfScope.length, 1);
   });
 
@@ -178,7 +190,7 @@ describe("card:", () => {
       row: { ref: "g1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
     };
-    const report = reconcile(channel, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
+    const report = reconcileDecided(channel, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
     assert.equal(report.matched.some((m) => m.channel.ref === "d1"), false);
     assert.equal(report.ghost.length, 1);
     assert.equal(report.ghost[0]!.reason, "amount-mismatch");
@@ -213,7 +225,7 @@ describe("card:", () => {
       row: { ref: "probe-x", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
     };
-    const report = reconcile(channel, [effect], { toleranceMs: 3 * 86_400_000, approvals: [] });
+    const report = reconcileDecided(channel, [effect], { toleranceMs: 3 * 86_400_000, approvals: [] });
     assert.equal(report.matched.length, 0);
     assert.equal(report.ghost.length, 1);
     assert.equal(report.ghost[0]!.reason, "amount-unknown");
@@ -234,7 +246,7 @@ describe("card:", () => {
       row: { ref: "n1", effectHash: "11".repeat(32), effectClass: "message.read", timestampMs: 20 },
       witnessClass: "self",
     };
-    const report = reconcile(channel, [effect]);
+    const report = reconcileDecided(channel, [effect]);
     assert.equal(report.matched.length, 1);
     assert.equal(report.ghost.length, 0);
     assert.equal(report.matched[0]!.effect.ref, "n1");
@@ -266,7 +278,7 @@ describe("card:", () => {
       row: { ref: "a1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
     };
-    const report = reconcile(channel, [effect], {
+    const report = reconcileDecided(channel, [effect], {
       toleranceMs: 3 * 86_400_000,
       approvals: [approval],
       descriptorsByPayee: { "ads-platform": ["FB.ME/ADS", "FACEBK"] },
@@ -303,7 +315,7 @@ describe("card:", () => {
       row: { ref: "a1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
     };
-    const report = reconcile(channel, [effect], {
+    const report = reconcileDecided(channel, [effect], {
       toleranceMs: 3 * 86_400_000,
       approvals: [approval],
       descriptorsByPayee: { "ads-platform": ["FB.ME/ADS", "FACEBK"] },
@@ -360,14 +372,14 @@ describe("card:", () => {
       brain: "brain-1",
       allowRef: "a1",
     };
-    const dayReport = reconcile(day, [farEffect], {
+    const dayReport = reconcileDecided(day, [farEffect], {
       toleranceMs: 3 * 86_400_000,
       approvals: [approval],
     });
     assert.equal(dayReport.matched.length, 1);
     assert.equal(dayReport.matched[0]!.datePrecision, "day");
     assert.equal(dayReport.matched[0]!.toleranceMs, 3 * 86_400_000);
-    const timedReport = reconcile(timed, [farEffect], {
+    const timedReport = reconcileDecided(timed, [farEffect], {
       toleranceMs: 3 * 86_400_000,
       approvals: [approval],
     });
@@ -409,7 +421,7 @@ describe("card:", () => {
       brain: "brain-1",
       allowRef: "a1",
     };
-    const report = reconcile(timed, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
+    const report = reconcileDecided(timed, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
     assert.equal(report.matched.length, 1);
     assert.equal(report.matched[0]!.datePrecision, "minute");
     assert.equal(report.matched[0]!.toleranceMs, 120_000);

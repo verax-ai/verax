@@ -8,6 +8,11 @@ export type PolicySpend = {
   currency: string;
   payees: readonly string[];
   dailyMaxMinor?: number;
+  /**
+   * Minutes added to `createdAtMs` before the UTC day bucket.
+   * 0 is UTC. −720..840 covers the offsets an operator's clock can sit in.
+   */
+  dayOffsetMinutes?: number;
   /** Statement stamps for this payee. Optional; never guessed. */
   descriptors?: readonly string[];
 };
@@ -27,7 +32,7 @@ export type PolicyDocument = {
   default: "deny";
   approvalTtlMs?: number;
   egress?: readonly string[];
-  /** Body-wide: a call with no `_inputs` key is deny inputs-required. */
+  /** Body-wide: a call with no `_inputs` key, or an empty list, is deny inputs-required. */
   requireInputs?: true;
   limits?: {
     ratePerMinute?: number;
@@ -37,17 +42,47 @@ export type PolicyDocument = {
   rules: PolicyRule[];
 };
 
+/** One DNS label: letters, digits, hyphens; no leading or trailing hyphen. */
+function plainDnsLabel(label: string): boolean {
+  if (label.length === 0 || label.length > 63) return false;
+  return /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(label);
+}
+
+/** A hostname and nothing else: no port, path, whitespace, or trailing dot. */
+function plainDnsHost(host: string): string | undefined {
+  if (host.length === 0 || host.length > 253) return undefined;
+  const labels = host.split(".");
+  if (labels.length === 0 || labels.some((label) => !plainDnsLabel(label))) return undefined;
+  return host.toLowerCase();
+}
+
+/**
+ * `to` is one address. More than one `@`, a local part that carries a list
+ * separator or whitespace, or a host that is not a plain DNS name yields no
+ * host, and the egress rule then denies `egress-host-missing`.
+ */
+function hasControl(value: string): boolean {
+  for (let i = 0; i < value.length; i += 1) {
+    const c = value.charCodeAt(i);
+    if (c < 0x20 || c === 0x7f) return true;
+  }
+  return false;
+}
+
+function messageSendHost(args: Record<string, unknown>): string | undefined {
+  const to = args.to;
+  if (typeof to !== "string" || to === "") return undefined;
+  const at = to.indexOf("@");
+  if (at <= 0 || at !== to.lastIndexOf("@")) return undefined;
+  const local = to.slice(0, at);
+  const host = to.slice(at + 1);
+  if (local === "" || /[\s,;<>"]/.test(local) || hasControl(local)) return undefined;
+  return plainDnsHost(host);
+}
+
 /** Named per tool. Do not sniff `host` / `url` on arbitrary arguments. */
 export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => string | undefined> = {
-  "message.send": (args) => {
-    const to = args.to;
-    if (typeof to !== "string" || to === "") return undefined;
-    const at = to.lastIndexOf("@");
-    if (at < 0) return undefined;
-    const host = to.slice(at + 1).trim().toLowerCase();
-    if (host === "" || host.includes("/") || host.includes(" ")) return undefined;
-    return host;
-  },
+  "message.send": messageSendHost,
 };
 
 const DEFAULT_APPROVAL_TTL_MS = 86_400_000;
@@ -128,6 +163,17 @@ function asSpend(raw: unknown, id: string): PolicySpend {
     }
     spend.dailyMaxMinor = rec.dailyMaxMinor;
   }
+  if (rec.dayOffsetMinutes !== undefined) {
+    if (
+      typeof rec.dayOffsetMinutes !== "number" ||
+      !Number.isInteger(rec.dayOffsetMinutes) ||
+      rec.dayOffsetMinutes < -720 ||
+      rec.dayOffsetMinutes > 840
+    ) {
+      throw new Error(`policy-rule-spend-day-offset:${id}`);
+    }
+    spend.dayOffsetMinutes = rec.dayOffsetMinutes;
+  }
   if (rec.descriptors !== undefined) {
     if (
       !Array.isArray(rec.descriptors) ||
@@ -141,6 +187,15 @@ function asSpend(raw: unknown, id: string): PolicySpend {
   return spend;
 }
 
+/**
+ * One class for the spend gate and the approve prompt: every control (Cc,
+ * C0 and C1), every format character (Cf: bidi, ZWJ/ZWNJ, U+FEFF), and the
+ * line and paragraph separators (Zl, Zp).
+ */
+export const TERMINAL_CONTROL_CLASS = "\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}";
+
+const SPEND_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
+
 function spendArgsInvalid(args: Record<string, unknown>): boolean {
   const keys = Object.keys(args);
   const allowed = new Set(["amountMinor", "currency", "payee", "reference"]);
@@ -148,8 +203,9 @@ function spendArgsInvalid(args: Record<string, unknown>): boolean {
   const amt = args.amountMinor;
   if (typeof amt !== "number" || !Number.isInteger(amt) || amt <= 0) return true;
   if (typeof args.currency !== "string" || !/^[A-Z]{3}$/.test(args.currency)) return true;
-  if (typeof args.payee !== "string" || args.payee === "") return true;
-  if (typeof args.reference !== "string" || args.reference.length > 140) return true;
+  if (typeof args.payee !== "string" || args.payee === "" || SPEND_CONTROL.test(args.payee)) return true;
+  if (typeof args.reference !== "string" || args.reference.length > 140 || SPEND_CONTROL.test(args.reference)) return true;
+  if (SPEND_CONTROL.test(args.currency)) return true;
   return false;
 }
 
@@ -197,7 +253,24 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
     }
     document.requireInputs = true;
   }
+  rejectDuplicateRules(document.rules);
   return document;
+}
+
+function rejectDuplicateRules(rules: readonly PolicyRule[]): void {
+  const seenId = new Set<string>();
+  const toolOwner = new Map<string, string>();
+  for (const rule of rules) {
+    if (seenId.has(rule.id)) {
+      throw new Error(`duplicate rule id ${rule.id} and ${rule.id}`);
+    }
+    seenId.add(rule.id);
+    const prior = toolOwner.get(rule.tool);
+    if (prior !== undefined) {
+      throw new Error(`duplicate rule for tool ${rule.tool}: ${prior} and ${rule.id}`);
+    }
+    toolOwner.set(rule.tool, rule.id);
+  }
 }
 
 function asLimits(raw: unknown): NonNullable<PolicyDocument["limits"]> {
@@ -229,8 +302,10 @@ export function loadPolicy(json: unknown): Policy {
     ...(document.limits?.ratePerMinute !== undefined ? { ratePerMinute: document.limits.ratePerMinute } : {}),
     ...(document.limits?.dailyMax !== undefined ? { dailyMax: document.limits.dailyMax } : {}),
   };
+  const spendRule = document.rules.find((rule) => rule.tool === "spend");
   return {
     hash,
+    dayOffsetMinutes: spendRule?.spend?.dayOffsetMinutes ?? 0,
     approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
     limits,
     ...(document.requireInputs ? { requireInputs: true as const } : {}),
@@ -241,8 +316,13 @@ export function loadPolicy(json: unknown): Policy {
         ? {
             id: found.id,
             text: found.text,
-            ...(found.spend?.dailyMaxMinor !== undefined
-              ? { spend: { dailyMaxMinor: found.spend.dailyMaxMinor } }
+            ...(found.spend
+              ? {
+                  spend: {
+                    ...(found.spend.dailyMaxMinor !== undefined ? { dailyMaxMinor: found.spend.dailyMaxMinor } : {}),
+                    dayOffsetMinutes: found.spend.dayOffsetMinutes ?? 0,
+                  },
+                }
               : {}),
           }
         : null;

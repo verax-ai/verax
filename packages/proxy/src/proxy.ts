@@ -98,6 +98,18 @@ function threwReplay(ref: string): ToolResult {
   };
 }
 
+/** The tool returned. The effect row did not. That is not `:threw`. */
+function effectUnrecorded(ref: string): ToolResult {
+  return {
+    content: [{ type: "text", text: `effect-unrecorded:${ref}` }],
+    isError: true,
+  };
+}
+
+function isEffectUnrecorded(result: ToolResult): boolean {
+  return result.content.some((part) => part.text.startsWith("effect-unrecorded:"));
+}
+
 async function replayAfterEffect(ledger: Ledger, ref: string): Promise<ToolResult> {
   const primary = (await ledger.effects()).find(
     (e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect",
@@ -163,6 +175,34 @@ function readRef(args: Record<string, unknown>): string | "invalid" | null {
   return raw;
 }
 
+/**
+ * The input-validity fold a new decision uses. A cited input that is missing,
+ * mismatched, or outside validFromMs..validUntilMs is a deny for that reason.
+ * An approved retry calls this same function before inner; it does not grow a second copy.
+ */
+function applyInputValidity(
+  inputReason: string | null,
+  verdict: { decision: "allow" | "deny" | "defer"; reasonCode: string },
+): { decision: "allow" | "deny" | "defer"; reasonCode: string } {
+  if (inputReason !== null) return { decision: "deny", reasonCode: inputReason };
+  return verdict;
+}
+
+function inputIdentityHash(
+  rows: readonly { id: string; versionHash: string; source?: Record<string, unknown> }[],
+): string {
+  return sha256Canonical(
+    rows.map((row) => {
+      const id: { id: string; versionHash: string; source?: Record<string, unknown> } = {
+        id: row.id,
+        versionHash: row.versionHash,
+      };
+      if (row.source !== undefined) id.source = row.source;
+      return id;
+    }),
+  );
+}
+
 function toolCallOf(call: ToolCall): ToolCall {
   const args = { ...call.arguments };
   delete args._inputs;
@@ -179,6 +219,7 @@ export function createProxy(deps: ProxyDeps) {
     policy: deps.policy,
     approvals,
     now: deps.now,
+    ledger: deps.ledger,
   });
   (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   const ledgerDir = (deps.ledger as unknown as { dir?: unknown }).dir;
@@ -279,7 +320,12 @@ export function createProxy(deps: ProxyDeps) {
     return denied("spend-reauth-required", ref);
   }
 
-  async function runInner(call: ToolCall, principal: Principal, ref: string): Promise<ToolResult> {
+  async function runInner(
+    call: ToolCall,
+    principal: Principal,
+    ref: string,
+    effectRecorded: { ok: boolean },
+  ): Promise<ToolResult> {
     const dispatchedName = call.name;
     const dispatchedArgs = deepFreeze(structuredClone(call.arguments));
     const dispatchedHash = sha256Canonical(effectDescriptor(dispatchedName, dispatchedArgs));
@@ -288,17 +334,9 @@ export function createProxy(deps: ProxyDeps) {
       name: dispatchedName,
       arguments: dispatchedArgs,
     });
+    let result: ToolResult;
     try {
-      const result = await deps.inner(frozenCall, principal, ref);
-      const row: EffectRow = {
-        ref,
-        effectHash: dispatchedHash,
-        effectClass: dispatchedName,
-        timestampMs: deps.now(),
-        actor: principal.brain,
-      };
-      await deps.ledger.appendEffect(row, "self", sha256Canonical(result));
-      return result;
+      result = await deps.inner(frozenCall, principal, ref);
     } catch (err) {
       const row: EffectRow = {
         ref,
@@ -307,9 +345,31 @@ export function createProxy(deps: ProxyDeps) {
         timestampMs: deps.now(),
         actor: principal.brain,
       };
-      await deps.ledger.appendEffect(row, "self", sha256Canonical(thrownPayload(err)));
+      try {
+        await deps.ledger.appendEffect(row, "self", sha256Canonical(thrownPayload(err)));
+        effectRecorded.ok = true;
+      } catch (writeErr) {
+        throw writeErr;
+      }
       throw err;
     }
+    const row: EffectRow = {
+      ref,
+      effectHash: dispatchedHash,
+      effectClass: dispatchedName,
+      timestampMs: deps.now(),
+      actor: principal.brain,
+    };
+    try {
+      await deps.ledger.appendEffect(row, "self", sha256Canonical(result));
+      effectRecorded.ok = true;
+    } catch {
+      // The tool already returned. A failed effect write is not a throw of the
+      // tool, so this does not record `:threw`. The start mark stays (effectRecorded
+      // stays false) and a restart answers outcome-unknown instead of running again.
+      return effectUnrecorded(ref);
+    }
+    return result;
   }
 
   async function resolveInputs(
@@ -324,7 +384,10 @@ export function createProxy(deps: ProxyDeps) {
         reasonCode: "input-invalid",
       };
     }
-    if (declared === null && deps.policy.requireInputs === true) {
+    if (
+      deps.policy.requireInputs === true &&
+      (declared === null || declared.length === 0)
+    ) {
       return {
         inputs: { principal: principalInputs(principal), inputs: [] },
         reasonCode: "inputs-required",
@@ -361,9 +424,63 @@ export function createProxy(deps: ProxyDeps) {
     };
   }
 
+  async function boundInputsReason(
+    rows: readonly { id: string; versionHash: string; validFromMs: number; validUntilMs: number }[],
+    timestampMs: number,
+    principal: Principal,
+  ): Promise<string | null> {
+    for (const item of rows) {
+      if (deps.resolveInput) {
+        const got = await deps.resolveInput(item.id, principal);
+        if (
+          !got ||
+          got.versionHash !== item.versionHash ||
+          got.validFromMs > timestampMs ||
+          got.validUntilMs < timestampMs
+        ) {
+          return "input-invalid";
+        }
+        continue;
+      }
+      if (item.validFromMs > timestampMs || item.validUntilMs < timestampMs) return "input-invalid";
+    }
+    return null;
+  }
+
+  async function signedRetryDeny(
+    reasonCode: string,
+    requestHash: string,
+    inputs: DecisionInputs,
+    timestampMs: number,
+    subject: string,
+    scopedRef: string,
+  ): Promise<ToolResult> {
+    const denyRef = deps.nonce();
+    await writeRecord({
+      decision: "deny",
+      reasonCode,
+      ref: denyRef,
+      requestHash,
+      inputs: {
+        ...inputs,
+        approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+      },
+      effectHash: null,
+      subject,
+      timestampMs,
+    });
+    return denied(reasonCode, denyRef);
+  }
+
   type AdmissionPlan =
     | { kind: "done"; result: ToolResult }
-    | { kind: "run"; work: Promise<ToolResult>; key: string; replayRef: string }
+    | {
+        kind: "run";
+        work: Promise<ToolResult>;
+        key: string;
+        replayRef: string;
+        effectRecorded: { ok: boolean };
+      }
     | { kind: "wait"; work: Promise<ToolResult>; replayRef: string };
 
   function launchInner(
@@ -376,9 +493,10 @@ export function createProxy(deps: ProxyDeps) {
     // mark that survives the process is what tells a restarted body that this
     // ref was already started (in-flight-log.ts).
     if (stateDir !== null) markStarted(stateDir, flightKey, dispatchedCall.name);
-    const work = runInner(dispatchedCall, principal, allowRef);
+    const effectRecorded = { ok: false };
+    const work = runInner(dispatchedCall, principal, allowRef, effectRecorded);
     inFlight.set(flightKey, work);
-    return { kind: "run", work, key: flightKey, replayRef: allowRef };
+    return { kind: "run", work, key: flightKey, replayRef: allowRef, effectRecorded };
   }
 
   async function retryPolicyDeny(
@@ -395,7 +513,7 @@ export function createProxy(deps: ProxyDeps) {
       const approvalRows = await approvals.listAll();
       spendCtx = {
         spentTodayMinor: (currency) =>
-          spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs),
+          spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs, deps.policy.dayOffsetMinutes ?? 0),
       };
     }
     const verdict = deps.policy.evaluate(dispatchedCall, principal, spendCtx);
@@ -432,8 +550,8 @@ export function createProxy(deps: ProxyDeps) {
             nonce: deps.nonce,
             ref: cmd.ref,
             approverId: cmd.approverId,
-            // Only `verax approve` queues a command, when the ledger is locked.
-            via: "cli",
+            // A command with no `via` is an old queue file; treat it as a script, not a person.
+            via: cmd.via === "cli" ? "cli" : "cli-script",
             policyHash: defer.policyHash,
             approvals,
             inputsLog,
@@ -476,6 +594,21 @@ export function createProxy(deps: ProxyDeps) {
       const given = readRef(call.arguments);
 
       const plan = await admission.enqueue(async (): Promise<AdmissionPlan> => {
+        // A call that waited here behind another admission reads the halt flag again.
+        if (stateDir && existsSync(join(stateDir, "halted"))) {
+          const ref = deps.nonce();
+          await writeRecord({
+            decision: "deny",
+            reasonCode: "halted",
+            ref,
+            requestHash,
+            inputs: resolved.inputs,
+            effectHash: null,
+            subject: call.name,
+            timestampMs,
+          });
+          return { kind: "done", result: denied("halted", ref) };
+        }
         if (given === "invalid") {
           const ref = deps.nonce();
           await writeRecord({
@@ -544,7 +677,10 @@ export function createProxy(deps: ProxyDeps) {
                   return { kind: "done", result: deferred(given) };
                 }
                 if (!snap?.allowRef) {
-                  await approvals.updateStatus(scopedRef, "approved", { allowRef: allow.ref });
+                  await approvals.updateStatus(scopedRef, "approved", {
+                    allowRef: allow.ref,
+                    approvedAtMs: allow.timestampMs,
+                  });
                 }
                 if (await hasPrimaryEffect(deps.ledger, allow.ref)) {
                   return { kind: "done", result: await replayAfterEffect(deps.ledger, allow.ref) };
@@ -587,6 +723,72 @@ export function createProxy(deps: ProxyDeps) {
                     timestampMs,
                   });
                   return { kind: "done", result: denied("outcome-unknown", unknownRef) };
+                }
+                const declared = declaredInputs(call.arguments);
+                if (declared === "invalid") {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      "input-invalid",
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
+                }
+                const boundRows = bound?.inputs ?? [];
+                if (declared !== null && inputIdentityHash(declared) !== inputIdentityHash(boundRows)) {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      "inputs-changed",
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
+                }
+                const validityReason = await boundInputsReason(boundRows, timestampMs, principal);
+                const gated = applyInputValidity(validityReason, {
+                  decision: "allow",
+                  reasonCode: "approved-by-operator",
+                });
+                if (gated.decision !== "allow") {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      gated.reasonCode,
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
+                }
+                if (
+                  deps.checkTenantMismatch &&
+                  (await deps.checkTenantMismatch(dispatched, principal))
+                ) {
+                  const denyRef = deps.nonce();
+                  await writeRecord({
+                    decision: "deny",
+                    reasonCode: "tenant-mismatch",
+                    ref: denyRef,
+                    requestHash,
+                    inputs: {
+                      ...resolved.inputs,
+                      approver: { id: "verax-proxy", via: "proxy", resolves: scopedRef },
+                    },
+                    effectHash: null,
+                    subject: call.name,
+                    timestampMs,
+                  });
+                  return { kind: "done", result: denied("tenant-mismatch", denyRef) };
                 }
                 return launchInner(dispatched, principal, allow.ref, scopedRef);
               }
@@ -641,12 +843,13 @@ export function createProxy(deps: ProxyDeps) {
           const approvalRows = await approvals.listAll();
           spendCtx = {
             spentTodayMinor: (currency) =>
-              spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs),
+              spentTodayMinorOf(approvalRows, timestampMs, currency, deps.policy.approvalTtlMs, deps.policy.dayOffsetMinutes ?? 0),
           };
         }
         const verdict = deps.policy.evaluate(dispatched, principal, spendCtx);
-        let reasonCode = resolved.reasonCode ?? verdict.reasonCode;
-        let decision = resolved.reasonCode ? ("deny" as const) : verdict.decision;
+        const admitted = applyInputValidity(resolved.reasonCode, verdict);
+        let reasonCode = admitted.reasonCode;
+        let decision = admitted.decision;
         const bound = rateBound(timestampMs, decision === "allow" || decision === "defer");
         if (bound) {
           decision = "deny";
@@ -654,7 +857,7 @@ export function createProxy(deps: ProxyDeps) {
         }
         if (
           !bound &&
-          decision === "allow" &&
+          (decision === "allow" || decision === "defer") &&
           deps.checkTenantMismatch &&
           (await deps.checkTenantMismatch(dispatched, principal))
         ) {
@@ -713,7 +916,8 @@ export function createProxy(deps: ProxyDeps) {
       if (plan.kind === "done") return plan.result;
       if (plan.kind === "wait") {
         try {
-          await plan.work;
+          const result = await plan.work;
+          if (isEffectUnrecorded(result)) return result;
           return allowedReplay(plan.replayRef);
         } catch {
           // The first call recorded the throw on its effect row. The
@@ -725,9 +929,11 @@ export function createProxy(deps: ProxyDeps) {
         return await plan.work;
       } finally {
         inFlight.delete(plan.key);
-        // runInner has written its effect row by now — on the throw path too,
-        // as `<name>:threw`. The outcome is on the ledger, so the mark goes.
-        if (stateDir !== null) markEnded(stateDir, plan.key);
+        // The mark stays when the effect row did not land: the tool threw and
+        // `:threw` could not be written, or the tool returned and its effect
+        // row could not be written. A retry then answers outcome-unknown
+        // instead of running again. A returned tool is not recorded as `:threw`.
+        if (plan.effectRecorded.ok && stateDir !== null) markEnded(stateDir, plan.key);
       }
     },
   };

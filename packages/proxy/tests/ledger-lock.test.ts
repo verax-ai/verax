@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { systemToolPath } from "../../body/src/install.ts";
 import { FileLedger } from "../src/ledger.ts";
 
 const worker = join(dirname(fileURLToPath(import.meta.url)), "lock-open-worker.ts");
@@ -99,7 +100,7 @@ function killOpener(opener: SpawnedOpener): void {
     // already gone
   }
   if (process.platform === "win32" && pid != null) {
-    spawnSync("taskkill", ["/PID", String(pid), "/T", "/F"], {
+    spawnSync(systemToolPath("taskkill", "win32"), ["/PID", String(pid), "/T", "/F"], {
       windowsHide: true,
       stdio: "ignore",
     });

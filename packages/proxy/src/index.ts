@@ -1,5 +1,5 @@
 export { createProxy, LedgerDenyUnrecorded } from "./proxy.ts";
-export { loadPolicy } from "./policy.ts";
+export { loadPolicy, TERMINAL_CONTROL_CLASS } from "./policy.ts";
 export { FileLedger, MemoryLedger, readLedgerTail } from "./ledger.ts";
 export { indexCoverage, listPieceFiles } from "./ledger-manifest.ts";
 export { explain } from "./explain.ts";
@@ -10,7 +10,7 @@ export {
   enqueueApprovalCommand,
   loadApprovalsFromDir,
 } from "./approvals.ts";
-export { loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "./reconcile.ts";
+export { loadDecisionRefsFromDir, loadEffectsFromDir, parseCardCsv, parseChannelJsonl, reconcile } from "./reconcile.ts";
 export { tenantKey } from "./tenant.ts";
 // The body writes checkpoints and signs its own effect attestations. Both were
 // reached through a relative path into this package, which only exists inside

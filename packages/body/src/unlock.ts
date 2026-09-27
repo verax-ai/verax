@@ -12,11 +12,22 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-export function readLockFile(path: string): { pid: number; startedAt: number } | null {
+export type LockRecord = { pid: number; startedAt: number; port?: number };
+
+/** A lock from before the body recorded its port has no `port`. That is still a lock. */
+export function readLockFile(path: string): LockRecord | null {
   try {
-    const raw = JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown; startedAt?: unknown };
+    const raw = JSON.parse(readFileSync(path, "utf8")) as {
+      pid?: unknown;
+      startedAt?: unknown;
+      port?: unknown;
+    };
     if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
-    return { pid: raw.pid, startedAt: raw.startedAt };
+    const record: LockRecord = { pid: raw.pid, startedAt: raw.startedAt };
+    if (typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) {
+      record.port = raw.port;
+    }
+    return record;
   } catch {
     return null;
   }

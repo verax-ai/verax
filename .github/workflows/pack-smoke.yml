@@ -1,0 +1,290 @@
+# The packaged product, installed in a clean directory, on the three
+# operating systems a release claims. Linux already ran pack:smoke inside
+# posix-full; this job is the same smoke on Windows and macOS as well,
+# against the official Node build install-e2e installs.
+name: pack-smoke
+
+env:
+  NODE_VERSION: "22.20.0"
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  installed:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - name: official Node
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = $env:NODE_VERSION
+          $name = "node-v$ver-x64.msi"
+          $base = "https://nodejs.org/dist/v$ver"
+          $sums = Join-Path $env:RUNNER_TEMP "SHASUMS256.txt"
+          $msi = Join-Path $env:RUNNER_TEMP $name
+          $nodeExe = "C:\Program Files\nodejs\node.exe"
+          if (Test-Path -LiteralPath $nodeExe) {
+            Write-Host "node.exe already exists before msiexec: $nodeExe"
+            Write-Host "existing version: $(& $nodeExe -v)"
+            Write-Host "using existing node; msiexec not run"
+          } else {
+            Write-Host "downloading SHASUMS256.txt from $base/SHASUMS256.txt to $sums"
+            Invoke-WebRequest -Uri "$base/SHASUMS256.txt" -OutFile $sums
+            Write-Host "downloading $name from $base/$name to $msi"
+            Invoke-WebRequest -Uri "$base/$name" -OutFile $msi
+            $line = @(Get-Content $sums | Where-Object { $_ -match " $([regex]::Escape($name))$" })
+            if ($line.Count -ne 1) { Write-Host "::error::SHASUMS256.txt has no $name"; exit 1 }
+            $expected = ($line[0] -split '\s+')[0].ToLower()
+            $actual = (Get-FileHash -Algorithm SHA256 $msi).Hash.ToLower()
+            Write-Host "sha256 expected: $expected"
+            Write-Host "sha256 actual: $actual"
+            if ($expected -ne $actual) { Write-Host "::error::sha256 mismatch for $name"; exit 1 }
+            $log = Join-Path $env:RUNNER_TEMP "node-msi.log"
+            Write-Host "running msiexec /i $msi /qn ALLUSERS=1 /norestart /l*v $log"
+            $proc = Start-Process msiexec.exe -ArgumentList @('/i', $msi, '/qn', 'ALLUSERS=1', '/norestart', '/l*v', $log) -Wait -PassThru
+            Write-Host "msiexec exit code: $($proc.ExitCode)"
+            if ($proc.ExitCode -ne 0) {
+              Write-Host "::error::msiexec failed with exit code $($proc.ExitCode)"
+              if (Test-Path -LiteralPath $log) {
+                Get-Content -LiteralPath $log -Tail 60 | ForEach-Object { Write-Host $_ }
+              }
+              exit $proc.ExitCode
+            }
+          }
+          $node = "C:\Program Files\nodejs\node.exe"
+          if (-not (Test-Path -LiteralPath $node)) { Write-Host "::error::official node.exe missing: $node"; exit 1 }
+          $real = & $node -p "require('fs').realpathSync.native(process.execPath)"
+          Write-Host "node -v: $(& $node -v)"
+          Write-Host "realpath: $real"
+          Add-Content -Path $env:GITHUB_PATH -Value "C:\Program Files\nodejs"
+          Add-Content -Path $env:GITHUB_ENV -Value "VERAX_NODE=$node"
+      - name: official Node
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          ver="$NODE_VERSION"
+          name="node-v${ver}-linux-x64.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
+          curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
+          grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && sha256sum -c -)
+          sudo mkdir -p /usr/local/lib/nodejs
+          sudo tar -C /usr/local/lib/nodejs -xzf "/tmp/${name}"
+          sudo chown -R root:root /usr/local/lib/nodejs
+          sudo chmod -R go-w /usr/local/lib/nodejs
+          node="/usr/local/lib/nodejs/node-v${ver}-linux-x64/bin/node"
+          real="$(readlink -f "$node")"
+          echo "node -v: $("$node" -v)"
+          echo "realpath: $real"
+          stat -c '%U:%G %a %n' "$real"
+          echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
+          echo "$(dirname "$node")" >> "$GITHUB_PATH"
+      - name: official Node
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          ver="$NODE_VERSION"
+          arch="$(uname -m)"
+          case "$arch" in
+            arm64) ;;
+            x86_64) arch="x64" ;;
+            *) echo "unsupported arch: $arch"; exit 1 ;;
+          esac
+          name="node-v${ver}-darwin-${arch}.tar.gz"
+          curl -fsSL "https://nodejs.org/dist/v${ver}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
+          curl -fsSL "https://nodejs.org/dist/v${ver}/${name}" -o "/tmp/${name}"
+          grep " ${name}$" /tmp/SHASUMS256.txt | (cd /tmp && shasum -a 256 -c -)
+          sudo mkdir -p /opt/verax-node
+          sudo tar -C /opt/verax-node -xzf "/tmp/${name}"
+          sudo chown -R root:wheel /opt/verax-node
+          sudo chmod -R go-w /opt/verax-node
+          node="/opt/verax-node/node-v${ver}-darwin-${arch}/bin/node"
+          real="$("$node" -p "require('fs').realpathSync.native(process.execPath)")"
+          echo "node -v: $("$node" -v)"
+          echo "realpath: $real"
+          echo "VERAX_NODE=$node" >> "$GITHUB_ENV"
+          echo "$(dirname "$node")" >> "$GITHUB_PATH"
+      - name: npm ci
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
+          npm ci
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::npm ci failed"; exit $LASTEXITCODE }
+      - name: npm ci
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm ci
+      - name: build:dist
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
+          npm run build:dist
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::build:dist failed"; exit $LASTEXITCODE }
+      - name: build:dist
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm run build:dist
+      - name: pack:smoke
+        id: pack-smoke-windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ((Get-Command node).Source -ne $env:VERAX_NODE) { Write-Host "::error::node is not the official install"; exit 1 }
+          npm run pack:smoke
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::pack:smoke failed"; exit $LASTEXITCODE }
+      - name: pack:smoke
+        id: pack-smoke-posix
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          test "$(command -v node)" = "$VERAX_NODE"
+          npm run pack:smoke
+      - name: platform evidence
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $PSNativeCommandUseErrorActionPreference = $false
+          trap { Write-Host $_.Exception.Message; exit 0 }
+          function Add-Evidence([string]$line) {
+            Write-Host $line
+            $path = $env:GITHUB_STEP_SUMMARY
+            if ([string]::IsNullOrWhiteSpace($path)) { return }
+            [System.IO.File]::AppendAllText($path, "$line`n", [System.Text.UTF8Encoding]::new($false))
+          }
+          function Mark([string]$outcome) {
+            if ($outcome -eq 'success') { return '✅' }
+            return '❌'
+          }
+          $caption = ''
+          $version = ''
+          try {
+            $caption = (Get-CimInstance Win32_OperatingSystem).Caption
+            $version = (Get-CimInstance Win32_OperatingSystem).Version
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $arch = [string]$env:PROCESSOR_ARCHITECTURE
+          $node = 'unavailable'
+          try {
+            $printed = (& node -v 2>&1 | Out-String).Trim()
+            if ($LASTEXITCODE -eq 0 -and $printed) { $node = $printed }
+          } catch {
+            Write-Host $_.Exception.Message
+          }
+          $osLine = ("$caption $version").Trim() -replace '\s+', ' '
+          $win = '${{ steps.pack-smoke-windows.outcome }}'
+          $posix = '${{ steps.pack-smoke-posix.outcome }}'
+          $outcome = $posix
+          if ($win -ne 'skipped' -and -not [string]::IsNullOrWhiteSpace($win)) { $outcome = $win }
+          Add-Evidence '### Platform evidence'
+          Add-Evidence "OS: $osLine"
+          Add-Evidence "Architecture: $arch"
+          Add-Evidence "Node: $node"
+          Add-Evidence 'Matrix leg: os: ${{ matrix.os }}'
+          Add-Evidence "Commit: $env:GITHUB_SHA"
+          Add-Evidence ''
+          Add-Evidence "$(Mark $outcome) the npm packages install cleanly and init / serve / a tool call / verify work"
+          exit 0
+      - name: platform evidence
+        if: always() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=""
+          if [ -f /etc/os-release ]; then
+            pretty=$(grep '^PRETTY_NAME=' /etc/os-release | head -n 1 | cut -d= -f2- | tr -d '"')
+          fi
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          win='${{ steps.pack-smoke-windows.outcome }}'
+          posix='${{ steps.pack-smoke-posix.outcome }}'
+          outcome="$posix"
+          if [ "$win" != "skipped" ] && [ -n "$win" ]; then
+            outcome="$win"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          add "$(mark "$outcome") the npm packages install cleanly and init / serve / a tool call / verify work"
+          exit 0
+      - name: platform evidence
+        if: always() && runner.os == 'macOS'
+        shell: bash
+        run: |
+          set +e
+          set +o pipefail
+          add() {
+            printf '%s\n' "$1"
+            if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+              printf '%s\n' "$1" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          }
+          mark() {
+            if [ "$1" = "success" ]; then
+              printf '%s' "✅"
+            else
+              printf '%s' "❌"
+            fi
+          }
+          pretty=$(sw_vers 2>/dev/null | tr '\n' ' ' | sed 's/  */ /g; s/ *$//')
+          arch=$(uname -m 2>/dev/null)
+          node=$(node -v 2>/dev/null)
+          if [ -z "$node" ]; then
+            node="unavailable"
+          fi
+          win='${{ steps.pack-smoke-windows.outcome }}'
+          posix='${{ steps.pack-smoke-posix.outcome }}'
+          outcome="$posix"
+          if [ "$win" != "skipped" ] && [ -n "$win" ]; then
+            outcome="$win"
+          fi
+          add "### Platform evidence"
+          add "OS: ${pretty}"
+          add "Architecture: ${arch}"
+          add "Node: ${node}"
+          add "Matrix leg: os: ${{ matrix.os }}"
+          add "Commit: ${GITHUB_SHA}"
+          add ""
+          add "$(mark "$outcome") the npm packages install cleanly and init / serve / a tool call / verify work"
+          exit 0

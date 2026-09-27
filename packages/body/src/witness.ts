@@ -8,10 +8,15 @@ import {
   checkpointHash,
   signCheckpoint,
   totalsFromDecisionRecords,
+  verifyCheckpoint,
+  verifyCheckpointUnderPin,
   type SignedCheckpoint,
 } from "@cedulon/checkpoint";
-import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
+import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
+import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
+import { verifyEffectExtract } from "@cedulon/effect-extract";
 import { checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
+import { assertEd25519PublicKey } from "./keys.ts";
 import { pidAlive } from "./unlock.ts";
 
 const WITNESS_CLASS = "same-org" as const;
@@ -52,19 +57,22 @@ export function loadOrCreateWitnessKeys(stateDir: string): { privateKeyPem: stri
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const priv = join(dir, "witness.private.pem");
   const pub = join(dir, "witness.public.pem");
-  if (existsSync(priv) && existsSync(pub)) {
-    return { privateKeyPem: readFileSync(priv, "utf8"), publicKeyPem: readFileSync(pub, "utf8") };
-  }
-  if (existsSync(priv) || existsSync(pub)) {
-    throw new Error("witness-keys-partial");
-  }
-  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
-  const pair = {
-    publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
-    privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
-  };
-  writePemAtomic(priv, pair.privateKeyPem);
-  writePemAtomic(pub, pair.publicKeyPem);
+  const pair = existsSync(priv) && existsSync(pub)
+    ? { privateKeyPem: readFileSync(priv, "utf8"), publicKeyPem: readFileSync(pub, "utf8") }
+    : existsSync(priv) || existsSync(pub)
+      ? null
+      : (() => {
+          const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+          const created = {
+            publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
+            privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+          };
+          writePemAtomic(priv, created.privateKeyPem);
+          writePemAtomic(pub, created.publicKeyPem);
+          return created;
+        })();
+  if (!pair) throw new Error("witness-keys-partial");
+  assertEd25519PublicKey(pair.publicKeyPem, "witness");
   return pair;
 }
 
@@ -161,17 +169,53 @@ function loadDecisions(stateDir: string): SignedDecisionRecord[] {
   return out;
 }
 
-function lastCheckpointHash(stateDir: string): string | null {
+/** Last checkpoint hash this process recorded. A truncated file is compared with it. */
+function recordedCheckpointHash(stateDir: string): string | null {
+  let text: string;
   try {
-    const text = readFileSync(checkpointsPath(stateDir), "utf8").trim();
-    if (text === "") return null;
-    const lines = text.split("\n").filter((l) => l !== "");
-    const last = JSON.parse(lines[lines.length - 1] ?? "{}") as SignedCheckpoint;
-    if (typeof last.coseHex !== "string" || !last.claims) return null;
-    return checkpointHash(last);
+    text = readFileSync(statusPath(stateDir), "utf8");
+  } catch {
+    return null;
+  }
+  let found: string | null = null;
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    try {
+      const row = JSON.parse(line) as { checkpointHash?: unknown };
+      if (typeof row.checkpointHash === "string" && row.checkpointHash !== "") found = row.checkpointHash;
+    } catch {
+      // A torn status line is not a hash.
+    }
+  }
+  return found;
+}
+
+function lastCheckpointHash(stateDir: string): string | null {
+  const path = checkpointsPath(stateDir);
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return null;
+    throw new Error("checkpoint-unreadable");
+  }
+  const trimmed = text.trim();
+  if (trimmed === "") {
+    // A missing file starts a chain. Zero bytes or whitespace are not that file.
+    // They also are not the hash recorded when the last checkpoint was written.
+    const recorded = recordedCheckpointHash(stateDir);
+    if (recorded === null || !trimmed.includes(recorded)) throw new Error("checkpoint-unreadable");
+  }
+  const lines = trimmed.split("\n").filter((line) => line !== "");
+  try {
+    const last = JSON.parse(lines[lines.length - 1] ?? "") as SignedCheckpoint;
+    if (!last || typeof last !== "object" || typeof last.coseHex !== "string" || !last.claims) {
+      throw new Error("checkpoint-unreadable");
+    }
+    return checkpointHash(last);
+  } catch (err) {
+    if (err instanceof Error && err.message === "checkpoint-unreadable") throw err;
+    throw new Error("checkpoint-unreadable");
   }
 }
 
@@ -196,6 +240,11 @@ function signWindowCheckpoint(
   );
   const signed = signCheckpoint(claims, keys.privateKeyPem, keys.publicKeyPem);
   appendFileSync(checkpointsPath(stateDir), `${JSON.stringify(signed)}\n`, { encoding: "utf8" });
+  appendStatus(stateDir, {
+    atMs: Date.now(),
+    result: "checkpoint",
+    checkpointHash: checkpointHash(signed),
+  });
   return signed;
 }
 
@@ -218,10 +267,74 @@ export async function requestWitnessCheckpoint(
     if (!res.ok) return null;
     const body = (await res.json()) as SignedCheckpoint;
     if (typeof body.coseHex !== "string" || !body.claims) return null;
+    if (!checkpointMatchesListenKey(body, listen.publicKeyPem)) {
+      appendStatus(stateDir, {
+        atMs: Date.now(),
+        result: "checkpoint-refused",
+        reason: "witness-key-mismatch",
+      });
+      return null;
+    }
     return body;
   } catch {
     return null;
   }
+}
+
+/** The listen file's key, not whichever key answered on the port. */
+function checkpointMatchesListenKey(body: SignedCheckpoint, publicKeyPem: string): boolean {
+  if (typeof body.coseHex !== "string" || body.coseHex === "" || !body.claims) return false;
+  if (typeof body.publicKeyPem !== "string" || !pemSame(body.publicKeyPem, publicKeyPem)) return false;
+  try {
+    return verifyCheckpointUnderPin(body, publicKeyPem) && verifyCheckpoint(body, publicKeyPem);
+  } catch {
+    return false;
+  }
+}
+
+function pemSame(left: string, right: string): boolean {
+  return left.replace(/\r\n/g, "\n").trim() === right.replace(/\r\n/g, "\n").trim();
+}
+
+/** The listen file's key, not whichever key answered on the port. */
+function answerMatchesListenKey(
+  body: {
+    receipt?: LedgerEffect["receipt"];
+    attestation?: LedgerEffect["attestation"];
+  },
+  row: EffectRowWire,
+  resultHash: string | undefined,
+  publicKeyPem: string,
+): boolean {
+  const receipt = body.receipt;
+  const coseHex = body.attestation?.coseHex;
+  if (!receipt || typeof coseHex !== "string" || coseHex === "") return false;
+  if (typeof receipt.publicKeyPem !== "string" || !pemSame(receipt.publicKeyPem, publicKeyPem)) return false;
+  const clean = {
+    ref: row.ref,
+    effectHash: row.effectHash,
+    effectClass: row.effectClass,
+    timestampMs: row.timestampMs,
+    ...(row.actor !== undefined ? { actor: row.actor } : {}),
+  };
+  const expected = canonical({
+    ref: clean.ref,
+    effectHash: clean.effectHash,
+    witnessClass: WITNESS_CLASS,
+    resultHash: resultHash ?? null,
+  });
+  try {
+    const decoded = decodeCoseSign1(coseFromHex(coseHex));
+    const payload = JSON.parse(Buffer.from(decoded.payload).toString("utf8")) as unknown;
+    if (canonical(payload) !== expected) return false;
+    if (!verifyCoseSign1(coseFromHex(coseHex), publicKeyPem, "application/json")) return false;
+    if (!verifyEffectExtract(receipt, publicKeyPem)) return false;
+    const signedRow = receipt.body.effects[0];
+    if (signedRow == null || canonical(signedRow) !== canonical(clean)) return false;
+  } catch {
+    return false;
+  }
+  return true;
 }
 
 export async function requestWitnessSign(
@@ -269,6 +382,15 @@ export async function requestWitnessSign(
         ref: row.ref,
         result: "self-fallback",
         reason: "unreachable",
+      });
+      return null;
+    }
+    if (!answerMatchesListenKey(body, row, resultHash, listen.publicKeyPem)) {
+      appendStatus(stateDir, {
+        atMs: Date.now(),
+        ref: row.ref,
+        result: "self-fallback",
+        reason: "witness-key-mismatch",
       });
       return null;
     }
@@ -352,7 +474,13 @@ export async function runWitness(stateDir: string): Promise<void> {
           return;
         }
         send(res, 404, { error: "not-found" });
-      } catch {
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "";
+        if (reason === "checkpoint-unreadable") {
+          appendStatus(stateDir, { atMs: Date.now(), result: "checkpoint-refused", reason });
+          send(res, 409, { error: reason });
+          return;
+        }
         send(res, 400, { error: "bad-request" });
       }
     })();

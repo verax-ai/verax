@@ -1,6 +1,6 @@
 {
   "name": "@verax-ai/proxy",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
@@ -20,7 +20,9 @@
   ],
   "dependencies": {
     "@cedulon/audit": "0.13.1",
+    "@cedulon/checkpoint": "0.13.1",
     "@cedulon/core": "0.13.1",
+    "@cedulon/cose": "0.13.1",
     "@cedulon/effect-extract": "0.13.1",
     "@cedulon/x402-adapter": "0.13.1"
   },
