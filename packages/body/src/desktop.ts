@@ -418,7 +418,10 @@ function ensureDesktopDirectory(
       const found = read(dir);
       const owner = found.ownerSid?.trim().toUpperCase() ?? "";
       const invoking = found.invokingSid?.trim().toUpperCase() ?? "";
-      if (owner === "" || invoking === "" || owner !== invoking) throw new Error(`desktop-dir-refused:${dir}`);
+      // An elevated administrator's new directories are owned by Administrators, not by the user;
+      // no other local user can make a directory with that owner, or with SYSTEM.
+      const ownerOk = owner === invoking || owner === "S-1-5-32-544" || owner === "S-1-5-18";
+      if (owner === "" || invoking === "" || !ownerOk) throw new Error(`desktop-dir-refused:${dir}`);
       restrict(dir);
       return;
     }

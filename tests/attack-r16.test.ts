@@ -24,7 +24,7 @@ import { loadPolicy } from "../packages/proxy/src/policy.ts";
 import { createProxy } from "../packages/proxy/src/proxy.ts";
 import { verifyLedger } from "../packages/proxy/src/verify-ledger.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER } from "../packages/proxy/tests/helpers.ts";
-import { refusedAsElevated, skipIfElevated } from "./elevated-refusal.ts";
+import { elevatedRunner, refusedAsElevated, skipIfElevated } from "./elevated-refusal.ts";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 
@@ -206,8 +206,10 @@ describe("attack R16", () => {
           resolve({ code: exit ?? 1, stderr });
         });
       });
+    // Elevated runner: every child of this checkout is refused before the command, so there is
+    // nothing to learn about flag routing there (and Node 22 may read a later --env-file itself).
+    if (elevatedRunner) return;
     const envFile = await run(["--env-file", join(dir, "missing.env")]);
-    if (refusedAsElevated(envFile.code, envFile.stderr)) return;
     assert.notEqual(envFile.code, 64, envFile.stderr);
     assert.equal(envFile.stderr.includes("unknown command:"), false, envFile.stderr);
     assert.equal(envFile.stderr.includes("env file is missing"), false, envFile.stderr);
@@ -672,6 +674,23 @@ describe("attack R16", () => {
     assert.equal(match, 1, matchErr.join(""));
     assert.match(matchErr.join(""), /restrict-ran/);
     assert.equal(matchErr.join("").includes("desktop-dir-refused:"), false);
+
+    // An elevated administrator's directories are owned by Administrators; that is accepted.
+    const adminErr: string[] = [];
+    const admin = await runDesktop(
+      { stateDir: dir, panelPort: 1, issuerPort: 2, bodyPort: 3 },
+      (line) => adminErr.push(line),
+      {
+        platform: "win32",
+        windowsDirectoryOwner: () => ({ ownerSid: "S-1-5-32-544", invokingSid: "S-1-5-21-1" }),
+        restrictOwner: () => {
+          throw new Error("restrict-ran");
+        },
+      },
+    );
+    assert.equal(admin, 1, adminErr.join(""));
+    assert.match(adminErr.join(""), /restrict-ran/);
+    assert.equal(adminErr.join("").includes("desktop-dir-refused:"), false);
   });
 
   it("R16-13 a user ACE with KA is judged writable", () => {
