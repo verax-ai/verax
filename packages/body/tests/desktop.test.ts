@@ -1,6 +1,5 @@
 import { strict as assert } from "node:assert";
 import { mkdtempSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -25,39 +24,15 @@ function freePort(): Promise<number> {
   });
 }
 
-function healthzServer(): Promise<{ port: number; close: () => Promise<void> }> {
-  return new Promise((resolve, reject) => {
-    const server: Server = createHttpServer((req, res) => {
-      if (req.url === "/healthz") {
-        res.writeHead(200, { "content-type": "application/json" });
-        res.end('{"ok":true}');
-        return;
-      }
-      res.writeHead(404);
-      res.end();
-    });
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const addr = server.address();
-      if (!addr || typeof addr === "string") {
-        reject(new Error("healthz-port"));
-        return;
-      }
-      resolve({
-        port: addr.port,
-        close: () => new Promise<void>((done) => server.close(() => done())),
-      });
-    });
-  });
-}
-
-function stateWithLock(pid: number): string {
+function stateWithLock(pid: number, port?: number): string {
   const dir = mkdtempSync(join(tmpdir(), "verax-desktop-mode-"));
-  writeFileSync(
-    join(dir, "ledger.lock"),
-    `${JSON.stringify({ pid, startedAt: Date.now(), token: "t" })}\n`,
-    "utf8",
-  );
+  const body: { pid: number; startedAt: number; token: string; port?: number } = {
+    pid,
+    startedAt: Date.now(),
+    token: "t",
+  };
+  if (port !== undefined) body.port = port;
+  writeFileSync(join(dir, "ledger.lock"), `${JSON.stringify(body)}\n`, "utf8");
   return dir;
 }
 
@@ -80,24 +55,23 @@ function deadPid(): number {
  * every time, so on a machine whose body starts at logon the window opened
  * on a second, empty ledger - the panel looked broken while the real
  * decisions sat in another directory. When the lock is held by a live
- * process and that body answers where this run was told to look, the panel
- * joins it instead.
+ * process, names this port, and that pid is the listener, the panel joins it.
  */
 describe("verax desktop joins a running body", () => {
-  it("attaches when the lock is live and /healthz answers on the body port", async () => {
-    const body = await healthzServer();
-    try {
-      const dir = stateWithLock(process.pid);
-      assert.deepEqual(await desktopMode(dir, body.port), { mode: "attach", pid: process.pid });
-    } finally {
-      await body.close();
-    }
+  it("attaches when the lock names the body port and the listener is that pid", async () => {
+    const port = await freePort();
+    const dir = stateWithLock(process.pid, port);
+    assert.deepEqual(await desktopMode(dir, port, () => process.pid), { mode: "attach", pid: process.pid });
   });
 
   it("refuses when the lock is live but nothing answers on the body port", async () => {
     const dir = stateWithLock(process.pid);
     const port = await freePort();
-    assert.deepEqual(await desktopMode(dir, port), { error: "desktop-body-locked", pid: process.pid });
+    assert.deepEqual(await desktopMode(dir, port, () => null), {
+      error: "desktop-body-locked",
+      pid: process.pid,
+      lockPort: null,
+    });
   });
 
   it("spawns when there is no lock", async () => {

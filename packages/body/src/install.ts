@@ -56,7 +56,7 @@ const DARWIN_PLIST = "/Library/LaunchDaemons/com.verax-ai.body.plist";
 
 const WIN32_TOOLS = ["whoami", "icacls", "schtasks", "net", "fsutil", "powershell"] as const;
 const LINUX_TOOLS = ["useradd", "userdel", "groupdel", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl", "getenforce", "ps", "ausearch"] as const;
-const DARWIN_TOOLS = ["dscl", "launchctl", "chown", "chmod", "id", "stat", "plutil"] as const;
+const DARWIN_TOOLS = ["dscl", "launchctl", "chown", "chmod", "id", "stat", "plutil", "lsof"] as const;
 const LINUX_TOOL_DIRS = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;
 /** Fixed paths. A plan must name these even when the binary is absent on the machine that built the plan. */
 const DARWIN_TOOL_PATHS: Record<(typeof DARWIN_TOOLS)[number], string> = {
@@ -67,6 +67,7 @@ const DARWIN_TOOL_PATHS: Record<(typeof DARWIN_TOOLS)[number], string> = {
   id: "/usr/bin/id",
   stat: "/usr/bin/stat",
   plutil: "/usr/bin/plutil",
+  lsof: "/usr/sbin/lsof",
 };
 const SYSTEM_TOOL_NAMES = new Set<string>([...WIN32_TOOLS, ...LINUX_TOOLS, ...DARWIN_TOOLS]);
 
@@ -161,7 +162,7 @@ function assertAdminWritableTree(root: string, exec: ToolExec): void {
 /**
  * Absolute path for a system tool. Windows uses System32 under SystemRoot.
  * Linux walks fixed directories and never consults PATH.
- * macOS uses the fixed table (dscl, launchctl, chown, chmod, id, stat, plutil).
+ * macOS uses the fixed table (dscl, launchctl, chown, chmod, id, stat, plutil, lsof).
  * A missing Linux binary falls back to the first candidate so a plan can name
  * the path; spawning still refuses when that file is absent.
  */
@@ -235,7 +236,7 @@ export function systemToolEnv(platform: NodeJS.Platform = process.platform, temp
   return env;
 }
 
-function toolArgv(tool: string, args: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
+export function toolArgv(tool: string, args: readonly string[], platform: NodeJS.Platform = process.platform): string[] {
   return [systemToolPath(tool, platform), ...args];
 }
 
@@ -477,11 +478,12 @@ export function veraxCodeDirectories(entryUrl: string = import.meta.url): string
   const start = path.dirname(fileURLToPath(entryUrl));
   const body = packageRootOf(start);
   const dirs = new Set<string>();
+  // A directory that is not on disk loads no code. Its parent is on the list and is judged.
   const add = (dir: string): void => {
     try {
       dirs.add(realpathSync(dir));
     } catch {
-      dirs.add(dir);
+      // not on disk
     }
   };
   if (!body) return [];
@@ -497,12 +499,15 @@ export function veraxCodeDirectories(entryUrl: string = import.meta.url): string
     deps = [];
   }
   for (const name of deps) {
-    let dir = path.join(body, "node_modules", ...name.split("/"));
+    // Resolve the entry Node itself would load (an exports map may not expose
+    // package.json), then walk up to that package's root.
+    let dir: string | null = null;
     try {
-      dir = path.dirname(fileURLToPath(import.meta.resolve(`${name}/package.json`)));
+      dir = packageRootOf(path.dirname(fileURLToPath(import.meta.resolve(name))));
     } catch {
-      // The package is named but not resolvable from this file. The path under body still gets checked.
+      dir = null;
     }
+    if (dir === null) return [];
     add(dir);
     add(path.join(dir, "node_modules"));
   }
@@ -4421,7 +4426,12 @@ function linuxFileUntrusted(file: string): boolean {
 }
 
 /** Owner + Administrators + SYSTEM. Throws when whoami or icacls fails. */
-export function restrictToOwnerWin32(target: string, spawn: ToolSpawn = defaultToolSpawn): void {
+/**
+ * Owner, Administrators and SYSTEM only. A directory that already holds files needs `directory`:
+ * the grants then carry `(OI)(CI)`, so its children inherit them. Without it `/inheritance:r`
+ * leaves every existing child with an empty DACL.
+ */
+export function restrictToOwnerWin32(target: string, spawn: ToolSpawn = defaultToolSpawn, directory = false): void {
   const whoami = requireSystemTool("whoami", "win32");
   const icacls = requireSystemTool("icacls", "win32");
   const opts = { encoding: "utf8" as const, windowsHide: true as const, shell: false as const, env: systemToolEnv("win32") };
@@ -4438,7 +4448,8 @@ export function restrictToOwnerWin32(target: string, spawn: ToolSpawn = defaultT
     }
   }
   if (!sid) throw new Error("whoami did not return a SID");
-  const ran = spawn(icacls, [target, "/inheritance:r", "/grant:r", `*${sid}:F`, `${ADMINISTRATORS_SID}:F`, `${SYSTEM_SID}:F`], opts);
+  const rights = directory ? "(OI)(CI)F" : "F";
+  const ran = spawn(icacls, [target, "/inheritance:r", "/grant:r", `*${sid}:${rights}`, `${ADMINISTRATORS_SID}:${rights}`, `${SYSTEM_SID}:${rights}`], opts);
   if ((ran.status ?? 1) !== 0) {
     throw new Error(`icacls failed: ${(ran.stderr || ran.stdout || "icacls failed").trim()}`);
   }
@@ -4551,19 +4562,21 @@ function collectTarballs(
   return { error: true, code: EX_CONFIG };
 }
 
-function codeDirWritable(dir: string, platform: InstallPlatform, exec: ToolExec): boolean {
-  const targets = trustTargets(dir, platform);
-  if (platform === "win32") {
-    const sid = invokingSid(exec);
-    for (const file of targets) {
-      const ran = exec(windowsSddlArgv(file.path));
-      if ((ran.status ?? 1) !== 0 || windowsUserCanWrite(ran.stdout ?? "", { path: file.path, userSid: sid, ancestor: file.ancestor })) {
-        return true;
-      }
-    }
-    return false;
+/**
+ * Whether the user can change each code directory. Windows reads every SDDL the
+ * check needs in one PowerShell process: one per path cost minutes on an elevated approve.
+ */
+function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, exec: ToolExec): (dir: string) => boolean {
+  if (platform !== "win32") {
+    return (dir) => trustTargets(dir, platform).some((file) => posixEntryUntrusted(file.path));
   }
-  return targets.some((file) => posixEntryUntrusted(file.path));
+  const sid = invokingSid(exec);
+  const read = readSddlBatch(exec, dirs.flatMap((dir) => trustTargets(dir, "win32").map((file) => file.path)));
+  return (dir) =>
+    trustTargets(dir, "win32").some((file) => {
+      const hit = sddlOrMiss(read, file.path);
+      return hit.status !== 0 || windowsUserCanWrite(hit.text, { path: file.path, userSid: sid, ancestor: file.ancestor });
+    });
 }
 
 export function refuseWritableCode(
@@ -4574,9 +4587,10 @@ export function refuseWritableCode(
 ): string | null {
   if (platform !== "win32" && platform !== "linux" && platform !== "darwin") return null;
   const spec = platform;
-  return elevatedCodeRefusal(spec, veraxCodeDirectories(), {
+  const dirs = veraxCodeDirectories();
+  return elevatedCodeRefusal(spec, dirs, {
     account: codeTrustAccount(platform, env),
-    ...(probe ? { probe } : { userWritable: (dir: string) => codeDirWritable(dir, spec, exec) }),
+    ...(probe ? { probe } : { userWritable: codeDirsWritable(dirs, spec, exec) }),
   });
 }
 

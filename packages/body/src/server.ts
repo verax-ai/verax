@@ -856,6 +856,17 @@ export async function listen(config: BodyConfig): Promise<Server> {
     services.ledger.close();
     void closeAll(sessions);
   });
+  const bound = server.address();
+  if (!bound || typeof bound === "string") {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw new Error("listen-port");
+  }
+  try {
+    services.ledger.recordListenPort(bound.port);
+  } catch (err) {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    throw err;
+  }
   return server;
 }
 

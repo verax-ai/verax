@@ -8,9 +8,19 @@ import { fileURLToPath } from "node:url";
 
 import { createProxy, FileLedger, loadApprovalsFromDir, loadPolicy } from "@verax-ai/proxy";
 import { runApprove } from "../packages/body/src/approve-cli.ts";
+import { defaultElevated } from "../packages/body/src/install.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
+// An elevated test process (the Windows CI runner) runs this checkout's CLI elevated, and an
+// elevated approve refuses code the user can change (R14-9). That refusal is what such a run checks.
+const ELEVATED = defaultElevated();
+function refusedAsElevated(code: number, stderr: string): boolean {
+  if (!ELEVATED) return false;
+  assert.equal(code, 78, stderr);
+  assert.match(stderr, /the verax code at .+ can be changed by/);
+  return true;
+}
 
 const POLICY = {
   version: 1,
@@ -63,6 +73,7 @@ describe("verax approve CLI", () => {
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 0, stderr);
     assert.match(stdout, /^approved:/);
     const again = new FileLedger(dir);
@@ -117,6 +128,7 @@ describe("verax approve CLI", () => {
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 0, stderr);
     assert.match(stdout, /^approved:/);
   });
@@ -158,6 +170,7 @@ describe("verax approve CLI", () => {
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 78, stdout);
     assert.match(stderr, /^ambiguous-ref\n/);
     assert.match(stderr, /:d1\n/);

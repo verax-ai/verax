@@ -1,10 +1,10 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { get } from "node:http";
 import { createConnection, createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { systemToolPath } from "./install.ts";
+import { restrictToOwnerWin32, systemToolEnv, systemToolPath, toolArgv } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
@@ -227,30 +227,110 @@ export function healthzUp(port: number): Promise<boolean> {
 export type DesktopMode =
   | { mode: "spawn" }
   | { mode: "attach"; pid: number }
-  | { error: "desktop-body-locked"; pid: number };
+  | { error: "desktop-body-locked"; pid: number; lockPort: number | null };
+
+function listenerArgv(port: number, platform: NodeJS.Platform): string[] | null {
+  if (platform === "win32") {
+    const script =
+      "$utf8 = New-Object System.Text.UTF8Encoding $false; " +
+      "[Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; " +
+      "Get-NetTCPConnection -State Listen -LocalPort " +
+      String(port) +
+      " -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ($_.LocalAddress.ToString() + ' ' + $_.OwningProcess) }";
+    return toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], "win32");
+  }
+  if (platform === "darwin") {
+    return toolArgv("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], "darwin");
+  }
+  if (platform === "linux") {
+    return toolArgv("ss", ["-ltnpH", `sport = :${port}`], "linux");
+  }
+  return null;
+}
+
+function onlyPid(pids: readonly number[]): number | null {
+  const unique = [...new Set(pids)];
+  return unique.length === 1 ? unique[0]! : null;
+}
+
+/** Pid listening on 127.0.0.1:`port`, or null when the tool names nobody or more than one pid. */
+export function loopbackListenPid(port: number, platform: NodeJS.Platform = process.platform): number | null {
+  if (!Number.isInteger(port) || port <= 0 || port >= 65536) return null;
+  const argv = listenerArgv(port, platform);
+  const file = argv?.[0];
+  if (!argv || !file) return null;
+  const ran = spawnSync(file, argv.slice(1), {
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+    timeout: 30_000,
+    env: systemToolEnv(platform),
+  });
+  if (ran.error) return null;
+  const text = (ran.stdout ?? "").replace(/\u0000/g, "").replace(/^\uFEFF/, "");
+  if (platform === "darwin") return onlyPid(lsofPids(text));
+  return onlyPid(loopbackPids(text, port));
+}
+
+function loopbackPids(text: string, port: number): number[] {
+  const pids: number[] = [];
+  const at = new RegExp(`(?:^|[\\s\\[])127\\.0\\.0\\.1:${port}(?!\\d)`);
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const win = /^(\S+)\s+(\d+)$/.exec(line);
+    if (win) {
+      if (win[1] === "127.0.0.1") pids.push(Number(win[2]));
+      continue;
+    }
+    if (!at.test(line)) continue;
+    const found = /pid=(\d+)/.exec(line);
+    if (found) pids.push(Number(found[1]));
+  }
+  return pids;
+}
+
+function lsofPids(text: string): number[] {
+  const pids: number[] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const found = /^p(\d+)$/.exec(raw.trim());
+    if (found) pids.push(Number(found[1]));
+  }
+  return pids;
+}
 
 /**
  * One ledger, one body. The desktop used to build its own issuer and body on
  * every open, which on a machine whose body starts at logon put the window on
  * a second, empty ledger: the panel looked broken while the real decisions sat
- * in the directory the lock names. So the lock is read first. Held by a live
- * process that answers /healthz where this run was told to look, the panel
- * joins that body. Held by a live process that does not answer there, the
- * desktop stops: someone owns the ledger and is not where we were pointed, and
- * a second body would be refused by the lock anyway. A dead or unreadable lock
- * is the body's own to clear (`verax unlock`); the desktop builds as before.
+ * in the directory the lock names. So the lock is read first. A live lock is
+ * joined only when it records this port and that pid is the process listening
+ * on 127.0.0.1 there. A 200 from /healthz is not the check. Any other live
+ * lock stops the desktop: `desktop-body-locked:<pid>:<port or unknown>`. A
+ * lock with no port is that stop until the body is started again. A dead or
+ * unreadable lock is left for `verax unlock`.
  */
 export async function desktopMode(
   stateDir: string,
   bodyPort: number,
-  probe: (port: number) => Promise<boolean> = healthzUp,
+  listenerPid: (port: number) => number | null = loopbackListenPid,
 ): Promise<DesktopMode> {
   const lockPath = join(stateDir, "ledger.lock");
   if (!existsSync(lockPath)) return { mode: "spawn" };
   const lock = readLockFile(lockPath);
   if (!lock || !pidAlive(lock.pid)) return { mode: "spawn" };
-  if (await probe(bodyPort)) return { mode: "attach", pid: lock.pid };
-  return { error: "desktop-body-locked", pid: lock.pid };
+  const lockPort = lock.port ?? null;
+  if (lockPort === null || lockPort !== bodyPort) {
+    return { error: "desktop-body-locked", pid: lock.pid, lockPort };
+  }
+  let heard: number | null;
+  try {
+    heard = listenerPid(bodyPort);
+  } catch {
+    heard = null;
+  }
+  if (heard !== lock.pid) return { error: "desktop-body-locked", pid: lock.pid, lockPort };
+  return { mode: "attach", pid: lock.pid };
 }
 
 export type DesktopChildName = "issuer" | "body" | "panel";
@@ -300,7 +380,46 @@ export type DesktopHooks = {
   ) => ChildProcess;
   /** Caps issuer, body, and panel readiness waits. The CLI uses the built-in budgets. */
   readyMs?: number;
+  /** Replaces the listener-pid lookup. */
+  listenerPid?: (port: number) => number | null;
+  /** Replaces the Windows owner ACL call on the state directory and the browser profile. */
+  restrictOwner?: (dir: string) => void;
 };
+
+/**
+ * Create `dir` as mode 0700, or on POSIX chmod an existing directory that has
+ * group or other bits. A symbolic link, or a directory owned by another uid,
+ * is refused. On Windows the owner ACL is applied to the directory.
+ */
+function ensureDesktopDirectory(dir: string, restrict: (target: string) => void): void {
+  let existing: ReturnType<typeof lstatSync> | null = null;
+  try {
+    existing = lstatSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (existing) {
+    if (existing.isSymbolicLink() || !existing.isDirectory()) throw new Error(`desktop-dir-refused:${dir}`);
+    if (process.platform === "win32") {
+      restrict(dir);
+      return;
+    }
+    const uid = typeof process.getuid === "function" ? process.getuid() : existing.uid;
+    if (existing.uid !== uid) throw new Error(`desktop-dir-refused:${dir}`);
+    if ((existing.mode & 0o077) !== 0) chmodSync(dir, 0o700);
+    return;
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const created = lstatSync(dir);
+  if (created.isSymbolicLink() || !created.isDirectory()) throw new Error(`desktop-dir-refused:${dir}`);
+  if (process.platform === "win32") {
+    restrict(dir);
+    return;
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : created.uid;
+  if (created.uid !== uid) throw new Error(`desktop-dir-refused:${dir}`);
+  chmodSync(dir, 0o700);
+}
 
 export function killTree(pid: number | undefined): void {
   if (pid == null) return;
@@ -401,7 +520,8 @@ export async function runDesktop(
   // file otherwise opens a panel that cannot read the ledger and does not say why.
   const passkeyHint = desktopPasskeyHint(opts.stateDir);
   if (passkeyHint) writeErr(passkeyHint);
-  mkdirSync(opts.stateDir, { recursive: true });
+  // Directories that may already hold the ledger and keys: the grants must be inheritable.
+  const restrictOwner = hooks?.restrictOwner ?? ((dir: string) => restrictToOwnerWin32(dir, undefined, true));
   const tokenPath = join(opts.stateDir, "dev-token");
   const issuerScript = join(repoRoot, "scripts", "dev-issuer.mjs");
   const mainTs = join(here, "main.ts");
@@ -479,9 +599,11 @@ export async function runDesktop(
   };
 
   try {
-    const decided = await desktopMode(opts.stateDir, opts.bodyPort);
+    ensureDesktopDirectory(opts.stateDir, restrictOwner);
+    const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
     if ("error" in decided) {
-      writeErr(`${decided.error}:${decided.pid}\n`);
+      const named = decided.lockPort === null ? "unknown" : String(decided.lockPort);
+      writeErr(`${decided.error}:${decided.pid}:${named}\n`);
       return 1;
     }
 
@@ -655,7 +777,7 @@ export async function runDesktop(
       return 1;
     }
     const profileDir = join(opts.stateDir, "browser-profile");
-    mkdirSync(profileDir, { recursive: true });
+    ensureDesktopDirectory(profileDir, restrictOwner);
     const browserArgv = scriptBrowser
       ? [opts.browser!, url]
       : [

@@ -2,7 +2,7 @@
 // implementation does the other thing, so the assertion fails.
 
 import { strict as assert } from "node:assert";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -22,9 +22,11 @@ import {
   elevatedCodeRefusal,
   planInstall,
   planUninstall,
+  refuseWritableCode,
   runInstall,
   runUninstall,
   systemToolName,
+  veraxCodeDirectories,
   type PlanOp,
 } from "../packages/body/src/install.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER } from "../packages/proxy/tests/helpers.ts";
@@ -229,6 +231,26 @@ describe("attack R14", () => {
     assert.equal(approveYes, 78);
     assert.match(err.join(""), /verax approve <stateDir> <ref>/);
     assert.equal(err.join("").includes("can be changed by"), false);
+  });
+
+  it("R14-9 the code check names real package roots and reads Windows ACLs in one process", () => {
+    // Each @verax-ai dependency resolves through its entry point (an exports map need not
+    // expose package.json); a path that is not on disk is never on the list.
+    const dirs = veraxCodeDirectories();
+    const roots = dirs.map((dir) => dir.replaceAll("\\", "/"));
+    for (const pkg of ["body", "inventory", "proxy"]) {
+      assert.ok(roots.some((dir) => dir.endsWith(`/packages/${pkg}`)), JSON.stringify(roots));
+    }
+    for (const dir of dirs) assert.ok(existsSync(dir), dir);
+    let sddlCalls = 0;
+    const refusal = refuseWritableCode("win32", {}, (argv) => {
+      const line = argv.join(" ");
+      if (/whoami/i.test(argv[0] ?? "")) return { status: 0, stdout: "desk\\op S-1-5-21-1001\n", stderr: "" };
+      if (line.includes("Get-Acl")) sddlCalls += 1;
+      return { status: 0, stdout: "{}", stderr: "" };
+    });
+    assert.equal(sddlCalls, 1, "one PowerShell process for every code path");
+    assert.match(refusal ?? "", /can be changed by/);
   });
 
   it("R14-3 an approved retry is checked against the inputs that were approved", async () => {

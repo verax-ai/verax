@@ -854,6 +854,30 @@ export class FileLedger implements Ledger {
     return this.ownsLock() ? "held" : "free";
   }
 
+  /**
+   * Record the port this process is listening on. Called once the socket is
+   * bound, so the number is the one the kernel gave us. An older lock has no
+   * port; this rewrite keeps the pid, the start time, and the token.
+   */
+  recordListenPort(port: number): void {
+    if (!Number.isInteger(port) || port <= 0 || port >= 65536) {
+      throw new Error("ledger-listen-port");
+    }
+    this.assertOwned();
+    const existing = readLock(this.lockPath);
+    if (!existing || existing.token !== this.token) {
+      this.markLost();
+      throw new Error("ledger-lost-lock");
+    }
+    const body = `${JSON.stringify({
+      pid: existing.pid,
+      startedAt: existing.startedAt,
+      token: this.token,
+      port,
+    })}\n`;
+    writeFileAtomic(this.lockPath, body);
+  }
+
   private markLost(): void {
     this.lost = true;
   }

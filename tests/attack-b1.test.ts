@@ -12,6 +12,7 @@ import { importPKCS8, SignJWT } from "jose";
 
 import { loadConfig } from "../packages/body/src/config.ts";
 import { loadEnvFile } from "../packages/body/src/init-local.ts";
+import { defaultElevated } from "../packages/body/src/install.ts";
 import { listen } from "../packages/body/src/server.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -153,7 +154,9 @@ describe("attack B1", () => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
     assert.equal(code, 78, stderr);
-    assert.match(stderr, /verax approve needs a terminal/);
+    // Elevated (the Windows CI runner): the checkout's own code is refused before the terminal check (R14-9).
+    if (defaultElevated()) assert.match(stderr, /the verax code at .+ can be changed by/);
+    else assert.match(stderr, /verax approve needs a terminal/);
     const allows = readDecisions(stateDir).filter((row) => row.claims.decision === "allow");
     assert.deepEqual(allows, [], JSON.stringify(readDecisions(stateDir)));
     rmSync(stateDir, { recursive: true, force: true });
