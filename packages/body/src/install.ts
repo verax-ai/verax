@@ -1196,7 +1196,7 @@ $result | ConvertTo-Json -Compress -Depth 4`;
   return toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], "win32");
 }
 
-type SddlHit = { status: number; text: string };
+export type SddlHit = { status: number; text: string };
 
 function sddlHit(value: unknown): SddlHit {
   if (typeof value === "string") return { status: 0, text: `${value}\n` };
@@ -1230,7 +1230,7 @@ function sddlOrMiss(map: Map<string, SddlHit>, file: string): SddlHit {
 }
 
 /** One process for every path. A failed process fails every path closed, with the tool text kept for the refusal. */
-function readSddlBatch(exec: ToolExec, paths: readonly string[]): Map<string, SddlHit> {
+export function readSddlBatch(exec: ToolExec, paths: readonly string[]): Map<string, SddlHit> {
   const wanted = uniquePaths(paths);
   const map = new Map<string, SddlHit>();
   if (wanted.length === 0) return map;
@@ -4888,6 +4888,11 @@ function invokingSid(exec: (argv: string[]) => ExecResult): string | undefined {
     winOwnerCache.sid = sid;
   }
   return sid;
+}
+
+/** The SID `whoami /user` names for this process. */
+export function windowsInvokingSid(exec: (argv: string[]) => ExecResult = defaultExec): string | undefined {
+  return invokingSid(exec);
 }
 
 function markerSource(file: string): string | undefined {

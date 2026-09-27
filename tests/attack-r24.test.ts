@@ -2,7 +2,7 @@
 // implementation does the other thing, so the assertion fails.
 
 import { strict as assert } from "node:assert";
-import { type ChildProcess } from "node:child_process";
+import { spawnSync, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { chmodSync, existsSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
@@ -308,6 +308,42 @@ describe("attack R24", () => {
       );
       assert.equal(text.includes("desktop-dir-refused:"), false, text);
       assert.equal(spawned[0], "issuer");
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  // No ACL hook: the ancestors go through the real batch read.
+  it("R24-2 on Windows, a real ancestor granting Everyone delete-child is refused", async (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows ACL");
+      return;
+    }
+    const parent = privateTempDir("verax-r24-dc-");
+    const icacls = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "icacls.exe");
+    const granted = spawnSync(icacls, [parent, "/grant", "*S-1-1-0:(DC)"], { encoding: "utf8", windowsHide: true });
+    assert.equal(granted.status, 0, `${granted.stdout}${granted.stderr}`);
+    const dir = join(parent, "state");
+    const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
+    const spawned: string[] = [];
+    const err: string[] = [];
+    try {
+      await runDesktop(
+        { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
+        (line) => err.push(line),
+        {
+          restrictOwner: () => {},
+          readyMs: 500,
+          spawn: (name) => {
+            spawned.push(name);
+            throw new Error("spawned");
+          },
+        },
+      );
+      const text = err.join("");
+      assert.match(text, new RegExp(`desktop-dir-refused:${escapeRegExp(dir)}`));
+      assert.match(text, new RegExp(`ancestor ${escapeRegExp(parent)} can be replaced by another user`, "i"));
+      assert.deepEqual(spawned, []);
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }

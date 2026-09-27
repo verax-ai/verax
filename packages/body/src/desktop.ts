@@ -6,13 +6,16 @@ import { basename, dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DESKTOP_PARENT_PID } from "./desktop-parent.ts";
 import {
+  defaultExec,
   posixOthersCanReplace,
+  readSddlBatch,
   restrictToOwnerWin32,
+  sddlOwner,
   systemToolEnv,
   systemToolPath,
   toolArgv,
   windowsDirectorySids,
-  windowsSddlArgv,
+  windowsInvokingSid,
   windowsUserCanWrite,
 } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
@@ -518,33 +521,28 @@ function devIssuerIsLink(dir: string): boolean {
   }
 }
 
-/** SDDL of one directory, or null when the read does not return a descriptor; `why.text` then says what the read returned. */
-function readWindowsDirectorySddl(dir: string, why?: { text: string }): string | null {
-  const argv = windowsSddlArgv(dir);
-  const file = argv[0];
-  const fail = (text: string): null => {
-    if (why) why.text = text;
-    return null;
-  };
-  if (!file) return fail("no powershell path");
-  const ran = spawnSync(file, argv.slice(1), {
-    encoding: "utf8",
-    windowsHide: true,
-    shell: false,
-    timeout: 30_000,
-    env: systemToolEnv("win32"),
-  });
-  if (ran.error) return fail(ran.error.message);
-  if ((ran.status ?? 1) !== 0) {
-    const first = (ran.stderr ?? "").trim().split(/\r?\n/)[0] ?? "";
-    return fail(`exit ${ran.status ?? ran.signal}${first ? `: ${first.slice(0, 200)}` : ""}`);
+/** An SDDL, or null with the first line of what the read returned instead. */
+type WindowsAcl = { sddl: string | null; why: string };
+
+/**
+ * SDDL of every path from one PowerShell process (the installer's batch
+ * reader). One process per path timed out on a loaded Windows runner: the
+ * ancestor walk alone reads four to six directories.
+ */
+function readWindowsAcls(paths: readonly string[]): Map<string, WindowsAcl> {
+  const read = readSddlBatch(defaultExec, paths);
+  const out = new Map<string, WindowsAcl>();
+  for (const p of paths) {
+    const hit = read.get(p);
+    const text = (hit?.text ?? "").replace(/^\uFEFF/, "").trim();
+    if (hit && hit.status === 0 && text !== "") out.set(p, { sddl: text, why: "" });
+    else out.set(p, { sddl: null, why: text.split(/\r?\n/)[0]?.slice(0, 200) || "no answer" });
   }
-  const text = (ran.stdout ?? "").replace(/^\uFEFF/, "").trim();
-  return text === "" ? fail("empty output") : text;
+  return out;
 }
 
-function unreadable(why: { text: string }): string {
-  return why.text === "" ? "" : ` (${why.text})`;
+function unreadable(why: string): string {
+  return why === "" ? "" : ` (${why})`;
 }
 
 /** Last bytes kept from a child so a long log cannot grow without a bound. */
@@ -634,22 +632,6 @@ function intermediateLink(dir: string): string | null {
   return null;
 }
 
-function firstExistingPath(dir: string): string {
-  let cur = dir;
-  for (let i = 0; i < 64; i += 1) {
-    try {
-      lstatSync(cur);
-      return cur;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") break;
-    }
-    const parent = dirname(cur);
-    if (parent === cur) break;
-    cur = parent;
-  }
-  return dir;
-}
-
 function refusePosixAncestors(dir: string): void {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   for (const ancestor of ancestorPaths(dir)) {
@@ -678,7 +660,7 @@ function ancestorInvokingSid(dir: string, opts?: DesktopDirectoryOpts): string {
   if (hooked !== "") return hooked;
   if (opts?.windowsDirectoryOwner || opts?.windowsDirectoryDacl || opts?.windowsAncestorDacl) return "";
   try {
-    return windowsDirectorySids(firstExistingPath(dir)).invokingSid?.trim().toUpperCase() ?? "";
+    return windowsInvokingSid()?.trim().toUpperCase() ?? "";
   } catch {
     return "";
   }
@@ -687,25 +669,34 @@ function ancestorInvokingSid(dir: string, opts?: DesktopDirectoryOpts): string {
 function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void {
   if ((opts?.windowsDirectoryDacl || opts?.windowsDirectoryOwner) && !opts?.windowsAncestorDacl) return;
   const svc = ancestorInvokingSid(dir, opts);
-  for (const ancestor of ancestorPaths(dir)) {
-    let sddl: string | null;
-    const why = { text: "" };
-    if (opts?.windowsAncestorDacl) {
-      sddl = opts.windowsAncestorDacl(ancestor);
-    } else {
+  const ancestors = ancestorPaths(dir);
+  let read: Map<string, WindowsAcl> | null = null;
+  if (!opts?.windowsAncestorDacl) {
+    const present = ancestors.filter((ancestor) => {
       try {
         lstatSync(ancestor);
+        return true;
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
-        refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+        return refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
       }
-      sddl = readWindowsDirectorySddl(ancestor, why);
+    });
+    read = readWindowsAcls(present);
+  }
+  for (const ancestor of ancestors) {
+    let acl: WindowsAcl;
+    if (opts?.windowsAncestorDacl) {
+      acl = { sddl: opts.windowsAncestorDacl(ancestor), why: "" };
+    } else {
+      const hit = read?.get(ancestor);
+      if (!hit) continue;
+      acl = hit;
     }
-    if (sddl === null || windowsUserCanWrite(sddl, { ancestor: true, svcSid: svc })) {
+    if (acl.sddl === null || windowsUserCanWrite(acl.sddl, { ancestor: true, svcSid: svc })) {
       refuseDesktopDirectory(
         dir,
-        sddl === null
-          ? `ancestor ${ancestor} ACL could not be read${unreadable(why)}`
+        acl.sddl === null
+          ? `ancestor ${ancestor} ACL could not be read${unreadable(acl.why)}`
           : `ancestor ${ancestor} can be replaced by another user`,
       );
     }
@@ -749,26 +740,34 @@ function ensureDesktopDirectory(
   if (existing) {
     if (existing.isSymbolicLink() || !existing.isDirectory()) refuseDesktopDirectory(dir);
     if (platform === "win32") {
-      const read = opts?.windowsDirectoryOwner ?? windowsDirectorySids;
-      const found = read(dir);
-      const owner = found.ownerSid?.trim().toUpperCase() ?? "";
-      const invoking = found.invokingSid?.trim().toUpperCase() ?? "";
+      // Production passes no hook: owner and DACL come from one SDDL read.
+      const daclHook = opts?.windowsDirectoryDacl;
+      const leaf = !opts?.windowsDirectoryOwner && !daclHook ? readWindowsAcls([dir]).get(dir) : undefined;
+      if (leaf && leaf.sddl === null) {
+        refuseDesktopDirectory(dir, `the directory ACL could not be read${unreadable(leaf.why)}; use a new directory`);
+      }
+      let owner: string;
+      let invoking: string;
+      if (leaf?.sddl) {
+        owner = sddlOwner(leaf.sddl)?.toUpperCase() ?? "";
+        invoking = windowsInvokingSid()?.trim().toUpperCase() ?? "";
+      } else {
+        const found = (opts?.windowsDirectoryOwner ?? windowsDirectorySids)(dir);
+        owner = found.ownerSid?.trim().toUpperCase() ?? "";
+        invoking = found.invokingSid?.trim().toUpperCase() ?? "";
+      }
       // An elevated administrator's new directories are owned by Administrators, not by the user;
       // no other local user can make a directory with that owner, or with SYSTEM.
       const ownerOk = owner === invoking || owner === "S-1-5-32-544" || owner === "S-1-5-18";
       if (owner === "" || invoking === "" || !ownerOk) refuseDesktopDirectory(dir);
-      // R16-12 injects the owner and not a DACL. Production passes neither and reads the SDDL.
-      const daclHook = opts?.windowsDirectoryDacl;
+      // R16-12 injects the owner and not a DACL.
       if (daclHook || !opts?.windowsDirectoryOwner) {
-        const why = { text: "" };
-        const sddl = daclHook ? daclHook(dir) : readWindowsDirectorySddl(dir, why);
+        const sddl = daclHook ? daclHook(dir) : (leaf?.sddl ?? null);
         // The invoking user's own entry is not "someone else", also when an elevated shell made Administrators the owner.
         if (sddl === null || windowsUserCanWrite(sddl, { svcSid: invoking })) {
           refuseDesktopDirectory(
             dir,
-            sddl === null
-              ? `the directory ACL could not be read${unreadable(why)}; use a new directory`
-              : DIRECTORY_WRITABLE_BY_OTHERS,
+            sddl === null ? "the directory ACL could not be read; use a new directory" : DIRECTORY_WRITABLE_BY_OTHERS,
           );
         }
       }
