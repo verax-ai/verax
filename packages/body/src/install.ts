@@ -54,7 +54,7 @@ const DARWIN_STATE = "/Library/Application Support/Verax/state";
 const DARWIN_MARKER = "/Library/Verax/install.json";
 const DARWIN_PLIST = "/Library/LaunchDaemons/com.verax-ai.body.plist";
 
-const WIN32_TOOLS = ["whoami", "icacls", "schtasks", "net", "fsutil", "powershell"] as const;
+const WIN32_TOOLS = ["whoami", "icacls", "schtasks", "net", "fsutil", "powershell", "netstat"] as const;
 const LINUX_TOOLS = ["useradd", "userdel", "groupdel", "chown", "chmod", "id", "getent", "stat", "systemctl", "journalctl", "getenforce", "ps", "ausearch"] as const;
 const DARWIN_TOOLS = ["dscl", "launchctl", "chown", "chmod", "id", "stat", "plutil", "lsof"] as const;
 const LINUX_TOOL_DIRS = ["/usr/sbin", "/usr/bin", "/sbin", "/bin"] as const;

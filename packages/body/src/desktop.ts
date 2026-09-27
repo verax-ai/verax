@@ -231,13 +231,9 @@ export type DesktopMode =
 
 function listenerArgv(port: number, platform: NodeJS.Platform): string[] | null {
   if (platform === "win32") {
-    const script =
-      "$utf8 = New-Object System.Text.UTF8Encoding $false; " +
-      "[Console]::OutputEncoding = $utf8; $OutputEncoding = $utf8; " +
-      "Get-NetTCPConnection -State Listen -LocalPort " +
-      String(port) +
-      " -ErrorAction SilentlyContinue | ForEach-Object { Write-Output ($_.LocalAddress.ToString() + ' ' + $_.OwningProcess) }";
-    return toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], "win32");
+    // netstat, not Get-NetTCPConnection: loading the NetTCPIP module in PowerShell took long
+    // enough on a busy machine to time the lookup out, and a timed-out lookup refuses the attach.
+    return toolArgv("netstat", ["-ano", "-p", "TCP"], "win32");
   }
   if (platform === "darwin") {
     return toolArgv("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], "darwin");
@@ -278,9 +274,11 @@ function loopbackPids(text: string, port: number): number[] {
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim();
     if (line === "") continue;
-    const win = /^(\S+)\s+(\d+)$/.exec(line);
+    // netstat -ano: "TCP  127.0.0.1:<port>  0.0.0.0:0  <state>  <pid>". The state word is localized;
+    // a listening socket is the one whose foreign address is 0.0.0.0:0.
+    const win = /^TCP\s+127\.0\.0\.1:(\d+)\s+0\.0\.0\.0:0\s+\S+\s+(\d+)$/i.exec(line);
     if (win) {
-      if (win[1] === "127.0.0.1") pids.push(Number(win[2]));
+      if (Number(win[1]) === port) pids.push(Number(win[2]));
       continue;
     }
     if (!at.test(line)) continue;

@@ -50,7 +50,7 @@ be held.
   row the ledger already resolved as allow.
 - R14-5: a missing piece named by the manifest is `missing piece: <path>`.
 - R14-7: a repeated signed `duplicate-effect` row is named and counted once.
-- R14-10: the body writes `port` into `ledger.lock` once it is listening. `verax desktop` joins that body only when the lock's port is the `--body-port` it was given and the process listening on 127.0.0.1 at that port is the lock's pid (`Get-NetTCPConnection`, `ss`, or `lsof` through the install tool path). Anything else is `desktop-body-locked:<pid>:<port or unknown>` and exits 1. A lock with no port is that stop until the body is started again.
+- R14-10: the body writes `port` into `ledger.lock` once it is listening. `verax desktop` joins that body only when the lock's port is the `--body-port` it was given and the process listening on 127.0.0.1 at that port is the lock's pid (`netstat -ano`, `ss`, or `lsof` through the install tool path). Anything else is `desktop-body-locked:<pid>:<port or unknown>` and exits 1. A lock with no port is that stop until the body is started again.
 - R14-11: the state directory and the browser profile are created mode 0700. On POSIX an existing directory with group or other bits is chmod 0700; a symbolic link or another uid is refused. On Windows both directories get an owner, Administrators and SYSTEM ACL whose grants are inheritable, so files already in the state directory keep their access.
 - A checkpoint chain check that throws is now named as a problem; the dependency does not throw for any input the
   verifier accepts today, so this has no test.
