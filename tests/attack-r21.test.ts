@@ -4,13 +4,12 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer } from "node:http";
-import { createServer, type Server } from "node:net";
+import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import path, { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { ipv6LoopbackAvailable, runDesktop } from "../packages/body/src/desktop.ts";
+import { forwardIpv6Loopback, runDesktop } from "../packages/body/src/desktop.ts";
 import {
   ensureTokenParent,
   systemToolEnv,
@@ -26,17 +25,28 @@ function ownerDir(prefix: string): string {
   return dir;
 }
 
-function listen(server: Server, port: number, host: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen({ port, host, ipv6Only: host === "::1" }, () => resolve());
-  });
+function ownerDirectoryHooks(): {
+  restrictOwner: () => void;
+  windowsDirectoryOwner?: () => { ownerSid: string; invokingSid: string };
+  windowsDirectoryDacl?: () => string;
+} {
+  const restrictOwner = () => {};
+  if (process.platform !== "win32") return { restrictOwner };
+  const sid = "S-1-5-21-1";
+  return {
+    restrictOwner,
+    windowsDirectoryOwner: () => ({ ownerSid: sid, invokingSid: sid }),
+    windowsDirectoryDacl: () => `O:${sid}D:(A;;FA;;;${sid})`,
+  };
 }
 
-function close(server: Server): Promise<void> {
-  return new Promise((resolve) => {
-    server.close(() => resolve());
-  });
+async function ipv6LeftFree(port: number): Promise<void> {
+  const opened = await forwardIpv6Loopback(port);
+  if (!opened.ok) {
+    assert.equal(opened.reason, "unsupported");
+    return;
+  }
+  await new Promise<void>((resolve) => opened.server.close(() => resolve()));
 }
 
 function takePort(): Promise<number> {
@@ -64,11 +74,7 @@ function entryIsUnder(entry: string, root: string): boolean {
 }
 
 describe("attack R21", () => {
-  it("R21-1 attach refuses [::1] on the issuer port when another process holds it", async (t) => {
-    if (!(await ipv6LoopbackAvailable())) {
-      t.skip("this host has no IPv6 loopback");
-      return;
-    }
+  it("R21-1 a live body on the state directory is refused before the issuer port is claimed", async () => {
     const dir = ownerDir("verax-r21-attach-");
     const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
@@ -76,38 +82,30 @@ describe("attack R21", () => {
       `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
       "utf8",
     );
-    const occupant = createServer();
-    const meta = createHttpServer((_req, res) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ authorization_servers: [`http://localhost:${issuerPort}`] }));
-    });
     const err: string[] = [];
     const spawned: string[] = [];
     try {
-      await listen(occupant, issuerPort, "::1");
-      await new Promise<void>((resolve, reject) => {
-        meta.once("error", reject);
-        meta.listen(bodyPort, "127.0.0.1", () => resolve());
-      });
       const code = await runDesktop(
         { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
         (line) => err.push(line),
         {
           readyMs: 500,
-          restrictOwner: () => {},
+          ...ownerDirectoryHooks(),
           listenerPid: () => process.pid,
           spawn: (name) => {
             spawned.push(name);
-            throw new Error("spawned while attaching with [::1] on the issuer port already taken");
+            throw new Error("spawned while a body was already running");
           },
         },
       );
-      assert.equal(code, 1, err.join(""));
-      assert.match(err.join(""), new RegExp(`desktop-port-busy:issuer:${issuerPort}:ipv6`));
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.match(text, new RegExp(`desktop-body-running:${bodyPort}`));
+      assert.match(text, /verax unlock is for a dead lock only/);
       assert.deepEqual(spawned, []);
+      await ipv6LeftFree(bodyPort);
+      await ipv6LeftFree(issuerPort);
     } finally {
-      await close(occupant);
-      if (meta.listening) await close(meta);
       rmSync(dir, { recursive: true, force: true });
     }
   });

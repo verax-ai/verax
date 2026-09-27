@@ -4,8 +4,15 @@ import { get } from "node:http";
 import { createConnection, createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isLoopbackHost } from "./config.ts";
-import { restrictToOwnerWin32, systemToolEnv, systemToolPath, toolArgv, windowsDirectorySids } from "./install.ts";
+import {
+  restrictToOwnerWin32,
+  systemToolEnv,
+  systemToolPath,
+  toolArgv,
+  windowsDirectorySids,
+  windowsSddlArgv,
+  windowsUserCanWrite,
+} from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
@@ -284,80 +291,6 @@ export function healthzUp(port: number): Promise<boolean> {
   });
 }
 
-/** Same document the panel reads: `apps/panel/src/session.ts` fetches this path. */
-const RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
-const RESOURCE_METADATA_TIMEOUT_MS = 2_000;
-
-type BodyAuthorizationServer =
-  | { kind: "loopback"; port: number }
-  | { kind: "remote" }
-  | { kind: "unknown" };
-
-/**
- * `authorization_servers[0]` from the body on 127.0.0.1:`bodyPort`.
- * `unknown` is a missing document, a non-200, or a first entry that is not a URL.
- * A loopback host without an explicit port uses 80 or 443.
- */
-function readBodyAuthorizationServer(bodyPort: number): Promise<BodyAuthorizationServer> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = (value: BodyAuthorizationServer) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    const req = get(
-      {
-        host: "127.0.0.1",
-        port: bodyPort,
-        path: RESOURCE_METADATA_PATH,
-        timeout: RESOURCE_METADATA_TIMEOUT_MS,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on("data", (chunk: Buffer | string) => {
-          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-        });
-        res.on("end", () => {
-          if (res.statusCode !== 200) {
-            finish({ kind: "unknown" });
-            return;
-          }
-          finish(authorizationServerFromMetadata(Buffer.concat(chunks).toString("utf8")));
-        });
-        res.on("error", () => finish({ kind: "unknown" }));
-      },
-    );
-    req.once("timeout", () => {
-      req.destroy();
-      finish({ kind: "unknown" });
-    });
-    req.once("error", () => finish({ kind: "unknown" }));
-  });
-}
-
-function authorizationServerFromMetadata(text: string): BodyAuthorizationServer {
-  let body: { authorization_servers?: unknown };
-  try {
-    body = JSON.parse(text) as { authorization_servers?: unknown };
-  } catch {
-    return { kind: "unknown" };
-  }
-  const first = Array.isArray(body.authorization_servers) ? body.authorization_servers[0] : undefined;
-  if (typeof first !== "string" || first.trim() === "") return { kind: "unknown" };
-  let url: URL;
-  try {
-    url = new URL(first.trim());
-  } catch {
-    return { kind: "unknown" };
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return { kind: "unknown" };
-  if (!isLoopbackHost(url.hostname)) return { kind: "remote" };
-  const port = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
-  if (!Number.isInteger(port) || port <= 0 || port >= 65536) return { kind: "unknown" };
-  return { kind: "loopback", port };
-}
-
 export type DesktopMode =
   | { mode: "spawn" }
   | { mode: "attach"; pid: number }
@@ -366,7 +299,7 @@ export type DesktopMode =
 function listenerArgv(port: number, platform: NodeJS.Platform): string[] | null {
   if (platform === "win32") {
     // netstat, not Get-NetTCPConnection: loading the NetTCPIP module in PowerShell took long
-    // enough on a busy machine to time the lookup out, and a timed-out lookup refuses the attach.
+    // enough on a busy machine to time the lookup out, and a timed-out lookup is no listener.
     return toolArgv("netstat", ["-ano", "-p", "TCP"], "win32");
   }
   if (platform === "darwin") {
@@ -435,12 +368,14 @@ function lsofPids(text: string): number[] {
  * One ledger, one body. The desktop used to build its own issuer and body on
  * every open, which on a machine whose body starts at logon put the window on
  * a second, empty ledger: the panel looked broken while the real decisions sat
- * in the directory the lock names. So the lock is read first. A live lock is
- * joined only when it records this port and that pid is the process listening
- * on 127.0.0.1 there. A 200 from /healthz is not the check. Any other live
+ * in the directory the lock names. So the lock is read first. A live lock that
+ * records this port, whose pid is the listener on 127.0.0.1 there, is
+ * `attach`. 0.4.0 does not join that body: `runDesktop` stops before it
+ * claims a port or starts a child. A later release may join again, once that
+ * body is supervised. A 200 from /healthz is not the check. Any other live
  * lock stops the desktop: `desktop-body-locked:<pid>:<port or unknown>`. A
  * lock with no port is that stop until the body is started again. A dead or
- * unreadable lock is left for `verax unlock`.
+ * unreadable lock is left for `verax unlock`, which is only for a dead lock.
  */
 export async function desktopMode(
   stateDir: string,
@@ -520,18 +455,59 @@ export type DesktopHooks = {
   platform?: NodeJS.Platform;
   /** Replaces the Windows owner-SID and invoking-SID lookup. */
   windowsDirectoryOwner?: (dir: string) => { ownerSid?: string; invokingSid?: string };
+  /** Replaces the Windows DACL read. The text is the SDDL `windowsUserCanWrite` already judges. */
+  windowsDirectoryDacl?: (dir: string) => string;
 };
 
 type DesktopDirectoryOpts = {
   platform?: NodeJS.Platform;
   windowsDirectoryOwner?: (dir: string) => { ownerSid?: string; invokingSid?: string };
+  windowsDirectoryDacl?: (dir: string) => string;
 };
 
+const DIRECTORY_WRITABLE_BY_OTHERS = "the directory was writable by others; use a new directory";
+
+function refuseDesktopDirectory(dir: string, detail?: string): never {
+  throw new Error(detail === undefined ? `desktop-dir-refused:${dir}` : `desktop-dir-refused:${dir}\n${detail}`);
+}
+
+/** `dev-issuer` planted as a symlink or junction. A missing entry is not that. */
+function devIssuerIsLink(dir: string): boolean {
+  try {
+    return lstatSync(join(dir, "dev-issuer")).isSymbolicLink();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw err;
+  }
+}
+
+/** SDDL of one directory, or null when the read does not return a descriptor. */
+function readWindowsDirectorySddl(dir: string): string | null {
+  const argv = windowsSddlArgv(dir);
+  const file = argv[0];
+  if (!file) return null;
+  const ran = spawnSync(file, argv.slice(1), {
+    encoding: "utf8",
+    windowsHide: true,
+    shell: false,
+    timeout: 30_000,
+    env: systemToolEnv("win32"),
+  });
+  if (ran.error || (ran.status ?? 1) !== 0) return null;
+  const text = (ran.stdout ?? "").replace(/^\uFEFF/, "").trim();
+  return text === "" ? null : text;
+}
+
 /**
- * Create `dir` as mode 0700, or on POSIX chmod an existing directory that has
- * group or other bits. A symbolic link, or a directory owned by another uid,
- * is refused. On Windows an existing directory is refused unless its owner
- * SID is the invoking SID; the owner ACL is applied only then.
+ * Create `dir` as mode 0700. An existing directory another user could write
+ * is refused and left as it is: on POSIX that is `mode & 0o022`, on Windows
+ * a DACL `windowsUserCanWrite` accepts for someone other than the owner
+ * (passed as `svcSid`), Administrators, or SYSTEM. A directory with only
+ * owner access keeps the previous path, including a chmod of group/other
+ * read or execute bits down to 0700. `dev-issuer` as a symlink or junction
+ * is refused. A symbolic link, or a directory owned by another uid, is
+ * refused. On Windows an existing directory is refused unless its owner SID
+ * is the invoking SID, Administrators, or SYSTEM.
  */
 function ensureDesktopDirectory(
   dir: string,
@@ -546,7 +522,7 @@ function ensureDesktopDirectory(
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
   if (existing) {
-    if (existing.isSymbolicLink() || !existing.isDirectory()) throw new Error(`desktop-dir-refused:${dir}`);
+    if (existing.isSymbolicLink() || !existing.isDirectory()) refuseDesktopDirectory(dir);
     if (platform === "win32") {
       const read = opts?.windowsDirectoryOwner ?? windowsDirectorySids;
       const found = read(dir);
@@ -555,24 +531,42 @@ function ensureDesktopDirectory(
       // An elevated administrator's new directories are owned by Administrators, not by the user;
       // no other local user can make a directory with that owner, or with SYSTEM.
       const ownerOk = owner === invoking || owner === "S-1-5-32-544" || owner === "S-1-5-18";
-      if (owner === "" || invoking === "" || !ownerOk) throw new Error(`desktop-dir-refused:${dir}`);
+      if (owner === "" || invoking === "" || !ownerOk) refuseDesktopDirectory(dir);
+      // R16-12 injects the owner and not a DACL. Production passes neither and reads the SDDL.
+      const daclHook = opts?.windowsDirectoryDacl;
+      if (daclHook || !opts?.windowsDirectoryOwner) {
+        const sddl = daclHook ? daclHook(dir) : readWindowsDirectorySddl(dir);
+        if (sddl === null || windowsUserCanWrite(sddl, { svcSid: owner })) {
+          refuseDesktopDirectory(
+            dir,
+            sddl === null ? "the directory ACL could not be read; use a new directory" : DIRECTORY_WRITABLE_BY_OTHERS,
+          );
+        }
+      }
+      if (devIssuerIsLink(dir)) {
+        refuseDesktopDirectory(dir, "dev-issuer in that directory is a symlink or junction; use a new directory");
+      }
       restrict(dir);
       return;
     }
     const uid = typeof process.getuid === "function" ? process.getuid() : existing.uid;
-    if (existing.uid !== uid) throw new Error(`desktop-dir-refused:${dir}`);
+    if (existing.uid !== uid) refuseDesktopDirectory(dir);
+    if ((existing.mode & 0o022) !== 0) refuseDesktopDirectory(dir, DIRECTORY_WRITABLE_BY_OTHERS);
+    if (devIssuerIsLink(dir)) {
+      refuseDesktopDirectory(dir, "dev-issuer in that directory is a symlink or junction; use a new directory");
+    }
     if ((existing.mode & 0o077) !== 0) chmodSync(dir, 0o700);
     return;
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const created = lstatSync(dir);
-  if (created.isSymbolicLink() || !created.isDirectory()) throw new Error(`desktop-dir-refused:${dir}`);
+  if (created.isSymbolicLink() || !created.isDirectory()) refuseDesktopDirectory(dir);
   if (platform === "win32") {
     restrict(dir);
     return;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : created.uid;
-  if (created.uid !== uid) throw new Error(`desktop-dir-refused:${dir}`);
+  if (created.uid !== uid) refuseDesktopDirectory(dir);
   chmodSync(dir, 0o700);
 }
 
@@ -810,6 +804,7 @@ export async function runDesktop(
     ensureDesktopDirectory(opts.stateDir, restrictOwner, {
       platform: hooks?.platform,
       windowsDirectoryOwner: hooks?.windowsDirectoryOwner,
+      windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
     });
     const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
     if ("error" in decided) {
@@ -818,73 +813,30 @@ export async function runDesktop(
       return 1;
     }
 
-    // Joining a running body. The panel takes its issuer from
-    // authorization_servers[0] on the body's protected-resource metadata, so
-    // that URL is the origin to account for, not --issuer-port. The token is
-    // not ours to read. The panel's own origin has to be on that issuer's
-    // allow-list (VERAX_DEV_REDIRECT_URIS on the running issuer), which this
-    // run cannot set after the fact.
-    // Attach joins a body that already holds 127.0.0.1 on the body port.
-    // [::1] on the body port is still this run's to hold. A loopback issuer
-    // (localhost, 127.0.0.1, [::1]) must already have a 127.0.0.1 listener,
-    // and [::1] on that issuer's port is held here. An issuer on another host
-    // is not held. The panel port is claimed below.
-    // A listener on [::1] that is not the forwarder this process just opened
-    // is a refusal: the browser's localhost lookup would reach it, and the
-    // passkey ceremony is sent to the issuer origin.
+    // 0.4.0 does not join a body that is already running on this state directory.
+    // The attached body is not supervised: if it dies, another local user can
+    // bind 127.0.0.1 on its port and the panel would hand over the operator
+    // session. Stop before any port is claimed and before any child starts.
     if (decided.mode === "attach") {
-      const named = await readBodyAuthorizationServer(opts.bodyPort);
-      if (named.kind === "unknown") {
-        writeErr("desktop-attach-issuer-unknown\n");
-        stopAll();
-        return 1;
-      }
-      if (named.kind === "loopback") {
-        const hear = hooks?.listenerPid ?? loopbackListenPid;
-        let heard: number | null;
-        try {
-          heard = hear(named.port);
-        } catch {
-          heard = null;
-        }
-        if (heard === null) {
-          writeErr(`desktop-attach-issuer-down:${named.port}\n`);
-          stopAll();
-          return 1;
-        }
-      }
-      const bodyV6 = await claimIpv6(opts.bodyPort);
-      if (bodyV6 === "busy") {
-        writeErr(desktopPortBusyLine("body", opts.bodyPort, true));
-        stopAll();
-        return 1;
-      }
-      if (named.kind === "loopback") {
-        const issuerV6 = await claimIpv6(named.port);
-        if (issuerV6 === "busy") {
-          writeErr(desktopPortBusyLine("issuer", named.port, true));
-          stopAll();
-          return 1;
-        }
-      }
+      writeErr(`desktop-body-running:${opts.bodyPort}\n`);
+      writeErr(
+        "a body is already running on this state directory; use the panel of the desktop that started it, or stop that body first. verax unlock is for a dead lock only\n",
+      );
+      return 1;
     }
 
-    // The body port is that body. Only the ports this run will bind must be free.
-    const ports: [DesktopChildName, number][] =
-      decided.mode === "spawn"
-        ? [
-            ["issuer", opts.issuerPort],
-            ["body", opts.bodyPort],
-            ["panel", opts.panelPort],
-          ]
-        : [["panel", opts.panelPort]];
+    // Only the ports this run will bind must be free.
+    const ports: [DesktopChildName, number][] = [
+      ["issuer", opts.issuerPort],
+      ["body", opts.bodyPort],
+      ["panel", opts.panelPort],
+    ];
     for (const [name, port] of ports) {
       if (await busy(name, port)) return 1;
     }
 
     let token: string | null = null;
-    if (decided.mode === "spawn") {
-      // A token or pin left on disk is the previous run's. This issuer must write both.
+    // A token or pin left on disk is the previous run's. This issuer must write both.
       // This file is the dev issuer's --out token, not the install agent token
       // (`%ProgramData%\Verax\agent-token\<SID>\agent.token` or `~/.verax/agent.token`).
       discardStaleFile(tokenPath);
@@ -976,7 +928,6 @@ export async function runDesktop(
         stopAll();
         return 1;
       }
-    }
 
     const panelSources = [
       join(panelDir, "src"),
@@ -1039,6 +990,7 @@ export async function runDesktop(
     ensureDesktopDirectory(profileDir, restrictOwner, {
       platform: hooks?.platform,
       windowsDirectoryOwner: hooks?.windowsDirectoryOwner,
+      windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
     });
     const browserArgv = scriptBrowser
       ? [opts.browser!, url]
@@ -1058,9 +1010,7 @@ export async function runDesktop(
       return 1;
     }
     process.stdout.write(
-      decided.mode === "attach"
-        ? `desktop-ready body=${opts.bodyPort} panel=${opts.panelPort} attached=1 pid=${decided.pid}\n`
-        : `desktop-ready issuer=${opts.issuerPort} body=${opts.bodyPort} panel=${opts.panelPort}\n`,
+      `desktop-ready issuer=${opts.issuerPort} body=${opts.bodyPort} panel=${opts.panelPort}\n`,
     );
     const onSignal = () => {
       stopAll();

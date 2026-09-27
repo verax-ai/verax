@@ -23,9 +23,10 @@ import { FileLedger } from "../packages/proxy/src/ledger.ts";
 import { loadPolicy } from "../packages/proxy/src/policy.ts";
 import { createProxy } from "../packages/proxy/src/proxy.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER } from "../packages/proxy/tests/helpers.ts";
+import { privateTempDir } from "./private-temp.ts";
 
 function ownerDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = privateTempDir(prefix);
   if (process.platform !== "win32") chmodSync(dir, 0o700);
   return dir;
 }

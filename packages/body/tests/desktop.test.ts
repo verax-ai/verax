@@ -1,11 +1,11 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { desktopMode, desktopPasskeyHint, issuerEnv, parseDesktopArgs } from "../src/desktop.ts";
+import { desktopMode, desktopPasskeyHint, forwardIpv6Loopback, issuerEnv, parseDesktopArgs, runDesktop } from "../src/desktop.ts";
 import { CREDENTIALS_FILE } from "../src/operator-credentials.ts";
 
 function freePort(): Promise<number> {
@@ -51,17 +51,61 @@ function deadPid(): number {
 }
 
 /**
- * One ledger, one body. The desktop used to build its own issuer and body
- * every time, so on a machine whose body starts at logon the window opened
- * on a second, empty ledger - the panel looked broken while the real
- * decisions sat in another directory. When the lock is held by a live
- * process, names this port, and that pid is the listener, the panel joins it.
+ * One ledger, one body. A live lock that names this port and whose pid is
+ * the listener is `attach` from `desktopMode`. 0.4.0 refuses that result
+ * before it claims a port or starts a child. A dead lock is still spawn.
  */
-describe("verax desktop joins a running body", () => {
-  it("attaches when the lock names the body port and the listener is that pid", async () => {
+describe("verax desktop and a lock on the state directory", () => {
+  it("refuses when the lock names the body port and the listener is that pid", async () => {
     const port = await freePort();
-    const dir = stateWithLock(process.pid, port);
-    assert.deepEqual(await desktopMode(dir, port, () => process.pid), { mode: "attach", pid: process.pid });
+    const issuerPort = await freePort();
+    const panelPort = await freePort();
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-mode-")));
+    if (process.platform !== "win32") chmodSync(dir, 0o700);
+    writeFileSync(
+      join(dir, "ledger.lock"),
+      `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: "t", port })}\n`,
+      "utf8",
+    );
+    const err: string[] = [];
+    const spawned: string[] = [];
+    const sid = "S-1-5-21-1";
+    try {
+      const code = await runDesktop(
+        { stateDir: dir, issuerPort, bodyPort: port, panelPort, browser: "fake-browser.mjs" },
+        (line) => err.push(line),
+        {
+          readyMs: 500,
+          restrictOwner: () => {},
+          ...(process.platform === "win32"
+            ? {
+                windowsDirectoryOwner: () => ({ ownerSid: sid, invokingSid: sid }),
+                windowsDirectoryDacl: () => `O:${sid}D:(A;;FA;;;${sid})`,
+              }
+            : {}),
+          listenerPid: () => process.pid,
+          spawn: (name) => {
+            spawned.push(name);
+            throw new Error("spawned while a body was already running");
+          },
+        },
+      );
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.match(text, new RegExp(`desktop-body-running:${port}`));
+      assert.match(text, /verax unlock is for a dead lock only/);
+      assert.deepEqual(spawned, []);
+      for (const held of [port, issuerPort]) {
+        const opened = await forwardIpv6Loopback(held);
+        if (!opened.ok) {
+          assert.equal(opened.reason, "unsupported");
+          continue;
+        }
+        await new Promise<void>((resolve) => opened.server.close(() => resolve()));
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("refuses when the lock is live but nothing answers on the body port", async () => {

@@ -21,6 +21,7 @@ import {
 } from "../packages/body/src/desktop.ts";
 import { EX_CONFIG } from "../packages/body/src/config.ts";
 import { readInstallHealthNonce } from "../packages/body/src/health-extras.ts";
+import { privateTempDir } from "./private-temp.ts";
 import {
   codeDirFor,
   healthzProvesService,
@@ -35,7 +36,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const repo = join(root, "..");
 
 function ownerDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  const dir = privateTempDir(prefix);
   if (process.platform !== "win32") chmodSync(dir, 0o700);
   return dir;
 }

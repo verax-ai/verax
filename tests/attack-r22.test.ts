@@ -3,13 +3,12 @@
 
 import { strict as assert } from "node:assert";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { createServer as createHttpServer, type Server as HttpServer } from "node:http";
-import { createServer, type Server } from "node:net";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { ipv6LoopbackAvailable, runDesktop } from "../packages/body/src/desktop.ts";
+import { forwardIpv6Loopback, runDesktop } from "../packages/body/src/desktop.ts";
 import { runDoctor } from "../packages/body/src/doctor.ts";
 
 function ownerDir(prefix: string): string {
@@ -18,21 +17,28 @@ function ownerDir(prefix: string): string {
   return dir;
 }
 
-function listen(server: Server | HttpServer, port: number, host: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen({ port, host, ipv6Only: host === "::1" }, () => resolve());
-  });
+function ownerDirectoryHooks(): {
+  restrictOwner: () => void;
+  windowsDirectoryOwner?: () => { ownerSid: string; invokingSid: string };
+  windowsDirectoryDacl?: () => string;
+} {
+  const restrictOwner = () => {};
+  if (process.platform !== "win32") return { restrictOwner };
+  const sid = "S-1-5-21-1";
+  return {
+    restrictOwner,
+    windowsDirectoryOwner: () => ({ ownerSid: sid, invokingSid: sid }),
+    windowsDirectoryDacl: () => `O:${sid}D:(A;;FA;;;${sid})`,
+  };
 }
 
-function close(server: Server | HttpServer): Promise<void> {
-  return new Promise((resolve) => {
-    if (!server.listening) {
-      resolve();
-      return;
-    }
-    server.close(() => resolve());
-  });
+async function ipv6LeftFree(port: number): Promise<void> {
+  const opened = await forwardIpv6Loopback(port);
+  if (!opened.ok) {
+    assert.equal(opened.reason, "unsupported");
+    return;
+  }
+  await new Promise<void>((resolve) => opened.server.close(() => resolve()));
 }
 
 function takePort(): Promise<number> {
@@ -79,103 +85,83 @@ function evidenceCopy(dir: string): { level?: string; detail?: string } | undefi
 }
 
 describe("attack R22", () => {
-  it("R22-1 attach refuses [::1] on the metadata issuer port when it differs from --issuer-port", async (t) => {
-    if (!(await ipv6LoopbackAvailable())) {
-      t.skip("this host has no IPv6 loopback");
-      return;
-    }
+  it("R22-1 a live body is refused before a metadata issuer port is claimed", async () => {
     const dir = ownerDir("verax-r22-attach-");
-    const [issuerPort, bodyPort, panelPort, metadataPort] = await Promise.all([
-      takePort(),
-      takePort(),
-      takePort(),
-      takePort(),
-    ]);
+    const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
       join(dir, "ledger.lock"),
       `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
       "utf8",
     );
-    const occupant = createServer();
-    const meta = createHttpServer((_req, res) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ authorization_servers: [`http://localhost:${metadataPort}`] }));
-    });
     const err: string[] = [];
     const spawned: string[] = [];
     try {
-      await listen(occupant, metadataPort, "::1");
-      await listen(meta, bodyPort, "127.0.0.1");
       const code = await runDesktop(
         { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
         (line) => err.push(line),
         {
           readyMs: 500,
-          restrictOwner: () => {},
+          ...ownerDirectoryHooks(),
           listenerPid: () => process.pid,
           spawn: (name) => {
             spawned.push(name);
-            throw new Error("spawned while attaching with [::1] on the metadata issuer port already taken");
+            throw new Error("spawned while a body was already running");
           },
         },
       );
       const text = err.join("");
       assert.equal(code, 1, text);
-      assert.match(text, new RegExp(`desktop-port-busy:issuer:${metadataPort}:ipv6`));
-      assert.equal(text.includes(`desktop-port-busy:issuer:${issuerPort}:ipv6`), false, text);
+      assert.match(text, new RegExp(`desktop-body-running:${bodyPort}`));
+      assert.equal(text.includes("desktop-port-busy:"), false, text);
       assert.deepEqual(spawned, []);
+      await ipv6LeftFree(bodyPort);
+      await ipv6LeftFree(issuerPort);
     } finally {
-      await close(occupant);
-      await close(meta);
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("R22-1 attach refuses when nothing listens on 127.0.0.1 at the metadata issuer port", async () => {
+  it("R22-1 a live body is refused without reading an issuer listener", async () => {
     const dir = ownerDir("verax-r22-down-");
-    const [issuerPort, bodyPort, panelPort, metadataPort] = await Promise.all([
-      takePort(),
-      takePort(),
-      takePort(),
-      takePort(),
-    ]);
+    const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
       join(dir, "ledger.lock"),
       `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
       "utf8",
     );
-    const meta = createHttpServer((_req, res) => {
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ authorization_servers: [`http://localhost:${metadataPort}`] }));
-    });
     const err: string[] = [];
     const spawned: string[] = [];
+    const heard: number[] = [];
     try {
-      await listen(meta, bodyPort, "127.0.0.1");
       const code = await runDesktop(
         { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
         (line) => err.push(line),
         {
           readyMs: 500,
-          restrictOwner: () => {},
-          // The body port is the lock's pid; the issuer port has no listener.
-          listenerPid: (port) => (port === bodyPort ? process.pid : null),
+          ...ownerDirectoryHooks(),
+          listenerPid: (port) => {
+            heard.push(port);
+            return port === bodyPort ? process.pid : null;
+          },
           spawn: (name) => {
             spawned.push(name);
-            throw new Error("spawned while the metadata issuer had no listener");
+            throw new Error("spawned while a body was already running");
           },
         },
       );
-      assert.equal(code, 1, err.join(""));
-      assert.match(err.join(""), new RegExp(`desktop-attach-issuer-down:${metadataPort}`));
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.match(text, new RegExp(`desktop-body-running:${bodyPort}`));
+      assert.equal(text.includes("desktop-attach-issuer-down"), false, text);
+      assert.deepEqual(heard, [bodyPort]);
       assert.deepEqual(spawned, []);
+      await ipv6LeftFree(issuerPort);
     } finally {
-      await close(meta);
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("R22-1 attach refuses when the body's resource metadata cannot be read", async () => {
+  it("R22-1 a live body is refused without reading resource metadata", async () => {
     const dir = ownerDir("verax-r22-meta-");
     const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
@@ -183,31 +169,29 @@ describe("attack R22", () => {
       `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
       "utf8",
     );
-    const meta = createHttpServer((req) => {
-      req.socket.destroy();
-    });
     const err: string[] = [];
     const spawned: string[] = [];
     try {
-      await listen(meta, bodyPort, "127.0.0.1");
       const code = await runDesktop(
         { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
         (line) => err.push(line),
         {
           readyMs: 500,
-          restrictOwner: () => {},
+          ...ownerDirectoryHooks(),
           listenerPid: () => process.pid,
           spawn: (name) => {
             spawned.push(name);
-            throw new Error("spawned while resource metadata could not be read");
+            throw new Error("spawned while a body was already running");
           },
         },
       );
-      assert.equal(code, 1, err.join(""));
-      assert.match(err.join(""), /desktop-attach-issuer-unknown/);
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.match(text, new RegExp(`desktop-body-running:${bodyPort}`));
+      assert.equal(text.includes("desktop-attach-issuer-unknown"), false, text);
       assert.deepEqual(spawned, []);
+      await ipv6LeftFree(bodyPort);
     } finally {
-      await close(meta);
       rmSync(dir, { recursive: true, force: true });
     }
   });

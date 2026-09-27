@@ -7,6 +7,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { privateTempDir } from "./private-temp.ts";
 
 import {
   bodyReadyLine,
@@ -123,7 +124,7 @@ describe("attack R14b", () => {
 
   it("R14-11 leaves the state directory and the browser profile owner-only", async () => {
     if (process.platform === "win32") {
-      const stateDir = mkdtempSync(join(tmpdir(), "verax-r14b-acl-"));
+      const stateDir = privateTempDir("verax-r14b-acl-");
       const seen: string[] = [];
       try {
         await driveDesktop(stateDir, (dir) => seen.push(dir));
