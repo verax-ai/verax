@@ -4,6 +4,7 @@
 import { strict as assert } from "node:assert";
 import { spawnSync } from "node:child_process";
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer, type Server } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import path, { join } from "node:path";
@@ -76,10 +77,18 @@ describe("attack R21", () => {
       "utf8",
     );
     const occupant = createServer();
+    const meta = createHttpServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ authorization_servers: [`http://localhost:${issuerPort}`] }));
+    });
     const err: string[] = [];
     const spawned: string[] = [];
     try {
       await listen(occupant, issuerPort, "::1");
+      await new Promise<void>((resolve, reject) => {
+        meta.once("error", reject);
+        meta.listen(bodyPort, "127.0.0.1", () => resolve());
+      });
       const code = await runDesktop(
         { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
         (line) => err.push(line),
@@ -98,6 +107,7 @@ describe("attack R21", () => {
       assert.deepEqual(spawned, []);
     } finally {
       await close(occupant);
+      if (meta.listening) await close(meta);
       rmSync(dir, { recursive: true, force: true });
     }
   });

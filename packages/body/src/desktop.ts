@@ -4,6 +4,7 @@ import { get } from "node:http";
 import { createConnection, createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isLoopbackHost } from "./config.ts";
 import { restrictToOwnerWin32, systemToolEnv, systemToolPath, toolArgv, windowsDirectorySids } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
@@ -281,6 +282,80 @@ export function healthzUp(port: number): Promise<boolean> {
     });
     req.once("error", () => resolve(false));
   });
+}
+
+/** Same document the panel reads: `apps/panel/src/session.ts` fetches this path. */
+const RESOURCE_METADATA_PATH = "/.well-known/oauth-protected-resource";
+const RESOURCE_METADATA_TIMEOUT_MS = 2_000;
+
+type BodyAuthorizationServer =
+  | { kind: "loopback"; port: number }
+  | { kind: "remote" }
+  | { kind: "unknown" };
+
+/**
+ * `authorization_servers[0]` from the body on 127.0.0.1:`bodyPort`.
+ * `unknown` is a missing document, a non-200, or a first entry that is not a URL.
+ * A loopback host without an explicit port uses 80 or 443.
+ */
+function readBodyAuthorizationServer(bodyPort: number): Promise<BodyAuthorizationServer> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: BodyAuthorizationServer) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const req = get(
+      {
+        host: "127.0.0.1",
+        port: bodyPort,
+        path: RESOURCE_METADATA_PATH,
+        timeout: RESOURCE_METADATA_TIMEOUT_MS,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer | string) => {
+          chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+        });
+        res.on("end", () => {
+          if (res.statusCode !== 200) {
+            finish({ kind: "unknown" });
+            return;
+          }
+          finish(authorizationServerFromMetadata(Buffer.concat(chunks).toString("utf8")));
+        });
+        res.on("error", () => finish({ kind: "unknown" }));
+      },
+    );
+    req.once("timeout", () => {
+      req.destroy();
+      finish({ kind: "unknown" });
+    });
+    req.once("error", () => finish({ kind: "unknown" }));
+  });
+}
+
+function authorizationServerFromMetadata(text: string): BodyAuthorizationServer {
+  let body: { authorization_servers?: unknown };
+  try {
+    body = JSON.parse(text) as { authorization_servers?: unknown };
+  } catch {
+    return { kind: "unknown" };
+  }
+  const first = Array.isArray(body.authorization_servers) ? body.authorization_servers[0] : undefined;
+  if (typeof first !== "string" || first.trim() === "") return { kind: "unknown" };
+  let url: URL;
+  try {
+    url = new URL(first.trim());
+  } catch {
+    return { kind: "unknown" };
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return { kind: "unknown" };
+  if (!isLoopbackHost(url.hostname)) return { kind: "remote" };
+  const port = url.port !== "" ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
+  if (!Number.isInteger(port) || port <= 0 || port >= 65536) return { kind: "unknown" };
+  return { kind: "loopback", port };
 }
 
 export type DesktopMode =
@@ -743,28 +818,54 @@ export async function runDesktop(
       return 1;
     }
 
-    // Joining a running body: its issuer is whatever the body's resource
-    // metadata names, and its token is not ours to read. The panel's own
-    // origin has to be on that issuer's allow-list (VERAX_DEV_REDIRECT_URIS on
-    // the running issuer), which this run cannot set after the fact.
-    // Attach joins a body that already holds 127.0.0.1 on the body port, and
-    // an issuer that already holds 127.0.0.1 on the issuer port. [::1] on
-    // both is still this run's to hold. The panel port is claimed below.
+    // Joining a running body. The panel takes its issuer from
+    // authorization_servers[0] on the body's protected-resource metadata, so
+    // that URL is the origin to account for, not --issuer-port. The token is
+    // not ours to read. The panel's own origin has to be on that issuer's
+    // allow-list (VERAX_DEV_REDIRECT_URIS on the running issuer), which this
+    // run cannot set after the fact.
+    // Attach joins a body that already holds 127.0.0.1 on the body port.
+    // [::1] on the body port is still this run's to hold. A loopback issuer
+    // (localhost, 127.0.0.1, [::1]) must already have a 127.0.0.1 listener,
+    // and [::1] on that issuer's port is held here. An issuer on another host
+    // is not held. The panel port is claimed below.
     // A listener on [::1] that is not the forwarder this process just opened
     // is a refusal: the browser's localhost lookup would reach it, and the
     // passkey ceremony is sent to the issuer origin.
     if (decided.mode === "attach") {
+      const named = await readBodyAuthorizationServer(opts.bodyPort);
+      if (named.kind === "unknown") {
+        writeErr("desktop-attach-issuer-unknown\n");
+        stopAll();
+        return 1;
+      }
+      if (named.kind === "loopback") {
+        const hear = hooks?.listenerPid ?? loopbackListenPid;
+        let heard: number | null;
+        try {
+          heard = hear(named.port);
+        } catch {
+          heard = null;
+        }
+        if (heard === null) {
+          writeErr(`desktop-attach-issuer-down:${named.port}\n`);
+          stopAll();
+          return 1;
+        }
+      }
       const bodyV6 = await claimIpv6(opts.bodyPort);
       if (bodyV6 === "busy") {
         writeErr(desktopPortBusyLine("body", opts.bodyPort, true));
         stopAll();
         return 1;
       }
-      const issuerV6 = await claimIpv6(opts.issuerPort);
-      if (issuerV6 === "busy") {
-        writeErr(desktopPortBusyLine("issuer", opts.issuerPort, true));
-        stopAll();
-        return 1;
+      if (named.kind === "loopback") {
+        const issuerV6 = await claimIpv6(named.port);
+        if (issuerV6 === "busy") {
+          writeErr(desktopPortBusyLine("issuer", named.port, true));
+          stopAll();
+          return 1;
+        }
       }
     }
 

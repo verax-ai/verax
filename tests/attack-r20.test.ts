@@ -3,6 +3,7 @@
 
 import { strict as assert } from "node:assert";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -140,10 +141,19 @@ describe("attack R20", () => {
       "utf8",
     );
     const occupant = createServer();
+    const meta = createHttpServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      // Not a loopback issuer, so attach claims no issuer port and the refusal is the body port.
+      res.end(JSON.stringify({ authorization_servers: ["https://issuer.example"] }));
+    });
     const err: string[] = [];
     const spawned: string[] = [];
     try {
       await listen(occupant, bodyPort, "::1");
+      await new Promise<void>((resolve, reject) => {
+        meta.once("error", reject);
+        meta.listen(bodyPort, "127.0.0.1", () => resolve());
+      });
       const code = await runDesktop(
         { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
         (line) => err.push(line),
@@ -162,6 +172,7 @@ describe("attack R20", () => {
       assert.deepEqual(spawned, []);
     } finally {
       await close(occupant);
+      if (meta.listening) await close(meta);
       rmSync(dir, { recursive: true, force: true });
     }
   });

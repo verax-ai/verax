@@ -391,6 +391,9 @@ function heartbeatMaxMs(env: NodeJS.ProcessEnv): number {
   return Number.isFinite(n) && n > 0 ? n : 30_000;
 }
 
+/** A pulse this far ahead of the clock is still treated as now. */
+const HEARTBEAT_FUTURE_SKEW_MS = 60_000;
+
 function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   let pieces: ReturnType<typeof listPieceFiles>;
@@ -402,7 +405,22 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
   }
   const srcLines = pieces.reduce((s, p) => s + countJsonl(p.decisions).lines, 0);
   const decisionN = pieces.reduce((s, p) => s + (p.closed ? p.n : countJsonl(p.decisions).lines), 0);
-  if (decisionN > 0) {
+  let closedOff: { id: string; lines: number; n: number } | null = null;
+  for (const piece of pieces) {
+    if (!piece.closed) continue;
+    const lines = countJsonl(piece.decisions).lines;
+    if (lines !== piece.n) {
+      closedOff = { id: piece.id, lines, n: piece.n };
+      break;
+    }
+  }
+  if (closedOff) {
+    checks.push({
+      id: "ledger-index",
+      level: "fail",
+      detail: `piece ${closedOff.id} has ${closedOff.lines} decision line(s), the manifest says ${closedOff.n}`,
+    });
+  } else if (decisionN > 0) {
     const known = new Set(pieces.map((p) => p.id));
     const cov = indexCoverage(stateDir);
     if (cov === null) {
@@ -450,6 +468,12 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
         level: "fail",
         detail: "ledger has rows but no readable heartbeat; the evidence service looks silent",
       });
+    } else if (!Number.isFinite(hb.atMs) || hb.atMs > Date.now() + HEARTBEAT_FUTURE_SKEW_MS) {
+      checks.push({
+        id: "heartbeat",
+        level: "fail",
+        detail: "heartbeat time is in the future",
+      });
     } else if (Date.now() - hb.atMs > heartbeatMaxMs(env)) {
       checks.push({
         id: "heartbeat",
@@ -482,12 +506,21 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       srcEffects.lines > 0 ||
       copy.lines > 0 ||
       copyEffects.lines > 0 ||
+      src.corrupt ||
+      srcEffects.corrupt ||
       copy.corrupt ||
       copyEffects.corrupt;
     if (!pieceAnything) continue;
     anything = true;
     if (fail) continue;
-    if (copy.corrupt || copyEffects.corrupt) {
+    if (src.corrupt || srcEffects.corrupt) {
+      const file = src.corrupt ? "decisions.jsonl" : "effects.jsonl";
+      fail = {
+        id: "evidence-copy",
+        level: "fail",
+        detail: `source ${file} on piece ${piece.id} is corrupt`,
+      };
+    } else if (copy.corrupt || copyEffects.corrupt) {
       fail = {
         id: "evidence-copy",
         level: "fail",
@@ -504,6 +537,12 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
         id: "evidence-copy",
         level: "fail",
         detail: `evidence copy is stale on piece ${piece.id} effects: ${copyEffects.lines} effect line(s) behind source ${srcEffects.lines}`,
+      };
+    } else if (copy.lines > src.lines || copyEffects.lines > srcEffects.lines) {
+      fail = {
+        id: "evidence-copy",
+        level: "fail",
+        detail: `source is shorter than its evidence copy on piece ${piece.id}`,
       };
     }
   }
