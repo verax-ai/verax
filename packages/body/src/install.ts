@@ -442,8 +442,8 @@ export function codeTrustAccount(platform: NodeJS.Platform, env: NodeJS.ProcessE
   return sudo !== "" ? sudo : "the invoking user";
 }
 
-export function elevatedCodeMessage(dir: string, account: string, platform: InstallPlatform): string {
-  const head = `refusing: the verax code at ${dir} can be changed by ${account}; run elevated commands from a copy only administrators can write`;
+export function elevatedCodeMessage(dir: string, account: string, platform: InstallPlatform, detail?: string): string {
+  const head = `refusing: the verax code at ${dir} can be changed by ${account}${detail ? ` (${detail})` : ""}; run elevated commands from a copy only administrators can write`;
   if (platform === "win32") {
     return [
       head,
@@ -522,13 +522,14 @@ export function veraxCodeDirectories(entryUrl: string = import.meta.url): string
 export function elevatedCodeRefusal(
   platform: InstallPlatform,
   dirs: readonly string[],
-  opts: { account: string; probe?: (dir: string) => boolean; userWritable?: (dir: string) => boolean },
+  opts: { account: string; probe?: (dir: string) => boolean; userWritable?: (dir: string) => boolean | string },
 ): string | null {
   // No directory found is not a directory that passed.
   if (dirs.length === 0) return "refusing: the verax code directory could not be found, so its owner cannot be checked";
   for (const dir of dirs) {
-    const writable = opts.probe ? opts.probe(dir) : opts.userWritable?.(dir) === true;
-    if (writable) return elevatedCodeMessage(dir, opts.account, platform);
+    // A string names the entry that failed, so the operator can see which path to fix.
+    const writable = opts.probe ? opts.probe(dir) : (opts.userWritable?.(dir) ?? false);
+    if (writable !== false) return elevatedCodeMessage(dir, opts.account, platform, typeof writable === "string" ? writable : undefined);
   }
   return null;
 }
@@ -4566,17 +4567,33 @@ function collectTarballs(
  * Whether the user can change each code directory. Windows reads every SDDL the
  * check needs in one PowerShell process: one per path cost minutes on an elevated approve.
  */
-function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, exec: ToolExec): (dir: string) => boolean {
+function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, exec: ToolExec): (dir: string) => string | false {
   if (platform !== "win32") {
-    return (dir) => trustTargets(dir, platform).some((file) => posixEntryUntrusted(file.path));
+    return (dir) => {
+      for (const file of trustTargets(dir, platform)) {
+        if (!posixEntryUntrusted(file.path)) continue;
+        try {
+          const st = lstatSync(file.path);
+          return st.isSymbolicLink()
+            ? `${file.path} is a symbolic link`
+            : `${file.path} owner uid ${st.uid}, mode ${(st.mode & 0o777).toString(8)}`;
+        } catch {
+          return `${file.path} could not be read`;
+        }
+      }
+      return false;
+    };
   }
   const sid = invokingSid(exec);
   const read = readSddlBatch(exec, dirs.flatMap((dir) => trustTargets(dir, "win32").map((file) => file.path)));
-  return (dir) =>
-    trustTargets(dir, "win32").some((file) => {
+  return (dir) => {
+    for (const file of trustTargets(dir, "win32")) {
       const hit = sddlOrMiss(read, file.path);
-      return hit.status !== 0 || windowsUserCanWrite(hit.text, { path: file.path, userSid: sid, ancestor: file.ancestor });
-    });
+      if (hit.status !== 0) return `${file.path}: ACL could not be read`;
+      if (windowsUserCanWrite(hit.text, { path: file.path, userSid: sid, ancestor: file.ancestor })) return `${file.path}: ${hit.text.trim()}`;
+    }
+    return false;
+  };
 }
 
 export function refuseWritableCode(
