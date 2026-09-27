@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 
 describe("serve --log-file", () => {
@@ -18,6 +20,7 @@ describe("serve --log-file", () => {
         encoding: "utf8",
         env,
       });
+      if (refusedAsElevated(ran.status, ran.stderr ?? "")) return;
       assert.equal(ran.status, 78, ran.stderr);
       const text = readFileSync(log, "utf8");
       assert.match(text, /missing VERAX_ISSUER, VERAX_JWKS_URL, or VERAX_AUDIENCE/);

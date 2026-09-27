@@ -22,7 +22,7 @@ export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--checkpoint-key <public.pem>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
     "  --key <file>      verify decision records against a public key you hold,",
@@ -30,9 +30,13 @@ function usage(): string {
     "                    difference between 'these files agree with each other'",
     "                    and 'these files were signed by the key I was given'.",
     "  --effect-key <file>",
-    "                    verify every effect row against a public key you hold,",
-    "                    instead of one key taken from the effects. Same",
+    "                    verify self effect rows against a public key you hold,",
+    "                    instead of one key taken from the first self row. Same",
     "                    distinction as --key, for the effect signer.",
+    "  --witness-key <file>",
+    "                    verify same-org effect rows against a public key you",
+    "                    hold, instead of one key taken from the first same-org",
+    "                    row. Agreement is not trust, the same as --key.",
     "  --checkpoint-key <file>",
     "                    verify every checkpoint row against a public key you",
     "                    hold, instead of one key taken from the checkpoint",
@@ -71,6 +75,21 @@ export function renderVerify(r: VerifyResult): string {
     }`,
   );
   lines.push(`              ${r.effectTrust.note}`);
+  const witnessTrust = r.witnessTrust ?? {
+    source: "none" as const,
+    publicKeyPem: null,
+    note: "no same-org effects, so no witness key was used",
+  };
+  lines.push(
+    `same-org with ${
+      witnessTrust.source === "pinned"
+        ? "a key you supplied"
+        : witnessTrust.source === "in-ledger"
+          ? "the key carried in these files"
+          : "no key"
+    }`,
+  );
+  lines.push(`              ${witnessTrust.note}`);
   lines.push(
     `checkpoints with ${
       r.checkpointTrust.source === "pinned"
@@ -121,6 +140,7 @@ export async function runVerify(
   const json = args.includes("--json");
   let publicKeyPem: string | undefined;
   let effectPublicKeyPem: string | undefined;
+  let witnessPublicKeyPem: string | undefined;
   let checkpointPublicKeyPem: string | undefined;
   const readKeyFlag = (flag: string): { ok: true; pem?: string } | { ok: false } => {
     const at = args.indexOf(flag);
@@ -145,6 +165,9 @@ export async function runVerify(
   const effectKey = readKeyFlag("--effect-key");
   if (!effectKey.ok) return EX_VERIFY_FAILED;
   effectPublicKeyPem = effectKey.pem;
+  const witnessKey = readKeyFlag("--witness-key");
+  if (!witnessKey.ok) return EX_VERIFY_FAILED;
+  witnessPublicKeyPem = witnessKey.pem;
   const checkpointKey = readKeyFlag("--checkpoint-key");
   if (!checkpointKey.ok) return EX_VERIFY_FAILED;
   checkpointPublicKeyPem = checkpointKey.pem;
@@ -154,7 +177,7 @@ export async function runVerify(
     return EX_VERIFY_FAILED;
   }
   if (directoryAccess(dir) === "unreadable") {
-    out(unreadableSentence(dir));
+    out(unreadableSentence(dir, "verify"));
     return 77;
   }
 
@@ -163,6 +186,7 @@ export async function runVerify(
     result = await verifyLedger(dir, {
       ...(publicKeyPem ? { publicKeyPem } : {}),
       ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
+      ...(witnessPublicKeyPem ? { witnessPublicKeyPem } : {}),
       ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
     });
   } catch (err) {
@@ -179,6 +203,7 @@ export async function runVerify(
       effectsOrphaned: 0,
       trust: { source: "none", publicKeyPem: null, note: problem },
       effectTrust: { source: "none", publicKeyPem: null, note: problem },
+      witnessTrust: { source: "none", publicKeyPem: null, note: problem },
       checkpointTrust: { source: "none", publicKeyPem: null, note: problem },
       index: { present: false, missing: 0, line: "index: none (cannot check for removed records)" },
       effectCompleteness: "effect completeness was not checked",

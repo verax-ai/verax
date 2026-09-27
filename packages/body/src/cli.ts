@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import path, { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
 import { attachBodyLog } from "./body-log.ts";
@@ -8,7 +8,7 @@ import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
 import { envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
-import { directoryAccess, doctorStateTarget, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, runInstall, runUninstall, unreadableSentence } from "./install.ts";
+import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
 import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
@@ -74,143 +74,203 @@ function version(): string {
   return "unknown";
 }
 
-const argv = process.argv.slice(2);
-// Asking what this is must work before it is configured. Without this, the
-// first thing a published `verax --help` said was that three environment
-// variables were missing.
-if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
-  process.stdout.write(HELP);
-  process.exit(0);
-}
-if (argv[0] === "--version" || argv[0] === "-v") {
-  process.stdout.write(`${version()}\n`);
-  process.exit(0);
-}
-if (argv[0] === "demo") {
-  process.exit(
-    await runDemo(argv, process.env, {
-      stdout: process.stdout,
-      stderr: process.stderr,
-      stdin: process.stdin,
-      isTTY: Boolean(process.stdin.isTTY),
-    }),
-  );
-}
-if (argv[0] === "approve") {
-  process.exit(await runApprove(argv));
-}
-if (argv[0] === "operator") {
-  process.exit(await runOperator(argv));
-}
-if (argv[0] === "halt") {
-  const stateDir = argv[1];
-  if (!stateDir) {
-    process.stderr.write("verax halt <stateDir>\n");
-    process.exit(78);
+export type CliHooks = {
+  elevated?: () => boolean;
+  codeProbe?: (dir: string) => boolean;
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  stdout?: { write(s: string): unknown };
+  stderr?: { write(s: string): unknown };
+};
+
+function isCliEntry(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  try {
+    return path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
   }
-  process.exit(runHalt(stateDir));
-}
-if (argv[0] === "unlock") {
-  const force = argv.includes("--force");
-  const stateDir = argv.slice(1).find((a) => a !== "--force");
-  if (!stateDir) {
-    process.stderr.write("verax unlock [--force] <stateDir>\n");
-    process.exit(78);
-  }
-  process.exit(runUnlock(stateDir, (s) => process.stderr.write(s), { force }));
-}
-if (argv[0] === "init") {
-  process.exit(await runInitLocal(argv.slice(1)));
-}
-if (argv[0] === "install") {
-  process.exit(await runInstall(argv));
-}
-if (argv[0] === "uninstall") {
-  process.exit(await runUninstall(argv));
-}
-if (argv[0] === "serve") {
-  const logFlag = argv.indexOf("--log-file");
-  if (logFlag !== -1) {
-    const logPath = argv[logFlag + 1];
-    if (!logPath || logPath.startsWith("-")) {
-      process.stderr.write("verax serve --log-file <file>\n");
-      process.exit(78);
-    }
-    const attached = attachBodyLog(logPath);
-    if (!attached.ok) {
-      process.stderr.write(`${attached.reason}\n`);
-      process.exit(78);
-    }
-    process.stderr.write("verax serve starting\n");
-  }
-  const fileFlag = argv.indexOf("--env-file");
-  if (fileFlag !== -1) {
-    const file = argv[fileFlag + 1];
-    if (!file || file.startsWith("-")) {
-      process.stderr.write("verax serve --env-file <file>\n");
-      process.exit(78);
-    }
-    for (const key of Object.keys(process.env)) {
-      if (key.startsWith("VERAX_")) delete process.env[key];
-    }
-    const loaded = loadEnvFile(file);
-    if (!loaded.ok) {
-      process.stderr.write(`${loaded.reason}\n`);
-      process.exit(78);
-    }
-    const missingJwks = envFileJwksMissing(process.env);
-    if (missingJwks) {
-      process.stderr.write(`${missingJwks}\n`);
-      process.exit(78);
-    }
-  }
-  await main();
-  // main() returns once the server is listening. The open socket keeps the
-  // process up; this promise stops the rest of the dispatcher from running.
-  await new Promise(() => {});
-}
-if (argv[0] === "doctor") {
-  const json = argv.includes("--json");
-  const target = doctorStateTarget(process.env);
-  if (target && directoryAccess(target) === "unreadable") {
-    process.stderr.write(`${unreadableSentence(target)}\n`);
-    process.exit(77);
-  }
-  const nodeLabel = process.platform === "linux" ? linuxNodeLabelCheck() : null;
-  const checks = [
-    ...runDoctor(process.env, process.argv),
-    ...liveInstalledChecks(),
-    ...(process.platform === "linux" ? [linuxSelinuxCheck()] : []),
-    ...(nodeLabel ? [nodeLabel] : []),
-  ];
-  const bodyLog = target ? doctorBodyLog(target) : "";
-  if (json) {
-    process.stdout.write(`${JSON.stringify(target ? { checks, bodyLog } : { checks })}\n`);
-  } else {
-    for (const c of checks) {
-      process.stdout.write(`${c.level}\t${c.id}\t${c.detail}\n`);
-    }
-    if (bodyLog !== "") process.stdout.write(bodyLog);
-  }
-  process.exit(doctorExit(checks));
-}
-if (argv[0] === "reconcile") {
-  process.exit(runReconcile(argv));
-}
-if (argv[0] === "verify") {
-  process.exit(await runVerify(argv.slice(1)));
-}
-if (argv[0] === "desktop") {
-  process.exit(await desktopMain(argv));
-}
-if (argv[0] === "witness") {
-  const stateDir = argv[1];
-  if (!stateDir) {
-    process.stderr.write("verax witness <stateDir>\n");
-    process.exit(78);
-  }
-  await runWitness(stateDir);
-  process.exit(0);
 }
 
-await main();
+/**
+ * One gate for every command except `--help` and `--version`. An elevated
+ * process refuses code the invoking user can change before the command runs.
+ * Install and approve keep their own check for direct callers; the flag stops
+ * a second check in this process.
+ */
+export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<number> {
+  const stdout = hooks.stdout ?? process.stdout;
+  const stderr = hooks.stderr ?? process.stderr;
+  const platform = hooks.platform ?? process.platform;
+  const env = hooks.env ?? process.env;
+  if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
+    stdout.write(HELP);
+    return 0;
+  }
+  if (argv[0] === "--version" || argv[0] === "-v") {
+    stdout.write(`${version()}\n`);
+    return 0;
+  }
+  let isElevated = false;
+  try {
+    isElevated = hooks.elevated ? hooks.elevated() : defaultElevated(platform);
+  } catch (err) {
+    if (err instanceof SystemToolError) {
+      stderr.write(`${err.message}\n`);
+      return 78;
+    }
+    throw err;
+  }
+  if (isElevated) {
+    const refusal = elevatedCommandCodeRefusal(platform, env, hooks.codeProbe);
+    if (refusal) {
+      stderr.write(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
+      return 78;
+    }
+    markCliCodeCheckPassed();
+  }
+  try {
+    return await dispatchCli(argv, stdout, stderr, env);
+  } finally {
+    clearCliCodeCheckPassed();
+  }
+}
+
+async function dispatchCli(
+  argv: string[],
+  stdout: { write(s: string): unknown },
+  stderr: { write(s: string): unknown },
+  env: NodeJS.ProcessEnv,
+): Promise<number> {
+  if (argv[0] === "demo") {
+    return runDemo(argv, env, {
+      stdout,
+      stderr,
+      stdin: process.stdin,
+      isTTY: Boolean(process.stdin.isTTY),
+    });
+  }
+  if (argv[0] === "approve") {
+    return runApprove(argv);
+  }
+  if (argv[0] === "operator") {
+    return runOperator(argv);
+  }
+  if (argv[0] === "halt") {
+    const stateDir = argv[1];
+    if (!stateDir) {
+      stderr.write("verax halt <stateDir>\n");
+      return 78;
+    }
+    return runHalt(stateDir, (s) => stderr.write(s));
+  }
+  if (argv[0] === "unlock") {
+    const force = argv.includes("--force");
+    const stateDir = argv.slice(1).find((a) => a !== "--force");
+    if (!stateDir) {
+      stderr.write("verax unlock [--force] <stateDir>\n");
+      return 78;
+    }
+    return runUnlock(stateDir, (s) => stderr.write(s), { force });
+  }
+  if (argv[0] === "init") {
+    return runInitLocal(argv.slice(1));
+  }
+  if (argv[0] === "install") {
+    return runInstall(argv);
+  }
+  if (argv[0] === "uninstall") {
+    return runUninstall(argv);
+  }
+  if (argv[0] === "serve") {
+    const logFlag = argv.indexOf("--log-file");
+    if (logFlag !== -1) {
+      const logPath = argv[logFlag + 1];
+      if (!logPath || logPath.startsWith("-")) {
+        stderr.write("verax serve --log-file <file>\n");
+        return 78;
+      }
+      const attached = attachBodyLog(logPath);
+      if (!attached.ok) {
+        stderr.write(`${attached.reason}\n`);
+        return 78;
+      }
+      stderr.write("verax serve starting\n");
+    }
+    const fileFlag = argv.indexOf("--env-file");
+    if (fileFlag !== -1) {
+      const file = argv[fileFlag + 1];
+      if (!file || file.startsWith("-")) {
+        stderr.write("verax serve --env-file <file>\n");
+        return 78;
+      }
+      for (const key of Object.keys(process.env)) {
+        if (key.startsWith("VERAX_")) delete process.env[key];
+      }
+      const loaded = loadEnvFile(file);
+      if (!loaded.ok) {
+        stderr.write(`${loaded.reason}\n`);
+        return 78;
+      }
+      const missingJwks = envFileJwksMissing(process.env);
+      if (missingJwks) {
+        stderr.write(`${missingJwks}\n`);
+        return 78;
+      }
+    }
+    await main();
+    // main() returns once the server is listening. The open socket keeps the
+    // process up; this promise stops the rest of the dispatcher from running.
+    await new Promise(() => {});
+  }
+  if (argv[0] === "doctor") {
+    const json = argv.includes("--json");
+    const target = doctorStateTarget(env);
+    if (target && directoryAccess(target) === "unreadable") {
+      stderr.write(`${unreadableSentence(target, "doctor")}\n`);
+      return 77;
+    }
+    const nodeLabel = process.platform === "linux" ? linuxNodeLabelCheck() : null;
+    const checks = [
+      ...runDoctor(env, process.argv),
+      ...liveInstalledChecks(),
+      ...(process.platform === "linux" ? [linuxSelinuxCheck()] : []),
+      ...(nodeLabel ? [nodeLabel] : []),
+    ];
+    const bodyLog = target ? doctorBodyLog(target) : "";
+    if (json) {
+      stdout.write(`${JSON.stringify(target ? { checks, bodyLog } : { checks })}\n`);
+    } else {
+      for (const c of checks) {
+        stdout.write(`${c.level}\t${c.id}\t${c.detail}\n`);
+      }
+      if (bodyLog !== "") stdout.write(bodyLog);
+    }
+    return doctorExit(checks);
+  }
+  if (argv[0] === "reconcile") {
+    return runReconcile(argv, (s) => stderr.write(s));
+  }
+  if (argv[0] === "verify") {
+    return runVerify(argv.slice(1), (s) => stdout.write(`${s}\n`));
+  }
+  if (argv[0] === "desktop") {
+    return desktopMain(argv);
+  }
+  if (argv[0] === "witness") {
+    const stateDir = argv[1];
+    if (!stateDir) {
+      stderr.write("verax witness <stateDir>\n");
+      return 78;
+    }
+    await runWitness(stateDir);
+    return 0;
+  }
+  await main();
+  return 0;
+}
+
+if (isCliEntry()) {
+  process.exit(await runCli(process.argv.slice(2)));
+}

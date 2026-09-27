@@ -10,7 +10,9 @@ import {
   totalsFromDecisionRecords,
   type SignedCheckpoint,
 } from "@cedulon/checkpoint";
-import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
+import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
+import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
+import { verifyEffectExtract } from "@cedulon/effect-extract";
 import { checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
 import { assertEd25519PublicKey } from "./keys.ts";
 import { pidAlive } from "./unlock.ts";
@@ -228,6 +230,51 @@ export async function requestWitnessCheckpoint(
   }
 }
 
+function pemSame(left: string, right: string): boolean {
+  return left.replace(/\r\n/g, "\n").trim() === right.replace(/\r\n/g, "\n").trim();
+}
+
+/** The listen file's key, not whichever key answered on the port. */
+function answerMatchesListenKey(
+  body: {
+    receipt?: LedgerEffect["receipt"];
+    attestation?: LedgerEffect["attestation"];
+  },
+  row: EffectRowWire,
+  resultHash: string | undefined,
+  publicKeyPem: string,
+): boolean {
+  const receipt = body.receipt;
+  const coseHex = body.attestation?.coseHex;
+  if (!receipt || typeof coseHex !== "string" || coseHex === "") return false;
+  if (typeof receipt.publicKeyPem !== "string" || !pemSame(receipt.publicKeyPem, publicKeyPem)) return false;
+  const clean = {
+    ref: row.ref,
+    effectHash: row.effectHash,
+    effectClass: row.effectClass,
+    timestampMs: row.timestampMs,
+    ...(row.actor !== undefined ? { actor: row.actor } : {}),
+  };
+  const expected = canonical({
+    ref: clean.ref,
+    effectHash: clean.effectHash,
+    witnessClass: WITNESS_CLASS,
+    resultHash: resultHash ?? null,
+  });
+  try {
+    const decoded = decodeCoseSign1(coseFromHex(coseHex));
+    const payload = JSON.parse(Buffer.from(decoded.payload).toString("utf8")) as unknown;
+    if (canonical(payload) !== expected) return false;
+    if (!verifyCoseSign1(coseFromHex(coseHex), publicKeyPem, "application/json")) return false;
+    if (!verifyEffectExtract(receipt, publicKeyPem)) return false;
+    const signedRow = receipt.body.effects[0];
+    if (signedRow == null || canonical(signedRow) !== canonical(clean)) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 export async function requestWitnessSign(
   stateDir: string,
   row: EffectRowWire,
@@ -273,6 +320,15 @@ export async function requestWitnessSign(
         ref: row.ref,
         result: "self-fallback",
         reason: "unreachable",
+      });
+      return null;
+    }
+    if (!answerMatchesListenKey(body, row, resultHash, listen.publicKeyPem)) {
+      appendStatus(stateDir, {
+        atMs: Date.now(),
+        ref: row.ref,
+        result: "self-fallback",
+        reason: "witness-key-mismatch",
       });
       return null;
     }

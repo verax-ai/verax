@@ -651,6 +651,10 @@ export async function listen(config: BodyConfig): Promise<Server> {
           }),
         });
         if (!outcome.ok) {
+          if (outcome.reason === "halted") {
+            send(res, 409, { error: "approve-halted" });
+            return;
+          }
           const code = outcome.reason === "unknown-ref" || outcome.reason === "snapshot-missing" ? 404 : 409;
           send(res, code, {
             error: outcome.reason,

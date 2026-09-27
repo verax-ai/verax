@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "dist", "cli.js");
 
@@ -140,6 +142,7 @@ describe("crash durability", () => {
       let body: Running | undefined;
       try {
         const init = spawnSync(process.execPath, [cli, "init", "--local", stateDir], { encoding: "utf8" });
+        if (refusedAsElevated(init.status, init.stderr ?? "")) return;
         assert.equal(init.status, 0, init.stderr);
         const env = envFrom(stateDir);
         const token = readFileSync(join(stateDir, "local-issuer", "agent.token"), "utf8").trim();

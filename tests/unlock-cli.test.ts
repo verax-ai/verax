@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 
 import { FileLedger } from "@verax-ai/proxy";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 
 function deadPid(): number {
@@ -35,9 +37,14 @@ describe("2 verax unlock CLI", () => {
     const child = spawn(process.execPath, ["--experimental-strip-types", cli, "unlock", dir], {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let stderr = "";
+    child.stderr.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 0);
     const ledger = new FileLedger(dir);
     ledger.close();
@@ -62,6 +69,7 @@ describe("2 verax unlock CLI", () => {
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 1);
     assert.equal(existsSync(join(dir, "ledger.lock")), true);
     assert.match(stderr, /record-failed:EISDIR/);
@@ -78,9 +86,14 @@ describe("2 verax unlock CLI", () => {
     const child = spawn(process.execPath, ["--experimental-strip-types", cli, "unlock", dir], {
       stdio: ["ignore", "pipe", "pipe"],
     });
+    let stderr = "";
+    child.stderr.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 0);
     assert.equal(existsSync(join(dir, "ledger.lock")), false);
     const lines = readFileSync(join(dir, "unlocks.jsonl"), "utf8")
@@ -109,6 +122,7 @@ describe("2 verax unlock CLI", () => {
     const refusedCode = await new Promise<number>((resolve) => {
       refused.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(refusedCode, refusedErr)) return;
     assert.equal(refusedCode, 1);
     assert.match(refusedErr, /lock-unreadable/);
     assert.equal(existsSync(join(dir, "ledger.lock")), true);

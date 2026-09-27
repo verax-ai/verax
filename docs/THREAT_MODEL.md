@@ -28,9 +28,11 @@ the hidden `_verax` user on macOS. On Windows the agent token is
 Administrators, with read for the invoking user's SID. On Linux and macOS
 the elevated install does not write, chown, or chmod anything under the
 invoking user's home; a child with that user's uid and gid writes
-`~/.verax/agent.token`. Elevated `install`, `uninstall`, and `approve`
-refuse to run when the verax code they loaded can be changed by that user.
-An administrator, or root, is outside this model: they can change the ACL,
+`~/.verax/agent.token`. Elevated commands refuse to run when the verax
+code they loaded can be changed by that user. An elevated PowerShell of the
+same user runs that user's `$PROFILE`, which the code check does not see, so
+on Windows start the administrator-owned copy from a PowerShell opened with
+`-NoProfile` (Run as administrator). An administrator, or root, is outside this model: they can change the ACL,
 the task, the unit, or the launch daemon. An elevated terminal the operator
 leaves open for the agent is also outside it.
 

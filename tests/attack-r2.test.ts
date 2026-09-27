@@ -11,6 +11,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 import { loadConfig } from "../packages/body/src/config.ts";
 import { systemToolEnv, systemToolPath } from "../packages/body/src/install.ts";
 import { envFileJwksMissing, loadEnvFile } from "../packages/body/src/init-local.ts";
@@ -78,6 +80,7 @@ describe("attack R2", () => {
     const init = spawnSync(process.execPath, ["--experimental-strip-types", cli, "init", "--local", stateDir], {
       encoding: "utf8",
     });
+    if (refusedAsElevated(init.status, init.stderr ?? "")) return;
     assert.equal(init.status, 0, init.stderr);
     const env: NodeJS.ProcessEnv = {};
     assert.equal(loadEnvFile(join(stateDir, "verax.env"), env).ok, true);
@@ -108,7 +111,8 @@ describe("attack R2", () => {
         const init = spawnSync(process.execPath, ["--experimental-strip-types", cli, "init", "--local", stateDir], {
           encoding: "utf8",
         });
-        assert.equal(init.status, 0, init.stderr);
+        if (refusedAsElevated(init.status, init.stderr ?? "")) return;
+    assert.equal(init.status, 0, init.stderr);
         const key = join(stateDir, "local-issuer", "key.pem");
         const acl = spawnSync(systemToolPath("icacls", "win32"), [key], {
           encoding: "utf8",
@@ -190,6 +194,7 @@ describe("attack R2", () => {
     const init = spawnSync(process.execPath, ["--experimental-strip-types", cli, "init", "--local", stateDir], {
       encoding: "utf8",
     });
+    if (refusedAsElevated(init.status, init.stderr ?? "")) return;
     assert.equal(init.status, 0, init.stderr);
     const env: NodeJS.ProcessEnv = {};
     assert.equal(loadEnvFile(join(stateDir, "verax.env"), env).ok, true);

@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import { desktopCloneError, portOpen } from "../packages/body/src/desktop.ts";
 import { listen } from "../packages/body/src/server.ts";
+import { elevatedRunner, refusedAsElevated } from "./elevated-refusal.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -137,11 +138,13 @@ describe("verax desktop CLI", () => {
         child.stderr?.on("data", feed);
 
         const up = await waitUntil(async () => {
+          if (elevatedRunner && child?.exitCode === 78) return true;
           const a = await portOpen(issuerPort);
           const b = await portOpen(bodyPort);
           const c = await portOpen(panelPort);
           return a && b && c && existsSync(pidPath);
         }, 150_000);
+        if (child?.exitCode === 78 && refusedAsElevated(child.exitCode, sink.text)) return;
         assert.equal(up, true, `ports-not-ready\n${sink.text}`);
 
         const token = readFileSync(join(stateDir, "dev-token"), "utf8").trim();
@@ -242,9 +245,12 @@ describe("verax desktop CLI", () => {
         child.stderr?.on("data", feed);
 
         const up = await waitUntil(
-          async () => (await portOpen(panelPort)) && existsSync(pidPath) && /desktop-ready/.test(sink.text),
+          async () =>
+            (elevatedRunner && child?.exitCode === 78) ||
+            ((await portOpen(panelPort)) && existsSync(pidPath) && /desktop-ready/.test(sink.text)),
           150_000,
         );
+        if (child?.exitCode === 78 && refusedAsElevated(child.exitCode, sink.text)) return;
         assert.equal(up, true, `panel-not-ready\n${sink.text}`);
         assert.match(sink.text, /desktop-ready body=\d+ panel=\d+ attached=1 pid=\d+/, sink.text);
         // No second issuer, no second token: the running body's are not ours.
@@ -331,6 +337,7 @@ describe("verax desktop CLI", () => {
         const code = await new Promise<number>((resolve) => {
           child!.on("close", (exit) => resolve(exit ?? 1));
         });
+        if (code === 78 && refusedAsElevated(code, sink.text)) return;
         assert.equal(code, 1, `expected-exit-1\n${sink.text}`);
         assert.match(sink.text, new RegExp(`desktop-body-locked:${process.pid}\\b`), sink.text);
         // Nothing was started over the lock: no issuer, no panel, no token.
@@ -393,6 +400,7 @@ describe("verax desktop CLI", () => {
         const code = await new Promise<number>((resolve) => {
           child!.on("close", (exit) => resolve(exit ?? 1));
         });
+        if (code === 78 && refusedAsElevated(code, sink.text)) return;
         assert.equal(code, 1, `expected-exit-1\n${sink.text}`);
         assert.match(sink.text, /desktop-browser-exited-early/);
         const empty = await waitUntil(async () => {

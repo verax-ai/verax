@@ -29,10 +29,12 @@
  *               most one primary effect row (a row that is not
  *               `duplicate-effect`). A further primary row for that ref is
  *               named `ref X has more than one effect row` and is not bound.
- *               The effect key is
- *               `effectPublicKeyPem` when the reader pins one; otherwise the
- *               first receipt key in the ledger, and every effect row is
- *               checked against that same key.
+ *               A `self` row is checked under the effect key:
+ *               `effectPublicKeyPem` when the reader pins one, otherwise the
+ *               first receipt key on a `self` row. A `same-org` row is checked
+ *               under the witness key: `witnessPublicKeyPem` when the reader
+ *               pins one, otherwise the first receipt key on a `same-org` row.
+ *               Agreement of that key with the files is not trust.
  *
  * Checkpoints are a fifth statement. Each row in `checkpoints.jsonl` must
  * verify under one witness key: `checkpointPublicKeyPem` when the reader
@@ -98,8 +100,10 @@ export type VerifyResult = {
   effectsBound: number;
   effectsOrphaned: number;
   trust: VerifyTrust;
-  /** Which key answered for effect rows. Same honesty rules as `trust`. */
+  /** Which key answered for `self` effect rows. Same honesty rules as `trust`. */
   effectTrust: VerifyTrust;
+  /** Which key answered for `same-org` effect rows. Agreement is not trust. */
+  witnessTrust: VerifyTrust;
   /** Which key answered for checkpoint rows. Same honesty rules as `trust`. */
   checkpointTrust: VerifyTrust;
   /** What `index.jsonl` still names. Missing file is not a failure. */
@@ -136,8 +140,10 @@ export type VerifyTail = {
 export type VerifyOptions = {
   /** Verify decision records against this key instead of the one they carry. */
   publicKeyPem?: string;
-  /** Verify every effect row against this key instead of the one the effects carry. */
+  /** Verify `self` effect rows against this key instead of the one those rows carry. */
   effectPublicKeyPem?: string;
+  /** Verify `same-org` effect rows against this key instead of the one those rows carry. */
+  witnessPublicKeyPem?: string;
   /** Verify every checkpoint row against this key instead of one key taken from the file. */
   checkpointPublicKeyPem?: string;
 };
@@ -296,9 +302,9 @@ function noteEd25519(pem: string | null | undefined, problems: string[]): void {
 
 /**
  * The writer signs `{ ref, effectHash, witnessClass, resultHash }` as COSE
- * Sign1 and a one-row extract with the same effect key. A row with either
- * missing is not bound. Both must verify under the one key the caller
- * settled on — never a key this row brought by itself.
+ * Sign1 and a one-row extract. A row with either missing is not bound. Both
+ * must verify under the key the caller settled on for this row's witness
+ * class — never a key this row brought by itself.
  */
 function effectSignatureCoversRow(effect: EffectOnDisk, effectKey: string | null): boolean {
   const coseHex = effect.attestation?.coseHex;
@@ -364,12 +370,41 @@ function effectProblem(effect: EffectOnDisk, ref: string | null): string {
   return `effect attestation does not cover the row: ref ${ref ?? "(missing)"}`;
 }
 
-function firstEffectKey(rows: readonly EffectOnDisk[]): string | null {
+function firstReceiptKey(rows: readonly EffectOnDisk[], sameOrg: boolean): string | null {
   for (const row of rows) {
+    if ((row.witnessClass === "same-org") !== sameOrg) continue;
     const pem = row.receipt?.publicKeyPem;
     if (isPublicKeyPem(pem)) return pem;
   }
   return null;
+}
+
+const AGREE =
+  "this shows the files are internally consistent, not that the key was ever trusted. Pin a key you hold to check that.";
+
+function witnessTrustOf(pinned: string, taken: string | null, sameOrgCount: number): VerifyTrust {
+  if (pinned !== "") {
+    return {
+      source: "pinned",
+      publicKeyPem: pinned,
+      note: "verified against a key the reader supplied, not one taken from these files",
+    };
+  }
+  if (taken) {
+    return {
+      source: "in-ledger",
+      publicKeyPem: taken,
+      note: `verified against the key carried in the same-org effects themselves: ${AGREE}`,
+    };
+  }
+  return {
+    source: "none",
+    publicKeyPem: null,
+    note:
+      sameOrgCount === 0
+        ? "no same-org effects, so no witness key was used"
+        : "no witness key was found in these files",
+  };
 }
 
 function firstCheckpointKey(rows: readonly SignedCheckpoint[]): string | null {
@@ -430,8 +465,7 @@ function effectTrustOf(pinned: string, taken: string | null, effectCount: number
       source: "in-ledger",
       publicKeyPem: taken,
       note:
-        "verified against the key carried in the effects themselves: this shows the files are " +
-        "internally consistent, not that the key was ever trusted. Pin a key you hold to check that.",
+        `verified against the key carried in the self effects themselves: ${AGREE}`,
     };
   }
   return {
@@ -631,6 +665,7 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     effectsOrphaned: 0,
     trust,
     effectTrust: trust,
+    witnessTrust: trust,
     checkpointTrust: trust,
     index: { present: false, missing: 0, line: INDEX_NONE },
     effectCompleteness: EFFECT_COMPLETENESS_UNCHECKED,
@@ -691,6 +726,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       effectsOrphaned: 0,
       trust: { source: "none", publicKeyPem: null, note: "no records, so no key was used" },
       effectTrust: effectTrustOf(opts.effectPublicKeyPem?.trim() ?? "", null, 0),
+      witnessTrust: witnessTrustOf(opts.witnessPublicKeyPem?.trim() ?? "", null, 0),
       checkpointTrust: emptyTail.checkpointTrust,
       index: emptyIndex.index,
       effectCompleteness,
@@ -790,9 +826,21 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     }
   }
   const pinnedEffect = opts.effectPublicKeyPem?.trim() ?? "";
-  const effectKey = pinnedEffect !== "" ? pinnedEffect : firstEffectKey(effectRows);
-  const effectTrust = effectTrustOf(pinnedEffect, effectKey, effectRows.length);
+  const pinnedWitness = opts.witnessPublicKeyPem?.trim() ?? "";
+  const selfKeyTaken = firstReceiptKey(effectRows, false);
+  const sameKeyTaken = firstReceiptKey(effectRows, true);
+  const effectKey = pinnedEffect !== "" ? pinnedEffect : selfKeyTaken;
+  const witnessKey = pinnedWitness !== "" ? pinnedWitness : sameKeyTaken;
+  const selfCount = effectRows.filter((row) => row.witnessClass !== "same-org").length;
+  const sameCount = effectRows.length - selfCount;
+  const effectTrust = effectTrustOf(
+    pinnedEffect,
+    selfKeyTaken,
+    selfCount === 0 && effectRows.length > 0 ? effectRows.length : selfCount,
+  );
+  const witnessTrust = witnessTrustOf(pinnedWitness, sameKeyTaken, sameCount);
   noteEd25519(effectKey, problems);
+  noteEd25519(witnessKey, problems);
   let effects = effectRows.length;
   let effectsBound = 0;
   let effectsOrphaned = 0;
@@ -823,7 +871,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
         );
         continue;
       }
-      if (!effectSignatureCoversRow(e, effectKey)) {
+      if (!effectSignatureCoversRow(e, e.witnessClass === "same-org" ? witnessKey : effectKey)) {
         effectsOrphaned += 1;
         problems.push(effectProblem(e, ref));
         continue;
@@ -863,7 +911,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       );
       continue;
     }
-    if (!effectSignatureCoversRow(e, effectKey)) {
+    if (!effectSignatureCoversRow(e, e.witnessClass === "same-org" ? witnessKey : effectKey)) {
       effectsOrphaned += 1;
       problems.push(effectProblem(e, ref));
       continue;
@@ -892,6 +940,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     effectsOrphaned,
     trust,
     effectTrust,
+    witnessTrust,
     checkpointTrust: tailed.checkpointTrust,
     index: indexed.index,
     effectCompleteness,

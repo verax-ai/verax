@@ -1,10 +1,17 @@
 import {
   appendFileSync,
+  closeSync,
+  constants,
   existsSync,
+  fchownSync,
+  fstatSync,
+  lstatSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
+  writeSync,
 } from "node:fs";
 
 /** I/O seam so drain-busy tests can inject rename failures. */
@@ -314,6 +321,17 @@ export async function approvePending(opts: {
   return approvalLockFor(opts.ledger).enqueue(() => approvePendingUnlocked(opts));
 }
 
+function ledgerStateDir(ledger: object): string | null {
+  const dir = (ledger as { dir?: unknown }).dir;
+  return typeof dir === "string" && dir !== "" ? dir : null;
+}
+
+function approvalsHalted(ledger: object): boolean {
+  const dir = ledgerStateDir(ledger);
+  if (!dir) return false;
+  return existsSync(join(dir, "halted"));
+}
+
 async function approvePendingUnlocked(opts: {
   ledger: Ledger;
   recordSigner: RecordSigner;
@@ -332,6 +350,7 @@ async function approvePendingUnlocked(opts: {
     | { ok: false; reason: "budget-exceeded" | "rule-missing" }
     | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }>;
 }): Promise<ApproveResult> {
+  if (approvalsHalted(opts.ledger)) return { ok: false, reason: "halted" };
   const inputsLog = opts.inputsLog ?? inputsLogFor(opts.ledger);
   const defer = await lookupDecisionByRef(opts.ledger, opts.ref);
   if (!defer || defer.decision !== "defer") return { ok: false, reason: "unknown-ref" };
@@ -469,10 +488,42 @@ export type ApprovalCommand = {
 };
 
 export function enqueueApprovalCommand(dir: string, cmd: ApprovalCommand): void {
-  appendFileSync(join(dir, "approval-commands.jsonl"), `${JSON.stringify(cmd)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+  const file = join(dir, "approval-commands.jsonl");
+  const payload = Buffer.from(`${JSON.stringify(cmd)}\n`, "utf8");
+  const dirStat = lstatSync(dir);
+  if (dirStat.isSymbolicLink() || !dirStat.isDirectory()) {
+    throw new Error(`refusing: ${dir} is a link`);
+  }
+  let existing: ReturnType<typeof lstatSync> | undefined;
+  try {
+    existing = lstatSync(file);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  if (existing?.isSymbolicLink()) {
+    throw new Error(`refusing: ${file} is a link`);
+  }
+  const uid = typeof process.getuid === "function" ? process.getuid() : undefined;
+  const chownToDir = process.platform !== "win32" && uid !== undefined && uid !== dirStat.uid;
+  if (process.platform === "win32") {
+    appendFileSync(file, payload, { mode: 0o600 });
+    return;
+  }
+  const nofollow = constants.O_NOFOLLOW ?? 0;
+  const flags =
+    (existing
+      ? constants.O_WRONLY | constants.O_APPEND
+      : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL) | nofollow;
+  const fd = openSync(file, flags, 0o600);
+  try {
+    // A hard link would carry the chown to another file; only a single-link regular file is written.
+    const opened = fstatSync(fd);
+    if (!opened.isFile() || opened.nlink !== 1) throw new Error(`refusing: ${file} is not a single-link file`);
+    if (chownToDir) fchownSync(fd, dirStat.uid, dirStat.gid);
+    writeSync(fd, payload);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export async function drainApprovalCommands(
@@ -507,8 +558,21 @@ export async function drainApprovalCommands(
   const poisonPath = join(dir, "approval-commands.poison.jsonl");
   for (const name of names) {
     const file = join(dir, name);
+    let text: string;
     try {
-      const text = readFileSync(file, "utf8");
+      text = readFileSync(file, "utf8");
+    } catch (err) {
+      const kept = join(dir, `approval-commands.unreadable-${Date.now()}`);
+      try {
+        renameSync(file, kept);
+      } catch {
+        // Leave the processing name in place. The bytes stay either way.
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      process.stderr.write(`verax-drain: unreadable ${file}: ${message}\n`);
+      continue;
+    }
+    try {
       for (const line of text.split("\n")) {
         if (line === "") continue;
         try {

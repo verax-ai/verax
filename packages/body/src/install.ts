@@ -28,8 +28,13 @@ export const EX_ELEVATION = 77;
 
 export const ELEVATION_LINE = "verax install needs an elevated shell (Administrator / root)";
 
-export function unreadableSentence(dir: string): string {
-  return `cannot read ${dir}: run this from an elevated terminal (Administrator / sudo)`;
+/** Names the administrator-owned copy. A same-user elevated shell is not that copy. */
+export function unreadableSentence(dir: string, command = "verax"): string {
+  const copy =
+    process.platform === "win32"
+      ? `& "$env:ProgramFiles\\verax-cli\\verax.cmd" ${command}`
+      : `sudo /opt/verax-cli/bin/verax ${command}`;
+  return `cannot read ${dir}: run ${copy}`;
 }
 
 const DEFAULT_DAYS = 30;
@@ -4722,6 +4727,52 @@ export function elevatedCommandCodeRefusal(
   return refuseWritableCode(platform, env, defaultExec, probe);
 }
 
+/**
+ * Set by the CLI after one passing code check, so install and approve do not
+ * run the same check again in that process. Cleared when the command returns.
+ */
+let cliCodeCheckPassed = false;
+
+export function markCliCodeCheckPassed(): void {
+  cliCodeCheckPassed = true;
+}
+
+export function clearCliCodeCheckPassed(): void {
+  cliCodeCheckPassed = false;
+}
+
+export function cliCodeCheckPassedAlready(): boolean {
+  return cliCodeCheckPassed;
+}
+
+/**
+ * The ancestor rule the installer applies to ProgramData: a non-administrator
+ * who can replace or re-point an ancestor is a refusal. A path whose ACL
+ * cannot be read is a refusal too.
+ */
+export function windowsProgramDataRefusal(
+  env: NodeJS.ProcessEnv,
+  exec: ToolExec = defaultExec,
+): string | null {
+  const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
+  const targets = trustTargets(data, "win32").map((entry) => ({ path: entry.path, ancestor: true }));
+  let sid: string | undefined;
+  try {
+    sid = invokingSid(exec);
+  } catch {
+    sid = undefined;
+  }
+  const cache = readSddlBatch(exec, targets.map((entry) => entry.path));
+  for (const file of targets) {
+    const acl = sddlOrMiss(cache, file.path);
+    if (acl.status !== 0 || windowsUserCanWrite(acl.text, { path: file.path, userSid: sid, ancestor: true })) {
+      const line = refuseAcl(acl.text, `refusing: ${file.path} can be changed by a non-administrator`);
+      return line.endsWith("\n") ? line.slice(0, -1) : line;
+    }
+  }
+  return null;
+}
+
 function resolveInvokingIds(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
@@ -4776,10 +4827,12 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     io.stderr.write(`${ELEVATION_LINE}\n`);
     return EX_ELEVATION;
   }
-  const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
-  if (codeRefusal) {
-    io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
-    return EX_CONFIG;
+  if (!cliCodeCheckPassed) {
+    const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
+    if (codeRefusal) {
+      io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
+      return EX_CONFIG;
+    }
   }
   const parsed = parseInstallArgs(argv);
   if ("error" in parsed) {
@@ -5442,10 +5495,12 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     io.stderr.write("verax uninstall needs an elevated shell (Administrator / root)\n");
     return EX_ELEVATION;
   }
-  const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
-  if (codeRefusal) {
-    io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
-    return EX_CONFIG;
+  if (!cliCodeCheckPassed) {
+    const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
+    if (codeRefusal) {
+      io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
+      return EX_CONFIG;
+    }
   }
   const body = argv[0] === "uninstall" ? argv.slice(1) : argv;
   const parsed = parseFlag(body, "--unused");

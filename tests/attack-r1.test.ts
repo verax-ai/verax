@@ -25,6 +25,7 @@ import { loadConfig } from "../packages/body/src/config.ts";
 import { runHalt } from "../packages/body/src/halt.ts";
 import { loadEnvFile } from "../packages/body/src/init-local.ts";
 import { listen } from "../packages/body/src/server.ts";
+import { refusedAsElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -48,11 +49,13 @@ type EffectRow = {
 
 type RpcResult = { status: number; json: Record<string, unknown> | null; text: string };
 
-function init(stateDir: string): void {
+function init(stateDir: string): boolean {
   const r = spawnSync(process.execPath, ["--experimental-strip-types", cli, "init", "--local", stateDir], {
     encoding: "utf8",
   });
+  if (refusedAsElevated(r.status, r.stderr ?? "")) return false;
   assert.equal(r.status, 0, r.stderr);
+  return true;
 }
 
 function envFromFile(stateDir: string): NodeJS.ProcessEnv {
@@ -229,9 +232,9 @@ async function boot(opts: {
   rules?: unknown[];
   extraPolicy?: Record<string, unknown>;
   downstreamFile?: string;
-} = {}): Promise<Boot> {
+} = {}): Promise<Boot | null> {
   const stateDir = mkdtempSync(join(tmpdir(), "verax-attack-r1-"));
-  init(stateDir);
+  if (!init(stateDir)) return null;
   if (opts.rules) writePolicy(stateDir, opts.rules, opts.extraPolicy);
   const env = envFromFile(stateDir);
   env.VERAX_BIND = "127.0.0.1:0";
@@ -290,7 +293,9 @@ function sha256File(path: string): string {
 
 describe("attack R1", () => {
   it("1 token forgery is 401 and writes no decision", { timeout: 60_000 }, async () => {
-    const box = await boot();
+    const booted = await boot();
+    if (!booted) return;
+    const box: Boot = booted;
     const evilJwks: HttpServer = createServer((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ keys: [] }));
@@ -385,7 +390,9 @@ describe("attack R1", () => {
   });
 
   it("2 agent token cannot approve, read the ledger, or see health counts", async () => {
-    const box = await boot();
+    const booted = await boot();
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const before = readDecisions(box.stateDir);
       const approve = await fetch(`${box.base}/api/approve`, {
@@ -417,7 +424,9 @@ describe("attack R1", () => {
   });
 
   it("3 a held spend is not an allow when the same _ref is sent again", { timeout: 60_000 }, async () => {
-    const box = await boot({ rules: [...memoryRules, spendRule()] });
+    const booted = await boot({ rules: [...memoryRules, spendRule()] });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const first = await rpc(box.mcp, box.token, "tools/call", {
         name: "spend",
@@ -459,7 +468,9 @@ describe("attack R1", () => {
   });
 
   it("4 twenty parallel spends with one _ref allow nothing", { timeout: 60_000 }, async () => {
-    const box = await boot({ rules: [...memoryRules, spendRule()] });
+    const booted = await boot({ rules: [...memoryRules, spendRule()] });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const calls = await Promise.all(
         Array.from({ length: 20 }, () =>
@@ -483,7 +494,9 @@ describe("attack R1", () => {
   });
 
   it("5 tool-name tricks are not allowed", { timeout: 60_000 }, async () => {
-    const box = await boot({ rules: memoryRules });
+    const booted = await boot({ rules: memoryRules });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const names = [
         "spend ",
@@ -522,7 +535,9 @@ describe("attack R1", () => {
   });
 
   it("6 memory ids cannot leave the tenant directory", { timeout: 60_000 }, async () => {
-    const box = await boot({ rules: memoryRules });
+    const booted = await boot({ rules: memoryRules });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const keyDir = join(box.stateDir, "keys");
       const keysBefore = existsSync(keyDir)
@@ -593,7 +608,9 @@ describe("attack R1", () => {
   });
 
   it("7 odd JSON-RPC shapes do not allow spend and the body still answers", { timeout: 60_000 }, async () => {
-    const box = await boot({ rules: [...memoryRules, spendRule()] });
+    const booted = await boot({ rules: [...memoryRules, spendRule()] });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const headers = {
         "content-type": "application/json",
@@ -669,6 +686,7 @@ describe("attack R1", () => {
       ],
       extraPolicy: { egress: ["ok.test"] },
     });
+    if (!box) return;
     try {
       const cases: { to: string; allow: boolean }[] = [
         { to: "user@ok.test", allow: true },
@@ -708,7 +726,9 @@ describe("attack R1", () => {
   });
 
   it("9 halt denies every later call", async () => {
-    const box = await boot({ rules: memoryRules });
+    const booted = await boot({ rules: memoryRules });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       assert.equal(runHalt(box.stateDir, () => undefined), 0);
       for (const name of ["memory.get", "memory.put"] as const) {
@@ -740,7 +760,9 @@ describe("attack R1", () => {
   });
 
   it("10 another subject cannot read this tenant's memory", { timeout: 60_000 }, async () => {
-    const box = await boot({ rules: memoryRules });
+    const booted = await boot({ rules: memoryRules });
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const put = await rpc(box.mcp, box.token, "tools/call", {
         name: "memory.put",
@@ -775,7 +797,9 @@ describe("attack R1", () => {
   });
 
   it("11 a body over MAX_BODY_BYTES is 413 and writes no decision", async () => {
-    const box = await boot();
+    const booted = await boot();
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const before = readDecisions(box.stateDir).length;
       const res = await fetch(box.mcp, {
@@ -817,6 +841,7 @@ describe("attack R1", () => {
       ],
       downstreamFile,
     });
+    if (!box) return;
     try {
       const res = await rpc(box.mcp, box.token, "tools/call", {
         name: "echo.ping",
@@ -877,7 +902,7 @@ describe("attack R1", () => {
     let box: Boot | undefined;
     try {
       const stateDir = mkdtempSync(join(tmpdir(), "verax-attack-r1-clockbody-"));
-      init(stateDir);
+      if (!init(stateDir)) return;
       writePolicy(stateDir, [
         ...memoryRules,
         {
@@ -937,7 +962,9 @@ describe("attack R1", () => {
   });
 
   it("14 a revoked jti is 401 and writes no decision", async () => {
-    const box = await boot();
+    const booted = await boot();
+    if (!booted) return;
+    const box: Boot = booted;
     try {
       const jti = payloadOf(box.token).jti;
       assert.equal(typeof jti, "string");

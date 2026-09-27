@@ -9,6 +9,7 @@ import { fileURLToPath } from "node:url";
 import { coseFromHex, verifyCoseSign1 } from "@cedulon/cose";
 
 import { createBodyServices } from "../packages/body/src/wiring.ts";
+import { refusedAsElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -61,9 +62,18 @@ describe("independent witness process", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-witness-ok-"));
     const body = testKeys();
     const child = spawnWitness(dir);
+    let stderr = "";
+    child.stderr?.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
     const listenPath = join(dir, "witness.listen.json");
     try {
-      await waitFile(listenPath, child);
+      try {
+        await waitFile(listenPath, child);
+      } catch (err) {
+        if (child.exitCode !== null && refusedAsElevated(child.exitCode, stderr)) return;
+        throw err;
+      }
       const listen = JSON.parse(readFileSync(listenPath, "utf8")) as { publicKeyPem?: string; pid?: number };
       assert.equal(typeof listen.publicKeyPem, "string");
       assert.notEqual(listen.publicKeyPem, body.publicKeyPem);

@@ -66,7 +66,7 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ## Connect your agent
 
-Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, in an Administrator PowerShell:
+Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, in a PowerShell started with `-NoProfile` as administrator (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
 
 ```powershell
 npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body
@@ -82,7 +82,7 @@ sudo /opt/verax-cli/bin/verax install
 
 The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs that Node, and keeps the ledger under a service account. On Windows the agent token is `%ProgramData%\Verax\agent-token\<your SID>\agent.token` (Administrators and SYSTEM have full control, your SID can read the file and read-execute the directory). On Linux and macOS a child process running as your uid writes `~/.verax/agent.token` from its stdin. It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. The service account and the file permissions are the boundary.
 
-Approve a held call from that same administrator-owned copy. Windows, in an Administrator PowerShell: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS: `sudo /opt/verax-cli/bin/verax approve`.
+Approve a held call from that same administrator-owned copy. Windows, in the same `-NoProfile` administrator PowerShell: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS: `sudo /opt/verax-cli/bin/verax approve`.
 
 To try it in your own user, which is not a boundary:
 
@@ -191,10 +191,12 @@ lying next to it proves the files agree with each other and nothing more —
 anything able to write the ledger could write that key too. Pass
 `--key <public.pem>` to verify decision records against a copy you hold, and
 the answer says `a key you supplied` instead. Effects are signed with a
-separate key. Without a pin, every effect row is checked against one key
-taken from the effects themselves, and that line says the same thing: the
-files agree with each other, not that the key was ever yours. Pass
-`--effect-key <public.pem>` to pin the effect key you hold. Checkpoints are signed by the witness key. Every checkpoint row is checked under one key: `--checkpoint-key <public.pem>` when you pin it, otherwise one key taken from the checkpoint file, with the same note that agreement is not trust. The tail counts only checkpoints whose signatures verified. Someone who can rewrite the files can still roll that file back to an older valid prefix together with the records after it; only a checkpoint held elsewhere detects that. `--json` prints
+separate key. A `self` row is checked under the effect key: `--effect-key <public.pem>`
+when you pin it, otherwise one key taken from the first `self` row. A `same-org`
+row is checked under the witness key: `--witness-key <public.pem>` when you pin it,
+otherwise one key taken from the first `same-org` row. Each of those lines says the
+same thing: the files agree with each other, not that the key was ever yours.
+Checkpoints are signed by the witness key. Every checkpoint row is checked under one key: `--checkpoint-key <public.pem>` when you pin it, otherwise one key taken from the checkpoint file, with the same note that agreement is not trust. The tail counts only checkpoints whose signatures verified. Someone who can rewrite the files can still roll that file back to an older valid prefix together with the records after it; only a checkpoint held elsewhere detects that. `--json` prints
 the same result for a
 pipeline; the exit code is 0 when it verifies and 1 when it does not, and a
 directory with no ledger in it is never quiet success.

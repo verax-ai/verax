@@ -15,18 +15,10 @@ import {
   type Policy,
 } from "@verax-ai/proxy";
 import { EX_CONFIG } from "./config.ts";
-import { defaultElevated, directoryAccess, elevatedCommandCodeRefusal, stateDirFor, SystemToolError, unreadableSentence } from "./install.ts";
+import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
-function policyForApprove(stateDir: string, policyHash: string): Policy | null {
-  const fromEnv = process.env.VERAX_POLICY_FILE?.trim();
-  if (fromEnv) {
-    try {
-      return loadPolicy(readFileSync(fromEnv, "utf8"));
-    } catch {
-      // Fall through to the snapshot the body wrote for this hash.
-    }
-  }
+function policyFromSnapshot(stateDir: string, policyHash: string): Policy | null {
   const snap = join(stateDir, "policies", `${policyHash}.json`);
   if (!existsSync(snap)) return null;
   try {
@@ -34,6 +26,22 @@ function policyForApprove(stateDir: string, policyHash: string): Policy | null {
   } catch {
     return null;
   }
+}
+
+function policyForApprove(stateDir: string, policyHash: string, env: NodeJS.ProcessEnv, elevated: boolean): Policy | null {
+  // An elevated approve inherits the user's environment. The snapshot the body
+  // wrote is the policy that held the call. The environment is not.
+  if (!elevated) {
+    const fromEnv = env.VERAX_POLICY_FILE?.trim();
+    if (fromEnv) {
+      try {
+        return loadPolicy(readFileSync(fromEnv, "utf8"));
+      } catch {
+        // Fall through to the snapshot the body wrote for this hash.
+      }
+    }
+  }
+  return policyFromSnapshot(stateDir, policyHash);
 }
 
 function operatorName(): string {
@@ -137,7 +145,7 @@ export async function runApprove(
     }
     throw err;
   }
-  if (isElevated) {
+  if (isElevated && !cliCodeCheckPassedAlready()) {
     const refusal = elevatedCommandCodeRefusal(platform, env, hooks?.codeProbe);
     if (refusal) {
       writeErr(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
@@ -152,14 +160,21 @@ export async function runApprove(
   if (rest.length === 1 && stateDir) {
     let installed: string;
     try {
-      installed = stateDirFor(process.platform);
+      if (platform === "win32") {
+        const rootRefusal = windowsProgramDataRefusal(env);
+        if (rootRefusal) {
+          writeErr(`${rootRefusal}\n`);
+          return 78;
+        }
+      }
+      installed = stateDirFor(platform, env);
     } catch (err) {
       writeErr(`${err instanceof SystemToolError ? err.message : "refusing install root"}\n`);
       return 78;
     }
     const access = directoryAccess(installed);
     if (access === "unreadable") {
-      writeErr(`${unreadableSentence(installed)}\n`);
+      writeErr(`${unreadableSentence(installed, "approve")}\n`);
       return 77;
     }
     if (access === "ok") {
@@ -172,7 +187,7 @@ export async function runApprove(
     return 78;
   }
   if (directoryAccess(stateDir) === "unreadable") {
-    writeErr(`${unreadableSentence(stateDir)}\n`);
+    writeErr(`${unreadableSentence(stateDir, "approve")}\n`);
     return 77;
   }
   // A non-interactive shell can read the state directory. Without a person
@@ -233,7 +248,12 @@ export async function runApprove(
       writeErr("approve-unknown-ref\n");
       return 78;
     }
-    const policy = policyForApprove(stateDir, defer.claims.policyHash);
+    const policy = policyForApprove(stateDir, defer.claims.policyHash, env, isElevated);
+    const waitingSubject = rows.find((row) => row.ref === ref)?.subject;
+    if (isElevated && !policy && waitingSubject === "spend") {
+      writeErr("approve-policy-missing\n");
+      return 1;
+    }
     const result = await approvePending({
       ledger,
       recordSigner: signers.recordSigner,

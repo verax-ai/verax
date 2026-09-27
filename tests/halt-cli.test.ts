@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 
 describe("S3 verax halt CLI", () => {
@@ -21,6 +23,7 @@ describe("S3 verax halt CLI", () => {
     const code = await new Promise<number>((resolve) => {
       child.on("close", (exit) => resolve(exit ?? 1));
     });
+    if (refusedAsElevated(code, stderr)) return;
     assert.equal(code, 0);
     assert.match(stderr, /halted/);
     assert.equal(existsSync(join(dir, "halted")), true);

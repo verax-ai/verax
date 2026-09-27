@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { refusedAsElevated } from "./elevated-refusal.ts";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
 
@@ -32,6 +34,7 @@ describe("verax init --local", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-"));
     try {
       const r = run(["init", "--local", stateDir]);
+      if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 0, r.stderr);
       for (const name of ["local-issuer/key.pem", "local-issuer/jwks.json", "local-issuer/agent.token", "verax.env", "policy.json"]) {
         assert.equal(existsSync(join(stateDir, name)), true, name);
@@ -44,7 +47,9 @@ describe("verax init --local", () => {
   it("refuses a second run without --force and leaves the key bytes", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-force-"));
     try {
-      assert.equal(run(["init", "--local", stateDir]).status, 0);
+      const first = run(["init", "--local", stateDir]);
+      if (refusedAsElevated(first.status, first.stderr)) return;
+      assert.equal(first.status, 0);
       const keyPath = join(stateDir, "local-issuer", "key.pem");
       const before = readFileSync(keyPath);
       const again = run(["init", "--local", stateDir]);
@@ -59,6 +64,7 @@ describe("verax init --local", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-quiet-"));
     try {
       const r = run(["init", "--local", stateDir]);
+      if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 0, r.stderr);
       const token = readFileSync(join(stateDir, "local-issuer", "agent.token"), "utf8").trim();
       assert.ok(token.startsWith("eyJ") && token.length > 40, "token-shape");
@@ -71,7 +77,9 @@ describe("verax init --local", () => {
   it("mints read and memory only", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-scope-"));
     try {
-      assert.equal(run(["init", "--local", stateDir]).status, 0);
+      const minted = run(["init", "--local", stateDir]);
+      if (refusedAsElevated(minted.status, minted.stderr)) return;
+      assert.equal(minted.status, 0);
       const token = readFileSync(join(stateDir, "local-issuer", "agent.token"), "utf8").trim();
       const scope = payload(token).scope ?? "";
       const parts = scope.split(/\s+/).filter((s) => s !== "");
@@ -88,6 +96,7 @@ describe("verax init --local", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-days-"));
     try {
       const r = run(["init", "--local", stateDir, "--days", "91"]);
+      if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 78, r.stderr);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
@@ -98,6 +107,7 @@ describe("verax init --local", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-port-"));
     try {
       const r = run(["init", "--local", stateDir, "--port", "8797"]);
+      if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 0, r.stderr);
       const env = readFileSync(join(stateDir, "verax.env"), "utf8");
       assert.match(env, /^VERAX_BIND=127\.0\.0\.1:8797$/m);
@@ -115,8 +125,12 @@ describe("verax init --local", () => {
   it("rejects a port outside 1024-65535", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-init-port-range-"));
     try {
-      assert.equal(run(["init", "--local", stateDir, "--port", "80"]).status, 78);
-      assert.equal(run(["init", "--local", stateDir, "--port", "70000"]).status, 78);
+      const low = run(["init", "--local", stateDir, "--port", "80"]);
+      if (refusedAsElevated(low.status, low.stderr)) return;
+      assert.equal(low.status, 78);
+      const high = run(["init", "--local", stateDir, "--port", "70000"]);
+      if (refusedAsElevated(high.status, high.stderr)) return;
+      assert.equal(high.status, 78);
       assert.equal(existsSync(join(stateDir, "verax.env")), false);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
@@ -128,6 +142,7 @@ describe("verax init --local", () => {
     const stateDir = join(parent, "state dir");
     try {
       const r = run(["init", "--local", stateDir]);
+      if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 0, r.stderr);
       const tokenPath = join(stateDir, "local-issuer", "agent.token").replaceAll("\\", "/");
       const shLine = r.stdout.split(/\r?\n/).find((line) => line.includes("$(cat "));
