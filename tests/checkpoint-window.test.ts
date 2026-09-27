@@ -10,7 +10,7 @@ import { explain } from "@verax-ai/proxy";
 
 import { createBodyServices } from "../packages/body/src/wiring.ts";
 import { requestWitnessCheckpoint } from "../packages/body/src/witness.ts";
-import { refusedAsElevated } from "./elevated-refusal.ts";
+import { refusedAsElevated, skipIfElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -85,7 +85,8 @@ describe("durable checkpoint", () => {
     }
   });
 
-  it("a witness-signed covering checkpoint makes window-coverage applicable", async () => {
+  it("a witness-signed covering checkpoint makes window-coverage applicable", async (t) => {
+    if (skipIfElevated(t)) return;
     const dir = mkdtempSync(join(tmpdir(), "verax-cp-ok-"));
     const child = spawnWitness(dir);
     let stderr = "";

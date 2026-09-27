@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { coseFromHex, verifyCoseSign1 } from "@cedulon/cose";
 
 import { createBodyServices } from "../packages/body/src/wiring.ts";
-import { refusedAsElevated } from "./elevated-refusal.ts";
+import { refusedAsElevated, skipIfElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -58,7 +58,8 @@ function spawnWitness(dir: string) {
 }
 
 describe("independent witness process", () => {
-  it("an effect signed by verax witness fails the body key and verifies with the witness key", async () => {
+  it("an effect signed by verax witness fails the body key and verifies with the witness key", async (t) => {
+    if (skipIfElevated(t)) return;
     const dir = mkdtempSync(join(tmpdir(), "verax-witness-ok-"));
     const body = testKeys();
     const child = spawnWitness(dir);

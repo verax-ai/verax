@@ -14,6 +14,7 @@ import { loadConfig } from "../packages/body/src/config.ts";
 import { loadEnvFile } from "../packages/body/src/init-local.ts";
 import { defaultElevated } from "../packages/body/src/install.ts";
 import { listen } from "../packages/body/src/server.ts";
+import { skipIfElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -42,7 +43,8 @@ function textOf(json: Record<string, unknown> | null): string {
 }
 
 describe("attack B1", () => {
-  it("local approve scope is 403 and a non-TTY approve exits 78", { timeout: 60_000 }, async () => {
+  it("local approve scope is 403 and a non-TTY approve exits 78", { timeout: 60_000 }, async (t) => {
+    if (skipIfElevated(t)) return;
     const stateDir = mkdtempSync(join(tmpdir(), "verax-attack-b1-"));
     init(stateDir);
     const policyPath = join(stateDir, "policy.json");
