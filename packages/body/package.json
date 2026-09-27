@@ -21,6 +21,8 @@
     "dist"
   ],
   "dependencies": {
+    "@cedulon/checkpoint": "0.13.1",
+    "@cedulon/core": "0.13.1",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@verax-ai/inventory": "^0.3.0",
     "@verax-ai/proxy": "^0.3.0",

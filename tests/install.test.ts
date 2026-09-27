@@ -42,6 +42,8 @@ import {
   windowsSddlBatchStdin,
   sddlRightsMask,
   type PlanOp,
+  type ExecResult,
+  type UserTokenSpawn,
 } from "../packages/body/src/install.ts";
 import { runInitLocal } from "../packages/body/src/init-local.ts";
 
@@ -146,6 +148,13 @@ function argvs(ops: PlanOp[]): string[][] {
  * Read-back icacls text. Only the code dir, state dir, and install marker carry verax-svc.
  * Node and ancestor reads stay Administrators + SYSTEM so the invoking SID is not a write ACE.
  */
+/** Stands in for the uid child: a test process cannot switch to another uid. Same file rules. */
+function userTokenStandIn(spec: UserTokenSpawn): ExecResult {
+  const wrote = writeAgentTokenFile(spec.tokenDir, spec.tokenPath, spec.token);
+  return wrote.ok ? { status: 0, stdout: "", stderr: "" } : { status: 78, stdout: "", stderr: `${wrote.error}
+` };
+}
+
 function winServiceAcl(dir: string): string {
   const base = dir.replace(/[\\/]+$/, "");
   const codeFile = /[/\\]node_modules[/\\]@verax-ai[/\\]body[/\\]/i.test(base);
@@ -375,6 +384,7 @@ describe("verax install plan", () => {
         platform: "linux",
         env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
@@ -573,6 +583,7 @@ describe("verax install plan", () => {
         platform: "linux",
         env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
@@ -618,6 +629,7 @@ describe("verax install plan", () => {
         platform: "linux",
         env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
@@ -669,6 +681,7 @@ describe("verax install plan", () => {
         platform: "linux",
         env: { SUDO_USER: "runner", SUDO_UID: "1000", SUDO_GID: "1000", VERAX_INVOKING_HOME: home },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
@@ -1283,6 +1296,7 @@ describe("verax install plan", () => {
         platform,
         env,
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout,
         posixRoot,
@@ -1333,6 +1347,7 @@ describe("verax install plan", () => {
           USERPROFILE: join(root, "home"),
         },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: winOpts,
         exec: (argv, stdin) => {
@@ -1418,6 +1433,7 @@ describe("verax install plan", () => {
       platform: "linux",
       env: linuxEnv,
       elevated: () => true,
+      spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
       layout: linuxOpts,
       exec: () => {
@@ -1442,6 +1458,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
       elevated: () => true,
+      spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
       layout: winOpts,
       exec: (argv, stdin) => {
@@ -1534,6 +1551,7 @@ describe("verax install plan", () => {
         platform: "win32",
         env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: winOpts,
         exec: (argv, stdin) => {
@@ -1600,6 +1618,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: winEnv,
       elevated: () => true,
+      spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
       layout: winOpts,
       exec: (argv) => {
@@ -1626,6 +1645,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: winEnv,
       elevated: () => true,
+      spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
       layout: winOpts,
       exec: (argv) => {
@@ -1675,6 +1695,7 @@ describe("verax install plan", () => {
         platform,
         env: platform === "win32" ? winEnv : linuxEnv,
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: { execPath: link, bodyVersion: "0.3.0", npmCli: target },
         exec: (argv) => {
@@ -1750,6 +1771,7 @@ describe("verax install plan", () => {
       platform: "win32",
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
       elevated: () => true,
+      spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
       layout: winOpts,
       exec: (argv, stdin) => {
@@ -1867,6 +1889,7 @@ describe("verax install plan", () => {
               USERPROFILE: join(root, "home"),
             },
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: posix
           ? { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! }
@@ -2761,6 +2784,7 @@ describe("verax uninstall", () => {
         platform: "win32",
         env,
         elevated: () => true,
+        spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
         layout: winOpts,
         exec: (argv, stdin) => {
