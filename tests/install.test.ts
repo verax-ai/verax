@@ -62,6 +62,11 @@ const linuxEnv = {
   VERAX_INVOKING_HOME: "/home/runner",
 };
 
+/** Injected ancestor of an install root: uid 0, mode 0755. The plan must not lstat this machine's /opt. */
+function rootOwnedAncestor(): { uid: number; mode: number } {
+  return { uid: 0, mode: 0o755 };
+}
+
 const winOpts = {
   port: 8801,
   days: 30,
@@ -81,6 +86,7 @@ const linuxOpts = {
   bodyVersion: "0.3.0",
   npmCli: "/usr/lib/node_modules/npm/bin/npm-cli.js",
   stateExists: false,
+  ancestorStat: rootOwnedAncestor,
 };
 
 const darwinEnv = {
@@ -98,6 +104,7 @@ const darwinOpts = {
   bodyVersion: "0.3.0",
   npmCli: "/usr/local/lib/node_modules/npm/bin/npm-cli.js",
   stateExists: false,
+  ancestorStat: rootOwnedAncestor,
 };
 
 /** `getent passwd runner` for a Linux runInstall mock: the plan confirms VERAX_INVOKING_HOME against it. */
@@ -388,6 +395,7 @@ describe("verax install plan", () => {
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
+        ancestorStat: rootOwnedAncestor,
         healthTimeoutMs: 1,
         exec: (argv, stdin) => {
           const passwd = getentAnswer(argv, home);
@@ -490,6 +498,7 @@ describe("verax install plan", () => {
       codeProbe: () => false,
       layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
       posixRoot,
+      ancestorStat: rootOwnedAncestor,
       healthTimeoutMs: 1,
       exec,
       io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
@@ -588,6 +597,7 @@ describe("verax install plan", () => {
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
+        ancestorStat: rootOwnedAncestor,
         exec: (argv) => {
           calls.push([...argv]);
           const passwd = getentAnswer(argv, home);
@@ -634,6 +644,7 @@ describe("verax install plan", () => {
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
+        ancestorStat: rootOwnedAncestor,
         healthTimeoutMs: 1,
         exec: (argv) => {
           calls.push([...argv]);
@@ -686,6 +697,7 @@ describe("verax install plan", () => {
         codeProbe: () => false,
         layout: { execPath: standIn, bodyVersion: "0.3.0", npmCli: standIn },
         posixRoot,
+        ancestorStat: rootOwnedAncestor,
         healthTimeoutMs: 1,
         exec: (argv) => {
           calls.push([...argv]);
@@ -1215,6 +1227,7 @@ describe("verax install plan", () => {
         },
         layout,
         posixRoot,
+        ancestorStat: rootOwnedAncestor,
         exec: (argv, stdin) => {
           const joined = argv.join("\n");
           if (
@@ -1301,6 +1314,7 @@ describe("verax install plan", () => {
         codeProbe: () => false,
         layout,
         posixRoot,
+        ancestorStat: rootOwnedAncestor,
         exec: (argv, stdin) => {
           const passwd = getentAnswer(argv, home);
           if (passwd) return passwd;
@@ -1896,6 +1910,7 @@ describe("verax install plan", () => {
           ? { execPath: trustedStandIn!, bodyVersion: "0.3.0", npmCli: trustedStandIn! }
           : winOpts,
         posixRoot: posix ? join(root, "fsroot") : undefined,
+        ancestorStat: rootOwnedAncestor,
         exec: (argv, stdin) => {
           const passwd = getentAnswer(argv, join(root, "home"));
           if (passwd) return passwd;

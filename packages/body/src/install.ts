@@ -669,6 +669,11 @@ export type PlanOpts = {
   userSid?: string;
   /** Linux: uid and mode of the Node file and each parent. Non-root or group/other-writable refuses. */
   nodeModes?: { uid: number; mode: number }[];
+  /**
+   * uid and mode of each ancestor of the Linux and macOS install roots.
+   * When set, the plan does not lstat those directories. `null` means unreadable.
+   */
+  ancestorStat?: (dir: string) => { uid: number; mode: number; symlink?: boolean } | null;
   /** Release-test install from `npm pack` tarballs. Skips the registry and signature audit. */
   fromTarballs?: string;
   tarballFiles?: string[];
@@ -767,6 +772,11 @@ export type InstallHooks = {
    * Absent means the install reads the real ACL or mode.
    */
   codeProbe?: (dir: string) => boolean;
+  /**
+   * uid and mode for ancestors of the Linux and macOS install roots.
+   * When set, the plan does not lstat them. Absent means lstat.
+   */
+  ancestorStat?: (dir: string) => { uid: number; mode: number; symlink?: boolean } | null;
   /** Test-only stand-in for the uid/gid child that writes the POSIX agent token. */
   spawnUserToken?: (spec: UserTokenSpawn) => ExecResult;
 };
@@ -1342,6 +1352,37 @@ export function trustTargets(file: string, platform: InstallPlatform): { path: s
   }));
 }
 
+/**
+ * Another user can rename or replace this entry.
+ * An ancestor with the sticky bit is kept: only its owner can rename a child (mode 1777, the way `/tmp` works).
+ * The entry itself stays refused when it is group- or other-writable, sticky bit or not.
+ * A symbolic link is refused either way.
+ */
+export function posixOthersCanReplace(st: { uid: number; mode: number; symlink?: boolean }, ancestor: boolean): boolean {
+  if (st.symlink) return true;
+  if (st.uid !== 0) return true;
+  if ((st.mode & 0o022) === 0) return false;
+  return !(ancestor && (st.mode & 0o1000) !== 0);
+}
+
+/** POSIX half of the elevated code check. `read` supplies uid and mode so a test does not lstat the machine. */
+export function posixCodeDirectoryDetail(
+  dir: string,
+  platform: InstallPlatform,
+  read: (file: string) => { uid: number; mode: number; symlink?: boolean } | null,
+): string | false {
+  for (const file of trustTargets(dir, platform)) {
+    const st = read(file.path);
+    if (st !== null && !posixOthersCanReplace({ uid: st.uid, mode: st.mode, symlink: st.symlink === true }, file.ancestor)) {
+      continue;
+    }
+    if (st === null) return `${file.path} could not be read`;
+    if (st.symlink) return `${file.path} is a symbolic link`;
+    return `${file.path} owner uid ${st.uid}, mode ${(st.mode & 0o7777).toString(8)}`;
+  }
+  return false;
+}
+
 function linuxNodeUntrusted(modes: { uid: number; mode: number }[]): boolean {
   return modes.some((st) => st.uid !== 0 || (st.mode & 0o022) !== 0);
 }
@@ -1762,6 +1803,64 @@ function sddlDescriptorLines(text: string): string[] {
   return lines.length > 0 ? lines : [text];
 }
 
+/** Ancestors only. The code root and the state root are created by this install and are not in the list. */
+function posixInstallAncestorDirs(platform: "linux" | "darwin", codeDir: string, stateDir: string, unitOrPlist: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const root of [codeDir, stateDir, unitOrPlist]) {
+    for (const dir of ancestry(root, platform).slice(1)) {
+      if (seen.has(dir)) continue;
+      seen.add(dir);
+      out.push(dir);
+    }
+  }
+  return out;
+}
+
+function readInstallAncestor(
+  dir: string,
+  read: PlanOpts["ancestorStat"],
+): { uid: number; mode: number; symlink: boolean } | "missing" | "unreadable" {
+  if (read) {
+    const st = read(dir);
+    if (st === null) return "unreadable";
+    return { uid: st.uid, mode: st.mode, symlink: st.symlink === true };
+  }
+  try {
+    const st = lstatSync(dir);
+    return { uid: st.uid, mode: st.mode, symlink: st.isSymbolicLink() };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return "missing";
+    return "unreadable";
+  }
+}
+
+function installAncestorPlanRefusal(
+  platform: "linux" | "darwin",
+  codeDir: string,
+  stateDir: string,
+  unitOrPlist: string,
+  read: PlanOpts["ancestorStat"],
+): InstallPlan | null {
+  for (const dir of posixInstallAncestorDirs(platform, codeDir, stateDir, unitOrPlist)) {
+    const st = readInstallAncestor(dir, read);
+    if (st === "missing") continue;
+    if (st === "unreadable") {
+      return fail(
+        EX_CONFIG,
+        `refusing: ${dir} can be changed by other users (owner uid unknown, mode unknown); the service code under it could be replaced`,
+      );
+    }
+    if (!posixOthersCanReplace(st, true)) continue;
+    const mode = (st.mode & 0o7777).toString(8);
+    return fail(
+      EX_CONFIG,
+      `refusing: ${dir} can be changed by other users (owner uid ${st.uid}, mode ${mode}); the service code under it could be replaced`,
+    );
+  }
+  return null;
+}
+
 function tarballAclRows(opts: PlanOpts): { path: string; sddl: string; ancestor: boolean }[] {
   if (opts.tarballSddl !== undefined) return opts.tarballSddl;
   if (opts.tarballIcacls === undefined || opts.fromTarballs === undefined) return [];
@@ -1848,6 +1947,16 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     if (stateFact) return stateFact;
     const rootFact = darwinRefuses(opts.darwinRoot, fixed.darwinRoot, Boolean(opts.markerExists));
     if (rootFact) return rootFact;
+  }
+  if (platform === "linux" || platform === "darwin") {
+    const held = installAncestorPlanRefusal(
+      platform,
+      paths.codeDir,
+      paths.stateDir,
+      platform === "linux" ? fixed.systemdUnit : fixed.darwinPlist,
+      opts.ancestorStat,
+    );
+    if (held) return held;
   }
   if (opts.stateExists && !opts.force) return fail(EX_CONFIG, `refusing: ${paths.stateDir} already exists`);
   const cliBin = cliBinFor(paths.codeDir, platform);
@@ -4401,12 +4510,11 @@ function linuxFact(dir: string, exec: (argv: string[]) => ExecResult): { exists:
   return { exists: true, symlink, owner: (owner.stdout ?? "").trim() };
 }
 
-/** Resolved path: root-owned and not group- or other-writable. The symlink itself is not the object. */
-function posixEntryUntrusted(file: string): boolean {
+/** Resolved path: root-owned and not group- or other-writable. A sticky ancestor is kept. The symlink itself is not the object. */
+function posixEntryUntrusted(file: string, ancestor: boolean): boolean {
   try {
     const st = lstatSync(file);
-    if (st.isSymbolicLink()) return true;
-    return st.uid !== 0 || (st.mode & 0o022) !== 0;
+    return posixOthersCanReplace({ uid: st.uid, mode: st.mode, symlink: st.isSymbolicLink() }, ancestor);
   } catch {
     return true;
   }
@@ -4569,20 +4677,14 @@ function collectTarballs(
  */
 function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, exec: ToolExec): (dir: string) => string | false {
   if (platform !== "win32") {
-    return (dir) => {
-      for (const file of trustTargets(dir, platform)) {
-        if (!posixEntryUntrusted(file.path)) continue;
-        try {
-          const st = lstatSync(file.path);
-          return st.isSymbolicLink()
-            ? `${file.path} is a symbolic link`
-            : `${file.path} owner uid ${st.uid}, mode ${(st.mode & 0o777).toString(8)}`;
-        } catch {
-          return `${file.path} could not be read`;
-        }
+    return (dir) => posixCodeDirectoryDetail(dir, platform, (file) => {
+      try {
+        const st = lstatSync(file);
+        return { uid: st.uid, mode: st.mode, symlink: st.isSymbolicLink() };
+      } catch {
+        return null;
       }
-      return false;
-    };
+    });
   }
   const sid = invokingSid(exec);
   const read = readSddlBatch(exec, dirs.flatMap((dir) => trustTargets(dir, "win32").map((file) => file.path)));
@@ -4769,7 +4871,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       }
     } else {
       for (const file of trustFiles) {
-        if (posixEntryUntrusted(file.path)) {
+        if (posixEntryUntrusted(file.path, file.ancestor)) {
           io.stderr.write(`${nodeTrustMessageFor(file.path, trustPlat)}\n`);
           return EX_CONFIG;
         }
@@ -4891,6 +4993,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     darwinState,
     darwinRoot,
     invokingIds,
+    ancestorStat: hooks.ancestorStat,
     ...(packed && !("error" in packed)
       ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballDigests: packed.digests, tarballSddl: packed.sddl, tarballModes: packed.modes }
       : {}),

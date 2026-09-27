@@ -95,6 +95,7 @@ describe("attack R14", () => {
       execPath: "/usr/bin/node",
       bodyVersion: "0.3.0",
       npmCli: "/usr/lib/node_modules/npm/bin/npm-cli.js",
+      ancestorStat: () => ({ uid: 0, mode: 0o755 }),
     });
     assert.equal(linux.ok, true, linux.ok ? "" : linux.message);
     if (!linux.ok) return;
@@ -115,6 +116,7 @@ describe("attack R14", () => {
       bodyVersion: "0.3.0",
       npmCli: "/usr/lib/node_modules/npm/bin/npm-cli.js",
       invokingIds: { uid: 501, gid: 20 },
+      ancestorStat: () => ({ uid: 0, mode: 0o755 }),
     });
     assert.equal(darwin.ok, true, darwin.ok ? "" : darwin.message);
     if (!darwin.ok) return;

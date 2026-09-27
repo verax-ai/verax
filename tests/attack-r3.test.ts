@@ -38,6 +38,7 @@ const linuxOpts = {
   bodyVersion: "0.3.0",
   npmCli: "/usr/lib/node_modules/npm/bin/npm-cli.js",
   stateExists: false,
+  ancestorStat: () => ({ uid: 0, mode: 0o755 }),
 };
 
 const adminAcl = "O:BAG:SYD:PAI(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";

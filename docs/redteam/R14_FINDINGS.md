@@ -35,6 +35,13 @@ be held.
   `@verax-ai/*` dependencies with the same trust check as `node.exe` before doing anything else, and refuse code the user
   can change, or code whose directory cannot be found. The README and the CI install jobs install the CLI into an
   administrator-owned prefix (`%ProgramFiles%\verax-cli`, `/opt/verax-cli`) and run it from there.
+- Gate (install-root ancestors): before it creates anything, a Linux or macOS install plan checks every ancestor of the
+  code root and the state root, and also the directory that holds the systemd unit and `/Library/LaunchDaemons`. Each of
+  those directories must be owned by uid 0 and must not be group- or other-writable, unless the sticky bit is set (mode
+  1777): only that directory's owner can rename an entry. Otherwise the plan exits with the config code and
+  `refusing: <path> can be changed by other users (owner uid <n>, mode <octal>); the service code under it could be replaced`.
+  The elevated CLI code check uses the same rule for its ancestors, so a sticky ancestor is accepted there too. Uninstall
+  does not run this check.
 - R14-3: an approved retry checks validity against the inputs bound to the allow record; a retry that declares different
   inputs is a signed `inputs-changed` deny.
 - R14-4: the halt flag is read again inside the admission queue.

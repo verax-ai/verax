@@ -37,6 +37,7 @@ const linuxOpts = {
   npmCli: "/usr/lib/node_modules/npm/bin/npm-cli.js",
   stateExists: false,
   linuxAccount: { exists: false, createdByUs: false, createdGroup: false },
+  ancestorStat: () => ({ uid: 0, mode: 0o755 }),
 };
 
 function toolOf(argv: readonly string[]): string {

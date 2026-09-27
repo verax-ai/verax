@@ -619,6 +619,7 @@ jobs:
           sudo chmod -R a-w,u+rX "$dir"
           # The runner image ships /opt as 0777 without the sticky bit: any user could rename
           # /opt/verax-cli and put other code in its place, and the elevated code check refuses that.
+          # The installer refuses a world-writable /opt too.
           # A normal system has /opt 0755; make this one match.
           sudo chmod 0755 /opt
           sudo mkdir -p /opt/verax-cli
