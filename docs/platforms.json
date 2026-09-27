@@ -1,73 +1,9 @@
 {
-  "sha": "62ac150e20eb0f390d49a9664487e38c3d66e1fa",
+  "sha": "d2a2771a2d1f0c5f834119af189b47013ef9d4a6",
   "date": "2026-09-27",
-  "statement": "This table is generated from CI for commit 62ac150e20eb0f390d49a9664487e38c3d66e1fa on 2026-09-27, and only these platforms are claimed.",
+  "statement": "This table is generated from CI for commit d2a2771a2d1f0c5f834119af189b47013ef9d4a6 on 2026-09-27, and only these platforms are claimed.",
   "osNote": "Where the jobs API did not include a step summary, the platform and architecture come from the job name and runner label.",
   "rows": [
-    {
-      "platform": "Windows (windows-latest)",
-      "architecture": "x64",
-      "checked": [
-        "installs as a separate service account and starts the service",
-        "a non-admin user cannot read the signing key",
-        "a non-admin user cannot write the approval queue",
-        "a non-admin user cannot change the installed code",
-        "the agent token works through the service",
-        "a directory planted by a non-admin user is refused",
-        "a non-admin user racing the install cannot plant inside the Verax root"
-      ],
-      "result": "success",
-      "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102434",
-      "job": "windows (localized)"
-    },
-    {
-      "platform": "Linux (ubuntu-24.04)",
-      "architecture": "x64",
-      "checked": [
-        "installs as a separate service account and starts the service",
-        "a non-admin user cannot read the signing key",
-        "a non-admin user cannot write the approval queue",
-        "a non-admin user cannot change the installed code",
-        "the agent token works through the service"
-      ],
-      "result": "success",
-      "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102526",
-      "job": "linux (ubuntu-24.04)"
-    },
-    {
-      "platform": "Windows (windows-latest)",
-      "architecture": "x64",
-      "checked": [
-        "installs as a separate service account and starts the service",
-        "a non-admin user cannot read the signing key",
-        "a non-admin user cannot write the approval queue",
-        "a non-admin user cannot change the installed code",
-        "the agent token works through the service",
-        "a directory planted by a non-admin user is refused",
-        "a non-admin user racing the install cannot plant inside the Verax root"
-      ],
-      "result": "success",
-      "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102535",
-      "job": "windows (default)"
-    },
-    {
-      "platform": "Linux (ubuntu-24.04-arm)",
-      "architecture": "arm64",
-      "checked": [
-        "installs as a separate service account and starts the service",
-        "a non-admin user cannot read the signing key",
-        "a non-admin user cannot write the approval queue",
-        "a non-admin user cannot change the installed code",
-        "the agent token works through the service"
-      ],
-      "result": "success",
-      "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102558",
-      "job": "linux (ubuntu-24.04-arm)"
-    },
     {
       "platform": "macOS (macos-15-intel)",
       "architecture": "x64",
@@ -80,8 +16,25 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102559",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399263",
       "job": "macos (macos-15-intel)"
+    },
+    {
+      "platform": "Windows (windows-latest)",
+      "architecture": "x64",
+      "checked": [
+        "installs as a separate service account and starts the service",
+        "a non-admin user cannot read the signing key",
+        "a non-admin user cannot write the approval queue",
+        "a non-admin user cannot change the installed code",
+        "the agent token works through the service",
+        "a directory planted by a non-admin user is refused",
+        "a non-admin user racing the install cannot plant inside the Verax root"
+      ],
+      "result": "success",
+      "conclusion": "success",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399345",
+      "job": "windows (default)"
     },
     {
       "platform": "macOS (macos-15)",
@@ -95,8 +48,25 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102574",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399351",
       "job": "macos (macos-15)"
+    },
+    {
+      "platform": "Windows (windows-latest)",
+      "architecture": "x64",
+      "checked": [
+        "installs as a separate service account and starts the service",
+        "a non-admin user cannot read the signing key",
+        "a non-admin user cannot write the approval queue",
+        "a non-admin user cannot change the installed code",
+        "the agent token works through the service",
+        "a directory planted by a non-admin user is refused",
+        "a non-admin user racing the install cannot plant inside the Verax root"
+      ],
+      "result": "success",
+      "conclusion": "success",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399364",
+      "job": "windows (localized)"
     },
     {
       "platform": "Linux (ubuntu-22.04)",
@@ -110,8 +80,49 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752382/job/108565102608",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399386",
       "job": "linux (ubuntu-22.04)"
+    },
+    {
+      "platform": "Linux (ubuntu-24.04-arm)",
+      "architecture": "arm64",
+      "checked": [
+        "installs as a separate service account and starts the service",
+        "a non-admin user cannot read the signing key",
+        "a non-admin user cannot write the approval queue",
+        "a non-admin user cannot change the installed code",
+        "the agent token works through the service"
+      ],
+      "result": "success",
+      "conclusion": "success",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399392",
+      "job": "linux (ubuntu-24.04-arm)"
+    },
+    {
+      "platform": "Linux (ubuntu-24.04)",
+      "architecture": "x64",
+      "checked": [
+        "installs as a separate service account and starts the service",
+        "a non-admin user cannot read the signing key",
+        "a non-admin user cannot write the approval queue",
+        "a non-admin user cannot change the installed code",
+        "the agent token works through the service"
+      ],
+      "result": "success",
+      "conclusion": "success",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195488/job/108704399402",
+      "job": "linux (ubuntu-24.04)"
+    },
+    {
+      "platform": "macOS (macos-latest)",
+      "architecture": "arm64",
+      "checked": [
+        "the npm packages install cleanly and init / serve / a tool call / verify work"
+      ],
+      "result": "success",
+      "conclusion": "success",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195491/job/108704399166",
+      "job": "installed (macos-latest)"
     },
     {
       "platform": "Windows (windows-latest)",
@@ -121,7 +132,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752370/job/108565102390",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195491/job/108704399280",
       "job": "installed (windows-latest)"
     },
     {
@@ -132,19 +143,8 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752370/job/108565102530",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36349195491/job/108704399310",
       "job": "installed (ubuntu-latest)"
-    },
-    {
-      "platform": "macOS (macos-latest)",
-      "architecture": "arm64",
-      "checked": [
-        "the npm packages install cleanly and init / serve / a tool call / verify work"
-      ],
-      "result": "success",
-      "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/36299752370/job/108565102542",
-      "job": "installed (macos-latest)"
     }
   ]
 }
