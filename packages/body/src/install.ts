@@ -3,11 +3,16 @@ import { createHash, randomBytes } from "node:crypto";
 import {
   accessSync,
   chmodSync,
+  closeSync,
   constants,
   copyFileSync,
   existsSync,
+  fchmodSync,
+  fchownSync,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   realpathSync,
@@ -244,15 +249,17 @@ function expandMachineRoot(raw: string, drive: string, label: string): string {
 
 const MACHINE_ROOTS_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
-  "$files = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion').ProgramFilesDir",
-  "$data = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList').ProgramData",
-  "$drive = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment').SystemDrive",
+  "$files = (Get-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion').GetValue('ProgramFilesDir', $null, 'DoNotExpandEnvironmentNames')",
+  "$data = (Get-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList').GetValue('ProgramData', $null, 'DoNotExpandEnvironmentNames')",
+  "$root = (Get-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').GetValue('SystemRoot', $null, 'DoNotExpandEnvironmentNames')",
+  "if ($root -notmatch '^[A-Za-z]:\\\\') { throw 'SystemRoot does not name a drive' }",
+  "$drive = $root.Substring(0, 2)",
   "Write-Output ('ProgramFilesDir=' + $files)",
   "Write-Output ('ProgramData=' + $data)",
   "Write-Output ('SystemDrive=' + $drive)",
 ].join("; ");
 
-/** HKLM ProgramFilesDir and ProfileList ProgramData, via the System32 PowerShell the installer already runs. */
+/** HKLM ProgramFilesDir and ProfileList ProgramData, read without expansion. The drive is the drive of SystemRoot. */
 export function readWindowsMachineRoots(exec: ToolExec = defaultExec): WindowsMachineRoots {
   const ran = exec(toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", MACHINE_ROOTS_SCRIPT], "win32"));
   if ((ran.status ?? 1) !== 0) {
@@ -266,6 +273,7 @@ export function readWindowsMachineRoots(exec: ToolExec = defaultExec): WindowsMa
     return value;
   };
   const drive = pick("SystemDrive");
+  if (!/^[A-Za-z]:$/.test(drive)) throw new SystemToolError(`refusing: the machine SystemDrive is ${drive}`);
   return {
     programFiles: expandMachineRoot(pick("ProgramFilesDir"), drive, "ProgramFiles"),
     programData: expandMachineRoot(pick("ProgramData"), drive, "ProgramData"),
@@ -348,6 +356,9 @@ export const PS_ERROR_MARK = "verax-ps-error:";
  * Env for system-tool spawns. The caller's PATH is not copied.
  * TEMP/TMP are set only to `tempDir`. The caller's TEMP is a user-writable
  * AppData directory and must not receive install files.
+ * On Windows, PSModulePath is only the System32 Windows PowerShell 5.1 module
+ * directory. Without it, PowerShell 5.1 puts Documents\WindowsPowerShell\Modules
+ * first, and -NoProfile does not change that list.
  */
 export function systemToolEnv(platform: NodeJS.Platform = process.platform, tempDir?: string): NodeJS.ProcessEnv {
   if (platform === "win32") {
@@ -359,6 +370,7 @@ export function systemToolEnv(platform: NodeJS.Platform = process.platform, temp
       PATHEXT: WIN32_PATHEXT,
       ComSpec: path.win32.join(root, "System32", "cmd.exe"),
       SystemDrive: drive,
+      PSModulePath: path.win32.join(root, "System32", "WindowsPowerShell", "v1.0", "Modules"),
     };
     if (tempDir) {
       env.TEMP = tempDir;
@@ -2963,7 +2975,7 @@ function spawnEnvFor(name: string, planned?: NodeJS.ProcessEnv): NodeJS.ProcessE
   return { ...merged, ...planned };
 }
 
-function defaultExec(argv: string[], stdin?: string, env?: NodeJS.ProcessEnv, cwd?: string): ExecResult {
+export function defaultExec(argv: string[], stdin?: string, env?: NodeJS.ProcessEnv, cwd?: string): ExecResult {
   const head = argv[0] ?? "";
   const name = systemToolName(head);
   const input = stdin === undefined ? {} : { input: stdin };
@@ -4619,7 +4631,10 @@ export function tokenParentRefusal(facts: {
   return `refusing: ${facts.dir} is not owned by the invoking user`;
 }
 
-/** chown + chmod so the invoking user can read a root-created token folder. */
+/**
+ * By-path chown and chmod. `ensureTokenParent` does not run these.
+ * It opens the directory and changes that descriptor.
+ */
 export function rootOwnedTokenParentArgv(dir: string, invokingUid: number, platform: NodeJS.Platform): string[][] {
   const spec = platform === "darwin" ? "darwin" : "linux";
   return [
@@ -4687,12 +4702,16 @@ function sudoUserUid(env: NodeJS.ProcessEnv, exec: (argv: string[]) => ExecResul
  * Create a missing token parent with recursive mkdir.
  * An existing directory must be a real directory, not a symlink or reparse point,
  * owned by the invoking user, Administrators, SYSTEM, or root. A root-owned
- * POSIX directory is chowned to the invoking uid and chmod 0700.
+ * POSIX directory is given to the invoking uid and mode 0700 through the
+ * directory descriptor, after the dev/ino is checked against the lstat.
+ * `beforeChange` runs after that lstat and the owner check, before the descriptor
+ * is opened. Tests use it to swap the directory.
  */
 export function ensureTokenParent(
   dir: string,
   env: NodeJS.ProcessEnv = process.env,
   exec: ToolExec = defaultExec,
+  beforeChange?: () => void,
 ): void {
   let st: ReturnType<typeof lstatSync>;
   try {
@@ -4725,13 +4744,41 @@ export function ensureTokenParent(
     invokingSid: owned && platform === "win32" ? invokingSid(exec) : undefined,
   });
   if (reason) throw new SystemToolError(reason);
-  if (platform !== "win32" && st.uid === 0 && invokingUid !== undefined && invokingUid !== 0) {
-    for (const argv of rootOwnedTokenParentArgv(dir, invokingUid, platform)) {
-      const ran = exec(argv);
-      if ((ran.status ?? 1) !== 0) {
-        throw new SystemToolError((ran.stderr || ran.stdout || "chown failed").trim());
-      }
+  if (platform === "win32") return;
+  const repair = st.uid === 0 && invokingUid !== undefined && invokingUid !== 0;
+  if (!repair && !beforeChange) return;
+  beforeChange?.();
+  const fd = openTokenParentNoFollow(dir);
+  try {
+    const opened = fstatSync(fd);
+    if (!opened.isDirectory() || opened.dev !== st.dev || opened.ino !== st.ino) {
+      throw new SystemToolError(`refusing: ${dir} dev/ino mismatch`);
     }
+    if (!repair || invokingUid === undefined) return;
+    try {
+      fchownSync(fd, invokingUid, -1);
+      fchmodSync(fd, 0o700);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "chown failed";
+      throw new SystemToolError(message.trim() || "chown failed");
+    }
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** Directory descriptor for the lstat'd inode. A symlink is a dev/ino mismatch. */
+function openTokenParentNoFollow(dir: string): number {
+  const directory = constants.O_DIRECTORY ?? 0;
+  const nofollow = constants.O_NOFOLLOW ?? 0;
+  try {
+    return openSync(dir, constants.O_RDONLY | directory | nofollow);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ELOOP" || code === "ENOTDIR" || code === "ENOENT") {
+      throw new SystemToolError(`refusing: ${dir} dev/ino mismatch`);
+    }
+    throw err;
   }
 }
 

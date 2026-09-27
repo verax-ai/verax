@@ -15,6 +15,7 @@ import {
 } from "../packages/body/src/desktop.ts";
 import {
   adoptWindowsInstallRoots,
+  defaultExec,
   planInstall,
   readWindowsMachineRoots,
   runUninstall,
@@ -254,6 +255,56 @@ describe("attack R20", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it("R20-2 a real Windows read returns ProgramData and Program Files", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows registry");
+      return;
+    }
+    const roots = readWindowsMachineRoots();
+    assert.match(roots.programData, /^[A-Za-z]:\\/);
+    assert.match(roots.programFiles, /^[A-Za-z]:\\/);
+    assert.match(roots.programData, /\\ProgramData$/i);
+    assert.match(roots.programFiles, /\\Program Files$/i);
+  });
+
+  it("R20-2 a SystemDrive on the child does not change ProgramData", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows registry");
+      return;
+    }
+    const plain = readWindowsMachineRoots();
+    // A spread of process.env keeps the host's own spelling (e.g. SYSTEMDRIVE);
+    // a second spelling would lose to it in the child, so drop every spelling first.
+    const env: NodeJS.ProcessEnv = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (key.toLowerCase() !== "systemdrive") env[key] = value;
+    }
+    env.SystemDrive = "Q:";
+    const redirected = readWindowsMachineRoots((argv) => defaultExec(argv, undefined, env));
+    assert.equal(redirected.programData, plain.programData);
+  });
+
+  it("R20-2 an empty or non-drive SystemDrive line is refused", () => {
+    assert.throws(
+      () =>
+        readWindowsMachineRoots(() => ({
+          status: 0,
+          stdout: "ProgramFilesDir=C:\\Program Files\nProgramData=C:\\ProgramData\nSystemDrive=\n",
+          stderr: "",
+        })),
+      /the machine SystemDrive is empty/,
+    );
+    assert.throws(
+      () =>
+        readWindowsMachineRoots(() => ({
+          status: 0,
+          stdout: "ProgramFilesDir=C:\\Program Files\nProgramData=C:\\ProgramData\nSystemDrive=not-a-drive\n",
+          stderr: "",
+        })),
+      /the machine SystemDrive is not-a-drive/,
+    );
   });
 
   it("R20-3 success text escapes a quote inside the token path", () => {

@@ -747,14 +747,22 @@ export async function runDesktop(
     // metadata names, and its token is not ours to read. The panel's own
     // origin has to be on that issuer's allow-list (VERAX_DEV_REDIRECT_URIS on
     // the running issuer), which this run cannot set after the fact.
-    // Attach joins a body that already holds 127.0.0.1. [::1] on that port is
-    // still this run's to hold. A listener there that is not the forwarder
-    // this process just opened is a refusal: the browser's localhost lookup
-    // would reach it with the real issuer's origin.
+    // Attach joins a body that already holds 127.0.0.1 on the body port, and
+    // an issuer that already holds 127.0.0.1 on the issuer port. [::1] on
+    // both is still this run's to hold. The panel port is claimed below.
+    // A listener on [::1] that is not the forwarder this process just opened
+    // is a refusal: the browser's localhost lookup would reach it, and the
+    // passkey ceremony is sent to the issuer origin.
     if (decided.mode === "attach") {
-      const v6 = await claimIpv6(opts.bodyPort);
-      if (v6 === "busy") {
+      const bodyV6 = await claimIpv6(opts.bodyPort);
+      if (bodyV6 === "busy") {
         writeErr(desktopPortBusyLine("body", opts.bodyPort, true));
+        stopAll();
+        return 1;
+      }
+      const issuerV6 = await claimIpv6(opts.issuerPort);
+      if (issuerV6 === "busy") {
+        writeErr(desktopPortBusyLine("issuer", opts.issuerPort, true));
         stopAll();
         return 1;
       }
