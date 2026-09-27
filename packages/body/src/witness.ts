@@ -169,6 +169,27 @@ function loadDecisions(stateDir: string): SignedDecisionRecord[] {
   return out;
 }
 
+/** Last checkpoint hash this process recorded. A truncated file is compared with it. */
+function recordedCheckpointHash(stateDir: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(statusPath(stateDir), "utf8");
+  } catch {
+    return null;
+  }
+  let found: string | null = null;
+  for (const line of text.split("\n")) {
+    if (line === "") continue;
+    try {
+      const row = JSON.parse(line) as { checkpointHash?: unknown };
+      if (typeof row.checkpointHash === "string" && row.checkpointHash !== "") found = row.checkpointHash;
+    } catch {
+      // A torn status line is not a hash.
+    }
+  }
+  return found;
+}
+
 function lastCheckpointHash(stateDir: string): string | null {
   const path = checkpointsPath(stateDir);
   let text: string;
@@ -179,7 +200,12 @@ function lastCheckpointHash(stateDir: string): string | null {
     throw new Error("checkpoint-unreadable");
   }
   const trimmed = text.trim();
-  if (trimmed === "") return null;
+  if (trimmed === "") {
+    // A missing file starts a chain. Zero bytes or whitespace are not that file.
+    // They also are not the hash recorded when the last checkpoint was written.
+    const recorded = recordedCheckpointHash(stateDir);
+    if (recorded === null || !trimmed.includes(recorded)) throw new Error("checkpoint-unreadable");
+  }
   const lines = trimmed.split("\n").filter((line) => line !== "");
   try {
     const last = JSON.parse(lines[lines.length - 1] ?? "") as SignedCheckpoint;
@@ -214,6 +240,11 @@ function signWindowCheckpoint(
   );
   const signed = signCheckpoint(claims, keys.privateKeyPem, keys.publicKeyPem);
   appendFileSync(checkpointsPath(stateDir), `${JSON.stringify(signed)}\n`, { encoding: "utf8" });
+  appendStatus(stateDir, {
+    atMs: Date.now(),
+    result: "checkpoint",
+    checkpointHash: checkpointHash(signed),
+  });
   return signed;
 }
 

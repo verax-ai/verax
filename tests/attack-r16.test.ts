@@ -172,7 +172,7 @@ describe("attack R16", () => {
     }
   });
 
-  it("R16-2 an unknown command exits 64 and a leading flag still reaches main", { timeout: 40_000 }, async () => {
+  it("R16-2 an unknown command exits 64 and a leading flag that main does not read exits 64", { timeout: 40_000 }, async () => {
     const err: string[] = [];
     const code = await runCli(["instal"], {
       elevated: () => false,
@@ -209,14 +209,11 @@ describe("attack R16", () => {
     // Elevated runner: every child of this checkout is refused before the command, so there is
     // nothing to learn about flag routing there (and Node 22 may read a later --env-file itself).
     if (elevatedRunner) return;
-    const envFile = await run(["--env-file", join(dir, "missing.env")]);
-    assert.notEqual(envFile.code, 64, envFile.stderr);
-    assert.equal(envFile.stderr.includes("unknown command:"), false, envFile.stderr);
-    assert.equal(envFile.stderr.includes("env file is missing"), false, envFile.stderr);
+    // A bare --env-file right after the script is taken by Node itself (it exits 9 before the CLI
+    // runs), so it is not a CLI path to test; --log-file reaches the CLI.
     const logFile = await run(["--log-file", join(dir, "body.log")]);
-    assert.notEqual(logFile.code, 64, logFile.stderr);
-    assert.equal(logFile.stderr.includes("unknown command:"), false, logFile.stderr);
-    assert.equal(logFile.stderr.includes("verax serve --log-file"), false, logFile.stderr);
+    assert.equal(logFile.code, 64, logFile.stderr);
+    assert.match(logFile.stderr, /unknown option: --log-file/);
   });
 
   it("R16-3 a mixed-case VERAX_ name is removed from the object passed in", () => {
@@ -237,9 +234,13 @@ describe("attack R16", () => {
 
   it("R16-4 elevated demo --with-conarium is refused", async () => {
     const err: string[] = [];
+    const env = { ...process.env };
+    delete env.NODE_OPTIONS;
     const code = await runCli(["demo", "--with-conarium"], {
       elevated: () => true,
       codeProbe: () => false,
+      execArgv: [],
+      env,
       stdout: sink,
       stderr: { write: (s) => err.push(String(s)) },
     });
@@ -393,9 +394,9 @@ describe("attack R16", () => {
       { elevated: () => false },
     );
     const shown = out.join("");
-    assert.match(shown, /payee: "sample-merchant"/);
-    assert.match(shown, /reference: " payee=x"/);
-    assert.equal(shown.split("\n").filter((line) => line.startsWith("payee:")).length, 1);
+    assert.match(shown, /"payee": "sample-merchant"/);
+    assert.match(shown, /"reference": " payee=x"/);
+    assert.equal(shown.split("\n").filter((line) => line.startsWith('"payee":')).length, 1);
   });
 
   it("R16-8 a non-spend prompt shows arguments and wants yes, and a non-integer spend amount is refused", async () => {
@@ -430,8 +431,8 @@ describe("attack R16", () => {
     );
     assert.equal(empty, 1, emptyErr.join(""));
     assert.match(emptyErr.join(""), /approve-confirm-mismatch/);
-    assert.match(emptyOut.join(""), /tool: "memory.put"/);
-    assert.match(emptyOut.join(""), /id: "n1"/);
+    assert.match(emptyOut.join(""), /"tool": "memory.put"/);
+    assert.match(emptyOut.join(""), /"id": "n1"/);
     assert.match(emptyOut.join(""), /Type yes:/);
     const pending = loadApprovalsFromDir(dir).find((row) => row.ref === "put-1" || row.ref.endsWith(":put-1"));
     assert.equal(pending?.status, "pending");

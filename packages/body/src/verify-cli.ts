@@ -156,6 +156,10 @@ export async function runVerify(
     }
     try {
       const pem = readFileSync(path, "utf8");
+      if (pem.trim() === "") {
+        out(`verify-key-empty: ${flag}`);
+        return { ok: false };
+      }
       args.splice(at, 2);
       return { ok: true, pem };
     } catch {

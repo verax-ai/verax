@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { beginWinOwnerRun, endWinOwnerRun, ensureTokenParent, mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
@@ -185,7 +185,18 @@ export type InitLocalOpts = {
   noOwnerGrant?: boolean;
   /** Install mode. Defaults to process.env. SUDO_USER names the POSIX owner. */
   env?: NodeJS.ProcessEnv;
+  /** Test hook. A throw here runs the rollback after the issuer directory exists and before any file is written. */
+  beforeWrite?: () => void;
 };
+
+function pathExists(target: string): boolean {
+  try {
+    lstatSync(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function runInitLocal(
   argv: readonly string[],
@@ -243,21 +254,30 @@ async function runInitLocalBody(
     .setExpirationTime(now + parsed.days * 24 * 60 * 60)
     .sign(key);
 
-  const createdState = !existsSync(stateDir);
+  const createdState = !pathExists(stateDir);
+  const issuerExisted = pathExists(issuerDir);
   const wrote: string[] = [];
+  const createdFiles = new Set<string>();
   const rollback = (): void => {
     if (createdState) {
       rmSync(stateDir, { recursive: true, force: true });
       return;
     }
-    for (const p of [...wrote].reverse()) rmSync(p, { force: true });
-    rmSync(issuerDir, { recursive: true, force: true });
+    for (const p of [...createdFiles].reverse()) rmSync(p, { force: true });
+    if (!issuerExisted) rmSync(issuerDir, { recursive: true, force: true });
+  };
+  const writeNew = (target: string, contents: string, mode?: number): void => {
+    if (!pathExists(target)) createdFiles.add(target);
+    writeFileSync(target, contents, mode === undefined ? { encoding: "utf8" } : { encoding: "utf8", mode });
+    wrote.push(target);
   };
   const grantOwner = opts.noOwnerGrant !== true;
   try {
   if (createdState) mkdirLeaf(stateDir, 0o700);
   if (process.platform === "win32" && grantOwner) restrictToOwnerWin32(stateDir);
-  mkdirLeaf(issuerDir, 0o700);
+  // --force keeps the existing issuer directory and rewrites what is in it.
+  mkdirLeaf(issuerDir, 0o700, { existingOk: parsed.force === true });
+  opts.beforeWrite?.();
   const keyPath = join(issuerDir, "key.pem");
   const jwksPath = join(issuerDir, "jwks.json");
   const insideToken = join(issuerDir, "agent.token");
@@ -265,20 +285,16 @@ async function runInitLocalBody(
   const tokenPath = external ? resolve(opts.tokenPath!) : insideToken;
   if (external) ensureTokenParent(dirname(tokenPath), opts.env ?? process.env);
   const envPath = join(stateDir, "verax.env");
-  writeFileSync(keyPath, pem, { encoding: "utf8", mode: 0o600 });
-  wrote.push(keyPath);
+  writeNew(keyPath, pem, 0o600);
   ownerOnly(keyPath, grantOwner);
-  writeFileSync(jwksPath, `${JSON.stringify({ keys: [publicJwk] })}\n`, { encoding: "utf8", mode: 0o600 });
-  wrote.push(jwksPath);
+  writeNew(jwksPath, `${JSON.stringify({ keys: [publicJwk] })}\n`, 0o600);
   ownerOnly(jwksPath, grantOwner);
-  writeFileSync(tokenPath, token, { encoding: "utf8", mode: 0o600 });
-  wrote.push(tokenPath);
+  writeNew(tokenPath, token, 0o600);
   ownerOnly(tokenPath, grantOwner);
   if (external && existsSync(insideToken)) unlinkSync(insideToken);
 
   if (!existsSync(policyDest) && policySrc) {
-    writeFileSync(policyDest, readFileSync(policySrc));
-    wrote.push(policyDest);
+    writeNew(policyDest, readFileSync(policySrc, "utf8"));
     ownerOnly(policyDest, grantOwner);
   }
   const envBody = [
@@ -290,8 +306,7 @@ async function runInitLocalBody(
     `VERAX_BIND=127.0.0.1:${parsed.port}`,
     "",
   ].join("\n");
-  writeFileSync(envPath, envBody, { encoding: "utf8" });
-  wrote.push(envPath);
+  writeNew(envPath, envBody);
   ownerOnly(envPath, grantOwner);
 
   const lines = [
@@ -327,7 +342,7 @@ async function runInitLocalBody(
   } catch (err) {
     const externalToken = wrote.find((p) => !p.startsWith(stateDir));
     rollback();
-    if (externalToken) rmSync(externalToken, { force: true });
+    if (externalToken && createdFiles.has(externalToken)) rmSync(externalToken, { force: true });
     const detail = err instanceof Error ? err.message : "owner-only failed";
     io.stderr.write(`${detail}\n`);
     return err instanceof SystemToolError ? EX_CONFIG : 1;

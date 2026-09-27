@@ -66,23 +66,23 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ## Connect your agent
 
-Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, in a PowerShell started with `-NoProfile` as administrator (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
+Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`) and prefer approving from the panel with a passkey, or from a separate administrator account. Start the administrator PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
 
 ```powershell
 npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body
 & "$env:ProgramFiles\verax-cli\verax.cmd" install
 ```
 
-On Linux and macOS, with a root-owned Node (the distribution's, or `/opt/verax-node`; the installer prints those steps when the Node it was started from can be changed by your account):
+On Linux and macOS, with a root-owned Node (the distribution's `/usr/bin/node`, or `/opt/verax-node/<dir>/bin/node`; the installer prints those steps when the Node it was started from can be changed by your account). Do not start an elevated command with `env node`:
 
 ```sh
 sudo npm install -g --prefix /opt/verax-cli @verax-ai/body
-sudo /opt/verax-cli/bin/verax install
+sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js install
 ```
 
 The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs that Node, and keeps the ledger under a service account. On Windows the agent token is `%ProgramData%\Verax\agent-token\<your SID>\agent.token` (Administrators and SYSTEM have full control, your SID can read the file and read-execute the directory). On Linux and macOS a child process running as your uid writes `~/.verax/agent.token` from its stdin. It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. The service account and the file permissions are the boundary.
 
-Approve a held call from that same administrator-owned copy. Windows, in the same `-NoProfile` administrator PowerShell: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS: `sudo /opt/verax-cli/bin/verax approve`.
+Approve a held call from that same administrator-owned copy. Windows, in the same `-NoProfile` administrator PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
 
 To try it in your own user, which is not a boundary:
 
@@ -218,6 +218,8 @@ npm install -g @verax-ai/body
 verax --help
 verax doctor
 ```
+
+On an account where every process is elevated (the built-in Administrator, or `EnableLUA=0`), a command from a user-writable npm prefix is refused; use the administrator-owned copy at `%ProgramFiles%\verax-cli`.
 
 Node 22.6 or newer. The body speaks MCP over Streamable HTTP at `/mcp` on
 `VERAX_BIND` (default `127.0.0.1:8787`) and needs an issuer, a JWKS URL, an

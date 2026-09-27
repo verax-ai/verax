@@ -387,6 +387,13 @@ const AGREE =
   "this shows the files are internally consistent, not that the key was ever trusted. Pin a key you hold to check that.";
 
 function witnessTrustOf(pinned: string, taken: string | null, sameOrgCount: number): VerifyTrust {
+  if (sameOrgCount === 0) {
+    return {
+      source: "none",
+      publicKeyPem: null,
+      note: "no same-org effects, so no witness key was used",
+    };
+  }
   if (pinned !== "") {
     return {
       source: "pinned",
@@ -404,10 +411,7 @@ function witnessTrustOf(pinned: string, taken: string | null, sameOrgCount: numb
   return {
     source: "none",
     publicKeyPem: null,
-    note:
-      sameOrgCount === 0
-        ? "no same-org effects, so no witness key was used"
-        : "no witness key was found in these files",
+    note: "no witness key was found in these files",
   };
 }
 
@@ -419,6 +423,13 @@ function firstCheckpointKey(rows: readonly SignedCheckpoint[]): string | null {
 }
 
 function checkpointTrustOf(pinned: string, taken: string | null, checkpointCount: number): VerifyTrust {
+  if (checkpointCount === 0) {
+    return {
+      source: "none",
+      publicKeyPem: null,
+      note: "no checkpoints, so no checkpoint key was used",
+    };
+  }
   if (pinned !== "") {
     return {
       source: "pinned",
@@ -438,10 +449,7 @@ function checkpointTrustOf(pinned: string, taken: string | null, checkpointCount
   return {
     source: "none",
     publicKeyPem: null,
-    note:
-      checkpointCount === 0
-        ? "no checkpoints, so no checkpoint key was used"
-        : "no checkpoint key was found in these files",
+    note: "no checkpoint key was found in these files",
   };
 }
 
@@ -457,6 +465,13 @@ function checkpointRowVerifies(row: SignedCheckpoint, key: string | null): boole
 }
 
 function effectTrustOf(pinned: string, taken: string | null, effectCount: number): VerifyTrust {
+  if (effectCount === 0) {
+    return {
+      source: "none",
+      publicKeyPem: null,
+      note: "no effects, so no effect key was used",
+    };
+  }
   if (pinned !== "") {
     return {
       source: "pinned",
@@ -475,7 +490,7 @@ function effectTrustOf(pinned: string, taken: string | null, effectCount: number
   return {
     source: "none",
     publicKeyPem: null,
-    note: effectCount === 0 ? "no effects, so no effect key was used" : "no effect key was found in these files",
+    note: "no effect key was found in these files",
   };
 }
 
@@ -837,11 +852,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   const witnessKey = pinnedWitness !== "" ? pinnedWitness : sameKeyTaken;
   const selfCount = effectRows.filter((row) => row.witnessClass !== "same-org").length;
   const sameCount = effectRows.length - selfCount;
-  const effectTrust = effectTrustOf(
-    pinnedEffect,
-    selfKeyTaken,
-    selfCount === 0 && effectRows.length > 0 ? effectRows.length : selfCount,
-  );
+  const effectTrust = effectTrustOf(pinnedEffect, selfKeyTaken, selfCount);
   const witnessTrust = witnessTrustOf(pinnedWitness, sameKeyTaken, sameCount);
   if (pinnedEffect !== "" && pinnedWitness === "" && sameCount > 0) {
     problems.push("same-org rows need --witness-key when --effect-key is pinned");

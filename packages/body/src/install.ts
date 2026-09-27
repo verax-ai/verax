@@ -28,12 +28,21 @@ export const EX_ELEVATION = 77;
 
 export const ELEVATION_LINE = "verax install needs an elevated shell (Administrator / root)";
 
+const POSIX_CLI = "/opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js";
+
+/** The tarball Node under `/opt/verax-node`, plus the distribution `/usr/bin/node`. Neither is `env node`. */
+export function posixRootOwnedCommand(platform: "linux" | "darwin", command: string): string {
+  const os = platform === "darwin" ? "darwin" : "linux";
+  const node = `/opt/verax-node/node-v${process.versions.node}-${os}-${process.arch}/bin/node`;
+  return `sudo ${node} ${POSIX_CLI} ${command} or sudo /usr/bin/node ${POSIX_CLI} ${command}`;
+}
+
 /** Names the administrator-owned copy. A same-user elevated shell is not that copy. */
 export function unreadableSentence(dir: string, command = "verax"): string {
   const copy =
     process.platform === "win32"
       ? `& "$env:ProgramFiles\\verax-cli\\verax.cmd" ${command}`
-      : `sudo /opt/verax-cli/bin/verax ${command}`;
+      : posixRootOwnedCommand(process.platform === "darwin" ? "darwin" : "linux", command);
   return `cannot read ${dir}: run ${copy}`;
 }
 
@@ -780,6 +789,14 @@ export type InstallHooks = {
    * Absent means the install reads the real ACL or mode.
    */
   codeProbe?: (dir: string) => boolean;
+  /**
+   * True when that path (the running Node, or an ancestor) can be changed by the invoking user.
+   * Absent, together with `codeProbe`, means a test is stubbing the code check and the Node
+   * binary is not lstat'd. Absent with no `codeProbe` means the real ACL or mode check.
+   */
+  execPathProbe?: (file: string) => boolean;
+  /** Defaults to `process.execArgv`. An elevated command refuses a preload flag here. */
+  execArgv?: readonly string[];
   /**
    * uid and mode for ancestors of the Linux and macOS install roots.
    * When set, the plan does not lstat them. Absent means lstat.
@@ -1709,7 +1726,11 @@ export function successText(
   const approve =
     platform === "win32"
       ? 'Approve held calls in an Administrator PowerShell: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
-      : "Approve held calls from the root-owned copy: sudo /opt/verax-cli/bin/verax approve";
+      : `Approve held calls from the root-owned Node: ${posixRootOwnedCommand(platform, "approve")}`;
+  const uninstall =
+    platform === "win32"
+      ? 'Uninstall from that copy: & "$env:ProgramFiles\\verax-cli\\verax.cmd" uninstall'
+      : `Uninstall from the root-owned Node: ${posixRootOwnedCommand(platform, "uninstall")}`;
   return [
     `code ${info.codeDir}`,
     `state ${info.stateDir}`,
@@ -1723,6 +1744,7 @@ export function successText(
     mcp,
     "",
     approve,
+    uninstall,
     "",
   ].join("\n");
 }
@@ -2930,18 +2952,48 @@ function writeManifest(dir: string): void {
   writeFileSync(path.join(dir, "MANIFEST.sha256"), `${lines.join("\n")}\n`);
 }
 
-/** Ancestors created along the way are 0755. Only `target` receives `mode`. */
-export function mkdirLeaf(target: string, mode: number): void {
+function applyLeafMode(target: string, mode: number): void {
+  if (process.platform === "win32") return;
+  try {
+    chmodSync(target, mode);
+  } catch {
+    // The platform does not honour the mode bit.
+  }
+}
+
+/**
+ * Ancestors created along the way are 0755. Only `target` receives `mode`.
+ * An existing real directory is kept and receives `mode`. A symlink or a file is EEXIST:
+ * this run must not follow a link into a directory it did not create.
+ */
+/**
+ * Create one directory. By default an existing target is EEXIST: the installer relies on that to
+ * refuse a directory someone planted between its check and this call. `existingOk` (init --force)
+ * keeps an existing real directory that this process's user owns.
+ */
+export function mkdirLeaf(target: string, mode: number, opts: { existingOk?: boolean } = {}): void {
   const parent = path.dirname(target);
   if (parent !== target && !existsSync(parent)) mkdirLeaf(parent, 0o755);
-  mkdirSync(target, { mode });
-  if (process.platform !== "win32") {
-    try {
-      chmodSync(target, mode);
-    } catch {
-      // The platform does not honour the mode bit.
-    }
+  let listed: ReturnType<typeof lstatSync> | undefined;
+  try {
+    listed = lstatSync(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
   }
+  if (listed) {
+    const ownUid = typeof process.getuid === "function" ? process.getuid() : undefined;
+    const ownedHere = ownUid === undefined || listed.uid === ownUid;
+    if (opts.existingOk !== true || listed.isSymbolicLink() || !listed.isDirectory() || !ownedHere) {
+      const error = new Error(`EEXIST: file already exists, mkdir '${target}'`) as NodeJS.ErrnoException;
+      error.code = "EEXIST";
+      error.syscall = "mkdir";
+      throw error;
+    }
+    applyLeafMode(target, mode);
+    return;
+  }
+  mkdirSync(target, { mode });
+  applyLeafMode(target, mode);
 }
 
 /** True when the body answered /healthz with this install's nonce. A bare 200 is not the service. */
@@ -4717,19 +4769,87 @@ function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, ex
   };
 }
 
+const PRELOAD_FLAGS = new Set(["--require", "-r", "--import", "--loader", "--experimental-loader"]);
+
+/**
+ * Code which already ran can hide itself: a preload can clear `NODE_OPTIONS` and
+ * `execArgv` before this function reads them. This catches only what is still set.
+ */
+export function elevatedPreloadRefusal(env: NodeJS.ProcessEnv, execArgv: readonly string[]): string | null {
+  const options = env.NODE_OPTIONS ?? "";
+  const flagged = execArgv.some((arg) => PRELOAD_FLAGS.has((arg.split("=", 1)[0] ?? arg)));
+  if (options.trim() !== "" || flagged) {
+    return "refusing: NODE_OPTIONS or a preload flag is set; an elevated verax runs with none";
+  }
+  return null;
+}
+
+export type NodeTrustProbe = {
+  execPath?: string;
+  execPathProbe?: (file: string) => boolean;
+  execArgv?: readonly string[];
+};
+
+function nodeBinaryUntrusted(
+  platform: InstallPlatform,
+  execPath: string,
+  exec: ToolExec,
+  probe?: (file: string) => boolean,
+): string | null {
+  const files = trustTargets(execPath, platform);
+  let hit: string | null = null;
+  if (probe) {
+    for (const file of files) {
+      if (probe(file.path) && hit === null) hit = file.path;
+    }
+  } else if (platform === "win32") {
+    let sid: string | undefined;
+    try {
+      sid = invokingSid(exec);
+    } catch {
+      sid = undefined;
+    }
+    const read = readSddlBatch(exec, files.map((file) => file.path));
+    for (const file of files) {
+      const acl = sddlOrMiss(read, file.path);
+      if (acl.status !== 0 || windowsUserCanWrite(acl.text, { path: file.path, userSid: sid, ancestor: file.ancestor })) {
+        hit = file.path;
+        break;
+      }
+    }
+  } else {
+    for (const file of files) {
+      if (posixEntryUntrusted(file.path, file.ancestor)) {
+        hit = file.path;
+        break;
+      }
+    }
+  }
+  return hit === null ? null : nodeTrustMessageFor(hit, platform);
+}
+
 export function refuseWritableCode(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
   exec: ToolExec,
   probe?: (dir: string) => boolean,
+  node?: NodeTrustProbe,
 ): string | null {
   if (platform !== "win32" && platform !== "linux" && platform !== "darwin") return null;
   const spec = platform;
   const dirs = veraxCodeDirectories();
-  return elevatedCodeRefusal(spec, dirs, {
+  const codeRefusal = elevatedCodeRefusal(spec, dirs, {
     account: codeTrustAccount(platform, env),
     ...(probe ? { probe } : { userWritable: codeDirsWritable(dirs, spec, exec) }),
   });
+  if (codeRefusal) return codeRefusal;
+  // A code probe that does not pass execArgv is stubbing the gate. Production reads process.execArgv.
+  const execArgv = node?.execArgv ?? (probe ? [] : process.execArgv);
+  const preload = elevatedPreloadRefusal(env, execArgv);
+  if (preload) return preload;
+  // A code probe with no Node probe is a test stubbing directories. Production passes neither.
+  if (probe && !node?.execPathProbe) return null;
+  return nodeBinaryUntrusted(spec, node?.execPath ?? process.execPath, exec, node?.execPathProbe);
 }
 
 /** Elevated approve uses the process exec. Install and uninstall pass their own. */
@@ -4737,8 +4857,79 @@ export function elevatedCommandCodeRefusal(
   platform: NodeJS.Platform,
   env: NodeJS.ProcessEnv,
   probe?: (dir: string) => boolean,
+  node?: NodeTrustProbe,
 ): string | null {
-  return refuseWritableCode(platform, env, defaultExec, probe);
+  return refuseWritableCode(platform, env, defaultExec, probe, node);
+}
+
+/**
+ * True when `posixOthersCanReplace` would refuse this entry, except a non-root owner
+ * the invoking user is not: the installed state directory is owned by the service account.
+ * Unknown invoking uid refuses every non-root owner, because that owner may be the user.
+ */
+function posixStateUntrusted(
+  st: { uid: number; mode: number; symlink?: boolean },
+  ancestor: boolean,
+  invokingUid: number | null,
+): boolean {
+  if (!posixOthersCanReplace(st, ancestor)) return false;
+  if (st.symlink) return true;
+  if ((st.mode & 0o022) !== 0) return true;
+  if (invokingUid === null) return true;
+  return st.uid === invokingUid;
+}
+
+function invokingUserCanChangeState(dir: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
+  if (platform !== "win32" && platform !== "linux" && platform !== "darwin") return false;
+  try {
+    if (lstatSync(dir).isSymbolicLink()) return true;
+  } catch {
+    return true;
+  }
+  const spec = platform;
+  if (spec === "win32") {
+    const files = trustTargets(dir, spec);
+    let sid: string | undefined;
+    try {
+      sid = invokingSid(defaultExec);
+    } catch {
+      sid = undefined;
+    }
+    const read = readSddlBatch(defaultExec, files.map((file) => file.path));
+    for (const file of files) {
+      const acl = sddlOrMiss(read, file.path);
+      if (acl.status !== 0 || windowsUserCanWrite(acl.text, { path: file.path, userSid: sid, ancestor: file.ancestor })) {
+        return true;
+      }
+    }
+    return false;
+  }
+  const uidText = env.SUDO_UID?.trim() ?? "";
+  const invokingUid = /^\d+$/.test(uidText) ? Number(uidText) : null;
+  for (const file of trustTargets(dir, spec)) {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(file.path);
+    } catch {
+      return true;
+    }
+    if (posixStateUntrusted({ uid: st.uid, mode: st.mode, symlink: st.isSymbolicLink() }, file.ancestor, invokingUid)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** Elevated approve opens a state directory only when the invoking user cannot change it. */
+export function elevatedStateDirRefusal(
+  dir: string,
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  probe?: (dir: string) => boolean,
+): string | null {
+  const writable = probe ? probe(dir) : invokingUserCanChangeState(dir, platform, env);
+  if (!writable) return null;
+  return `refusing: ${dir} can be changed by ${codeTrustAccount(platform, env)}; an elevated approve only opens the installed state directory`;
 }
 
 /**
@@ -4842,7 +5033,10 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     return EX_ELEVATION;
   }
   if (!cliCodeCheckPassed) {
-    const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
+    const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe, {
+      execPathProbe: hooks.execPathProbe,
+      execArgv: hooks.execArgv,
+    });
     if (codeRefusal) {
       io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
       return EX_CONFIG;
@@ -5510,7 +5704,10 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     return EX_ELEVATION;
   }
   if (!cliCodeCheckPassed) {
-    const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe);
+    const codeRefusal = refuseWritableCode(platform, env, hooks.exec ?? defaultExec, hooks.codeProbe, {
+      execPathProbe: hooks.execPathProbe,
+      execArgv: hooks.execArgv,
+    });
     if (codeRefusal) {
       io.stderr.write(codeRefusal.endsWith("\n") ? codeRefusal : `${codeRefusal}\n`);
       return EX_CONFIG;

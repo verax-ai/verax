@@ -42,7 +42,9 @@ Usage: verax <command> [options]
   approve <args>       approve a waiting request from this machine.
                        An elevated approve must be the administrator-owned copy:
                        Windows "%ProgramFiles%\\verax-cli\\verax.cmd" approve;
-                       Linux and macOS the root-owned Node under /opt/verax-node.
+                       Linux and macOS the root-owned Node, for example
+                       sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve
+                       or sudo /usr/bin/node with that same cli.js.
   operator <args>      enrol an operator and manage their passkeys
   reconcile <args>     compare the ledger against a statement
   verify <stateDir>    read a ledger back without a body: signatures, chain,
@@ -77,6 +79,10 @@ function version(): string {
 export type CliHooks = {
   elevated?: () => boolean;
   codeProbe?: (dir: string) => boolean;
+  /** True when that Node path can be changed by the invoking user. See `NodeTrustProbe`. */
+  execPathProbe?: (file: string) => boolean;
+  /** Defaults to `process.execArgv` for the elevated preload check. */
+  execArgv?: readonly string[];
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   stdout?: { write(s: string): unknown };
@@ -125,7 +131,10 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
     throw err;
   }
   if (isElevated) {
-    const refusal = elevatedCommandCodeRefusal(platform, env, hooks.codeProbe);
+    const refusal = elevatedCommandCodeRefusal(platform, env, hooks.codeProbe, {
+      execPathProbe: hooks.execPathProbe,
+      execArgv: hooks.execArgv,
+    });
     if (refusal) {
       stderr.write(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
       return 78;
@@ -276,6 +285,12 @@ async function dispatchCli(
   const head = argv[0];
   if (head !== undefined && !head.startsWith("--")) {
     stderr.write(`unknown command: ${head}\n`);
+    stderr.write(HELP);
+    return 64;
+  }
+  // `main()` reads `--inventory`. Any other leading flag is not a serve option.
+  if (head !== undefined && head.startsWith("--") && head !== "--inventory") {
+    stderr.write(`unknown option: ${head}\n`);
     stderr.write(HELP);
     return 64;
   }

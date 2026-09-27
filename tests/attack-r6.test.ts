@@ -129,9 +129,9 @@ describe("attack R6", () => {
         const held = out.join("");
         const hex = mark.codePointAt(0)!.toString(16).padStart(4, "0");
         assert.equal(held.includes(mark), false, cls);
-        assert.match(held, new RegExp(`^reference: .*\\\\u${hex}`, "m"), cls);
-        assert.match(held, /^payee: "true-ads"$/m, cls);
-        assert.equal((held.match(/^payee: /gm) ?? []).length, 1, cls);
+        assert.match(held, new RegExp(`^"reference": .*\\\\u${hex}`, "m"), cls);
+        assert.match(held, /^"payee": "true-ads"$/m, cls);
+        assert.equal((held.match(/^"payee": /gm) ?? []).length, 1, cls);
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

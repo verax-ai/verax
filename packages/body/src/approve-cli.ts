@@ -15,14 +15,16 @@ import {
   type Policy,
 } from "@verax-ai/proxy";
 import { EX_CONFIG } from "./config.ts";
-import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal } from "./install.ts";
+import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, elevatedStateDirRefusal, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
 function policyFromSnapshot(stateDir: string, policyHash: string): Policy | null {
   const snap = join(stateDir, "policies", `${policyHash}.json`);
   if (!existsSync(snap)) return null;
   try {
-    return loadPolicy(JSON.parse(readFileSync(snap, "utf8")) as unknown);
+    const loaded = loadPolicy(JSON.parse(readFileSync(snap, "utf8")) as unknown);
+    if (loaded.hash !== policyHash) return null;
+    return loaded;
   } catch {
     return null;
   }
@@ -90,17 +92,19 @@ function minorUnits(row: ApprovalRow): number | null {
 const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "gu");
 
 /**
- * One argument per line, JSON-quoted, so a value cannot look like another field. JSON leaves
- * U+0085, U+FEFF, U+2028 and U+2029 as they are, so every terminal-control code point is
- * written as a \u escape as well.
+ * One argument per line, name and value both JSON-quoted, so neither can look like another field.
+ * JSON leaves U+0085, U+FEFF, U+2028 and U+2029 as they are, so every terminal-control code point
+ * is written as a \u escape as well.
  */
+function escapeHeld(text: string): string {
+  return text.replace(HELD_CONTROL, (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+}
+
 function quotedField(name: string, value: unknown): string {
   const text = typeof value === "string" ? value : value === undefined || value === null ? "" : JSON.stringify(value);
-  const quoted = JSON.stringify(text).replace(
-    HELD_CONTROL,
-    (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`,
-  );
-  return `${name}: ${quoted}\n`;
+  const quotedName = escapeHeld(JSON.stringify(name));
+  const quoted = escapeHeld(JSON.stringify(text));
+  return `${quotedName}: ${quoted}\n`;
 }
 
 function spendPrompt(row: ApprovalRow, amount: number): string {
@@ -148,6 +152,13 @@ function defaultApproveIo(): ApproveIo {
 export type ApproveHooks = {
   elevated?: () => boolean;
   codeProbe?: (dir: string) => boolean;
+  execPathProbe?: (file: string) => boolean;
+  execArgv?: readonly string[];
+  /**
+   * True when the invoking user can change that state directory.
+   * Absent means the real ACL or mode check. Ignored when the process is not elevated.
+   */
+  stateProbe?: (dir: string) => boolean;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
 };
@@ -172,7 +183,10 @@ export async function runApprove(
     throw err;
   }
   if (isElevated && !cliCodeCheckPassedAlready()) {
-    const refusal = elevatedCommandCodeRefusal(platform, env, hooks?.codeProbe);
+    const refusal = elevatedCommandCodeRefusal(platform, env, hooks?.codeProbe, {
+      execPathProbe: hooks?.execPathProbe,
+      execArgv: hooks?.execArgv,
+    });
     if (refusal) {
       writeErr(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
       return EX_CONFIG;
@@ -211,6 +225,13 @@ export async function runApprove(
   if (!stateDir || !given || (rest.length !== 2 && !(rest.length === 1 && stateDir && given))) {
     writeErr("verax approve <stateDir> <ref>\n");
     return 78;
+  }
+  if (isElevated) {
+    const owned = elevatedStateDirRefusal(stateDir, platform, env, hooks?.stateProbe);
+    if (owned) {
+      writeErr(`${owned}\n`);
+      return 78;
+    }
   }
   if (directoryAccess(stateDir) === "unreadable") {
     writeErr(`${unreadableSentence(stateDir, "approve")}\n`);

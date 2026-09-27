@@ -245,8 +245,8 @@ describe("verax approve CLI", () => {
       { elevated: () => false },
     );
     assert.equal(yesCode, 0, yesErr.join(""));
-    assert.match(yesOut.join(""), /tool: "spend"/);
-    assert.match(yesOut.join(""), /amount: "100"/);
+    assert.match(yesOut.join(""), /"tool": "spend"/);
+    assert.match(yesOut.join(""), /"amount": "100"/);
     const yesLedger = new FileLedger(yesDir);
     const yesRecs = await yesLedger.decisions();
     yesLedger.close();

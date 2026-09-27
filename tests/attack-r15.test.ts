@@ -34,6 +34,7 @@ import { loadPolicy } from "../packages/proxy/src/policy.ts";
 import { createProxy } from "../packages/proxy/src/proxy.ts";
 import { verifyLedger } from "../packages/proxy/src/verify-ledger.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER } from "../packages/proxy/tests/helpers.ts";
+import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
 
 function ownerDir(prefix: string): string {
   const dir = mkdtempSync(join(tmpdir(), prefix));
@@ -286,21 +287,27 @@ describe("attack R15", () => {
   });
 
   it("R15-6 elevated approve ignores VERAX_POLICY_FILE and refuses a missing snapshot for a spend", async () => {
-    const hold = async (prefix: string): Promise<{ dir: string; hash: string }> => {
+    // "s-a" is asked for before today's UTC midnight and "s-b" today, so both defer under the cap;
+    // at approval "s-a" counts today and the cap in the snapshot refuses "s-b".
+    const capped = { ...spendDoc(true), approvalTtlMs: 172_800_000 };
+    const hold = async (prefix: string, policyDoc: Record<string, unknown>): Promise<{ dir: string; hash: string }> => {
       const dir = ownerDir(prefix);
       const signers = loadOrCreateSigners(dir);
       const ledger = new FileLedger(dir);
+      const today = new Date();
+      let clock = Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate()) - 3_600_000;
       let i = 0;
       const proxy = createProxy({
-        policy: loadPolicy(spendDoc(false)),
+        policy: loadPolicy(policyDoc),
         recordSigner: signers.recordSigner,
         effectSigner: signers.effectSigner,
         ledger,
-        now: () => Date.now(),
+        now: () => clock,
         nonce: () => `n-${i++}`,
         inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
       });
       for (const ref of ["s-a", "s-b"]) {
+        if (ref === "s-b") clock = Date.now();
         await proxy.call(
           {
             name: "spend",
@@ -319,18 +326,16 @@ describe("attack R15", () => {
       ledger.close();
       return { dir, hash };
     };
+    const elevatedHooks = { elevated: () => true, codeProbe: () => false, execArgv: [] as string[], stateProbe: () => false };
 
+    // The environment names an uncapped policy; the snapshot the body wrote is the capped one that held the calls.
     const uncappedPath = join(ownerDir("verax-r15-env-policy-"), "policy.json");
-    writeFileSync(uncappedPath, `${JSON.stringify(spendDoc(false))}\n`, { encoding: "utf8" });
-
-    const elevatedHold = await hold("verax-r15-elev-");
-    mkdirSync(join(elevatedHold.dir, "policies"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      join(elevatedHold.dir, "policies", `${elevatedHold.hash}.json`),
-      `${JSON.stringify(spendDoc(true))}\n`,
-      { encoding: "utf8" },
-    );
-    const env = { ...process.env, VERAX_POLICY_FILE: uncappedPath };
+    writeFileSync(uncappedPath, `${JSON.stringify({ ...spendDoc(false), approvalTtlMs: 172_800_000 })}\n`, { encoding: "utf8" });
+    const elevatedHold = await hold("verax-r15-elev-", capped);
+    assert.equal(elevatedHold.hash, loadPolicy(capped).hash);
+    persistPolicySnapshot(elevatedHold.dir, elevatedHold.hash, capped);
+    const env: NodeJS.ProcessEnv = { ...process.env, VERAX_POLICY_FILE: uncappedPath };
+    delete env.NODE_OPTIONS;
     const firstErr: string[] = [];
     const firstOut: string[] = [];
     const first = await runApprove(
@@ -338,50 +343,32 @@ describe("attack R15", () => {
       (line) => firstErr.push(line),
       (line) => firstOut.push(line),
       undefined,
-      { elevated: () => true, codeProbe: () => false, env },
+      { ...elevatedHooks, env },
     );
     assert.equal(first, 0, firstErr.join(""));
-    assert.match(firstOut.join(""), /^approved:/);
+    assert.match(firstOut.join(""), /^approved:/m);
     const secondErr: string[] = [];
     const second = await runApprove(
       ["approve", "--from-script", elevatedHold.dir, "s-b"],
       (line) => secondErr.push(line),
       () => undefined,
       undefined,
-      { elevated: () => true, codeProbe: () => false, env },
+      { ...elevatedHooks, env },
     );
     assert.equal(second, 1, secondErr.join(""));
     assert.match(secondErr.join(""), /approve-budget-exceeded/);
 
-    const openHold = await hold("verax-r15-open-");
-    mkdirSync(join(openHold.dir, "policies"), { recursive: true, mode: 0o700 });
-    writeFileSync(
-      join(openHold.dir, "policies", `${openHold.hash}.json`),
-      `${JSON.stringify(spendDoc(true))}\n`,
-      { encoding: "utf8" },
-    );
-    const openErr: string[] = [];
-    const openOut: string[] = [];
-    for (const ref of ["s-a", "s-b"]) {
-      const code = await runApprove(
-        ["approve", "--from-script", openHold.dir, ref],
-        (line) => openErr.push(line),
-        (line) => openOut.push(line),
-        undefined,
-        { elevated: () => false, env },
-      );
-      assert.equal(code, 0, openErr.join(""));
-    }
-    assert.equal(openOut.filter((line) => line.startsWith("approved:")).length, 2);
-
-    const missing = await hold("verax-r15-missing-");
+    // No snapshot at all: an elevated approve of a spend is refused and the row stays pending.
+    const missing = await hold("verax-r15-missing-", capped);
     const missErr: string[] = [];
+    const missEnv: NodeJS.ProcessEnv = { ...process.env };
+    delete missEnv.NODE_OPTIONS;
     const miss = await runApprove(
       ["approve", "--from-script", missing.dir, "s-a"],
       (line) => missErr.push(line),
       () => undefined,
       undefined,
-      { elevated: () => true, codeProbe: () => false, env: { ...process.env } },
+      { ...elevatedHooks, env: missEnv },
     );
     assert.equal(miss, 1, missErr.join(""));
     assert.match(missErr.join(""), /approve-policy-missing/);

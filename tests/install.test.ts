@@ -1125,7 +1125,11 @@ describe("verax install plan", () => {
       assert.match(printed, /Claude Code:/);
       assert.match(printed, /mcp\.json/);
       if (platform === "win32") assert.match(printed, /Administrator PowerShell: & "\$env:ProgramFiles\\verax-cli\\verax\.cmd" approve/);
-      else assert.match(printed, /Approve held calls from the root-owned copy: sudo \/opt\/verax-cli\/bin\/verax approve/);
+      else {
+        assert.match(printed, /\/opt\/verax-node\/node-v.+\/bin\/node \/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js approve/);
+        assert.match(printed, /sudo \/usr\/bin\/node \/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js approve/);
+        assert.match(printed, /cli\.js uninstall/);
+      }
     }
     const stateDir = mkdtempSync(join(tmpdir(), "verax-install-quiet-"));
     const out: string[] = [];
@@ -1264,7 +1268,8 @@ describe("verax install plan", () => {
       assert.equal(text.includes("A shell as the same user"), false);
       if (platform === "win32") assert.match(text, /verax-cli\\verax\.cmd" approve/);
       else {
-        assert.match(text, /Approve held calls from the root-owned copy: sudo \/opt\/verax-cli\/bin\/verax approve/);
+        assert.match(text, /\/opt\/verax-node\/node-v.+\/bin\/node \/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js approve/);
+        assert.match(text, /sudo \/usr\/bin\/node \/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js uninstall/);
         assert.match(text, new RegExp(posixRoot!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
       }
     } finally {
