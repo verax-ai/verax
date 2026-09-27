@@ -98,6 +98,18 @@ function threwReplay(ref: string): ToolResult {
   };
 }
 
+/** The tool returned. The effect row did not. That is not `:threw`. */
+function effectUnrecorded(ref: string): ToolResult {
+  return {
+    content: [{ type: "text", text: `effect-unrecorded:${ref}` }],
+    isError: true,
+  };
+}
+
+function isEffectUnrecorded(result: ToolResult): boolean {
+  return result.content.some((part) => part.text.startsWith("effect-unrecorded:"));
+}
+
 async function replayAfterEffect(ledger: Ledger, ref: string): Promise<ToolResult> {
   const primary = (await ledger.effects()).find(
     (e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect",
@@ -322,18 +334,9 @@ export function createProxy(deps: ProxyDeps) {
       name: dispatchedName,
       arguments: dispatchedArgs,
     });
+    let result: ToolResult;
     try {
-      const result = await deps.inner(frozenCall, principal, ref);
-      const row: EffectRow = {
-        ref,
-        effectHash: dispatchedHash,
-        effectClass: dispatchedName,
-        timestampMs: deps.now(),
-        actor: principal.brain,
-      };
-      await deps.ledger.appendEffect(row, "self", sha256Canonical(result));
-      effectRecorded.ok = true;
-      return result;
+      result = await deps.inner(frozenCall, principal, ref);
     } catch (err) {
       const row: EffectRow = {
         ref,
@@ -350,6 +353,23 @@ export function createProxy(deps: ProxyDeps) {
       }
       throw err;
     }
+    const row: EffectRow = {
+      ref,
+      effectHash: dispatchedHash,
+      effectClass: dispatchedName,
+      timestampMs: deps.now(),
+      actor: principal.brain,
+    };
+    try {
+      await deps.ledger.appendEffect(row, "self", sha256Canonical(result));
+      effectRecorded.ok = true;
+    } catch {
+      // The tool already returned. A failed effect write is not a throw of the
+      // tool, so this does not record `:threw`. The start mark stays (effectRecorded
+      // stays false) and a restart answers outcome-unknown instead of running again.
+      return effectUnrecorded(ref);
+    }
+    return result;
   }
 
   async function resolveInputs(
@@ -896,7 +916,8 @@ export function createProxy(deps: ProxyDeps) {
       if (plan.kind === "done") return plan.result;
       if (plan.kind === "wait") {
         try {
-          await plan.work;
+          const result = await plan.work;
+          if (isEffectUnrecorded(result)) return result;
           return allowedReplay(plan.replayRef);
         } catch {
           // The first call recorded the throw on its effect row. The
@@ -908,8 +929,10 @@ export function createProxy(deps: ProxyDeps) {
         return await plan.work;
       } finally {
         inFlight.delete(plan.key);
-        // The mark stays when neither the success row nor the `:threw` row
-        // landed. A retry then answers outcome-unknown instead of running again.
+        // The mark stays when the effect row did not land: the tool threw and
+        // `:threw` could not be written, or the tool returned and its effect
+        // row could not be written. A retry then answers outcome-unknown
+        // instead of running again. A returned tool is not recorded as `:threw`.
         if (plan.effectRecorded.ok && stateDir !== null) markEnded(stateDir, plan.key);
       }
     },

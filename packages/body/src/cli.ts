@@ -40,8 +40,10 @@ Usage: verax <command> [options]
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
        [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
   approve <args>       approve a waiting request from this machine.
-                       An elevated approve must be the administrator-owned copy:
-                       Windows "%ProgramFiles%\\verax-cli\\verax.cmd" approve;
+                       On Windows the panel with a passkey is how a held call is approved.
+                       An elevated CLI approve is a fallback from a separate administrator
+                       account, not this account elevated:
+                       "%ProgramFiles%\\verax-cli\\verax.cmd" approve.
                        Linux and macOS the root-owned Node, for example
                        sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve
                        or sudo /usr/bin/node with that same cli.js.

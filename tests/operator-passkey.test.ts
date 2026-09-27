@@ -18,6 +18,12 @@ const script = join(root, "scripts", "dev-issuer.mjs");
 const LISTENING = /dev-issuer listening on http:\/\/127\.0\.0\.1:(\d+)\//;
 const LOCAL_FETCH_MS = 10_000;
 
+/** A browser accepts an RP ID that is the page host, or a suffix of it. An IP host fails. */
+function originHostMatchesRp(origin: string, rpID: string): boolean {
+  const host = new URL(origin).hostname;
+  return host === rpID || host.endsWith(`.${rpID}`);
+}
+
 function decodePayload(token: string): { scope?: string; sub?: string } {
   const body = token.split(".")[1];
   assert.ok(body, "token-shape");
@@ -46,9 +52,12 @@ function freePort(): Promise<number> {
 async function startIssuer(
   stateDir: string,
   over: { rp?: boolean; port?: number } = {},
-): Promise<{ origin: string; port: number; rpID: string; kill: () => Promise<void>; stderr: () => string }> {
+): Promise<{ origin: string; base: string; port: number; rpID: string; kill: () => Promise<void>; stderr: () => string }> {
   const port = over.port ?? (await freePort());
-  const origin = `http://127.0.0.1:${port}`;
+  // The ceremony origin is localhost. HTTP from this process uses 127.0.0.1,
+  // the address the issuer binds, so the fetch does not depend on resolver order.
+  const origin = `http://localhost:${port}`;
+  const base = `http://127.0.0.1:${port}`;
   const rpID = "localhost";
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -63,6 +72,8 @@ async function startIssuer(
   if (over.rp !== false) {
     env.VERAX_RP_ID = rpID;
     env.VERAX_RP_ORIGINS = origin;
+    if (!originHostMatchesRp(origin, rpID)) throw new Error("rp-origin");
+    if (originHostMatchesRp(base, rpID)) throw new Error("ip-origin-matched-rp");
   } else {
     delete env.VERAX_RP_ID;
     delete env.VERAX_RP_ORIGINS;
@@ -99,6 +110,7 @@ async function startIssuer(
   }
   return {
     origin,
+    base,
     port: boundPort,
     rpID,
     stderr: () => stderr,
@@ -118,13 +130,13 @@ function pkce() {
 
 type EnrollBody = { challenge?: string; error?: string; enrolled?: boolean; sub?: string };
 
-async function enroll(origin: string, rpID: string, code: string): Promise<{
+async function enroll(base: string, origin: string, rpID: string, code: string): Promise<{
   passkey: ReturnType<typeof mintSoftwarePasskey>;
   status: number;
   body: EnrollBody;
 }> {
   const passkey = mintSoftwarePasskey();
-  const opt = await fetch(`${origin}/enroll/options`, {
+  const opt = await fetch(`${base}/enroll/options`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code }),
@@ -140,7 +152,7 @@ async function enroll(origin: string, rpID: string, code: string): Promise<{
     rpID,
     origin,
   });
-  const done = await fetch(`${origin}/enroll/verify`, {
+  const done = await fetch(`${base}/enroll/verify`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ code, response }),
@@ -150,9 +162,9 @@ async function enroll(origin: string, rpID: string, code: string): Promise<{
   return { passkey, status: done.status, body };
 }
 
-async function signIn(origin: string, rpID: string, passkey: ReturnType<typeof mintSoftwarePasskey>) {
+async function signIn(base: string, origin: string, rpID: string, passkey: ReturnType<typeof mintSoftwarePasskey>) {
   const { verifier, challenge, redirect } = pkce();
-  const opt = await fetch(`${origin}/authorize/options`, {
+  const opt = await fetch(`${base}/authorize/options`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: "{}",
@@ -166,7 +178,7 @@ async function signIn(origin: string, rpID: string, passkey: ReturnType<typeof m
     rpID,
     origin,
   });
-  const done = await fetch(`${origin}/authorize/verify`, {
+  const done = await fetch(`${base}/authorize/verify`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -184,10 +196,10 @@ async function signIn(origin: string, rpID: string, passkey: ReturnType<typeof m
   return { status: done.status, body, verifier, redirect };
 }
 
-async function exchange(origin: string, location: string, verifier: string, redirect: string) {
+async function exchange(base: string, location: string, verifier: string, redirect: string) {
   const code = new URL(location).searchParams.get("code");
   assert.ok(code, "no code on location");
-  const tokenRes = await fetch(`${origin}/token`, {
+  const tokenRes = await fetch(`${base}/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
@@ -229,12 +241,18 @@ function approvePolicyFile(dir: string): string {
 }
 
 describe("operator passkey sign-in", { concurrency: 1 }, () => {
+  it("a passkey origin host equals the RP ID or ends with it, and an IP origin does not", () => {
+    assert.equal(originHostMatchesRp("http://localhost:8790", "localhost"), true);
+    assert.equal(originHostMatchesRp("http://panel.localhost:5173", "localhost"), true);
+    assert.equal(originHostMatchesRp("http://127.0.0.1:8790", "localhost"), false);
+  });
+
   it("refuses a wrong pairing code, burns on the sixth try, and will not reuse a spent code", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-passkey-pairing-"));
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      const wrong = await fetch(`${issuer.origin}/enroll/options`, {
+      const wrong = await fetch(`${issuer.base}/enroll/options`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code: "00000000" }),
@@ -244,13 +262,13 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
       assert.equal(((await wrong.json()) as { error?: string }).error, "mismatch");
 
       for (let i = 1; i < PAIRING_MAX_ATTEMPTS; i += 1) {
-        await fetch(`${issuer.origin}/enroll/options`, {
+        await fetch(`${issuer.base}/enroll/options`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ code: "11111111" }),
         });
       }
-      const sixth = await fetch(`${issuer.origin}/enroll/options`, {
+      const sixth = await fetch(`${issuer.base}/enroll/options`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code }),
@@ -274,7 +292,7 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
         expiresAtMs: Date.now() - 1,
         attempts: 0,
       });
-      const late = await fetch(`${issuer.origin}/enroll/options`, {
+      const late = await fetch(`${issuer.base}/enroll/options`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ code }),
@@ -292,12 +310,12 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      const first = await enroll(issuer.origin, issuer.rpID, code);
+      const first = await enroll(issuer.base, issuer.origin, issuer.rpID, code);
       assert.equal(first.status, 200);
       assert.equal(first.body.enrolled, true);
       assert.equal(first.body.sub, "operator-1");
       assert.equal(hasRegisteredOperator(stateDir), true);
-      const second = await enroll(issuer.origin, issuer.rpID, code);
+      const second = await enroll(issuer.base, issuer.origin, issuer.rpID, code);
       assert.equal(second.status, 400);
       assert.equal(second.body.error, "burned");
     } finally {
@@ -310,18 +328,18 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      const page = await fetch(`${issuer.origin}/enroll`, { signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
+      const page = await fetch(`${issuer.base}/enroll`, { signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
       assert.equal(page.status, 200);
-      const vendor = await fetch(`${issuer.origin}/vendor/@simplewebauthn/browser/esm/index.js`, {
+      const vendor = await fetch(`${issuer.base}/vendor/@simplewebauthn/browser/esm/index.js`, {
         signal: AbortSignal.timeout(LOCAL_FETCH_MS),
       });
       assert.equal(vendor.status, 200);
-      const { passkey, status } = await enroll(issuer.origin, issuer.rpID, code);
+      const { passkey, status } = await enroll(issuer.base, issuer.origin, issuer.rpID, code);
       assert.equal(status, 200);
-      const signed = await signIn(issuer.origin, issuer.rpID, passkey);
+      const signed = await signIn(issuer.base, issuer.origin, issuer.rpID, passkey);
       assert.equal(signed.status, 200);
       assert.ok(signed.body.location);
-      const claims = await exchange(issuer.origin, signed.body.location, signed.verifier, signed.redirect);
+      const claims = await exchange(issuer.base, signed.body.location, signed.verifier, signed.redirect);
       assert.equal(claims.sub, "operator-1");
       assert.notEqual(claims.sub, "dev-brain");
       assert.equal(
@@ -339,12 +357,12 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      const { passkey, status } = await enroll(issuer.origin, issuer.rpID, code);
+      const { passkey, status } = await enroll(issuer.base, issuer.origin, issuer.rpID, code);
       assert.equal(status, 200);
-      const first = await signIn(issuer.origin, issuer.rpID, passkey);
+      const first = await signIn(issuer.base, issuer.origin, issuer.rpID, passkey);
       assert.equal(first.status, 200);
       const { challenge, redirect } = pkce();
-      const opt = await fetch(`${issuer.origin}/authorize/options`, {
+      const opt = await fetch(`${issuer.base}/authorize/options`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: "{}",
@@ -358,7 +376,7 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
         origin: issuer.origin,
         counter: passkey.counter,
       });
-      const replay = await fetch(`${issuer.origin}/authorize/verify`, {
+      const replay = await fetch(`${issuer.base}/authorize/verify`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -383,17 +401,17 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      await enroll(issuer.origin, issuer.rpID, code);
+      await enroll(issuer.base, issuer.origin, issuer.rpID, code);
       const { challenge, redirect } = pkce();
       const auth = await fetch(
-        `${issuer.origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+        `${issuer.base}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
         { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(auth.status, 200);
       assert.equal((auth.headers.get("location") ?? "").includes("code="), false);
       const html = await auth.text();
       assert.match(html, /passkey/i);
-      const bogus = await fetch(`${issuer.origin}/authorize/verify`, {
+      const bogus = await fetch(`${issuer.base}/authorize/verify`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -422,10 +440,10 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      const { passkey, status } = await enroll(issuer.origin, issuer.rpID, code);
+      const { passkey, status } = await enroll(issuer.base, issuer.origin, issuer.rpID, code);
       assert.equal(status, 200);
       const impostor = { ...mintSoftwarePasskey(), id: passkey.id };
-      const signed = await signIn(issuer.origin, issuer.rpID, impostor);
+      const signed = await signIn(issuer.base, issuer.origin, issuer.rpID, impostor);
       assert.equal(signed.status >= 400, true, `impostor signed in: ${signed.status}`);
       assert.equal(signed.body.location, undefined);
     } finally {
@@ -441,7 +459,7 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { challenge, redirect } = pkce();
-      const authorizeUrl = `${issuer.origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`;
+      const authorizeUrl = `${issuer.base}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`;
       for (const broken of ['{"credentials": [', JSON.stringify({ credentials: [{ id: "a", publicKey: "b", counter: "0", sub: "operator-1" }] })]) {
         writeFileSync(join(stateDir, "operator-credentials.json"), broken, "utf8");
         const auth = await fetch(authorizeUrl, { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
@@ -460,13 +478,13 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     try {
       const { verifier, challenge, redirect } = pkce();
       const auth = await fetch(
-        `${issuer.origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+        `${issuer.base}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
         { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(auth.status, 302);
       const location = auth.headers.get("location") ?? "";
       assert.match(location, /code=/);
-      const claims = await exchange(issuer.origin, location, verifier, redirect);
+      const claims = await exchange(issuer.base, location, verifier, redirect);
       assert.equal(claims.sub, "operator-1");
       assert.equal(
         typeof claims.scope === "string" && claims.scope.split(/\s+/).includes("verax:approve"),
@@ -484,15 +502,15 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir, { rp: false });
     try {
       assert.match(issuer.stderr(), /passkey enroll and sign-in are closed: VERAX_RP_ID is unset/);
-      const enrollRes = await fetch(`${issuer.origin}/enroll`, { signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
+      const enrollRes = await fetch(`${issuer.base}/enroll`, { signal: AbortSignal.timeout(LOCAL_FETCH_MS) });
       assert.equal(enrollRes.status, 503);
       const { verifier, challenge, redirect } = pkce();
       const auth = await fetch(
-        `${issuer.origin}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
+        `${issuer.base}/authorize?response_type=code&client_id=verax-panel&redirect_uri=${encodeURIComponent(redirect)}&code_challenge=${challenge}&code_challenge_method=S256`,
         { redirect: "manual", signal: AbortSignal.timeout(LOCAL_FETCH_MS) },
       );
       assert.equal(auth.status, 302);
-      const claims = await exchange(issuer.origin, auth.headers.get("location") ?? "", verifier, redirect);
+      const claims = await exchange(issuer.base, auth.headers.get("location") ?? "", verifier, redirect);
       assert.equal(
         typeof claims.scope === "string" && claims.scope.split(/\s+/).includes("verax:approve"),
         false,
@@ -507,9 +525,9 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
     const issuer = await startIssuer(stateDir);
     try {
       const { code } = beginPairing(stateDir);
-      const { passkey } = await enroll(issuer.origin, issuer.rpID, code);
-      const signed = await signIn(issuer.origin, issuer.rpID, passkey);
-      const operatorClaims = await exchange(issuer.origin, signed.body.location ?? "", signed.verifier, signed.redirect);
+      const { passkey } = await enroll(issuer.base, issuer.origin, issuer.rpID, code);
+      const signed = await signIn(issuer.base, issuer.origin, issuer.rpID, passkey);
+      const operatorClaims = await exchange(issuer.base, signed.body.location ?? "", signed.verifier, signed.redirect);
       const agentToken = (
         await import("node:fs")
       ).readFileSync(join(stateDir, "token"), "utf8").trim();
@@ -517,10 +535,10 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
       assert.equal(agentClaims.sub, "dev-brain");
       assert.notEqual(operatorClaims.sub, agentClaims.sub);
 
-      const signedIn = await signIn(issuer.origin, issuer.rpID, passkey);
+      const signedIn = await signIn(issuer.base, issuer.origin, issuer.rpID, passkey);
       const operatorToken = (
         await (
-          await fetch(`${issuer.origin}/token`, {
+          await fetch(`${issuer.base}/token`, {
             method: "POST",
             headers: { "content-type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
@@ -537,7 +555,7 @@ describe("operator passkey sign-in", { concurrency: 1 }, () => {
 
       const body = await listen({
         issuer: "http://127.0.0.1:8790",
-        jwksUrl: `${issuer.origin}/.well-known/jwks.json`,
+        jwksUrl: `${issuer.base}/.well-known/jwks.json`,
         audience: "http://127.0.0.1/verax-passkey",
         stateDir: join(stateDir, "body"),
         bindHost: "127.0.0.1",

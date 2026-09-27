@@ -1124,7 +1124,11 @@ describe("verax install plan", () => {
       assert.match(printed, /agent token/);
       assert.match(printed, /Claude Code:/);
       assert.match(printed, /mcp\.json/);
-      if (platform === "win32") assert.match(printed, /Administrator PowerShell: & "\$env:ProgramFiles\\verax-cli\\verax\.cmd" approve/);
+      if (platform === "win32") {
+        assert.match(printed, /panel with a passkey/);
+        assert.match(printed, /separate administrator account/);
+        assert.match(printed, /& "\$env:ProgramFiles\\verax-cli\\verax\.cmd" approve/);
+      }
       else {
         assert.match(printed, /\/opt\/verax-node\/node-v.+\/bin\/node \/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js approve/);
         assert.match(printed, /sudo \/usr\/bin\/node \/opt\/verax-cli\/lib\/node_modules\/@verax-ai\/body\/dist\/cli\.js approve/);

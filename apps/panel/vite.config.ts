@@ -19,6 +19,9 @@ export default defineConfig(({ mode }) => {
       },
     },
     preview: {
+      // `verax desktop` binds preview to 127.0.0.1 and opens http://localhost:<port>.
+      // The Host header on that request is localhost.
+      allowedHosts: ["localhost"],
       proxy: {
         "/api": toBody,
         "/healthz": toBody,

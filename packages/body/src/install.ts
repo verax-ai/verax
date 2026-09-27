@@ -39,6 +39,9 @@ export function posixRootOwnedCommand(platform: "linux" | "darwin", command: str
 
 /** Names the administrator-owned copy. A same-user elevated shell is not that copy. */
 export function unreadableSentence(dir: string, command = "verax"): string {
+  if (process.platform === "win32" && command === "approve") {
+    return `cannot read ${dir}: approve from the panel with a passkey. An elevated CLI approve is a fallback from a separate administrator account, not this account elevated: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve`;
+  }
   const copy =
     process.platform === "win32"
       ? `& "$env:ProgramFiles\\verax-cli\\verax.cmd" ${command}`
@@ -366,7 +369,7 @@ const SDDL_SID: Record<string, string> = {
 
 /** Object write/modify. Ancestor checks use a narrower set. FA and FW expand into these bits. */
 const OBJECT_WRITE_MASK = 0x0002 | 0x0004 | 0x0010 | 0x0040 | 0x0100 | 0x10000 | 0x40000 | 0x80000 | 0x10000000 | 0x40000000;
-/** Replace or re-point a child. Add-file (0x2) and add-subdirectory (0x4) on an ancestor do not. FA includes these bits; the full FA mask is not ORed in. */
+/** Replace or re-point a child. Add-file (0x2) and add-subdirectory (0x4) on an ancestor do not. FA includes these bits; the full FA mask is not ORed in. The directory that holds an executable is not an ancestor: Windows loads a DLL from that directory first, so it uses the object mask. */
 const ANCESTOR_REPLACE_MASK = 0x0040 | 0x10000 | 0x40000 | 0x80000 | 0x10000000;
 
 /** SDDL access rights, two letters each. Not the icacls abbreviation list. */
@@ -1370,10 +1373,24 @@ export function resolveTrustPath(file: string, platform: InstallPlatform): strin
   }
 }
 
+/** Windows loads a DLL from the directory that holds the executable, before the system directories. */
+function executableParentIsObject(file: string, platform: InstallPlatform): boolean {
+  return platform === "win32" && /\.exe$/i.test(file);
+}
+
+/**
+ * The target, then each parent. The target itself is judged as the object.
+ * When the target is a Windows executable (`node.exe`, a System32 tool, `process.execPath`),
+ * its immediate parent is also judged as the object: add-file and add-subdirectory count.
+ * Parents above that stay ancestors. A directory target is unchanged: only that
+ * directory is the object, and every parent stays an ancestor.
+ */
 export function trustTargets(file: string, platform: InstallPlatform): { path: string; ancestor: boolean }[] {
-  return ancestry(resolveTrustPath(file, platform), platform).map((entry, index) => ({
+  const resolved = resolveTrustPath(file, platform);
+  const parentIsObject = executableParentIsObject(resolved, platform);
+  return ancestry(resolved, platform).map((entry, index) => ({
     path: entry,
-    ancestor: index > 0,
+    ancestor: parentIsObject ? index > 1 : index > 0,
   }));
 }
 
@@ -1725,7 +1742,7 @@ export function successText(
   ].join("\n");
   const approve =
     platform === "win32"
-      ? 'Approve held calls in an Administrator PowerShell: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
+      ? 'Approve held calls from the panel with a passkey. An elevated CLI approve is a fallback from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
       : `Approve held calls from the root-owned Node: ${posixRootOwnedCommand(platform, "approve")}`;
   const uninstall =
     platform === "win32"

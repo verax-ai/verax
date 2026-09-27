@@ -132,12 +132,26 @@ describe("verax desktop wiring", () => {
     const env = issuerEnv(
       {},
       { stateDir: "/tmp/state", issuerPort: 8791, panelPort: 5200 },
-      "http://127.0.0.1:8787",
-      "http://127.0.0.1:8791",
+      "http://localhost:8787",
+      "http://localhost:8791",
     );
     // Without this the panel's own origin is not on the allow-list and the code
     // flow stops at `invalid_request` on any port but the default.
-    assert.equal(env.VERAX_DEV_REDIRECT_URIS, "http://127.0.0.1:5200/");
+    // The browser origin is localhost: an IP address cannot be a WebAuthn RP ID.
+    assert.equal(env.VERAX_DEV_REDIRECT_URIS, "http://localhost:5200/");
     assert.equal(env.VERAX_DEV_ISSUER_PORT, "8791");
+    assert.equal(env.VERAX_RP_ID, "localhost");
+    assert.equal(env.VERAX_RP_ORIGINS, "http://localhost:8791");
+    assert.equal(env.VERAX_AUDIENCE, "http://localhost:8787");
+    assert.equal(env.VERAX_ISSUER, "http://localhost:8791");
+    const kept = issuerEnv(
+      { VERAX_RP_ID: "login.example", VERAX_RP_ORIGINS: "https://login.example" },
+      { stateDir: "/tmp/state", issuerPort: 8791, panelPort: 5200 },
+      "http://localhost:8787",
+      "http://localhost:8791",
+    );
+    assert.equal(kept.VERAX_RP_ID, "login.example");
+    assert.equal(kept.VERAX_RP_ORIGINS, "https://login.example");
+    assert.equal(kept.VERAX_DEV_REDIRECT_URIS, "http://localhost:5200/");
   });
 });

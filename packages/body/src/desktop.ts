@@ -462,8 +462,25 @@ export function killTree(pid: number | undefined): void {
   }
 }
 
+function keptOr(base: NodeJS.ProcessEnv, key: string, value: string): string {
+  const current = base[key]?.trim() ?? "";
+  return current !== "" ? current : value;
+}
+
+/** Comma-separated origins. An origin already listed is not added again. */
+export function mergeAllowedOrigin(existing: string | undefined, origin: string): string {
+  const parts = (existing ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+  if (!parts.includes(origin)) parts.push(origin);
+  return parts.join(",");
+}
+
 /** The panel's redirect is its own origin, so the issuer has to be told which port
- *  this run put it on: the allow-list default only holds 5173 and 4173. */
+ *  this run put it on: the allow-list default only holds 5173 and 4173.
+ *  The passkey ceremony runs on the issuer (`/authorize` and `/enroll`), so the
+ *  RP ID and RP origins name that origin unless the operator already set them. */
 export function issuerEnv(
   base: NodeJS.ProcessEnv,
   opts: { stateDir: string; issuerPort: number; panelPort: number },
@@ -477,7 +494,9 @@ export function issuerEnv(
     VERAX_DEV_ISSUER_PORT: String(opts.issuerPort),
     VERAX_AUDIENCE: audience,
     VERAX_ISSUER: issuerUrl,
-    VERAX_DEV_REDIRECT_URIS: `http://127.0.0.1:${opts.panelPort}/`,
+    VERAX_DEV_REDIRECT_URIS: `http://localhost:${opts.panelPort}/`,
+    VERAX_RP_ID: keptOr(base, "VERAX_RP_ID", "localhost"),
+    VERAX_RP_ORIGINS: keptOr(base, "VERAX_RP_ORIGINS", issuerUrl),
   };
 }
 
@@ -549,8 +568,16 @@ export async function runDesktop(
   const viteJs = join(repoRoot, "node_modules", "vite", "bin", "vite.js");
   const panelDir = join(repoRoot, "apps", "panel");
   const policy = join(repoRoot, "packages", "proxy", "policy", "default.json");
-  const audience = `http://127.0.0.1:${opts.bodyPort}`;
-  const issuerUrl = `http://127.0.0.1:${opts.issuerPort}`;
+  // Browser-facing origins are localhost: an IP address cannot be a WebAuthn RP ID,
+  // and an RP ID of localhost does not match a page on 127.0.0.1. The audience is
+  // the same host so the token `aud` and the body's VERAX_AUDIENCE agree; it is
+  // not a page. Sockets stay on 127.0.0.1. Node (the panel proxy, the JWKS URL)
+  // uses that address so it does not follow a resolver that tries ::1 first.
+  const audience = `http://localhost:${opts.bodyPort}`;
+  const issuerUrl = `http://localhost:${opts.issuerPort}`;
+  const panelOrigin = `http://localhost:${opts.panelPort}`;
+  const bodyLoopback = `http://127.0.0.1:${opts.bodyPort}`;
+  const issuerLoopback = `http://127.0.0.1:${opts.issuerPort}`;
   const kids: ChildProcess[] = [];
   const log = { text: "" };
   const gate = { watch: true };
@@ -716,10 +743,11 @@ export async function runDesktop(
           ...cleanEnv(),
           VERAX_STATE_DIR: opts.stateDir,
           VERAX_ISSUER: issuerUrl,
-          VERAX_JWKS_URL: `${issuerUrl}/.well-known/jwks.json`,
+          VERAX_JWKS_URL: `${issuerLoopback}/.well-known/jwks.json`,
           VERAX_JWKS_PIN: pinnedJwks,
           VERAX_AUDIENCE: audience,
           VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
+          VERAX_ALLOWED_ORIGINS: mergeAllowedOrigin(process.env.VERAX_ALLOWED_ORIGINS, panelOrigin),
           VERAX_POLICY_FILE: policy,
           ...(opts.inventoryFile ? { VERAX_INVENTORY_FILE: opts.inventoryFile } : {}),
         },
@@ -752,7 +780,7 @@ export async function runDesktop(
     if (!hooks?.spawn && panelBuildNeeded(join(panelDir, "dist", "index.html"), panelSources)) {
       const built = spawnSync(process.execPath, [viteJs, "build"], {
         cwd: panelDir,
-        env: { ...cleanEnv(), VERAX_BODY_URL: audience },
+        env: { ...cleanEnv(), VERAX_BODY_URL: bodyLoopback },
         encoding: "utf8",
         windowsHide: true,
       });
@@ -771,7 +799,7 @@ export async function runDesktop(
       [viteJs, "preview", "--host", "127.0.0.1", "--port", String(opts.panelPort), "--strictPort"],
       {
         ...cleanEnv(),
-        VERAX_BODY_URL: audience,
+        VERAX_BODY_URL: bodyLoopback,
       },
       panelDir,
     );
@@ -792,7 +820,7 @@ export async function runDesktop(
       return 1;
     }
 
-    const url = `http://127.0.0.1:${opts.panelPort}`;
+    const url = panelOrigin;
     const scriptBrowser = Boolean(opts.browser && /\.(mjs|js|ts)$/.test(opts.browser));
     const browserBin = scriptBrowser ? process.execPath : (opts.browser ?? defaultBrowser());
     if (!browserBin) {

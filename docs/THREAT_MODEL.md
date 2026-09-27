@@ -29,13 +29,15 @@ Administrators, with read for the invoking user's SID. On Linux and macOS
 the elevated install does not write, chown, or chmod anything under the
 invoking user's home; a child with that user's uid and gid writes
 `~/.verax/agent.token`. Elevated commands refuse to run when the verax
-code they loaded can be changed by that user. On Windows a same-user
-elevated shell inherits that user's environment variables and PowerShell
-profile, which the agent can set. Clear `NODE_OPTIONS` in that shell
-(`Remove-Item Env:NODE_OPTIONS`) and prefer approving from the panel with a
-passkey, or from a separate administrator account. The code check does not
-see a preload that already ran. Start the administrator-owned copy from a
-PowerShell opened with `-NoProfile` (Run as administrator). An administrator, or root, is outside this model: they can change the ACL,
+code they loaded can be changed by that user. On Windows the supported way
+to approve is the panel with a passkey. An elevated CLI `approve` stays as a
+fallback and has to be run from a separate administrator account, not the
+agent's own account elevated, because a same-user elevated shell inherits
+that user's environment variables and PowerShell profile, which the agent
+can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`).
+The code check does not see a preload that already ran. Start that other
+account's copy from a PowerShell opened with `-NoProfile` (Run as
+administrator). An administrator, or root, is outside this model: they can change the ACL,
 the task, the unit, or the launch daemon. An elevated terminal the operator
 leaves open for the agent is also outside it.
 

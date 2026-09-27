@@ -11,6 +11,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { signCheckpoint, type CheckpointClaims } from "@cedulon/checkpoint";
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { runCli } from "../packages/body/src/cli.ts";
 import { runDesktop } from "../packages/body/src/desktop.ts";
@@ -526,6 +527,54 @@ describe("attack R16", () => {
         };
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify(body));
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    writeFileSync(
+      join(dir, "witness.listen.json"),
+      `${JSON.stringify({
+        pid: process.pid,
+        port: address.port,
+        token: "tok",
+        publicKeyPem: listenKey.publicKeyPem,
+        startedAt: Date.now(),
+      })}\n`,
+      "utf8",
+    );
+    try {
+      const signed = await requestWitnessCheckpoint(dir, { epoch: 0, startMs: 1, endMs: 2 });
+      assert.equal(signed, null);
+      assert.equal(existsSync(join(dir, "checkpoints.jsonl")), false);
+      const status = readFileSync(join(dir, "witness-status.jsonl"), "utf8").trim().split("\n").pop();
+      const parsed = JSON.parse(status ?? "{}") as { reason?: string };
+      assert.equal(parsed.reason, "witness-key-mismatch");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("R16-9 a checkpoint that carries the listen PEM but is signed by another key is not stored", async () => {
+    const dir = ownerDir("verax-r16-cpsig-");
+    const listenKey = ed25519();
+    const other = ed25519();
+    const claims: CheckpointClaims = {
+      epoch: 0,
+      startMs: 1,
+      endMs: 2,
+      receiptCount: 0,
+      chainHeadHash: null,
+      totals: {},
+      prevCheckpointHash: null,
+    };
+    const signedByOther = signCheckpoint(claims, other.privateKeyPem, other.publicKeyPem);
+    const swapped = { ...signedByOther, publicKeyPem: listenKey.publicKeyPem };
+    const server = createServer((req, res) => {
+      req.resume();
+      req.on("end", () => {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(swapped));
       });
     });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));

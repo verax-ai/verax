@@ -442,7 +442,10 @@ describe("attack R12", () => {
         inputsLog: proxy.inputsLog,
       });
       assert.equal(approved.ok, true, JSON.stringify(approved));
-      await assert.rejects(() => proxy.call(call, writer), /effect-unwritable/);
+      // The tool ran; its effect row could not be written. That is an error result, not a throw (R19-2).
+      const unrecorded = await proxy.call(call, writer);
+      assert.match(textOf(unrecorded), /^effect-unrecorded:/, textOf(unrecorded));
+      assert.equal(unrecorded.isError, true);
       assert.equal(calls, 1);
       assert.equal(startedWithoutEnd(dir, "r-once"), true);
       ledger.close();

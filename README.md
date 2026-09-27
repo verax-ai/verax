@@ -66,7 +66,7 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ## Connect your agent
 
-Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`) and prefer approving from the panel with a passkey, or from a separate administrator account. Start the administrator PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
+Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows the supported way to approve is the panel with a passkey. An elevated CLI `approve` stays as a fallback and has to be run from a separate administrator account, not this account elevated, because a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`). Start that other account's PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
 
 ```powershell
 npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body
@@ -82,7 +82,7 @@ sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js in
 
 The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs that Node, and keeps the ledger under a service account. On Windows the agent token is `%ProgramData%\Verax\agent-token\<your SID>\agent.token` (Administrators and SYSTEM have full control, your SID can read the file and read-execute the directory). On Linux and macOS a child process running as your uid writes `~/.verax/agent.token` from its stdin. It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. The service account and the file permissions are the boundary.
 
-Approve a held call from that same administrator-owned copy. Windows, in the same `-NoProfile` administrator PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
+Approve a held call from the panel after a passkey sign-in. On Windows that is the supported path. `verax desktop` opens the panel at `http://localhost:<panelPort>` and the dev issuer at `http://localhost:<issuerPort>` (the passkey ceremony runs on the issuer); the processes still bind `127.0.0.1`. An elevated CLI approve on Windows is a fallback from a separate administrator account, not this account elevated, in a `-NoProfile` PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
 
 To try it in your own user, which is not a boundary:
 
@@ -248,8 +248,11 @@ Each line below is a row in the capability matrix in
 with what it does not do and the test that fails when it stops being
 true.
 
-- Approval: a held call is approved with `verax approve` on this machine, or
-  from the panel after a passkey sign-in (`verax operator`); the approver's
+- Approval: a held call is approved from the panel after a passkey sign-in
+  (`verax operator`), or with `verax approve` on this machine. On Windows the
+  panel is the supported path; an elevated CLI approve is a fallback from a
+  separate administrator account. `verax desktop` opens `http://localhost:<panelPort>`
+  and talks to the issuer at `http://localhost:<issuerPort>`. The approver's
   operator id is bound into the signed record by hash.
 - Witness: `verax witness` signs effect rows from a second process and writes
   durable checkpoints; without it the witness class stays `self`.
