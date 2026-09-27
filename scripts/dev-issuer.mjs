@@ -19,6 +19,7 @@ import {
 import { readRpConfig } from "../packages/body/src/rp-config.ts";
 import { payloadTooLarge, readIssuerBody as readBody } from "./issuer-body.mjs";
 import { collectVendorEsm, readVendorFile } from "./vendor-allow.mjs";
+import { watchDesktopParent } from "../packages/body/src/desktop-parent.ts";
 
 // Off by default. With VERAX_DEV_ISSUER_TRACE=1 the issuer names each phase and
 // the time since it started, on stderr. It exists because a gate run twice saw
@@ -36,6 +37,8 @@ if (process.env.NODE_ENV === "production") {
   process.stderr.write("dev-issuer refuses NODE_ENV=production\n");
   process.exit(1);
 }
+
+watchDesktopParent();
 
 const stateDir = process.env.VERAX_STATE_DIR;
 if (!stateDir) {

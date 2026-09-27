@@ -1,10 +1,12 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs";
 import { get } from "node:http";
 import { createConnection, createServer, type Server } from "node:net";
-import { dirname, join } from "node:path";
+import { basename, dirname, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { DESKTOP_PARENT_PID } from "./desktop-parent.ts";
 import {
+  posixOthersCanReplace,
   restrictToOwnerWin32,
   systemToolEnv,
   systemToolPath,
@@ -92,7 +94,15 @@ export function panelBuildNeeded(distIndex: string, sourceRoots: readonly string
   return sourceRoots.some((root) => newestUnder(root, builtAt));
 }
 
-export function parseDesktopArgs(argv: string[]): DesktopOpts | { error: string } {
+/** UNC share or a Win32 device path (`\\?\`, `\\.\`, `\\?\UNC\`, `//host`): all start with two separators. */
+export function desktopStateUncOrDevice(stateDir: string): boolean {
+  return stateDir.replaceAll("/", "\\").startsWith("\\\\");
+}
+
+export function parseDesktopArgs(
+  argv: string[],
+  platform: NodeJS.Platform = process.platform,
+): DesktopOpts | { error: string } {
   const rest = argv.slice(1);
   let stateDir = "";
   let panelPort = 5173;
@@ -129,6 +139,7 @@ export function parseDesktopArgs(argv: string[]): DesktopOpts | { error: string 
     if (a.startsWith("-")) return { error: `flag-unknown:${a}` };
   }
   if (!stateDir) return { error: "usage" };
+  if (platform === "win32" && desktopStateUncOrDevice(stateDir)) return { error: "desktop-state-unc" };
   if (![panelPort, issuerPort, bodyPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) {
     return { error: "port-invalid" };
   }
@@ -436,6 +447,19 @@ export function desktopChildExitedLine(name: DesktopChildName): string {
 
 export type DesktopSpawnName = DesktopChildName | "browser";
 
+/**
+ * Stand-in for `process` so a test can emit SIGHUP, SIGBREAK, an uncaught
+ * exception, or `exit` without signalling this process. `platform` chooses
+ * SIGHUP (anything but win32) or SIGBREAK (win32).
+ */
+export type DesktopSignalHost = {
+  once: (event: string, listener: () => void) => void;
+  on: (event: string, listener: () => void) => void;
+  removeListener: (event: string, listener: () => void) => void;
+  exit: (code: number) => void;
+  platform?: NodeJS.Platform;
+};
+
 /** Test seam. Production leaves this unset and spawns the real children. */
 export type DesktopHooks = {
   spawn?: (
@@ -457,12 +481,25 @@ export type DesktopHooks = {
   windowsDirectoryOwner?: (dir: string) => { ownerSid?: string; invokingSid?: string };
   /** Replaces the Windows DACL read. The text is the SDDL `windowsUserCanWrite` already judges. */
   windowsDirectoryDacl?: (dir: string) => string;
+  /**
+   * Replaces the ancestor DACL read. When set, each ancestor is judged with
+   * `windowsUserCanWrite(..., { ancestor: true })`. When a leaf owner or leaf
+   * DACL hook is set and this is not, ancestors are not read from the machine.
+   */
+  windowsAncestorDacl?: (dir: string) => string;
+  /** Replaces `killTree` for the children this run started. */
+  kill?: (pid: number | undefined) => void;
+  /** Called with the capped stdout/stderr kept for one child. */
+  childOutput?: (name: DesktopSpawnName, stored: string) => void;
+  /** Replaces `process` for stop handlers. Production uses this process. */
+  signals?: DesktopSignalHost;
 };
 
 type DesktopDirectoryOpts = {
   platform?: NodeJS.Platform;
   windowsDirectoryOwner?: (dir: string) => { ownerSid?: string; invokingSid?: string };
   windowsDirectoryDacl?: (dir: string) => string;
+  windowsAncestorDacl?: (dir: string) => string;
 };
 
 const DIRECTORY_WRITABLE_BY_OTHERS = "the directory was writable by others; use a new directory";
@@ -498,6 +535,178 @@ function readWindowsDirectorySddl(dir: string): string | null {
   return text === "" ? null : text;
 }
 
+/** Last bytes kept from a child so a long log cannot grow without a bound. */
+export const DESKTOP_CHILD_OUTPUT_CAP = 64 * 1024;
+
+/** Keep the tail. A ready line at the end of a large chunk stays inside the cap. */
+export function rememberChildOutput(current: string, chunk: string, cap = DESKTOP_CHILD_OUTPUT_CAP): string {
+  if (cap <= 0) return "";
+  if (chunk.length >= cap) return chunk.slice(chunk.length - cap);
+  if (current.length + chunk.length <= cap) return current + chunk;
+  return (current + chunk).slice(current.length + chunk.length - cap);
+}
+
+function foldDesktopPath(p: string): string {
+  if (process.platform !== "win32") return p.length > 1 ? p.replace(/\/+$/, "") : p;
+  let s = p.replaceAll("/", "\\");
+  const lower = s.toLowerCase();
+  if (lower.startsWith("\\\\?\\unc\\")) s = `\\\\${s.slice(8)}`;
+  else if (lower.startsWith("\\\\?\\")) s = s.slice(4);
+  s = s.toLowerCase();
+  if (s.length > 3) s = s.replace(/\\+$/, "");
+  return s;
+}
+
+function ancestorPaths(dir: string): string[] {
+  const out: string[] = [];
+  let cur = resolve(dir);
+  for (let i = 0; i < 64; i += 1) {
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    out.push(parent);
+    cur = parent;
+  }
+  return out;
+}
+
+/**
+ * An intermediate link makes the real path differ from the path as given.
+ * 8.3 names are expanded with `realpathSync.native` on each component that is
+ * not a link, then compared case-insensitively on Windows. A missing leaf is
+ * the real path of the parent plus the leaf name. The leaf itself being a
+ * link is left to the directory check.
+ */
+function intermediateLink(dir: string): string | null {
+  const abs = resolve(dir);
+  const root = parse(abs).root;
+  const segs = abs.slice(root.length).split(/[\\/]/).filter((seg) => seg.length > 0);
+  let cursor = root;
+  let expanded = root;
+  for (let i = 0; i < segs.length; i += 1) {
+    const next = join(cursor, segs[i]!);
+    const leaf = i === segs.length - 1;
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(next);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        expanded = join(expanded, ...segs.slice(i));
+        break;
+      }
+      throw err;
+    }
+    if (st.isSymbolicLink()) {
+      if (leaf) return null;
+      return next;
+    }
+    try {
+      expanded = realpathSync.native(next);
+    } catch {
+      return next;
+    }
+    cursor = next;
+  }
+  let real: string;
+  try {
+    real = realpathSync.native(abs);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    const parent = dirname(abs);
+    try {
+      real = join(realpathSync.native(parent), basename(abs));
+    } catch {
+      return null;
+    }
+  }
+  if (foldDesktopPath(expanded) !== foldDesktopPath(real)) return dirname(abs);
+  return null;
+}
+
+function firstExistingPath(dir: string): string {
+  let cur = dir;
+  for (let i = 0; i < 64; i += 1) {
+    try {
+      lstatSync(cur);
+      return cur;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") break;
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return dir;
+}
+
+function refusePosixAncestors(dir: string): void {
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  for (const ancestor of ancestorPaths(dir)) {
+    let st: ReturnType<typeof lstatSync> | undefined;
+    try {
+      st = lstatSync(ancestor);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
+    }
+    if (!st) continue;
+    const ownerIsOperator = st.uid === 0 || st.uid === uid;
+    if (
+      posixOthersCanReplace(
+        { uid: ownerIsOperator ? 0 : st.uid, mode: st.mode, symlink: st.isSymbolicLink() },
+        true,
+      )
+    ) {
+      refuseDesktopDirectory(dir, `ancestor ${ancestor} can be replaced by another user`);
+    }
+  }
+}
+
+function ancestorInvokingSid(dir: string, opts?: DesktopDirectoryOpts): string {
+  const hooked = opts?.windowsDirectoryOwner?.(dir).invokingSid?.trim().toUpperCase() ?? "";
+  if (hooked !== "") return hooked;
+  if (opts?.windowsDirectoryOwner || opts?.windowsDirectoryDacl || opts?.windowsAncestorDacl) return "";
+  try {
+    return windowsDirectorySids(firstExistingPath(dir)).invokingSid?.trim().toUpperCase() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void {
+  if ((opts?.windowsDirectoryDacl || opts?.windowsDirectoryOwner) && !opts?.windowsAncestorDacl) return;
+  const svc = ancestorInvokingSid(dir, opts);
+  for (const ancestor of ancestorPaths(dir)) {
+    let sddl: string | null;
+    if (opts?.windowsAncestorDacl) {
+      sddl = opts.windowsAncestorDacl(ancestor);
+    } else {
+      try {
+        lstatSync(ancestor);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
+      }
+      sddl = readWindowsDirectorySddl(ancestor);
+    }
+    if (sddl === null || windowsUserCanWrite(sddl, { ancestor: true, svcSid: svc })) {
+      refuseDesktopDirectory(
+        dir,
+        sddl === null
+          ? `ancestor ${ancestor} ACL could not be read`
+          : `ancestor ${ancestor} can be replaced by another user`,
+      );
+    }
+  }
+}
+
+/** Intermediate link, or an ancestor another user can replace. Same rule for a new directory and an existing one. */
+function refuseDesktopAncestors(dir: string, platform: NodeJS.Platform, opts?: DesktopDirectoryOpts): void {
+  const link = intermediateLink(dir);
+  if (link) refuseDesktopDirectory(dir, `ancestor ${link} is a link`);
+  if (platform === "win32") refuseWindowsAncestors(dir, opts);
+  else refusePosixAncestors(dir);
+}
+
 /**
  * Create `dir` as mode 0700. An existing directory another user could write
  * is refused and left as it is: on POSIX that is `mode & 0o022`, on Windows
@@ -507,7 +716,9 @@ function readWindowsDirectorySddl(dir: string): string | null {
  * read or execute bits down to 0700. `dev-issuer` as a symlink or junction
  * is refused. A symbolic link, or a directory owned by another uid, is
  * refused. On Windows an existing directory is refused unless its owner SID
- * is the invoking SID, Administrators, or SYSTEM.
+ * is the invoking SID, Administrators, or SYSTEM. An ancestor another user
+ * can replace, or an intermediate link, is refused the same way for a new
+ * directory and for one that already exists.
  */
 function ensureDesktopDirectory(
   dir: string,
@@ -515,6 +726,7 @@ function ensureDesktopDirectory(
   opts?: DesktopDirectoryOpts,
 ): void {
   const platform = opts?.platform ?? process.platform;
+  refuseDesktopAncestors(dir, platform, opts);
   let existing: ReturnType<typeof lstatSync> | null = null;
   try {
     existing = lstatSync(dir);
@@ -536,7 +748,8 @@ function ensureDesktopDirectory(
       const daclHook = opts?.windowsDirectoryDacl;
       if (daclHook || !opts?.windowsDirectoryOwner) {
         const sddl = daclHook ? daclHook(dir) : readWindowsDirectorySddl(dir);
-        if (sddl === null || windowsUserCanWrite(sddl, { svcSid: owner })) {
+        // The invoking user's own entry is not "someone else", also when an elevated shell made Administrators the owner.
+        if (sddl === null || windowsUserCanWrite(sddl, { svcSid: invoking })) {
           refuseDesktopDirectory(
             dir,
             sddl === null ? "the directory ACL could not be read; use a new directory" : DIRECTORY_WRITABLE_BY_OTHERS,
@@ -559,6 +772,8 @@ function ensureDesktopDirectory(
     return;
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // A missing intermediate directory another user created between the first check and mkdir is theirs now.
+  refuseDesktopAncestors(dir, platform, opts);
   const created = lstatSync(dir);
   if (created.isSymbolicLink() || !created.isDirectory()) refuseDesktopDirectory(dir);
   if (platform === "win32") {
@@ -570,8 +785,10 @@ function ensureDesktopDirectory(
   chmodSync(dir, 0o700);
 }
 
+/** Synchronous: `spawnSync` on Windows, `process.kill` elsewhere. An `exit` handler can call it. */
 export function killTree(pid: number | undefined): void {
-  if (pid == null) return;
+  // POSIX kill(-1) signals every process this user may signal, kill(0) our own group. No child has pid 0 or 1.
+  if (pid == null || !Number.isInteger(pid) || pid <= 1) return;
   if (process.platform === "win32") {
     spawnSync(systemToolPath("taskkill", "win32"), ["/T", "/PID", String(pid), "/F"], {
       windowsHide: true,
@@ -733,11 +950,15 @@ export async function runDesktop(
     forwarders.push(opened.server);
     return "held";
   };
+  const killPid = hooks?.kill ?? killTree;
   const stopAll = () => {
     gate.watch = false;
     stopForwarders();
-    for (const c of kids) killTree(c.pid);
+    for (const c of kids) killPid(c.pid);
   };
+  const signalHost: DesktopSignalHost = hooks?.signals ?? (process as unknown as DesktopSignalHost);
+  const signalPlatform = hooks?.signals?.platform ?? process.platform;
+  let disarmSignals = () => {};
   const launch = (
     name: DesktopSpawnName,
     cmd: string,
@@ -746,11 +967,12 @@ export async function runDesktop(
     cwd: string,
     hideWindow = true,
   ): ChildProcess => (hooks?.spawn ? hooks.spawn(name, cmd, args, env, cwd) : spawnLogged(cmd, args, env, cwd, hideWindow));
-  const pipe = (child: ChildProcess, own: { text: string }) => {
+  const pipe = (name: DesktopSpawnName, child: ChildProcess, own: { text: string }) => {
     const feed = (chunk: Buffer | string) => {
       const text = String(chunk);
-      own.text += text;
-      log.text += text;
+      own.text = rememberChildOutput(own.text, text);
+      log.text = rememberChildOutput(log.text, text);
+      hooks?.childOutput?.(name, own.text);
     };
     child.stdout?.on("data", feed);
     child.stderr?.on("data", feed);
@@ -801,10 +1023,12 @@ export async function runDesktop(
   };
 
   try {
+    disarmSignals = armDesktopStop(signalHost, signalPlatform, stopAll);
     ensureDesktopDirectory(opts.stateDir, restrictOwner, {
       platform: hooks?.platform,
       windowsDirectoryOwner: hooks?.windowsDirectoryOwner,
       windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
+      windowsAncestorDacl: hooks?.windowsAncestorDacl,
     });
     const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
     if ("error" in decided) {
@@ -846,13 +1070,13 @@ export async function runDesktop(
         "issuer",
         process.execPath,
         ["--experimental-strip-types", issuerScript, "--out", tokenPath],
-        issuerEnv(cleanEnv(), opts, audience, issuerUrl),
+        { ...issuerEnv(cleanEnv(), opts, audience, issuerUrl), [DESKTOP_PARENT_PID]: String(process.pid) },
         repoRoot,
       );
       kids.push(issuer);
       arm("issuer", issuer);
       const issuerOut = { text: "" };
-      pipe(issuer, issuerOut);
+      pipe("issuer", issuer, issuerOut);
       const issuerReady = await waitReady(
         issuer,
         issuerOut,
@@ -908,6 +1132,7 @@ export async function runDesktop(
           VERAX_BIND: `127.0.0.1:${opts.bodyPort}`,
           VERAX_ALLOWED_ORIGINS: mergeAllowedOrigin(process.env.VERAX_ALLOWED_ORIGINS, panelOrigin),
           VERAX_POLICY_FILE: policy,
+          [DESKTOP_PARENT_PID]: String(process.pid),
           ...(opts.inventoryFile ? { VERAX_INVENTORY_FILE: opts.inventoryFile } : {}),
         },
         repoRoot,
@@ -915,7 +1140,7 @@ export async function runDesktop(
       kids.push(body);
       arm("body", body);
       const bodyOut = { text: "" };
-      pipe(body, bodyOut);
+      pipe("body", body, bodyOut);
       const bodyReady = await waitReady(
         body,
         bodyOut,
@@ -951,6 +1176,9 @@ export async function runDesktop(
     }
 
     if (await busy("panel", opts.panelPort)) return 1;
+    // vite preview has no parent-pid watch. stopAll kills it with the tree.
+    // A launcher killed outright does not run stopAll; the issuer and the body
+    // exit when VERAX_DESKTOP_PARENT_PID is gone, and without them this port is idle.
     const panel = launch(
       "panel",
       process.execPath,
@@ -964,7 +1192,7 @@ export async function runDesktop(
     kids.push(panel);
     arm("panel", panel);
     const panelOut = { text: "" };
-    pipe(panel, panelOut);
+    pipe("panel", panel, panelOut);
     const panelReady = await waitReady(
       panel,
       panelOut,
@@ -991,6 +1219,7 @@ export async function runDesktop(
       platform: hooks?.platform,
       windowsDirectoryOwner: hooks?.windowsDirectoryOwner,
       windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
+      windowsAncestorDacl: hooks?.windowsAncestorDacl,
     });
     const browserArgv = scriptBrowser
       ? [opts.browser!, url]
@@ -1003,7 +1232,7 @@ export async function runDesktop(
         ];
     const browser = launch("browser", browserBin, browserArgv, cleanEnv(), repoRoot, false);
     kids.push(browser);
-    pipe(browser, { text: "" });
+    pipe("browser", browser, { text: "" });
     if (token !== null && log.text.includes(token)) {
       writeErr("desktop-token-leaked\n");
       stopAll();
@@ -1012,20 +1241,12 @@ export async function runDesktop(
     process.stdout.write(
       `desktop-ready issuer=${opts.issuerPort} body=${opts.bodyPort} panel=${opts.panelPort}\n`,
     );
-    const onSignal = () => {
-      stopAll();
-      process.exit(1);
-    };
-    process.once("SIGINT", onSignal);
-    process.once("SIGTERM", onSignal);
     const closed = new Promise<void>((resolve) => {
       if (browser.exitCode !== null || browser.signalCode !== null) resolve();
       else browser.once("close", () => resolve());
     });
     const childExit = async (name: DesktopChildName): Promise<number> => {
       writeErr(desktopChildExitedLine(name));
-      process.removeListener("SIGINT", onSignal);
-      process.removeListener("SIGTERM", onSignal);
       stopAll();
       return 1;
     };
@@ -1039,8 +1260,6 @@ export async function runDesktop(
     if (exitedEarly.kind === "child") return childExit(exitedEarly.name);
     if (exitedEarly.kind === "browser") {
       writeErr("desktop-browser-exited-early\n");
-      process.removeListener("SIGINT", onSignal);
-      process.removeListener("SIGTERM", onSignal);
       stopAll();
       return 1;
     }
@@ -1048,8 +1267,6 @@ export async function runDesktop(
       closed.then(() => ({ kind: "browser" as const })),
       childGone.then((name) => ({ kind: "child" as const, name })),
     ]);
-    process.removeListener("SIGINT", onSignal);
-    process.removeListener("SIGTERM", onSignal);
     if (ended.kind === "child") return childExit(ended.name);
     stopAll();
     return 0;
@@ -1058,7 +1275,39 @@ export async function runDesktop(
     const msg = err instanceof Error ? err.message : "unknown";
     writeErr(`desktop-failed:${msg}\n`);
     return 1;
+  } finally {
+    disarmSignals();
   }
+}
+
+/** SIGHUP on POSIX, SIGBREAK on Windows, plus crash and process exit. `stopAll` is synchronous. */
+function armDesktopStop(host: DesktopSignalHost, platform: NodeJS.Platform, stopAll: () => void): () => void {
+  const onSignal = () => {
+    stopAll();
+    host.exit(1);
+  };
+  const onCrash = () => {
+    stopAll();
+    host.exit(1);
+  };
+  const onExit = () => {
+    stopAll();
+  };
+  const paired: [string, () => void][] = [
+    ["SIGINT", onSignal],
+    ["SIGTERM", onSignal],
+    // Node raises SIGHUP on Windows too, when the console window is closed.
+    ["SIGHUP", onSignal],
+    ...(platform === "win32" ? ([["SIGBREAK", onSignal]] as [string, () => void][]) : []),
+    ["uncaughtException", onCrash],
+    ["unhandledRejection", onCrash],
+  ];
+  for (const [event, fn] of paired) host.once(event, fn);
+  host.on("exit", onExit);
+  return () => {
+    for (const [event, fn] of paired) host.removeListener(event, fn);
+    host.removeListener("exit", onExit);
+  };
 }
 
 export async function desktopMain(argv: string[]): Promise<number> {

@@ -7,7 +7,7 @@ import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { privateTempDir } from "./private-temp.ts";
+import { desktopAncestorDaclHook, privateTempDir } from "./private-temp.ts";
 
 import {
   forwardIpv6Loopback,
@@ -113,6 +113,7 @@ describe("attack R20", () => {
         (line) => err.push(line),
         {
           readyMs: 500,
+          ...desktopAncestorDaclHook(),
           restrictOwner: () => {},
           spawn: () => {
             throw new Error("spawned while [::1] was already taken");

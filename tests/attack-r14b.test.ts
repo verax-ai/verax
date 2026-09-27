@@ -7,7 +7,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { privateTempDir } from "./private-temp.ts";
+import { desktopAncestorDaclHook, privateTempDir } from "./private-temp.ts";
 
 import {
   bodyReadyLine,
@@ -69,6 +69,7 @@ async function driveDesktop(stateDir: string, restrictOwner?: (dir: string) => v
     () => {},
     {
       readyMs: 2_000,
+      ...desktopAncestorDaclHook(),
       ...(restrictOwner ? { restrictOwner } : {}),
       spawn: (name: DesktopSpawnName) => {
         if (name === "issuer") {

@@ -1,6 +1,7 @@
 import { type AddressInfo } from "node:net";
 import { JwksFileError } from "./auth.ts";
 import { EX_CONFIG, loadConfig, overlayInventoryArg } from "./config.ts";
+import { watchDesktopParent } from "./desktop-parent.ts";
 import { KeyAlgorithmError, KeysPartialError } from "./keys.ts";
 import { listen } from "./server.ts";
 
@@ -8,6 +9,7 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
   argv: readonly string[] = process.argv,
 ): Promise<void> {
+  watchDesktopParent({ env });
   const overlaid = overlayInventoryArg(env, argv);
   if ("error" in overlaid) {
     process.stderr.write(`${overlaid.error}\n`);

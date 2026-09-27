@@ -23,7 +23,7 @@ import { FileLedger } from "../packages/proxy/src/ledger.ts";
 import { loadPolicy } from "../packages/proxy/src/policy.ts";
 import { createProxy } from "../packages/proxy/src/proxy.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER } from "../packages/proxy/tests/helpers.ts";
-import { privateTempDir } from "./private-temp.ts";
+import { desktopAncestorDaclHook, privateTempDir } from "./private-temp.ts";
 
 function ownerDir(prefix: string): string {
   const dir = privateTempDir(prefix);
@@ -141,6 +141,7 @@ describe("attack F27", () => {
       );
     } finally {
       again.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -200,6 +201,7 @@ describe("attack F27", () => {
         () => {},
         {
           readyMs: 2_000,
+          ...desktopAncestorDaclHook(),
           restrictOwner: () => {},
           spawn: (name, _cmd, args, env) => {
             seen.push({ name, args: [...args], env: { ...env } });

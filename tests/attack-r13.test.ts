@@ -21,7 +21,7 @@ import {
 } from "../packages/body/src/desktop.ts";
 import { EX_CONFIG } from "../packages/body/src/config.ts";
 import { readInstallHealthNonce } from "../packages/body/src/health-extras.ts";
-import { privateTempDir } from "./private-temp.ts";
+import { desktopAncestorDaclHook, privateTempDir } from "./private-temp.ts";
 import {
   codeDirFor,
   healthzProvesService,
@@ -118,6 +118,7 @@ describe("attack R13", () => {
         (line) => busyErr.push(line),
         {
           readyMs: 300,
+          ...desktopAncestorDaclHook(),
           spawn: () => {
             spawned += 1;
             return hold("should-not-run");
@@ -142,6 +143,7 @@ describe("attack R13", () => {
         (line) => earlyErr.push(line),
         {
           readyMs: 1_000,
+          ...desktopAncestorDaclHook(),
           spawn: (name: DesktopSpawnName) => {
             if (name === "body") bodies += 1;
             if (name === "issuer") return nodeEval("process.exit(1)");
@@ -167,6 +169,7 @@ describe("attack R13", () => {
         (line) => squatErr.push(line),
         {
           readyMs: 400,
+          ...desktopAncestorDaclHook(),
           spawn: (name: DesktopSpawnName) => {
             if (name === "body") squatBodies += 1;
             if (name === "issuer") {
@@ -203,6 +206,7 @@ describe("attack R13", () => {
         (line) => pinErr.push(line),
         {
           readyMs: 2_000,
+          ...desktopAncestorDaclHook(),
           spawn: (name, _cmd, _args, env) => {
             if (name === "issuer") {
               tokenPresentAtSpawn = existsSync(tokenPath);
