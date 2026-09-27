@@ -12,6 +12,7 @@ import { describe, it } from "node:test";
 import { DESKTOP_PARENT_PID, watchDesktopParent } from "../packages/body/src/desktop-parent.ts";
 import {
   DESKTOP_CHILD_OUTPUT_CAP,
+  expandLocalAccountAliases,
   bodyReadyLine,
   issuerJwksPinPath,
   issuerReadyLine,
@@ -23,6 +24,7 @@ import {
   type DesktopSignalHost,
   type DesktopSpawnName,
 } from "../packages/body/src/desktop.ts";
+import { windowsUserCanWrite } from "../packages/body/src/install.ts";
 import { desktopAncestorDaclHook, privateTempDir } from "./private-temp.ts";
 
 function takePort(): Promise<number> {
@@ -311,6 +313,25 @@ describe("attack R24", () => {
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
+  });
+
+  // The GitHub Windows runner is the built-in Administrator. Its SDDL names that account `LA`, and the
+  // judge reads an alias as someone else, so the desktop refused a directory only its own user could write.
+  it("the built-in Administrator's own LA entry is its own once the alias is expanded; LG and unresolved aliases stay someone else", () => {
+    const admin = "S-1-5-21-3162555376-3447873500-144036907-500";
+    const guest = "S-1-5-21-3162555376-3447873500-144036907-501";
+    const leaf = "O:BAG:S-1-5-21-3162555376-3447873500-144036907-513D:P(A;OICI;FA;;;LA)(A;OICI;FA;;;BA)(A;OICI;FA;;;SY)";
+    assert.equal(windowsUserCanWrite(leaf, { svcSid: admin }), true, "the raw alias is judged someone else");
+    const expanded = expandLocalAccountAliases(leaf, { LA: admin, LG: guest });
+    assert.equal(expanded.includes(`;${admin})`), true, expanded);
+    assert.equal(windowsUserCanWrite(expanded, { svcSid: admin }), false);
+    assert.equal(windowsUserCanWrite(expanded, { svcSid: admin, ancestor: true }), false);
+    const withGuest = expandLocalAccountAliases(`${leaf}(A;OICI;FA;;;LG)`, { LA: admin, LG: guest });
+    assert.equal(windowsUserCanWrite(withGuest, { svcSid: admin }), true, "the guest is someone else");
+    assert.equal(expandLocalAccountAliases(leaf, {}), leaf, "no SID, no change");
+    assert.equal(expandLocalAccountAliases("O:LAG:BAD:(A;;FA;;;LA)", { LA: admin }), `O:${admin}G:BAD:(A;;FA;;;${admin})`);
+    const untouched = `O:BAD:(A;;FA;;;${admin})(A;;FA;;;S-1-5-21-9-LA)`;
+    assert.equal(expandLocalAccountAliases(untouched, { LA: guest }), untouched);
   });
 
   // No ACL hook: the ancestors go through the real batch read.

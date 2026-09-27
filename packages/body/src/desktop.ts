@@ -536,10 +536,55 @@ function readWindowsAcls(paths: readonly string[]): Map<string, WindowsAcl> {
   for (const p of paths) {
     const hit = read.get(p);
     const text = (hit?.text ?? "").replace(/^\uFEFF/, "").trim();
-    if (hit && hit.status === 0 && text !== "") out.set(p, { sddl: text, why: "" });
-    else out.set(p, { sddl: null, why: text.split(/\r?\n/)[0]?.slice(0, 200) || "no answer" });
+    if (hit && hit.status === 0 && text !== "") {
+      const aliased = /(?:[OG]:|;)L[AG](?=[)OGDS:]|$)/.test(text);
+      out.set(p, { sddl: aliased ? expandLocalAccountAliases(text, localAccountSids()) : text, why: "" });
+    } else {
+      out.set(p, { sddl: null, why: text.split(/\r?\n/)[0]?.slice(0, 200) || "no answer" });
+    }
   }
   return out;
+}
+
+let localAccounts: { LA?: string; LG?: string } | null = null;
+
+/** This machine's built-in Administrator and Guest SIDs, which an SDDL writes as `LA` and `LG`. Empty when the lookup fails. */
+function localAccountSids(): { LA?: string; LG?: string } {
+  if (localAccounts) return localAccounts;
+  const ran = defaultExec(
+    toolArgv(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "[Security.Principal.SecurityIdentifier]::new('LA').Value; [Security.Principal.SecurityIdentifier]::new('LG').Value",
+      ],
+      "win32",
+    ),
+  );
+  const sids = (ran.status ?? 1) === 0 ? (ran.stdout ?? "").match(/S-1-5-21-[0-9-]+/g) ?? [] : [];
+  localAccounts = sids.length === 2 && sids[0]!.endsWith("-500") && sids[1]!.endsWith("-501") ? { LA: sids[0], LG: sids[1] } : {};
+  return localAccounts;
+}
+
+/**
+ * The account SIDs in place of the `LA` / `LG` aliases, so the built-in
+ * Administrator's own entry compares equal to its SID (a GitHub Windows
+ * runner runs as that account). An alias with no SID given is left, and the
+ * judge treats it as someone else.
+ */
+export function expandLocalAccountAliases(sddl: string, sids: { LA?: string; LG?: string }): string {
+  const sid = (alias: string): string | undefined => (alias === "LA" ? sids.LA : alias === "LG" ? sids.LG : undefined);
+  return sddl
+    .replace(/([OG]:)(LA|LG)(?=[OGDS]:|$)/g, (whole, field: string, alias: string) => {
+      const full = sid(alias);
+      return full ? `${field}${full}` : whole;
+    })
+    .replace(/;(LA|LG)\)/g, (whole, alias: string) => {
+      const full = sid(alias);
+      return full ? `;${full})` : whole;
+    });
 }
 
 function unreadable(why: string): string {
