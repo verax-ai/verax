@@ -87,9 +87,11 @@ describe("verax desktop CLI", () => {
         windowsHide: true,
         timeout: 60_000,
       });
+      assert.equal(existsSync(stateDir), false);
+      // An elevated runner refuses this checkout's code before any command (R15-1).
+      if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 64, `${r.stdout}${r.stderr}`);
       assert.match(r.stderr, /^desktop-not-in-0\.4\.0: the desktop panel ships in 0\.4\.1\n$/);
-      assert.equal(existsSync(stateDir), false);
       const help = spawnSync(process.execPath, ["--experimental-strip-types", cli, "--help"], {
         encoding: "utf8",
         windowsHide: true,

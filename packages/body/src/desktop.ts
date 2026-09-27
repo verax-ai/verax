@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { DESKTOP_PARENT_PID } from "./desktop-parent.ts";
 import {
   defaultExec,
+  foreignAclPrincipals,
   posixOthersCanReplace,
   readSddlBatch,
   restrictToOwnerWin32,
@@ -545,6 +546,12 @@ function unreadable(why: string): string {
   return why === "" ? "" : ` (${why})`;
 }
 
+/** Who the refused DACL names, so the operator (and a CI log) can see which entry was judged to be someone else. */
+function aclWho(sddl: string, you: string): string {
+  const others = foreignAclPrincipals(sddl, you);
+  return ` (owner ${sddlOwner(sddl) ?? "unknown"}; other entries ${others.length > 0 ? others.join(", ") : "none"}; you ${you || "unknown"})`;
+}
+
 /** Last bytes kept from a child so a long log cannot grow without a bound. */
 export const DESKTOP_CHILD_OUTPUT_CAP = 64 * 1024;
 
@@ -697,7 +704,7 @@ function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void 
         dir,
         acl.sddl === null
           ? `ancestor ${ancestor} ACL could not be read${unreadable(acl.why)}`
-          : `ancestor ${ancestor} can be replaced by another user`,
+          : `ancestor ${ancestor} can be replaced by another user${aclWho(acl.sddl, svc)}`,
       );
     }
   }
@@ -767,7 +774,9 @@ function ensureDesktopDirectory(
         if (sddl === null || windowsUserCanWrite(sddl, { svcSid: invoking })) {
           refuseDesktopDirectory(
             dir,
-            sddl === null ? "the directory ACL could not be read; use a new directory" : DIRECTORY_WRITABLE_BY_OTHERS,
+            sddl === null
+              ? "the directory ACL could not be read; use a new directory"
+              : `${DIRECTORY_WRITABLE_BY_OTHERS}${aclWho(sddl, invoking)}`,
           );
         }
       }
