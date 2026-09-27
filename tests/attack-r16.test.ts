@@ -4,7 +4,7 @@
 import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
 import { generateKeyPairSync } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -30,7 +30,8 @@ import { elevatedRunner, refusedAsElevated, skipIfElevated } from "./elevated-re
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 
 function ownerDir(prefix: string): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+  // macOS tmpdir() is under the /var link; the desktop refuses an intermediate link.
+  const dir = realpathSync.native(mkdtempSync(join(tmpdir(), prefix)));
   if (process.platform !== "win32") chmodSync(dir, 0o700);
   return dir;
 }

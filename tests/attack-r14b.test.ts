@@ -2,7 +2,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawn, type ChildProcess } from "node:child_process";
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -137,10 +137,11 @@ describe("attack R14b", () => {
       return;
     }
 
-    const parent = mkdtempSync(join(tmpdir(), "verax-r14b-new-"));
+    // realpath: macOS tmpdir() is under the /var link, which the desktop refuses.
+    const parent = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-r14b-new-")));
     chmodSync(parent, 0o700);
     const created = join(parent, "state");
-    const loose = mkdtempSync(join(tmpdir(), "verax-r14b-loose-"));
+    const loose = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-r14b-loose-")));
     chmodSync(loose, 0o755);
     const profile = join(loose, "browser-profile");
     mkdirSync(profile);

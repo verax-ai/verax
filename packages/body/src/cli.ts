@@ -5,7 +5,6 @@ import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
 import { attachBodyLog } from "./body-log.ts";
 import { runDemo } from "./demo.ts";
-import { desktopMain } from "./desktop.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
@@ -54,7 +53,6 @@ Usage: verax <command> [options]
   witness <stateDir>   run the witness alongside a body
   halt <stateDir>      stop the body from allowing anything further
   unlock [--force] <stateDir>   clear a stale ledger lock
-  desktop <args>       open the local panel, joining the body that holds the ledger if one is up
 
   --help, -h           print this
   --version, -v        print the version
@@ -273,7 +271,8 @@ async function dispatchCli(
     return runVerify(argv.slice(1), (s) => stdout.write(`${s}\n`));
   }
   if (argv[0] === "desktop") {
-    return desktopMain(argv);
+    stderr.write("desktop-not-in-0.4.0: the desktop panel ships in 0.4.1\n");
+    return 64;
   }
   if (argv[0] === "witness") {
     const stateDir = argv[1];

@@ -518,11 +518,15 @@ function devIssuerIsLink(dir: string): boolean {
   }
 }
 
-/** SDDL of one directory, or null when the read does not return a descriptor. */
-function readWindowsDirectorySddl(dir: string): string | null {
+/** SDDL of one directory, or null when the read does not return a descriptor; `why.text` then says what the read returned. */
+function readWindowsDirectorySddl(dir: string, why?: { text: string }): string | null {
   const argv = windowsSddlArgv(dir);
   const file = argv[0];
-  if (!file) return null;
+  const fail = (text: string): null => {
+    if (why) why.text = text;
+    return null;
+  };
+  if (!file) return fail("no powershell path");
   const ran = spawnSync(file, argv.slice(1), {
     encoding: "utf8",
     windowsHide: true,
@@ -530,9 +534,17 @@ function readWindowsDirectorySddl(dir: string): string | null {
     timeout: 30_000,
     env: systemToolEnv("win32"),
   });
-  if (ran.error || (ran.status ?? 1) !== 0) return null;
+  if (ran.error) return fail(ran.error.message);
+  if ((ran.status ?? 1) !== 0) {
+    const first = (ran.stderr ?? "").trim().split(/\r?\n/)[0] ?? "";
+    return fail(`exit ${ran.status ?? ran.signal}${first ? `: ${first.slice(0, 200)}` : ""}`);
+  }
   const text = (ran.stdout ?? "").replace(/^\uFEFF/, "").trim();
-  return text === "" ? null : text;
+  return text === "" ? fail("empty output") : text;
+}
+
+function unreadable(why: { text: string }): string {
+  return why.text === "" ? "" : ` (${why.text})`;
 }
 
 /** Last bytes kept from a child so a long log cannot grow without a bound. */
@@ -677,6 +689,7 @@ function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void 
   const svc = ancestorInvokingSid(dir, opts);
   for (const ancestor of ancestorPaths(dir)) {
     let sddl: string | null;
+    const why = { text: "" };
     if (opts?.windowsAncestorDacl) {
       sddl = opts.windowsAncestorDacl(ancestor);
     } else {
@@ -686,13 +699,13 @@ function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void 
         if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
         refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
       }
-      sddl = readWindowsDirectorySddl(ancestor);
+      sddl = readWindowsDirectorySddl(ancestor, why);
     }
     if (sddl === null || windowsUserCanWrite(sddl, { ancestor: true, svcSid: svc })) {
       refuseDesktopDirectory(
         dir,
         sddl === null
-          ? `ancestor ${ancestor} ACL could not be read`
+          ? `ancestor ${ancestor} ACL could not be read${unreadable(why)}`
           : `ancestor ${ancestor} can be replaced by another user`,
       );
     }
@@ -747,12 +760,15 @@ function ensureDesktopDirectory(
       // R16-12 injects the owner and not a DACL. Production passes neither and reads the SDDL.
       const daclHook = opts?.windowsDirectoryDacl;
       if (daclHook || !opts?.windowsDirectoryOwner) {
-        const sddl = daclHook ? daclHook(dir) : readWindowsDirectorySddl(dir);
+        const why = { text: "" };
+        const sddl = daclHook ? daclHook(dir) : readWindowsDirectorySddl(dir, why);
         // The invoking user's own entry is not "someone else", also when an elevated shell made Administrators the owner.
         if (sddl === null || windowsUserCanWrite(sddl, { svcSid: invoking })) {
           refuseDesktopDirectory(
             dir,
-            sddl === null ? "the directory ACL could not be read; use a new directory" : DIRECTORY_WRITABLE_BY_OTHERS,
+            sddl === null
+              ? `the directory ACL could not be read${unreadable(why)}; use a new directory`
+              : DIRECTORY_WRITABLE_BY_OTHERS,
           );
         }
       }

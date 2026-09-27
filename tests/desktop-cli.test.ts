@@ -15,6 +15,7 @@ import { privateTempDir } from "./private-temp.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const cli = join(here, "..", "packages", "body", "src", "cli.ts");
+const desktopEntry = join(here, "desktop-entry.ts");
 const fakeBrowser = join(here, "..", "packages", "body", "tests", "fixtures", "fake-browser.mjs");
 const fakeBrowserExit = join(here, "..", "packages", "body", "tests", "fixtures", "fake-browser-exit.mjs");
 const policyFile = join(here, "..", "packages", "proxy", "policy", "default.json");
@@ -77,6 +78,29 @@ function commandLines(): string {
 }
 
 describe("verax desktop CLI", () => {
+  it("0.4.0 refuses `verax desktop` and creates nothing, and the help does not list it", () => {
+    const parent = privateTempDir("verax-desktop-off-");
+    const stateDir = join(parent, "state");
+    try {
+      const r = spawnSync(process.execPath, ["--experimental-strip-types", cli, "desktop", "--state", stateDir], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 60_000,
+      });
+      assert.equal(r.status, 64, `${r.stdout}${r.stderr}`);
+      assert.match(r.stderr, /^desktop-not-in-0\.4\.0: the desktop panel ships in 0\.4\.1\n$/);
+      assert.equal(existsSync(stateDir), false);
+      const help = spawnSync(process.execPath, ["--experimental-strip-types", cli, "--help"], {
+        encoding: "utf8",
+        windowsHide: true,
+        timeout: 60_000,
+      });
+      assert.equal(/^\s+desktop\b/m.test(`${help.stdout}${help.stderr}`), false);
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
   it("names a directory that is not a clone and accepts this repository", () => {
     const outside = mkdtempSync(join(tmpdir(), "verax-not-a-clone-"));
     try {
@@ -108,8 +132,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -214,8 +237,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -294,8 +316,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
@@ -352,8 +373,7 @@ describe("verax desktop CLI", () => {
           process.execPath,
           [
             "--experimental-strip-types",
-            cli,
-            "desktop",
+            desktopEntry,
             "--state",
             stateDir,
             "--port",
