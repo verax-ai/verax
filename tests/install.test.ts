@@ -1736,6 +1736,7 @@ describe("verax install plan", () => {
       const code = await runInstall(["install", "--port", "8801"], {
         platform,
         env: platform === "win32" ? winEnv : linuxEnv,
+        windowsMachineRoots: platform === "win32" ? machineOf(winEnv) : undefined,
         elevated: () => true,
         spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
