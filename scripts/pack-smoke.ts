@@ -164,7 +164,8 @@ function listen(env: NodeJS.ProcessEnv): Promise<{ child: ChildProcess; port: nu
       settled = true;
       child.kill("SIGKILL");
       reject(new Error(`no listen: ${err.slice(0, 400)}`));
-    }, 15_000);
+      // An elevated start first checks who can change the code (one PowerShell on Windows).
+    }, 60_000);
     const onExit = (code: number | null): void => {
       if (settled) return;
       settled = true;
