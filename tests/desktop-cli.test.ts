@@ -213,7 +213,8 @@ describe("verax desktop CLI", () => {
 
   it(
     "refuses a body that already holds the ledger instead of joining it",
-    { timeout: 60_000 },
+    // Same budget as the other tests here that start real children; a loaded Windows runner passed 60 s.
+    { timeout: 180_000 },
     async () => {
       const stateDir = privateTempDir("verax-desktop-attach-");
       const audience = "http://127.0.0.1/verax-desktop-attach";
@@ -291,7 +292,8 @@ describe("verax desktop CLI", () => {
 
   it(
     "refuses a live lock whose body does not answer on the port it was given",
-    { timeout: 60_000 },
+    // Same budget as the other tests here that start real children; a loaded Windows runner passed 60 s.
+    { timeout: 180_000 },
     async () => {
       const stateDir = privateTempDir("verax-desktop-locked-");
       const audience = "http://127.0.0.1/verax-desktop-locked";
