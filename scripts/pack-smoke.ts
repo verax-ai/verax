@@ -11,6 +11,7 @@ import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { defaultElevated } from "../packages/body/src/install.ts";
 import { packReportFiles } from "./pack-report.ts";
 
 const PACKAGES = ["@verax-ai/inventory", "@verax-ai/proxy", "@verax-ai/body"] as const;
@@ -61,7 +62,14 @@ for (const name of PACKAGES) {
 
 // A consumer that is not this repository. The two libraries are pinned through
 // overrides because they are not on the registry yet; body asks for them by name.
-const consumer = mkdtempSync(join(tmpdir(), "verax-consumer-"));
+// An elevated run (the Windows CI runner has no UAC) refuses code the user can change, and a
+// temp directory under the profile is such code. There the consumer goes under Program Files,
+// which only administrators can write: the same place the README puts the CLI.
+const consumerParent =
+  process.platform === "win32" && defaultElevated("win32") && process.env.ProgramFiles
+    ? process.env.ProgramFiles
+    : tmpdir();
+const consumer = mkdtempSync(join(consumerParent, "verax-consumer-"));
 writeFileSync(
   join(consumer, "package.json"),
   `${JSON.stringify(

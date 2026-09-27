@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path, { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
@@ -86,8 +86,10 @@ export type CliHooks = {
 function isCliEntry(): boolean {
   const entry = process.argv[1];
   if (!entry) return false;
+  // npm starts the CLI through a symbolic link (`bin/verax`, `node_modules/.bin/verax`): compare
+  // real paths, or a linked start runs nothing and exits 0.
   try {
-    return path.resolve(entry) === path.resolve(fileURLToPath(import.meta.url));
+    return realpathSync(path.resolve(entry)) === realpathSync(fileURLToPath(import.meta.url));
   } catch {
     return false;
   }
