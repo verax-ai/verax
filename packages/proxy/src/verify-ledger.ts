@@ -34,7 +34,11 @@
  *               first receipt key on a `self` row. A `same-org` row is checked
  *               under the witness key: `witnessPublicKeyPem` when the reader
  *               pins one, otherwise the first receipt key on a `same-org` row.
- *               Agreement of that key with the files is not trust.
+ *               Pinning one of those keys and leaving the other to the file
+ *               does not verify: a pinned effect key with any `same-org` row
+ *               requires a pinned witness key, and a pinned witness key with
+ *               any `self` row requires a pinned effect key. Agreement of a
+ *               key with the files is not trust.
  *
  * Checkpoints are a fifth statement. Each row in `checkpoints.jsonl` must
  * verify under one witness key: `checkpointPublicKeyPem` when the reader
@@ -839,6 +843,12 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     selfCount === 0 && effectRows.length > 0 ? effectRows.length : selfCount,
   );
   const witnessTrust = witnessTrustOf(pinnedWitness, sameKeyTaken, sameCount);
+  if (pinnedEffect !== "" && pinnedWitness === "" && sameCount > 0) {
+    problems.push("same-org rows need --witness-key when --effect-key is pinned");
+  }
+  if (pinnedWitness !== "" && pinnedEffect === "" && selfCount > 0) {
+    problems.push("self rows need --effect-key when --witness-key is pinned");
+  }
   noteEd25519(effectKey, problems);
   noteEd25519(witnessKey, problems);
   let effects = effectRows.length;

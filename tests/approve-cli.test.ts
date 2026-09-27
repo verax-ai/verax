@@ -10,6 +10,7 @@ import { createProxy, FileLedger, loadApprovalsFromDir, loadPolicy } from "@vera
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { defaultElevated } from "../packages/body/src/install.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
+import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 // An elevated test process (the Windows CI runner) runs this checkout's CLI elevated, and an
@@ -203,6 +204,8 @@ describe("verax approve CLI", () => {
     };
     const hold = async (prefix: string) => {
       const dir = mkdtempSync(join(tmpdir(), prefix));
+      // The body writes the policy snapshot a held spend is approved under; without it the approve refuses (R16-5).
+      persistPolicySnapshot(dir, loadPolicy(spendPolicy).hash, spendPolicy);
       const signers = loadOrCreateSigners(dir);
       const ledger = new FileLedger(dir);
       const proxy = createProxy({
@@ -242,7 +245,8 @@ describe("verax approve CLI", () => {
       { elevated: () => false },
     );
     assert.equal(yesCode, 0, yesErr.join(""));
-    assert.match(yesOut.join(""), /^held tool=spend /);
+    assert.match(yesOut.join(""), /tool: "spend"/);
+    assert.match(yesOut.join(""), /amount: "100"/);
     const yesLedger = new FileLedger(yesDir);
     const yesRecs = await yesLedger.decisions();
     yesLedger.close();

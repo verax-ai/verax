@@ -54,11 +54,19 @@ export function loadEnvFile(path: string, env: NodeJS.ProcessEnv = process.env):
     }
     parsed.push([key, value]);
   }
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("VERAX_")) delete env[key];
-  }
+  clearVeraxEnv(env);
   for (const [key, value] of parsed) env[key] = value;
   return { ok: true };
+}
+
+/**
+ * Drop every `VERAX_*` name before an env file is applied. Comparison is
+ * case-insensitive because Windows environment names are.
+ */
+export function clearVeraxEnv(env: NodeJS.ProcessEnv): void {
+  for (const key of Object.keys(env)) {
+    if (key.toUpperCase().startsWith("VERAX_")) delete env[key];
+  }
 }
 
 /** `serve --env-file` refuses a file that names neither JWKS source. */

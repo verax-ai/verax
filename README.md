@@ -194,7 +194,10 @@ the answer says `a key you supplied` instead. Effects are signed with a
 separate key. A `self` row is checked under the effect key: `--effect-key <public.pem>`
 when you pin it, otherwise one key taken from the first `self` row. A `same-org`
 row is checked under the witness key: `--witness-key <public.pem>` when you pin it,
-otherwise one key taken from the first `same-org` row. Each of those lines says the
+otherwise one key taken from the first `same-org` row. Pinning `--effect-key` while
+a `same-org` row is present requires `--witness-key` as well, and pinning
+`--witness-key` while a `self` row is present requires `--effect-key` as well;
+otherwise the result is not verified. Each of those lines says the
 same thing: the files agree with each other, not that the key was ever yours.
 Checkpoints are signed by the witness key. Every checkpoint row is checked under one key: `--checkpoint-key <public.pem>` when you pin it, otherwise one key taken from the checkpoint file, with the same note that agreement is not trust. The tail counts only checkpoints whose signatures verified. Someone who can rewrite the files can still roll that file back to an older valid prefix together with the records after it; only a checkpoint held elsewhere detects that. `--json` prints
 the same result for a

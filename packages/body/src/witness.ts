@@ -8,6 +8,8 @@ import {
   checkpointHash,
   signCheckpoint,
   totalsFromDecisionRecords,
+  verifyCheckpoint,
+  verifyCheckpointUnderPin,
   type SignedCheckpoint,
 } from "@cedulon/checkpoint";
 import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
@@ -168,16 +170,26 @@ function loadDecisions(stateDir: string): SignedDecisionRecord[] {
 }
 
 function lastCheckpointHash(stateDir: string): string | null {
+  const path = checkpointsPath(stateDir);
+  let text: string;
   try {
-    const text = readFileSync(checkpointsPath(stateDir), "utf8").trim();
-    if (text === "") return null;
-    const lines = text.split("\n").filter((l) => l !== "");
-    const last = JSON.parse(lines[lines.length - 1] ?? "{}") as SignedCheckpoint;
-    if (typeof last.coseHex !== "string" || !last.claims) return null;
-    return checkpointHash(last);
+    text = readFileSync(path, "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    return null;
+    throw new Error("checkpoint-unreadable");
+  }
+  const trimmed = text.trim();
+  if (trimmed === "") return null;
+  const lines = trimmed.split("\n").filter((line) => line !== "");
+  try {
+    const last = JSON.parse(lines[lines.length - 1] ?? "") as SignedCheckpoint;
+    if (!last || typeof last !== "object" || typeof last.coseHex !== "string" || !last.claims) {
+      throw new Error("checkpoint-unreadable");
+    }
+    return checkpointHash(last);
+  } catch (err) {
+    if (err instanceof Error && err.message === "checkpoint-unreadable") throw err;
+    throw new Error("checkpoint-unreadable");
   }
 }
 
@@ -224,9 +236,28 @@ export async function requestWitnessCheckpoint(
     if (!res.ok) return null;
     const body = (await res.json()) as SignedCheckpoint;
     if (typeof body.coseHex !== "string" || !body.claims) return null;
+    if (!checkpointMatchesListenKey(body, listen.publicKeyPem)) {
+      appendStatus(stateDir, {
+        atMs: Date.now(),
+        result: "checkpoint-refused",
+        reason: "witness-key-mismatch",
+      });
+      return null;
+    }
     return body;
   } catch {
     return null;
+  }
+}
+
+/** The listen file's key, not whichever key answered on the port. */
+function checkpointMatchesListenKey(body: SignedCheckpoint, publicKeyPem: string): boolean {
+  if (typeof body.coseHex !== "string" || body.coseHex === "" || !body.claims) return false;
+  if (typeof body.publicKeyPem !== "string" || !pemSame(body.publicKeyPem, publicKeyPem)) return false;
+  try {
+    return verifyCheckpointUnderPin(body, publicKeyPem) && verifyCheckpoint(body, publicKeyPem);
+  } catch {
+    return false;
   }
 }
 
@@ -412,7 +443,13 @@ export async function runWitness(stateDir: string): Promise<void> {
           return;
         }
         send(res, 404, { error: "not-found" });
-      } catch {
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : "";
+        if (reason === "checkpoint-unreadable") {
+          appendStatus(stateDir, { atMs: Date.now(), result: "checkpoint-refused", reason });
+          send(res, 409, { error: reason });
+          return;
+        }
         send(res, 400, { error: "bad-request" });
       }
     })();

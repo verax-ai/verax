@@ -4,7 +4,7 @@ import { get } from "node:http";
 import { createConnection, createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { restrictToOwnerWin32, systemToolEnv, systemToolPath, toolArgv } from "./install.ts";
+import { restrictToOwnerWin32, systemToolEnv, systemToolPath, toolArgv, windowsDirectorySids } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
@@ -382,14 +382,29 @@ export type DesktopHooks = {
   listenerPid?: (port: number) => number | null;
   /** Replaces the Windows owner ACL call on the state directory and the browser profile. */
   restrictOwner?: (dir: string) => void;
+  /** Replaces `process.platform` for the directory owner check. */
+  platform?: NodeJS.Platform;
+  /** Replaces the Windows owner-SID and invoking-SID lookup. */
+  windowsDirectoryOwner?: (dir: string) => { ownerSid?: string; invokingSid?: string };
+};
+
+type DesktopDirectoryOpts = {
+  platform?: NodeJS.Platform;
+  windowsDirectoryOwner?: (dir: string) => { ownerSid?: string; invokingSid?: string };
 };
 
 /**
  * Create `dir` as mode 0700, or on POSIX chmod an existing directory that has
  * group or other bits. A symbolic link, or a directory owned by another uid,
- * is refused. On Windows the owner ACL is applied to the directory.
+ * is refused. On Windows an existing directory is refused unless its owner
+ * SID is the invoking SID; the owner ACL is applied only then.
  */
-function ensureDesktopDirectory(dir: string, restrict: (target: string) => void): void {
+function ensureDesktopDirectory(
+  dir: string,
+  restrict: (target: string) => void,
+  opts?: DesktopDirectoryOpts,
+): void {
+  const platform = opts?.platform ?? process.platform;
   let existing: ReturnType<typeof lstatSync> | null = null;
   try {
     existing = lstatSync(dir);
@@ -398,7 +413,12 @@ function ensureDesktopDirectory(dir: string, restrict: (target: string) => void)
   }
   if (existing) {
     if (existing.isSymbolicLink() || !existing.isDirectory()) throw new Error(`desktop-dir-refused:${dir}`);
-    if (process.platform === "win32") {
+    if (platform === "win32") {
+      const read = opts?.windowsDirectoryOwner ?? windowsDirectorySids;
+      const found = read(dir);
+      const owner = found.ownerSid?.trim().toUpperCase() ?? "";
+      const invoking = found.invokingSid?.trim().toUpperCase() ?? "";
+      if (owner === "" || invoking === "" || owner !== invoking) throw new Error(`desktop-dir-refused:${dir}`);
       restrict(dir);
       return;
     }
@@ -410,7 +430,7 @@ function ensureDesktopDirectory(dir: string, restrict: (target: string) => void)
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const created = lstatSync(dir);
   if (created.isSymbolicLink() || !created.isDirectory()) throw new Error(`desktop-dir-refused:${dir}`);
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     restrict(dir);
     return;
   }
@@ -597,7 +617,10 @@ export async function runDesktop(
   };
 
   try {
-    ensureDesktopDirectory(opts.stateDir, restrictOwner);
+    ensureDesktopDirectory(opts.stateDir, restrictOwner, {
+      platform: hooks?.platform,
+      windowsDirectoryOwner: hooks?.windowsDirectoryOwner,
+    });
     const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
     if ("error" in decided) {
       const named = decided.lockPort === null ? "unknown" : String(decided.lockPort);
@@ -775,7 +798,10 @@ export async function runDesktop(
       return 1;
     }
     const profileDir = join(opts.stateDir, "browser-profile");
-    ensureDesktopDirectory(profileDir, restrictOwner);
+    ensureDesktopDirectory(profileDir, restrictOwner, {
+      platform: hooks?.platform,
+      windowsDirectoryOwner: hooks?.windowsDirectoryOwner,
+    });
     const browserArgv = scriptBrowser
       ? [opts.browser!, url]
       : [

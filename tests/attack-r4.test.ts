@@ -273,10 +273,11 @@ describe("attack R4", () => {
         { isTTY: true, ask: async () => "100" },
         { elevated: () => false },
       );
-      const held = out.find((line) => line.startsWith("held ")) ?? "";
-      assert.equal(held.includes("\r"), false, JSON.stringify(held));
-      assert.match(held, /payee=true-ads/);
-      assert.doesNotMatch(held, /payee=other-ads/);
+      const shown = out.join("");
+      assert.equal(shown.includes("\r"), false, JSON.stringify(shown));
+      assert.match(shown, /payee: "true-ads"/);
+      assert.match(shown, /reference: "inv\\rheld tool=spend payee=other-ads amount=100 currency=TRY reference=ok"/);
+      assert.equal(shown.split("\n").filter((line) => line.startsWith("payee:")).length, 1);
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
     }

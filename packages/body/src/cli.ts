@@ -7,7 +7,7 @@ import { attachBodyLog } from "./body-log.ts";
 import { runDemo } from "./demo.ts";
 import { desktopMain } from "./desktop.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
-import { envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
+import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
 import { runHalt } from "./halt.ts";
 import { main } from "./main.ts";
@@ -133,6 +133,12 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
     markCliCodeCheckPassed();
   }
   try {
+    if (isElevated && argv[0] === "demo" && argv.includes("--with-conarium")) {
+      stderr.write(
+        "refusing: demo --with-conarium fetches and runs code with npx; run it from a terminal that is not elevated\n",
+      );
+      return 78;
+    }
     return await dispatchCli(argv, stdout, stderr, env);
   } finally {
     clearCliCodeCheckPassed();
@@ -207,9 +213,7 @@ async function dispatchCli(
         stderr.write("verax serve --env-file <file>\n");
         return 78;
       }
-      for (const key of Object.keys(process.env)) {
-        if (key.startsWith("VERAX_")) delete process.env[key];
-      }
+      clearVeraxEnv(process.env);
       const loaded = loadEnvFile(file);
       if (!loaded.ok) {
         stderr.write(`${loaded.reason}\n`);
@@ -269,7 +273,16 @@ async function dispatchCli(
     await runWitness(stateDir);
     return 0;
   }
+  const head = argv[0];
+  if (head !== undefined && !head.startsWith("--")) {
+    stderr.write(`unknown command: ${head}\n`);
+    stderr.write(HELP);
+    return 64;
+  }
   await main();
+  // main() returns once the server is listening. The open socket keeps the
+  // process up, the same way as `serve`.
+  await new Promise(() => {});
   return 0;
 }
 

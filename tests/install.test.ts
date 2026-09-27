@@ -1523,7 +1523,10 @@ describe("verax install plan", () => {
       ["FX", 0x1200a0],
       ["0x4", 0x4],
       ["DCLC", 0x6],
-      ["KA", 0],
+      ["KA", 0xf003f],
+      ["KR", 0x20019],
+      ["KW", 0x20006],
+      ["KX", 0x20019],
     ];
     for (const [token, mask] of rows) {
       const parsed = sddlRightsMask(token);

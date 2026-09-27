@@ -125,12 +125,13 @@ describe("attack R6", () => {
           isTTY: true,
           ask: async () => "100",
         }, { elevated: () => false });
-        const held = out.find((line) => line.startsWith("held ")) ?? "";
+        // The prompt is one JSON-quoted line per field (R16-7); the reference line carries the mark.
+        const held = out.join("");
         const hex = mark.codePointAt(0)!.toString(16).padStart(4, "0");
         assert.equal(held.includes(mark), false, cls);
-        assert.match(held, new RegExp(`\\\\u${hex}`), cls);
-        assert.match(held, /payee=true-ads/, cls);
-        assert.doesNotMatch(held, /payee=other/, cls);
+        assert.match(held, new RegExp(`^reference: .*\\\\u${hex}`, "m"), cls);
+        assert.match(held, /^payee: "true-ads"$/m, cls);
+        assert.equal((held.match(/^payee: /gm) ?? []).length, 1, cls);
       } finally {
         rmSync(stateDir, { recursive: true, force: true });
       }

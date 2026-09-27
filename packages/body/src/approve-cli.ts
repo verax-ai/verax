@@ -31,11 +31,15 @@ function policyFromSnapshot(stateDir: string, policyHash: string): Policy | null
 function policyForApprove(stateDir: string, policyHash: string, env: NodeJS.ProcessEnv, elevated: boolean): Policy | null {
   // An elevated approve inherits the user's environment. The snapshot the body
   // wrote is the policy that held the call. The environment is not.
+  // When not elevated, the environment file is that policy only when its
+  // canonical hash is the defer's policyHash. Any other file falls through
+  // to the snapshot.
   if (!elevated) {
     const fromEnv = env.VERAX_POLICY_FILE?.trim();
     if (fromEnv) {
       try {
-        return loadPolicy(readFileSync(fromEnv, "utf8"));
+        const loaded = loadPolicy(readFileSync(fromEnv, "utf8"));
+        if (loaded.hash === policyHash) return loaded;
       } catch {
         // Fall through to the snapshot the body wrote for this hash.
       }
@@ -73,28 +77,50 @@ export function resolveApproveRef(
 const NEEDS_TERMINAL =
   "verax approve needs a terminal: it shows what is waiting and asks you to type the amount back\n";
 
+function integerMinor(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
+}
+
+/** An integer minor-unit amount, or null when the stored amount cannot be read as one. */
 function minorUnits(row: ApprovalRow): number | null {
-  if (typeof row.amount === "number") return row.amount;
-  const fromArgs = row.args.amountMinor;
-  return typeof fromArgs === "number" ? fromArgs : null;
+  if (typeof row.amount === "number") return integerMinor(row.amount);
+  return integerMinor(row.args.amountMinor);
 }
 
-const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
+const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "gu");
 
-/** A control in a stored row must not redraw the prompt, or smuggle a second `payee=`. */
-function escapeHeld(value: string): string {
-  const tainted = HELD_CONTROL.test(value);
-  const pattern = tainted ? new RegExp(`[${TERMINAL_CONTROL_CLASS}=]`, "gu") : HELD_CONTROL;
-  return value.replace(pattern, (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+/**
+ * One argument per line, JSON-quoted, so a value cannot look like another field. JSON leaves
+ * U+0085, U+FEFF, U+2028 and U+2029 as they are, so every terminal-control code point is
+ * written as a \u escape as well.
+ */
+function quotedField(name: string, value: unknown): string {
+  const text = typeof value === "string" ? value : value === undefined || value === null ? "" : JSON.stringify(value);
+  const quoted = JSON.stringify(text).replace(
+    HELD_CONTROL,
+    (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`,
+  );
+  return `${name}: ${quoted}\n`;
 }
 
-function heldLine(row: ApprovalRow): string {
+function spendPrompt(row: ApprovalRow, amount: number): string {
   const payee = typeof row.payee === "string" ? row.payee : String(row.args.payee ?? "");
   const currency = typeof row.currency === "string" ? row.currency : String(row.args.currency ?? "");
   const reference = typeof row.args.reference === "string" ? row.args.reference : "";
-  const amount = minorUnits(row);
-  const prefix = row.requestHash.slice(0, 12);
-  return `held tool=${escapeHeld(row.subject)} payee=${escapeHeld(payee)} amount=${amount === null ? "" : String(amount)} currency=${escapeHeld(currency)} reference=${escapeHeld(reference)} requestHash=${escapeHeld(prefix)}\n`;
+  return [
+    quotedField("tool", row.subject),
+    quotedField("payee", payee),
+    quotedField("amount", String(amount)),
+    quotedField("currency", currency),
+    quotedField("reference", reference),
+    quotedField("requestHash", row.requestHash.slice(0, 12)),
+  ].join("");
+}
+
+function argumentPrompt(row: ApprovalRow): string {
+  const lines = [quotedField("tool", row.subject)];
+  for (const key of Object.keys(row.args).sort()) lines.push(quotedField(key, row.args[key]));
+  return lines.join("");
 }
 
 function readTypedAmount(): Promise<string> {
@@ -216,14 +242,27 @@ export async function runApprove(
       writeErr("approve-unknown-ref\n");
       return 78;
     }
-    const expected = minorUnits(waiting);
-    const shown = expected === null ? "" : String(expected);
-    writeOut(heldLine(waiting));
-    writeOut("Type the amount in minor units:\n");
-    const typed = (await terminal.ask("Type the amount in minor units:\n")).trim();
-    if (typed !== shown) {
-      writeErr("approve-amount-mismatch\n");
-      return 1;
+    if (waiting.subject === "spend") {
+      const expected = minorUnits(waiting);
+      if (expected === null) {
+        writeErr("approve-amount-unreadable\n");
+        return 1;
+      }
+      writeOut(spendPrompt(waiting, expected));
+      writeOut("Type the amount in minor units:\n");
+      const typed = (await terminal.ask("Type the amount in minor units:\n")).trim();
+      if (typed !== String(expected)) {
+        writeErr("approve-amount-mismatch\n");
+        return 1;
+      }
+    } else {
+      writeOut(argumentPrompt(waiting));
+      writeOut("Type yes:\n");
+      const typed = (await terminal.ask("Type yes:\n")).trim();
+      if (typed !== "yes") {
+        writeErr("approve-confirm-mismatch\n");
+        return 1;
+      }
     }
   }
   let ledger: FileLedger;
@@ -250,7 +289,7 @@ export async function runApprove(
     }
     const policy = policyForApprove(stateDir, defer.claims.policyHash, env, isElevated);
     const waitingSubject = rows.find((row) => row.ref === ref)?.subject;
-    if (isElevated && !policy && waitingSubject === "spend") {
+    if (!policy && waitingSubject === "spend") {
       writeErr("approve-policy-missing\n");
       return 1;
     }

@@ -383,9 +383,12 @@ const SDDL_RIGHTS: Record<string, number> = {
   FR: 0x120089,
   FW: 0x120116,
   FX: 0x1200a0,
+  // Registry aliases. On a file these masks include write bits (KA includes FILE_WRITE_DATA).
+  KA: 0xf003f,
+  KR: 0x20019,
+  KW: 0x20006,
+  KX: 0x20019,
 };
-/** File ACEs ignore key rights. They are not unknown. */
-const SDDL_RIGHTS_IGNORED = new Set(["KA", "KR", "KW", "KX"]);
 
 /**
  * One place on both systems. Intel Homebrew gives `/usr/local` to the user, so a Node under it can be
@@ -1244,8 +1247,8 @@ export function sddlRightsMask(rights: string): { mask: number } | { unknown: st
   if (words.length % 2 !== 0) return { unknown: words };
   for (let i = 0; i < words.length; i += 2) {
     const token = words.slice(i, i + 2);
-    if (SDDL_RIGHTS_IGNORED.has(token)) continue;
     const bit = SDDL_RIGHTS[token];
+    // An unknown two-letter alias is not zero rights. Callers treat `unknown` as write.
     if (bit === undefined) return { unknown: token };
     mask |= bit;
   }
@@ -4409,6 +4412,17 @@ export function beginWinOwnerRun(): void {
 export function endWinOwnerRun(): void {
   winOwnerDepth = Math.max(0, winOwnerDepth - 1);
   if (winOwnerDepth === 0) winOwnerCache = null;
+}
+
+/** Owner SID of an existing directory, and the SID of this process. */
+export function windowsDirectorySids(
+  dir: string,
+  exec: (argv: string[]) => ExecResult = defaultExec,
+): { ownerSid: string | undefined; invokingSid: string | undefined } {
+  return {
+    ownerSid: directoryOwnerSid(dir, exec),
+    invokingSid: invokingSid(exec),
+  };
 }
 
 function directoryOwnerSid(dir: string, exec: (argv: string[]) => ExecResult): string | undefined {
