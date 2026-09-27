@@ -55,6 +55,14 @@ const winEnv = {
   USERDOMAIN: "DESKTOP",
 };
 
+/** Machine roots for a test that relocates ProgramData and ProgramFiles. The shell env must match these. */
+function machineOf(env: NodeJS.ProcessEnv): { programData: string; programFiles: string } {
+  return {
+    programData: env.ProgramData ?? "C:\\ProgramData",
+    programFiles: env.ProgramFiles ?? "C:\\Program Files",
+  };
+}
+
 const linuxEnv = {
   SUDO_USER: "runner",
   SUDO_UID: "1000",
@@ -367,7 +375,7 @@ describe("verax install plan", () => {
   });
 
   it("linux install under SELinux enforcing names an execmem denial when health fails", async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "verax-selinux-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-selinux-")));
     const home = join(root, "home").replaceAll("\\", "/");
     mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
@@ -455,7 +463,7 @@ describe("verax install plan", () => {
       t.skip("no root-owned binary to stand in for Node");
       return;
     }
-    const root = mkdtempSync(join(tmpdir(), "verax-linux-rollback-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-linux-rollback-")));
     const home = join(root, "home").replaceAll("\\", "/");
     mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
@@ -582,7 +590,7 @@ describe("verax install plan", () => {
 
     const standIn = rootOwnedStandIn();
     if (standIn === undefined) return;
-    const root = mkdtempSync(join(tmpdir(), "verax-selinux-libt-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-selinux-libt-")));
     const home = join(root, "home").replaceAll("\\", "/");
     mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
@@ -629,7 +637,7 @@ describe("verax install plan", () => {
     assert.equal(linuxSelinuxNodeRefusal(selinuxLabelExec("Enforcing", "usr_t"), "/usr/bin/node"), null);
     const standIn = rootOwnedStandIn();
     if (standIn === undefined) return;
-    const root = mkdtempSync(join(tmpdir(), "verax-selinux-bint-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-selinux-bint-")));
     const home = join(root, "home").replaceAll("\\", "/");
     mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
@@ -682,7 +690,7 @@ describe("verax install plan", () => {
     );
     const standIn = rootOwnedStandIn();
     if (standIn === undefined) return;
-    const root = mkdtempSync(join(tmpdir(), "verax-selinux-permissive-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-selinux-permissive-")));
     const home = join(root, "home").replaceAll("\\", "/");
     mkdirSync(home, { recursive: true });
     const posixRoot = join(root, "fsroot").replaceAll("\\", "/");
@@ -950,7 +958,7 @@ describe("verax install plan", () => {
   });
 
   it("poisoned PATH does not select whoami, icacls, or chown", () => {
-    const dir = mkdtempSync(join(tmpdir(), "verax-path-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-path-")));
     const prev = process.env.PATH;
     const planTools = new Set(["icacls", "schtasks", "powershell", "useradd", "chown", "chmod", "systemctl"]);
     try {
@@ -1135,7 +1143,7 @@ describe("verax install plan", () => {
         assert.match(printed, /cli\.js uninstall/);
       }
     }
-    const stateDir = mkdtempSync(join(tmpdir(), "verax-install-quiet-"));
+    const stateDir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-install-quiet-")));
     const out: string[] = [];
     try {
       const code = await runInitLocal(
@@ -1160,7 +1168,7 @@ describe("verax install plan", () => {
       t.skip("verax install does not run on this operating system");
       return;
     }
-    const root = mkdtempSync(join(tmpdir(), "verax-install-init-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-install-init-")));
     const home = join(root, "home");
     mkdirSync(home, { recursive: true });
     const env: NodeJS.ProcessEnv = platform === "win32"
@@ -1227,6 +1235,7 @@ describe("verax install plan", () => {
       const code = await runInstall(["install", "--port", String(port)], {
         platform,
         env,
+        windowsMachineRoots: platform === "win32" ? machineOf(env) : undefined,
         elevated: () => true,
         codeProbe: () => false,
         spawnUserToken: (spec) => {
@@ -1290,7 +1299,7 @@ describe("verax install plan", () => {
       t.skip("verax install does not run on this operating system");
       return;
     }
-    const root = mkdtempSync(join(tmpdir(), "verax-install-version-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-install-version-")));
     const home = join(root, "home");
     mkdirSync(home, { recursive: true });
     const env: NodeJS.ProcessEnv = platform === "win32"
@@ -1318,6 +1327,7 @@ describe("verax install plan", () => {
       const code = await runInstall(["install", "--port", "8801"], {
         platform,
         env,
+        windowsMachineRoots: platform === "win32" ? machineOf(env) : undefined,
         elevated: () => true,
         spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1357,7 +1367,7 @@ describe("verax install plan", () => {
     const win = okPlan("win32", winEnv, winOpts);
     const dumped = JSON.stringify(win.ops.filter((op) => op.op === "write" || op.op === "print"));
     assert.equal(dumped.includes("LOCAL SERVICE"), false);
-    const root = mkdtempSync(join(tmpdir(), "verax-svc-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-svc-")));
     const out: string[] = [];
     const err: string[] = [];
     let seen = "";
@@ -1370,6 +1380,7 @@ describe("verax install plan", () => {
           ProgramFiles: join(root, "files"),
           USERPROFILE: join(root, "home"),
         },
+        windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
         elevated: () => true,
         spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1476,11 +1487,12 @@ describe("verax install plan", () => {
     assert.equal(windowsUserCanWrite(nodejs, { path: "C:\\Program Files\\nodejs", ancestor: true }), false);
     const err: string[] = [];
     let sawAdd = false;
-    const root = mkdtempSync(join(tmpdir(), "verax-ancestor-ok-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-ancestor-ok-")));
     try {
     await runInstall(["install", "--port", "8801"], {
       platform: "win32",
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+      windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
       elevated: () => true,
       spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1572,11 +1584,12 @@ describe("verax install plan", () => {
     assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;;0x1200a9;;;ZZ)", { ancestor: false }), false);
     assert.equal(windowsUserCanWrite("O:BAG:SYD:PAI(A;OICIIO;FA;;;ZZ)(D;;FA;;;BU)", { ancestor: true }), false);
     const err: string[] = [];
-    const root = mkdtempSync(join(tmpdir(), "verax-sddl-stock-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-sddl-stock-")));
     try {
       await runInstall(["install", "--port", "8801"], {
         platform: "win32",
         env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+      windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
         elevated: () => true,
         spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1644,6 +1657,7 @@ describe("verax install plan", () => {
     const code = await runInstall(["install", "--port", "8801"], {
       platform: "win32",
       env: winEnv,
+      windowsMachineRoots: machineOf(winEnv),
       elevated: () => true,
       spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1671,6 +1685,7 @@ describe("verax install plan", () => {
     const code = await runInstall(["install", "--port", "8801"], {
       platform: "win32",
       env: winEnv,
+      windowsMachineRoots: machineOf(winEnv),
       elevated: () => true,
       spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1692,7 +1707,7 @@ describe("verax install plan", () => {
   });
 
   it("refuses a root-owned symlink whose target lives in a user-owned directory", async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "verax-link-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-link-")));
     const linkDir = join(root, "link");
     const userDir = join(root, "user");
     const target = join(userDir, "node");
@@ -1791,12 +1806,13 @@ describe("verax install plan", () => {
     const err: string[] = [];
     let continued = false;
     let password = "";
-    const root = mkdtempSync(join(tmpdir(), "verax-ps-fail-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-ps-fail-")));
     let code = 1;
     try {
     code = await runInstall(["install", "--port", "8801"], {
       platform: "win32",
       env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+      windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
       elevated: () => true,
       spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -1886,7 +1902,7 @@ describe("verax install plan", () => {
   });
 
   it("an npm failure prints the debug log tail and icacls, then removes the private temp", async (t) => {
-    const root = mkdtempSync(join(tmpdir(), "verax-npm-fail-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-npm-fail-")));
     const err: string[] = [];
     let tempPath = "";
     let codeDir = "";
@@ -1915,6 +1931,7 @@ describe("verax install plan", () => {
               ProgramFiles: join(root, "files"),
               USERPROFILE: join(root, "home"),
             },
+        windowsMachineRoots: posix ? undefined : { programData: join(root, "data"), programFiles: join(root, "files") },
         elevated: () => true,
         spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -2061,7 +2078,7 @@ describe("verax install plan", () => {
       t.skip("Windows icacls inheritance is checked on a Windows dev machine");
       return;
     }
-    const root = mkdtempSync(join(tmpdir(), "verax-acl-reset-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-acl-reset-")));
     const file = join(root, "key.pem");
     try {
       writeFileSync(file, "pem");
@@ -2131,7 +2148,7 @@ describe("verax install plan", () => {
       t.skip("Windows icacls inheritance is checked on a Windows dev machine");
       return;
     }
-    const root = mkdtempSync(join(tmpdir(), "verax-acl-init-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-acl-init-")));
     const tokenPath = join(root, "..", `token-${process.pid}`);
     const err: string[] = [];
     try {
@@ -2189,7 +2206,7 @@ describe("verax install plan", () => {
   });
 
   it("install-mode init accepts an existing token folder and leaves its ACL", async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-token-parent-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-token-parent-")));
     const tokenDir = join(root, "profile");
     const stateDir = join(root, "state");
     const tokenPath = join(tokenDir, "agent.token");
@@ -2232,7 +2249,7 @@ describe("verax install plan", () => {
   });
 
   it("install-mode init refuses a symlink or junction token folder", async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-token-link-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-token-link-")));
     const real = join(root, "real");
     const link = join(root, "link");
     const err: string[] = [];
@@ -2321,7 +2338,7 @@ describe("verax install plan", () => {
       invokingUid: 1000,
     }), null);
     if (process.platform === "win32" || process.getuid?.() === 0) return;
-    const root = mkdtempSync(join(tmpdir(), "verax-token-uid-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-token-uid-")));
     const tokenDir = join(root, "profile");
     const err: string[] = [];
     try {
@@ -2364,7 +2381,7 @@ describe("verax install plan", () => {
   });
 
   it("a tarball hash that fails twice with EPERM then succeeds proceeds and says it retried", () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-tgz-hash-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-tgz-hash-")));
     const file = join(root, "verax-ai-proxy-0.3.0.tgz");
     writeFileSync(file, "tarball-bytes");
     const err: string[] = [];
@@ -2416,7 +2433,7 @@ describe("verax install plan", () => {
   });
 
   it("a tarball copy that fails twice with EPERM then succeeds proceeds and says it retried", () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-tgz-retry-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-tgz-retry-")));
     const source = join(root, "verax-ai-proxy-0.3.0.tgz");
     const dest = join(root, "copy.tgz");
     writeFileSync(source, "tarball-bytes");
@@ -2448,7 +2465,7 @@ describe("verax install plan", () => {
   });
 
   it("a tarball whose bytes change between the trust check and the copy is refused", () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-tgz-swap-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-tgz-swap-")));
     const source = join(root, "verax-ai-body-0.3.0.tgz");
     const dest = join(root, "copy.tgz");
     writeFileSync(source, "trusted-bytes");
@@ -2655,7 +2672,7 @@ describe("verax uninstall", () => {
   });
 
   it("a clean machine prints nothing to remove and exits 0", async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-uninst-clean-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-uninst-clean-")));
     const out: string[] = [];
     const err: string[] = [];
     const code = await runUninstall(["uninstall"], {
@@ -2666,6 +2683,7 @@ describe("verax uninstall", () => {
         ProgramData: join(root, "data"),
         USERPROFILE: join(root, "home"),
       },
+      windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
       elevated: () => true,
         codeProbe: () => false,
       exec: () => ({ status: 1, stdout: "", stderr: "" }),
@@ -2678,7 +2696,7 @@ describe("verax uninstall", () => {
   });
 
   it("a failing schtasks or icacls step prints the tool, exit code, and stderr", async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-uninst-fail-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-uninst-fail-")));
     const out: string[] = [];
     const err: string[] = [];
     const code = await runUninstall(["uninstall"], {
@@ -2689,6 +2707,7 @@ describe("verax uninstall", () => {
         ProgramData: join(root, "data"),
         USERPROFILE: join(root, "home"),
       },
+      windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
       elevated: () => true,
         codeProbe: () => false,
       exec: (argv) => {
@@ -2811,6 +2830,7 @@ describe("verax uninstall", () => {
       await runInstall(["install", "--port", "8801"], {
         platform: "win32",
         env,
+        windowsMachineRoots: machineOf(env),
         elevated: () => true,
         spawnUserToken: userTokenStandIn,
         codeProbe: () => false,
@@ -2837,7 +2857,7 @@ describe("verax uninstall", () => {
       return { acl, paths, locked, err: err.join(""), batch, listed };
     };
 
-    const fresh = mkdtempSync(join(tmpdir(), "verax-f10e-plan-"));
+    const fresh = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-f10e-plan-")));
     try {
       const planned = await countPlan({
         ...winEnv,
@@ -2855,7 +2875,7 @@ describe("verax uninstall", () => {
       rmSync(fresh, { recursive: true, force: true });
     }
 
-    const refused = mkdtempSync(join(tmpdir(), "verax-f10e-root-"));
+    const refused = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-f10e-root-")));
     const data = join(refused, "data");
     const verax = join(data, "Verax");
     try {
@@ -2899,7 +2919,7 @@ describe("verax uninstall", () => {
     assert.equal(plain.ops.some((op) => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "userdel"), false);
     assert.equal(plain.ops.some((op) => op.op === "argv" && systemToolName(op.argv[0] ?? "") === "groupdel"), false);
 
-    const root = mkdtempSync(join(tmpdir(), "verax-linux-uninst-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-linux-uninst-")));
     const posixRoot = root.replaceAll("\\", "/");
     const markerPath = `${posixRoot}/opt/verax/install.json`;
     const uninstall = async (body: string | null) => {

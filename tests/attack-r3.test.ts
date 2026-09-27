@@ -3,7 +3,7 @@
 // the assertion fails. A fix should turn that assertion green without weakening it.
 
 import { strict as assert } from "node:assert";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -71,7 +71,7 @@ function planText(plan: { ok: true; ops: unknown[] } | { ok: false; message: str
 
 describe("attack R3", () => {
   it("R3-1 a user-written install.json does not authorise a pre-created Verax root", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-r3-marker-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-r3-marker-")));
     const data = join(root, "data");
     const files = join(root, "files");
     const verax = join(data, "Verax");
@@ -106,6 +106,7 @@ describe("attack R3", () => {
       const code = await runInstall(["install", "--port", "8801"], {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: files, USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: data, programFiles: files },
         elevated: () => true,
         codeProbe: () => false,
         layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },
@@ -124,7 +125,7 @@ describe("attack R3", () => {
   });
 
   it("W1 a root whose DACL changes between plan and lock is refused at the lock", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-w1-toctou-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-w1-toctou-")));
     const data = join(root, "data");
     const files = join(root, "files");
     const verax = join(data, "Verax");
@@ -166,6 +167,7 @@ describe("attack R3", () => {
       const code = await runInstall(["install", "--port", "8801"], {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: files, USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: data, programFiles: files },
         elevated: () => true,
         codeProbe: () => false,
         layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },
@@ -254,7 +256,7 @@ describe("attack R3", () => {
   });
 
   it("W1 a raced child in a fresh root is refused and removed", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-w1-race-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-w1-race-")));
     const data = join(root, "data");
     const verax = join(data, "Verax");
     const err: string[] = [];
@@ -274,6 +276,7 @@ describe("attack R3", () => {
       const code = await runInstall(["install", "--port", "8801"], {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: data, programFiles: join(root, "files") },
         elevated: () => true,
         codeProbe: () => false,
         layout: { execPath: winOpts.execPath, bodyVersion: winOpts.bodyVersion, npmCli: winOpts.npmCli },

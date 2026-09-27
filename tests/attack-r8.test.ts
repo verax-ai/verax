@@ -4,7 +4,7 @@
 // should turn that assertion green without weakening it.
 
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -204,7 +204,7 @@ describe("attack R8", () => {
   });
 
   it("uninstall with a marker whose recorded uid or SID does not match the live account does not delete it", async () => {
-    const root = mkdtempSync(join(tmpdir(), "verax-r8-account-"));
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-r8-account-")));
     const deleted = (seen: string[][], tool: string, arg: string): boolean =>
       seen.some((argv) => systemToolName(argv[0] ?? "") === tool && argv.includes(arg));
     try {
@@ -284,6 +284,7 @@ describe("attack R8", () => {
       const winCode = await runUninstall(["uninstall"], {
         platform: "win32",
         env: { ...winEnv, ProgramData: data, ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: data, programFiles: join(root, "files") },
         elevated: () => true,
         codeProbe: () => false,
         exec: (argv) => {

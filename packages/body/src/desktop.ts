@@ -1,7 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { get } from "node:http";
-import { createConnection, createServer } from "node:net";
+import { createConnection, createServer, type Server } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { restrictToOwnerWin32, systemToolEnv, systemToolPath, toolArgv, windowsDirectorySids } from "./install.ts";
@@ -138,22 +138,81 @@ export function portOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
   });
 }
 
-/**
- * Bind the loopback port and close it. True only when this process held it.
- * A connect probe is not this: whoever is already listening would answer it.
- */
-export function desktopPortFree(port: number): Promise<boolean> {
+function bindLoopback(port: number, host: string): Promise<"free" | "busy" | "unsupported"> {
   return new Promise((resolve) => {
     const server = createServer();
-    server.once("error", () => resolve(false));
-    server.listen(port, "127.0.0.1", () => {
-      server.close(() => resolve(true));
+    server.once("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT") resolve("unsupported");
+      else resolve("busy");
+    });
+    server.listen({ port, host, ipv6Only: host === "::1" }, () => {
+      server.close(() => resolve("free"));
     });
   });
 }
 
-export function desktopPortBusyLine(name: DesktopChildName, port: number): string {
-  return `desktop-port-busy:${name}:${port}\n`;
+/**
+ * Bind 127.0.0.1 and [::1], then close both. True only when this process held
+ * 127.0.0.1 and [::1] was free or this host has no IPv6 loopback. A connect
+ * probe is not this: whoever is already listening would answer it.
+ */
+export function desktopPortFree(port: number): Promise<boolean> {
+  return bindLoopback(port, "127.0.0.1").then(async (v4) => {
+    if (v4 !== "free") return false;
+    const v6 = await bindLoopback(port, "::1");
+    return v6 !== "busy";
+  });
+}
+
+/** True when a socket can bind [::1]. False when the host has no IPv6 loopback. */
+export function ipv6LoopbackAvailable(): Promise<boolean> {
+  return bindLoopback(0, "::1").then((held) => held !== "unsupported");
+}
+
+/**
+ * Hold `[::1]:port` and pipe each accepted socket to `127.0.0.1:port`.
+ * `unsupported` means this host cannot bind the IPv6 loopback.
+ */
+export function forwardIpv6Loopback(port: number): Promise<
+  { ok: true; server: Server } | { ok: false; reason: "busy" | "unsupported" }
+> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const server = createServer((inbound) => {
+      const upstream = createConnection({ host: "127.0.0.1", port });
+      const drop = () => {
+        inbound.destroy();
+        upstream.destroy();
+      };
+      inbound.on("error", drop);
+      upstream.on("error", drop);
+      inbound.pipe(upstream);
+      upstream.pipe(inbound);
+    });
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      if (settled) return;
+      settled = true;
+      if (err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT") resolve({ ok: false, reason: "unsupported" });
+      else resolve({ ok: false, reason: "busy" });
+    });
+    server.listen({ port, host: "::1", ipv6Only: true }, () => {
+      if (settled) {
+        server.close();
+        return;
+      }
+      settled = true;
+      resolve({ ok: true, server });
+    });
+  });
+}
+
+function listeningPort(server: Server): number | null {
+  const addr = server.address();
+  return addr && typeof addr !== "string" ? addr.port : null;
+}
+
+export function desktopPortBusyLine(name: DesktopChildName, port: number, ipv6 = false): string {
+  return ipv6 ? `desktop-port-busy:${name}:${port}:ipv6\n` : `desktop-port-busy:${name}:${port}\n`;
 }
 
 /** JWKS document the dev issuer rewrites under the state directory on every start. */
@@ -571,8 +630,11 @@ export async function runDesktop(
   // Browser-facing origins are localhost: an IP address cannot be a WebAuthn RP ID,
   // and an RP ID of localhost does not match a page on 127.0.0.1. The audience is
   // the same host so the token `aud` and the body's VERAX_AUDIENCE agree; it is
-  // not a page. Sockets stay on 127.0.0.1. Node (the panel proxy, the JWKS URL)
-  // uses that address so it does not follow a resolver that tries ::1 first.
+  // not a page. The children bind 127.0.0.1. This process also holds [::1] on
+  // those ports and pipes each connection to 127.0.0.1, so a page fetched as
+  // localhost cannot land on another local user's socket. Node (the panel
+  // proxy, the JWKS URL) uses 127.0.0.1 so it does not follow a resolver that
+  // tries ::1 first.
   const audience = `http://localhost:${opts.bodyPort}`;
   const issuerUrl = `http://localhost:${opts.issuerPort}`;
   const panelOrigin = `http://localhost:${opts.panelPort}`;
@@ -587,8 +649,24 @@ export async function runDesktop(
     resolveGone = resolve;
   });
 
+  const forwarders: Server[] = [];
+  const stopForwarders = () => {
+    for (const server of forwarders) {
+      server.close();
+      server.unref();
+    }
+    forwarders.length = 0;
+  };
+  const claimIpv6 = async (port: number): Promise<"held" | "busy" | "unsupported"> => {
+    if (forwarders.some((server) => listeningPort(server) === port)) return "held";
+    const opened = await forwardIpv6Loopback(port);
+    if (!opened.ok) return opened.reason;
+    forwarders.push(opened.server);
+    return "held";
+  };
   const stopAll = () => {
     gate.watch = false;
+    stopForwarders();
     for (const c of kids) killTree(c.pid);
   };
   const launch = (
@@ -634,8 +712,15 @@ export async function runDesktop(
     if (exited.name || !childStillAlive(child)) return "exited";
     return ready(own.text) ? "ready" : "timeout";
   };
+  const ipv4Free = (port: number): Promise<boolean> => bindLoopback(port, "127.0.0.1").then((held) => held === "free");
   const busy = async (name: DesktopChildName, port: number): Promise<boolean> => {
-    if (await desktopPortFree(port)) return false;
+    const v6 = await claimIpv6(port);
+    if (v6 === "busy") {
+      writeErr(desktopPortBusyLine(name, port, true));
+      stopAll();
+      return true;
+    }
+    if (await ipv4Free(port)) return false;
     writeErr(desktopPortBusyLine(name, port));
     stopAll();
     return true;
@@ -662,6 +747,19 @@ export async function runDesktop(
     // metadata names, and its token is not ours to read. The panel's own
     // origin has to be on that issuer's allow-list (VERAX_DEV_REDIRECT_URIS on
     // the running issuer), which this run cannot set after the fact.
+    // Attach joins a body that already holds 127.0.0.1. [::1] on that port is
+    // still this run's to hold. A listener there that is not the forwarder
+    // this process just opened is a refusal: the browser's localhost lookup
+    // would reach it with the real issuer's origin.
+    if (decided.mode === "attach") {
+      const v6 = await claimIpv6(opts.bodyPort);
+      if (v6 === "busy") {
+        writeErr(desktopPortBusyLine("body", opts.bodyPort, true));
+        stopAll();
+        return 1;
+      }
+    }
+
     // The body port is that body. Only the ports this run will bind must be free.
     const ports: [DesktopChildName, number][] =
       decided.mode === "spawn"

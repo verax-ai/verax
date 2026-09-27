@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { windowsAgentTokenPath } from "./install.ts";
+import { readWindowsMachineRoots, SystemToolError, windowsAgentTokenPath } from "./install.ts";
 import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
@@ -283,7 +283,12 @@ function agentTokenOnDisk(env: NodeJS.ProcessEnv): string | null {
   if (process.platform === "win32") {
     const sid = env.VERAX_USER_SID?.trim().replace(/^\*/, "") ?? "";
     if (!/^S-1-[0-9-]+$/i.test(sid)) return null;
-    return windowsAgentTokenPath(env, sid);
+    try {
+      return windowsAgentTokenPath(env, sid, readWindowsMachineRoots());
+    } catch (err) {
+      if (err instanceof SystemToolError) return null;
+      throw err;
+    }
   }
   const home = env.HOME?.trim() || env.USERPROFILE?.trim() || homedir();
   if (home === "") return null;

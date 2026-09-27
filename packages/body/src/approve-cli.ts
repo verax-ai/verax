@@ -15,7 +15,7 @@ import {
   type Policy,
 } from "@verax-ai/proxy";
 import { EX_CONFIG } from "./config.ts";
-import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, elevatedStateDirRefusal, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal } from "./install.ts";
+import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, elevatedStateDirRefusal, readWindowsMachineRoots, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal, type ToolExec, type WindowsMachineRoots } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
 function policyFromSnapshot(stateDir: string, policyHash: string): Policy | null {
@@ -161,6 +161,9 @@ export type ApproveHooks = {
   stateProbe?: (dir: string) => boolean;
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
+  exec?: ToolExec;
+  /** Machine ProgramData and Program Files. When omitted, approve reads HKLM. */
+  windowsMachineRoots?: WindowsMachineRoots;
 };
 
 export async function runApprove(
@@ -200,14 +203,16 @@ export async function runApprove(
   if (rest.length === 1 && stateDir) {
     let installed: string;
     try {
+      let machine = hooks?.windowsMachineRoots;
+      if (platform === "win32" && !machine) machine = readWindowsMachineRoots(hooks?.exec);
       if (platform === "win32") {
-        const rootRefusal = windowsProgramDataRefusal(env);
+        const rootRefusal = windowsProgramDataRefusal(env, hooks?.exec, machine);
         if (rootRefusal) {
           writeErr(`${rootRefusal}\n`);
           return 78;
         }
       }
-      installed = stateDirFor(platform, env);
+      installed = stateDirFor(platform, env, undefined, machine);
     } catch (err) {
       writeErr(`${err instanceof SystemToolError ? err.message : "refusing install root"}\n`);
       return 78;

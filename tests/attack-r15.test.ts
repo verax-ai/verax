@@ -457,6 +457,7 @@ describe("attack R15", () => {
         elevated: () => true,
         codeProbe: () => false,
         env: { ProgramData: "C:\\Users\\me\\fake", USERNAME: "me", USERDOMAIN: "DESKTOP" },
+        windowsMachineRoots: { programData: "C:\\Users\\me\\fake", programFiles: "C:\\Program Files" },
       },
     );
     assert.equal(code, 78, err.join(""));

@@ -140,7 +140,7 @@ export function windowsSystemRoot(env: NodeJS.ProcessEnv = process.env, exec?: T
   return root;
 }
 
-/** Install root taken from the environment. `..` is refused. The trust check is separate. */
+/** One install root, normalised. `..` is refused. The machine comparison is separate. */
 export function windowsInstallRoot(raw: string | undefined, fallback: string, label: string): string {
   const text = raw === undefined || raw.trim() === "" ? fallback : raw.trim();
   if (pathHasDotDot(text)) throw new SystemToolError(`refusing: ${label} ${text} contains ..`);
@@ -152,6 +152,124 @@ export function windowsInstallRoot(raw: string | undefined, fallback: string, la
     throw new SystemToolError(`refusing: ${label} ${text} is not an absolute path`);
   }
   return norm;
+}
+
+/** ProgramData and Program Files as the machine records them, not as the shell sets them. */
+export type WindowsMachineRoots = { programData: string; programFiles: string };
+
+export const WINDOWS_CANONICAL_ROOTS: WindowsMachineRoots = {
+  programData: "C:\\ProgramData",
+  programFiles: "C:\\Program Files",
+};
+
+function windowsPathKey(value: string): string {
+  return path.win32.normalize(value.trim()).replace(/[\\/]+$/, "").toLowerCase();
+}
+
+function stripWinExtended(value: string): string {
+  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice("\\\\?\\UNC\\".length)}`;
+  if (value.startsWith("\\\\?\\")) return value.slice("\\\\?\\".length);
+  return value;
+}
+
+/** A junction or symlink. A missing path is not one. Intermediate links are not followed: the named path is lstat'd. */
+function windowsReparsePoint(file: string): boolean {
+  try {
+    return lstatSync(file).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function refuseWindowsRootShape(root: string, label: string): void {
+  for (const entry of ancestry(root, "win32")) {
+    if (windowsReparsePoint(entry)) throw new SystemToolError(`refusing: ${entry} is a reparse point`);
+  }
+  let real: string;
+  try {
+    real = stripWinExtended(realpathSync.native(root));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw new SystemToolError(`refusing: ${label} ${root} could not be read`);
+  }
+  if (windowsPathKey(real) !== windowsPathKey(root)) {
+    throw new SystemToolError(`refusing: ${label} ${root} is not the path on disk ${real}`);
+  }
+}
+
+/**
+ * Use the machine roots. A shell value that differs is named and refused.
+ * An unset shell variable is not a redirect. The root and each ancestor must
+ * be a real directory, and the path on disk must be the path as given.
+ */
+export function adoptWindowsInstallRoots(
+  env: NodeJS.ProcessEnv,
+  machine: WindowsMachineRoots = WINDOWS_CANONICAL_ROOTS,
+): WindowsMachineRoots {
+  const rows: { label: "ProgramData" | "ProgramFiles"; fromEnv: string | undefined; fromMachine: string; fallback: string }[] = [
+    { label: "ProgramData", fromEnv: env.ProgramData, fromMachine: machine.programData, fallback: WINDOWS_CANONICAL_ROOTS.programData },
+    { label: "ProgramFiles", fromEnv: env.ProgramFiles, fromMachine: machine.programFiles, fallback: WINDOWS_CANONICAL_ROOTS.programFiles },
+  ];
+  const resolved: { label: "ProgramData" | "ProgramFiles"; machinePath: string }[] = [];
+  for (const row of rows) {
+    const machinePath = windowsInstallRoot(row.fromMachine, row.fromMachine, row.label);
+    if (row.fromEnv !== undefined && row.fromEnv.trim() !== "") {
+      const envPath = windowsInstallRoot(row.fromEnv, row.fallback, row.label);
+      if (windowsPathKey(envPath) !== windowsPathKey(machinePath)) {
+        throw new SystemToolError(
+          `refusing: ${row.label} in this shell is ${row.fromEnv.trim()}, the machine says ${machinePath}`,
+        );
+      }
+    }
+    resolved.push({ label: row.label, machinePath });
+  }
+  const out: WindowsMachineRoots = { programData: "", programFiles: "" };
+  for (const row of resolved) {
+    refuseWindowsRootShape(row.machinePath, row.label);
+    if (row.label === "ProgramData") out.programData = row.machinePath;
+    else out.programFiles = row.machinePath;
+  }
+  return out;
+}
+
+function expandMachineRoot(raw: string, drive: string, label: string): string {
+  if (!raw.includes("%")) return raw;
+  if (!/^[A-Za-z]:$/.test(drive)) {
+    throw new SystemToolError(`refusing: ${label} ${raw} needs SystemDrive and the machine says ${drive || "(empty)"}`);
+  }
+  const expanded = raw.replace(/%SystemDrive%/gi, drive);
+  if (/%[^%]+%/.test(expanded)) throw new SystemToolError(`refusing: ${label} ${raw} has an unexpanded variable`);
+  return expanded;
+}
+
+const MACHINE_ROOTS_SCRIPT = [
+  "$ErrorActionPreference = 'Stop'",
+  "$files = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion').ProgramFilesDir",
+  "$data = (Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList').ProgramData",
+  "$drive = (Get-ItemProperty -Path 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment').SystemDrive",
+  "Write-Output ('ProgramFilesDir=' + $files)",
+  "Write-Output ('ProgramData=' + $data)",
+  "Write-Output ('SystemDrive=' + $drive)",
+].join("; ");
+
+/** HKLM ProgramFilesDir and ProfileList ProgramData, via the System32 PowerShell the installer already runs. */
+export function readWindowsMachineRoots(exec: ToolExec = defaultExec): WindowsMachineRoots {
+  const ran = exec(toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", MACHINE_ROOTS_SCRIPT], "win32"));
+  if ((ran.status ?? 1) !== 0) {
+    throw new SystemToolError("refusing: the machine ProgramData and ProgramFiles could not be read");
+  }
+  const lines = `${ran.stdout ?? ""}`.split(/\r?\n/).map((line) => line.trim());
+  const pick = (key: string): string => {
+    const line = lines.find((item) => item.startsWith(`${key}=`));
+    const value = line?.slice(key.length + 1).trim() ?? "";
+    if (value === "") throw new SystemToolError(`refusing: the machine ${key} is empty`);
+    return value;
+  };
+  const drive = pick("SystemDrive");
+  return {
+    programFiles: expandMachineRoot(pick("ProgramFilesDir"), drive, "ProgramFiles"),
+    programData: expandMachineRoot(pick("ProgramData"), drive, "ProgramData"),
+  };
 }
 
 function winToolUnder(root: string, name: string): string {
@@ -673,6 +791,11 @@ export type PlanOpts = {
    * Win32 ignores it.
    */
   posixRoot?: string;
+  /**
+   * Machine ProgramData and Program Files. When omitted, the canonical paths
+   * are the machine values. A shell value that differs is refused.
+   */
+  windowsMachineRoots?: WindowsMachineRoots;
   /** Trusted Node used to run npm and the service. It is not copied. */
   execPath: string;
   bodyVersion: string;
@@ -807,6 +930,11 @@ export type InstallHooks = {
   ancestorStat?: (dir: string) => { uid: number; mode: number; symlink?: boolean } | null;
   /** Test-only stand-in for the uid/gid child that writes the POSIX agent token. */
   spawnUserToken?: (spec: UserTokenSpawn) => ExecResult;
+  /**
+   * Machine ProgramData and Program Files. When omitted, install and uninstall
+   * read them from HKLM. A shell value that differs is refused.
+   */
+  windowsMachineRoots?: WindowsMachineRoots;
 };
 
 type Paths = { codeDir: string; stateDir: string; tokenPath: string };
@@ -851,9 +979,10 @@ export function stateDirFor(
   platform: NodeJS.Platform | InstallPlatform,
   env: NodeJS.ProcessEnv = process.env,
   posixRoot?: string,
+  machine?: WindowsMachineRoots,
 ): string {
   if (platform === "win32") {
-    const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
+    const data = adoptWindowsInstallRoots(env, machine).programData;
     return path.win32.join(data, "Verax", "state");
   }
   if (platform === "darwin") return fixedPosix(posixRoot).darwinState;
@@ -864,9 +993,10 @@ export function codeDirFor(
   platform: NodeJS.Platform | InstallPlatform,
   env: NodeJS.ProcessEnv = process.env,
   posixRoot?: string,
+  machine?: WindowsMachineRoots,
 ): string {
   if (platform === "win32") {
-    const files = windowsInstallRoot(env.ProgramFiles, "C:\\Program Files", "ProgramFiles");
+    const files = adoptWindowsInstallRoots(env, machine).programFiles;
     return path.win32.join(files, "Verax");
   }
   if (platform === "darwin") return fixedPosix(posixRoot).darwinCode;
@@ -900,8 +1030,8 @@ function darwinHome(env: NodeJS.ProcessEnv, resolved?: string): { home: string }
   return { error: "verax install needs the invoking user's home from dscl" };
 }
 
-export function windowsAgentTokenPath(env: NodeJS.ProcessEnv, userSid: string): string {
-  const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
+export function windowsAgentTokenPath(env: NodeJS.ProcessEnv, userSid: string, machine?: WindowsMachineRoots): string {
+  const data = adoptWindowsInstallRoots(env, machine).programData;
   const sid = userSid.trim().replace(/^\*/, "");
   return path.win32.join(data, "Verax", "agent-token", sid, "agent.token");
 }
@@ -912,6 +1042,7 @@ function pathsFor(
   posixRoot?: string,
   invokingHome?: string,
   userSid?: string,
+  machine?: WindowsMachineRoots,
 ): { ok: true; paths: Paths; home: string } | { ok: false; code: number; message: string } {
   if (platform === "darwin") {
     const home = darwinHome(env, invokingHome);
@@ -930,9 +1061,9 @@ function pathsFor(
     const sid = userSid?.trim().replace(/^\*/, "") ?? "";
     try {
       const paths = {
-        codeDir: codeDirFor("win32", env),
-        stateDir: stateDirFor("win32", env),
-        tokenPath: sid !== "" ? windowsAgentTokenPath(env, sid) : "",
+        codeDir: codeDirFor("win32", env, undefined, machine),
+        stateDir: stateDirFor("win32", env, undefined, machine),
+        tokenPath: sid !== "" ? windowsAgentTokenPath(env, sid, machine) : "",
       };
       return { ok: true, paths, home: profile };
     } catch (err) {
@@ -1721,6 +1852,16 @@ function dscl(args: readonly string[]): PlanOp {
   return { op: "argv", argv: toolArgv("dscl", [".", ...args], "darwin") };
 }
 
+/** PowerShell single quotes: `'` is `''`. */
+function psSingleQuoted(value: string): string {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+/** POSIX single quotes: `'` is `'\''`. */
+function shSingleQuoted(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 export function successText(
   platform: InstallPlatform,
   info: { codeDir: string; stateDir: string; tokenPath: string; port: number },
@@ -1728,8 +1869,8 @@ export function successText(
   const origin = `http://127.0.0.1:${info.port}`;
   const claude =
     platform === "win32"
-      ? `claude mcp add --transport http verax ${origin}/mcp --header "Authorization: Bearer $(Get-Content -Raw '${info.tokenPath}')"`
-      : `claude mcp add --transport http verax ${origin}/mcp --header "Authorization: Bearer $(cat '${info.tokenPath}')"`;
+      ? `claude mcp add --transport http verax ${origin}/mcp --header "Authorization: Bearer $(Get-Content -Raw ${psSingleQuoted(info.tokenPath)})"`
+      : `claude mcp add --transport http verax ${origin}/mcp --header "Authorization: Bearer $(cat ${shSingleQuoted(info.tokenPath)})"`;
   const mcp = [
     "{",
     '  "mcpServers": {',
@@ -1922,7 +2063,16 @@ function tarballAclRows(opts: PlanOpts): { path: string; sddl: string; ancestor:
 export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, opts: PlanOpts): InstallPlan {
   const posixRoot = platform === "win32" ? undefined : opts.posixRoot;
   const fixed = fixedPosix(posixRoot);
-  const located = pathsFor(platform, env, posixRoot, opts.invokingHome, opts.userSid);
+  let machine: WindowsMachineRoots | undefined;
+  if (platform === "win32") {
+    try {
+      machine = adoptWindowsInstallRoots(env, opts.windowsMachineRoots);
+    } catch (err) {
+      if (err instanceof SystemToolError) return fail(EX_CONFIG, err.message);
+      throw err;
+    }
+  }
+  const located = pathsFor(platform, env, posixRoot, opts.invokingHome, opts.userSid, machine);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -2011,7 +2161,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
   const logFile = (platform === "win32" ? path.win32 : path.posix).join(paths.stateDir, "body.log");
   const winPassword = platform === "win32" ? windowsServicePassword() : "";
   const winCreate = platform === "win32" && !opts.winAccount?.exists;
-  const tempDir = privateTempPath(platform, env, posixRoot);
+  const tempDir = privateTempPath(platform, env, posixRoot, machine);
   const pathFor = platform === "win32" ? path.win32 : path.posix;
   const digestOf = new Map((opts.tarballDigests ?? []).map((row) => [row.file, row.sha256]));
   const stagedTarballs =
@@ -2239,10 +2389,15 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
 const PRIVATE_TEMP_ACL = [ADMINISTRATORS_SID, SYSTEM_SID] as const;
 
 /** Admin-only install scratch. Never the caller's TEMP. */
-function privateTempPath(platform: InstallPlatform, env: NodeJS.ProcessEnv, posixRoot?: string): string {
+function privateTempPath(
+  platform: InstallPlatform,
+  env: NodeJS.ProcessEnv,
+  posixRoot?: string,
+  machine?: WindowsMachineRoots,
+): string {
   const id = randomBytes(16).toString("hex");
   if (platform === "win32") {
-    const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
+    const data = (machine ?? adoptWindowsInstallRoots(env)).programData;
     return path.win32.join(data, "Verax", `install-tmp-${id}`);
   }
   const prefix = posixRoot?.trim().replace(/\/+$/, "") ?? "";
@@ -2436,9 +2591,19 @@ export function planUninstall(
     posixRoot?: string;
     /** Invoking user SID. Windows removes `%ProgramData%\\Verax\\agent-token\\<sid>`. */
     userSid?: string;
+    windowsMachineRoots?: WindowsMachineRoots;
   },
 ): InstallPlan {
-  const located = pathsFor(platform, env, opts.posixRoot, undefined, opts.userSid);
+  let machine: WindowsMachineRoots | undefined;
+  if (platform === "win32") {
+    try {
+      machine = adoptWindowsInstallRoots(env, opts.windowsMachineRoots);
+    } catch (err) {
+      if (err instanceof SystemToolError) return fail(EX_CONFIG, err.message);
+      throw err;
+    }
+  }
+  const located = pathsFor(platform, env, opts.posixRoot, undefined, opts.userSid, machine);
   if (!located.ok) return fail(located.code, located.message);
   if (platform === "win32") {
     try {
@@ -4975,8 +5140,15 @@ export function cliCodeCheckPassedAlready(): boolean {
 export function windowsProgramDataRefusal(
   env: NodeJS.ProcessEnv,
   exec: ToolExec = defaultExec,
+  machine?: WindowsMachineRoots,
 ): string | null {
-  const data = windowsInstallRoot(env.ProgramData, "C:\\ProgramData", "ProgramData");
+  let data: string;
+  try {
+    data = adoptWindowsInstallRoots(env, machine ?? readWindowsMachineRoots(exec)).programData;
+  } catch (err) {
+    if (err instanceof SystemToolError) return err.message.endsWith("\n") ? err.message.slice(0, -1) : err.message;
+    throw err;
+  }
   const targets = trustTargets(data, "win32").map((entry) => ({ path: entry.path, ancestor: true }));
   let sid: string | undefined;
   try {
@@ -5085,9 +5257,11 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
   const posixRoot = platform === "win32" ? undefined : hooks.posixRoot;
   const fixed = fixedPosix(posixRoot);
   let stateDir: string;
+  let adopted: WindowsMachineRoots | undefined;
   try {
     if (platform === "win32") windowsSystemRoot(plannedEnv);
-    stateDir = stateDirFor(platform, plannedEnv, posixRoot);
+    if (platform === "win32") adopted = adoptWindowsInstallRoots(plannedEnv, hooks.windowsMachineRoots ?? readWindowsMachineRoots(exec));
+    stateDir = stateDirFor(platform, plannedEnv, posixRoot, adopted);
   } catch (err) {
     if (err instanceof SystemToolError) {
       io.stderr.write(err.message.endsWith("\n") ? err.message : `${err.message}\n`);
@@ -5101,8 +5275,8 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
   if (platform === "win32") {
     try {
       const sys = windowsSystemRoot(plannedEnv);
-      const data = windowsInstallRoot(plannedEnv.ProgramData, "C:\\ProgramData", "ProgramData");
-      const filesRoot = windowsInstallRoot(plannedEnv.ProgramFiles, "C:\\Program Files", "ProgramFiles");
+      const data = adopted?.programData ?? adoptWindowsInstallRoots(plannedEnv, hooks.windowsMachineRoots).programData;
+      const filesRoot = adopted?.programFiles ?? adoptWindowsInstallRoots(plannedEnv, hooks.windowsMachineRoots).programFiles;
       trustFiles.push(...trustTargets(path.win32.join(sys, "System32"), "win32"));
       for (const name of WIN32_TOOLS) trustFiles.push(...trustTargets(winToolUnder(sys, name), "win32"));
       // The install roots are parents of what the installer creates and locks, and stock ProgramData lets Users create
@@ -5272,6 +5446,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     darwinRoot,
     invokingIds,
     ancestorStat: hooks.ancestorStat,
+    windowsMachineRoots: adopted,
     ...(packed && !("error" in packed)
       ? { fromTarballs: packed.dir, tarballFiles: packed.files, tarballDigests: packed.digests, tarballSddl: packed.sddl, tarballModes: packed.modes }
       : {}),
@@ -5439,7 +5614,48 @@ function runUninstallTool(exec: ToolExec, io: InstallIo, argv: string[]): number
   return ran.status ?? 1;
 }
 
-function removeInstallPath(target: string, io: InstallIo): number | null {
+/** Refuse a junction or symlink at `target`, at an ancestor, or at a child. Does not follow one. */
+function windowsRemovalRefusal(target: string): string | null {
+  for (const entry of ancestry(target, "win32")) {
+    if (windowsReparsePoint(entry)) return `refusing: ${entry} is a reparse point`;
+  }
+  const walk = (dir: string): string | null => {
+    let listed: ReturnType<typeof lstatSync>;
+    try {
+      listed = lstatSync(dir);
+    } catch {
+      return null;
+    }
+    if (listed.isSymbolicLink()) return `refusing: ${dir} is a reparse point`;
+    if (!listed.isDirectory()) return null;
+    let names: { name: string; isSymbolicLink(): boolean; isDirectory(): boolean }[];
+    try {
+      names = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return `refusing: ${dir} could not be read`;
+    }
+    for (const name of names) {
+      const sep = dir.includes("\\") ? "\\" : "/";
+      const child = `${dir.replace(/[\\/]+$/, "")}${sep}${name.name}`;
+      if (name.isSymbolicLink()) return `refusing: ${child} is a reparse point`;
+      if (name.isDirectory()) {
+        const nested = walk(child);
+        if (nested) return nested;
+      }
+    }
+    return null;
+  };
+  return walk(target);
+}
+
+function removeInstallPath(target: string, io: InstallIo, platform: NodeJS.Platform = process.platform): number | null {
+  if (platform === "win32") {
+    const refused = windowsRemovalRefusal(target);
+    if (refused) {
+      io.stderr.write(refused.endsWith("\n") ? refused : `${refused}\n`);
+      return EX_CONFIG;
+    }
+  }
   try {
     rmSync(target, { recursive: true, force: true });
   } catch (err) {
@@ -5510,7 +5726,7 @@ function executeUninstall(
     const failed = note(existsSync(unit), "systemd unit verax.service", () => {
       const stopped = runUninstallTool(exec, io, toolArgv("systemctl", ["disable", "--now", "verax"], "linux"));
       if (stopped !== null) return stopped;
-      const removed = removeInstallPath(unit, io);
+      const removed = removeInstallPath(unit, io, platform);
       if (removed !== null) return removed;
       return runUninstallTool(exec, io, toolArgv("systemctl", ["daemon-reload"], "linux"));
     });
@@ -5522,7 +5738,7 @@ function executeUninstall(
     const failed = note(existsSync(DARWIN_PLIST), `launchd plist ${DARWIN_PLIST}`, () => {
       const boot = runUninstallTool(exec, io, toolArgv("launchctl", ["bootout", `system/${DARWIN_LABEL}`], "darwin"));
       if (boot !== null) return boot;
-      return removeInstallPath(DARWIN_PLIST, io);
+      return removeInstallPath(DARWIN_PLIST, io, platform);
     });
     if (failed !== null) {
       writeLines();
@@ -5530,25 +5746,25 @@ function executeUninstall(
     }
   }
 
-  const codeFailed = note(existsSync(plan.codeDir), plan.codeDir, () => removeInstallPath(plan.codeDir, io));
+  const codeFailed = note(existsSync(plan.codeDir), plan.codeDir, () => removeInstallPath(plan.codeDir, io, platform));
   if (codeFailed !== null) {
     writeLines();
     return codeFailed;
   }
   if (platform === "darwin") {
-    const markerFailed = note(existsSync(DARWIN_MARKER), DARWIN_MARKER, () => removeInstallPath(DARWIN_MARKER, io));
+    const markerFailed = note(existsSync(DARWIN_MARKER), DARWIN_MARKER, () => removeInstallPath(DARWIN_MARKER, io, platform));
     if (markerFailed !== null) {
       writeLines();
       return markerFailed;
     }
-    const rootFailed = note(existsSync(DARWIN_ROOT), DARWIN_ROOT, () => removeInstallPath(DARWIN_ROOT, io));
+    const rootFailed = note(existsSync(DARWIN_ROOT), DARWIN_ROOT, () => removeInstallPath(DARWIN_ROOT, io, platform));
     if (rootFailed !== null) {
       writeLines();
       return rootFailed;
     }
   }
   if (!opts.keepState) {
-    const stateFailed = note(existsSync(plan.stateDir), plan.stateDir, () => removeInstallPath(plan.stateDir, io));
+    const stateFailed = note(existsSync(plan.stateDir), plan.stateDir, () => removeInstallPath(plan.stateDir, io, platform));
     if (stateFailed !== null) {
       writeLines();
       return stateFailed;
@@ -5556,7 +5772,7 @@ function executeUninstall(
   }
   if (platform === "win32" && plan.tokenPath.includes(`${path.win32.sep}agent-token${path.win32.sep}`)) {
     const tokenDir = path.win32.dirname(plan.tokenPath);
-    const tokenFailed = note(existsSync(tokenDir), tokenDir, () => removeInstallPath(tokenDir, io));
+    const tokenFailed = note(existsSync(tokenDir), tokenDir, () => removeInstallPath(tokenDir, io, platform));
     if (tokenFailed !== null) {
       writeLines();
       return tokenFailed;
@@ -5751,9 +5967,12 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
   const fixed = fixedPosix(posixRoot);
   // Linux install.json lives in the code dir. Read it before that dir is removed.
   let markerFile: string;
+  let adopted: WindowsMachineRoots | undefined;
   try {
+    if (platform === "win32") windowsSystemRoot(plannedEnv);
+    if (platform === "win32") adopted = adoptWindowsInstallRoots(plannedEnv, hooks.windowsMachineRoots ?? readWindowsMachineRoots(exec));
     markerFile = platform === "win32"
-      ? path.win32.join(path.win32.dirname(stateDirFor(platform, plannedEnv)), "install.json")
+      ? path.win32.join(path.win32.dirname(stateDirFor(platform, plannedEnv, undefined, adopted)), "install.json")
       : platform === "darwin"
         ? fixed.darwinMarker
         : path.posix.join(fixed.linuxCode, "install.json");
@@ -5775,6 +5994,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
     removeLinuxGroup: flags.createdGroup,
     posixRoot,
     userSid,
+    windowsMachineRoots: adopted,
   });
   if (!plan.ok) {
     io.stderr.write(plan.message);
@@ -5810,8 +6030,9 @@ export function liveInstalledChecks(
   let codeDir: string;
   let stateDir: string;
   try {
-    codeDir = codeDirFor(platform, env);
-    stateDir = stateDirFor(platform, env);
+    const machine = platform === "win32" ? readWindowsMachineRoots(exec) : undefined;
+    codeDir = codeDirFor(platform, env, undefined, machine);
+    stateDir = stateDirFor(platform, env, undefined, machine);
   } catch (err) {
     if (err instanceof SystemToolError) {
       return [{ id: "install-root", level: "fail", detail: err.message.trim() }];
@@ -5901,7 +6122,8 @@ export function doctorStateTarget(env: NodeJS.ProcessEnv, platform: NodeJS.Platf
   const named = env.VERAX_STATE_DIR?.trim() ?? "";
   if (named !== "") return named;
   try {
-    const installed = stateDirFor(platform, env);
+    const machine = platform === "win32" ? readWindowsMachineRoots() : undefined;
+    const installed = stateDirFor(platform, env, undefined, machine);
     return directoryAccess(installed) === "missing" ? null : installed;
   } catch (err) {
     if (err instanceof SystemToolError) return null;

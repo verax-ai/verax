@@ -282,6 +282,7 @@ describe("attack R13", () => {
         USERPROFILE: "C:\\Users\\operator",
         USERNAME: "operator",
       },
+      windowsMachineRoots: { programData: "C:\\Users\\x\\fake", programFiles: "C:\\Program Files" },
       elevated: () => true,
         codeProbe: () => false,
       layout: winLayout,
