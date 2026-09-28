@@ -279,7 +279,7 @@ describe("observatory layout", () => {
             if (TAB_FILES[t] === "box") {
               // The box mounts into its shadow root one render after the tab.
               await page
-                .waitForFunction(() => (window as ScreenWindow).__screenElements(".lab-console").length > 0, null, { timeout: 15_000 })
+                .waitForFunction(() => (window as ScreenWindow).__screenElements(".tape").length > 0, null, { timeout: 15_000 })
                 .catch(() => fails.push(`${view.name}/box: the console never drew`));
             }
             // Every tab, not just the one the panel opens on: the first
@@ -400,26 +400,25 @@ describe("observatory layout", () => {
             }
             if (TAB_FILES[t] === "box") {
               // The box takes the whole width; its way into a record is the
-              // console's own button, and it names no product it is not bound to.
+              // chain's own button, and it names no product it is not bound to.
               const box = await page.evaluate(() => {
                 const w = window as ScreenWindow;
                 const text = w.__screenElements(".cx").map((el) => (el as HTMLElement).innerText).join(String.fromCharCode(10));
-                const controls = w.__screenElements(".object-controls button")[0]?.getBoundingClientRect();
+                const controls = w.__screenElements(".tape .mark")[0]?.getBoundingClientRect();
                 const strip = document.querySelector(".obs-timeline")?.getBoundingClientRect();
                 return {
                   rail: document.querySelector(".obs-left") !== null,
                   detail: document.querySelector(".obs-detail") !== null,
-                  openRecord: w.__screenElements(".integrity-row button").length,
+                  openRecord: w.__screenElements(".chain .open").length,
                   product: /Conarium|Tugra|Tuğra|Cedulon/i.exec(text)?.[0] ?? null,
                   controlsBottom: controls ? Math.round(controls.bottom) : null,
                   stripTop: strip ? Math.round(strip.top) : null,
                 };
               });
-              // The site's scene fills a window; in the panel it shares one with
-              // the tab bar and the timeline. At 1440x900 that put the box's own
-              // open control under the strip, found only by scrolling.
+              // The tape is what the tab is for: its marks sit above the
+              // timeline strip at every desktop size, not found by scrolling.
               if (view.width > 800 && (box.controlsBottom === null || box.stripTop === null || box.controlsBottom > box.stripTop)) {
-                fails.push(`${view.name}/box: the box's controls end at ${box.controlsBottom}, under the timeline at ${box.stripTop}`);
+                fails.push(`${view.name}/box: the tape's marks end at ${box.controlsBottom}, under the timeline at ${box.stripTop}`);
               }
               if (box.rail || box.detail) fails.push(`${view.name}/box: rail ${box.rail}, detail ${box.detail} on a full-width tab`);
               if (box.openRecord === 0) fails.push(`${view.name}/box: no rail, and no other way into a record`);
@@ -498,7 +497,7 @@ describe("observatory layout", () => {
           await page.waitForTimeout(200);
           if (tabFiles[t] === "box") {
             await page
-              .waitForFunction(() => (window as ScreenWindow).__screenElements(".lab-console").length > 0, null, { timeout: 15_000 })
+              .waitForFunction(() => (window as ScreenWindow).__screenElements(".tape").length > 0, null, { timeout: 15_000 })
               .catch(() => fails.push("box: the console never drew"));
           }
           const text = await page.evaluate(() => (window as ScreenWindow).__screenText());

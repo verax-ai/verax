@@ -1,17 +1,12 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { panelCopy } from "../src/copy.ts";
+import { fillCopy } from "../src/fill.ts";
 import { formatMinor } from "../src/records/money.ts";
 import type { PendingApproval, RailAction } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
-
-const here = dirname(fileURLToPath(import.meta.url));
 
 afterEach(() => {
   cleanup();
@@ -87,31 +82,58 @@ function openBox(extra: Record<string, unknown> = {}) {
 }
 
 /**
- * The black box is the public site's design, standing on this ledger. What it
- * may not bring from the site: a product name the body is not connected to, a
- * number the ledger did not give, or an approval that does not go through the
- * same questions as the rest of the panel.
+ * The black box reads the ledger like a flight recorder: a tape of every
+ * decision, the chain of the one picked, and what is waiting. It may not draw
+ * a product the body is not connected to, a number the ledger did not give, or
+ * an approval that skips the questions the rest of the panel asks.
  */
 describe("the black box tab", () => {
   it("draws inside its shadow root, where the page's own text checks cannot see", () => {
     const { host, cx } = openBox();
     // The reason the checks below read the shadow root: the page does not.
     expect(host.textContent).toBe("");
-    expect(cx.textContent).toContain(panelCopy()["box.title"]);
+    expect(cx.textContent).toContain(panelCopy()["rec.tape.title"]);
   });
 
   it("names no product the body is not connected to", () => {
     const { cx } = openBox();
     expect(cx.textContent).not.toMatch(/Conarium|Tugra|Tuğra|Cedulon/i);
-    expect(cx.textContent).toContain(panelCopy()["box.layer.unbound"]);
   });
 
-  it("counts its layers from the ledger", () => {
-    const { box, cx } = openBox();
-    expect(box.getByTestId("box-record-count").textContent).toBe(`${panelCopy()["box.layer.record"]} / 0002`);
-    expect(cx.textContent).toContain("1 KAYIT · 1 BEKLİYOR");
-    expect(cx.textContent).toContain("İmzalı kayıtta 2 karar var.");
-    expect(cx.textContent).toContain("1 istek onay bekliyor.");
+  it("counts from the ledger and puts every decision on the tape", () => {
+    const { cx } = openBox();
+    expect(cx.textContent).toContain("2 karar, 1 ajan. 0 ret, 1 onay bekliyor.");
+    expect(cx.querySelectorAll(".mark")).toHaveLength(2);
+  });
+
+  it("stops the chain at a refusal: the tool never ran", () => {
+    const denied: RailAction = {
+      ...memoryRecord,
+      record: { claims: { ...memoryRecord.record.claims, decision: "deny", reasonCode: "scope-missing", ref: "m-deny", timestampMs: 1_788_800_030_000 } },
+    };
+    const { box, cx } = openBox({ actions: [deferRecord, denied] });
+    const mark = cx.querySelector(".mark.deny");
+    if (!(mark instanceof HTMLElement)) throw new Error("no refused mark on the tape");
+    expect(mark.getAttribute("aria-label")).toContain(panelCopy()["rec.legend.deny"]);
+    fireEvent.click(mark);
+    const chain = box.getByTestId("box-chain");
+    expect(chain.textContent).toContain(panelCopy()["rec.say.decision.deny"]);
+    expect(chain.textContent).toContain(panelCopy()["rec.say.effect.refused"]);
+    expect(chain.textContent).not.toContain(panelCopy()["rec.step.receipt"]);
+  });
+
+  it("draws a long silence as a break that says how long", () => {
+    const late: RailAction = {
+      ...memoryRecord,
+      record: { claims: { ...memoryRecord.record.claims, ref: "m-late", timestampMs: 1_788_800_000_000 + 2 * 3600_000 + 60_000 } },
+    };
+    const { cx } = openBox({ actions: [deferRecord, late] });
+    expect(cx.textContent).toContain(fillCopy(panelCopy()["rec.tape.break"], { gap: "2 sa" }));
+  });
+
+  it("says the tape is empty instead of drawing a sample", () => {
+    const { cx } = openBox({ actions: [], pending: [] });
+    expect(cx.textContent).toContain(panelCopy()["rec.tape.empty"]);
   });
 
   it("prints the waiting sum exactly as the record list does", () => {
@@ -183,24 +205,5 @@ describe("the black box tab", () => {
     openBox();
     expect(document.querySelector(".obs-left")).toBeNull();
     expect(document.querySelector(".obs-detail")).toBeNull();
-  });
-});
-
-/**
- * codex.css is the site's stylesheet, copied. Two copies of one file drift
- * apart without a word, so the copy is pinned: changing it here means taking a
- * new copy from the site on purpose and moving the pin with it.
- *
- * Source: verax-web at cca1f0f, src/codex.css (sha256 1a526afe…31434), with one
- * declaration removed - `backdrop-filter:blur(10px);` on the box's control
- * buttons - because the panel does not use backdrop-filter (canvas-traps). The
- * same buttons already sit on a near-opaque background in that file.
- */
-describe("the black box stylesheet", () => {
-  it("is the site's file less the one declaration the panel does not use", () => {
-    const css = readFileSync(join(here, "..", "src", "blackbox", "codex.css"));
-    expect(createHash("sha256").update(css).digest("hex")).toBe(
-      "734b5d54d4f40b59b88ec4d0540061eee220d852d4cb451235822aeeed3bf572",
-    );
   });
 });
