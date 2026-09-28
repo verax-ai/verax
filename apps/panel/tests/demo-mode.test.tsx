@@ -93,10 +93,10 @@ describe("demo mode", () => {
     render(<App />);
     const console = () => screen.getByTestId("black-box").shadowRoot?.querySelector(".cx") as HTMLElement | null;
     await waitFor(() => {
-      expect(console()?.querySelector(".button.blue")).toBeTruthy();
+      expect(console()?.querySelector(".decision-buttons .primary")).toBeTruthy();
     });
-    fireEvent.click(console()!.querySelector(".button.blue")!);
-    fireEvent.click(console()!.querySelector(".button.blue")!);
+    fireEvent.click(console()!.querySelector(".decision-buttons .primary")!);
+    fireEvent.click(console()!.querySelector(".decision-buttons .primary")!);
     await waitFor(() => {
       expect(console()?.querySelector('[data-testid="box-approve-outcome"]')).toBeTruthy();
     });
