@@ -21,6 +21,19 @@ const DEMO_EFFECT_HASH =
 const DEMO_DEFER_MS = 1_788_800_000_000;
 const DEMO_WAIT_MS = 1_788_800_000_500;
 const DEMO_ALLOW_MS = 1_788_800_001_100;
+/**
+ * The golden ledger's clock starts at 10 ms, so on the sample's tape it sat in
+ * 1970 and drew a 56-year gap before the spend. The sample moves those rows
+ * to the twenty minutes before it, 10 ms of the fixture to one minute. The
+ * signed bytes still carry the fixture's own stamps; the sample never
+ * verifies them, and the panel says the signature is not measured.
+ */
+const GOLDEN_START_MS = DEMO_DEFER_MS - 20 * 60_000;
+const GOLDEN_MS_PER_FIXTURE_MS = 6_000;
+/** Sample sums in minor units (cents): an approved one and a larger one waiting. */
+const DEMO_APPROVED_MINOR = 24_000;
+const DEMO_WAITING_MINOR = 185_000;
+const DEMO_CURRENCY = "USD";
 
 const demoRule = {
   id: "spend-sample",
@@ -130,13 +143,22 @@ export function loadDemoActions(): RailAction[] {
     effectsText,
     policyStore as PolicyStore,
     parseInputsJsonl(inputsText),
-  );
+  ).map(onSampleClock);
   // parseLedger is newest-first. These two are the newest outward records so
   // the screen opens on the resolved spend. Appending them would leave the
   // exhibit on golden message.read and the gate would keep measuring a thin pane.
   // The waiting spend sits after the resolved pair so the exhibit stays the
   // allow; the operator still has a pending row to tap on the records tab.
   return [demoAllow(), demoDefer(), demoWaiting(), ...golden];
+}
+
+function onSampleClock(action: RailAction): RailAction {
+  const at = (ms: number) => GOLDEN_START_MS + ms * GOLDEN_MS_PER_FIXTURE_MS;
+  return {
+    ...action,
+    record: { ...action.record, claims: { ...action.record.claims, timestampMs: at(action.record.claims.timestampMs) } },
+    effect: action.effect ? { ...action.effect, row: { ...action.effect.row, timestampMs: at(action.effect.row.timestampMs) } } : null,
+  };
 }
 
 export function loadDemoApprovals(): PendingApproval[] {
@@ -147,8 +169,8 @@ export function loadDemoApprovals(): PendingApproval[] {
       subject: "spend",
       ruleText: demoRule.text,
       inputsSummary: { count: 0, ids: [] },
-      amount: 1000,
-      currency: "TRY",
+      amount: DEMO_APPROVED_MINOR,
+      currency: DEMO_CURRENCY,
       payee: "example-payee",
       expiresAtMs: DEMO_ALLOW_MS + 86_400_000,
       status: "approved",
@@ -161,8 +183,8 @@ export function loadDemoApprovals(): PendingApproval[] {
       subject: "spend",
       ruleText: demoRule.text,
       inputsSummary: { count: 0, ids: [] },
-      amount: 1000,
-      currency: "TRY",
+      amount: DEMO_WAITING_MINOR,
+      currency: DEMO_CURRENCY,
       payee: "example-payee",
       expiresAtMs: DEMO_ALLOW_MS + 86_400_000,
       status: "pending",

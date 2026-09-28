@@ -245,7 +245,7 @@ describe("observatory layout", () => {
               );
               if (!metrics.spendText) {
                 fails.push(`${view.name}: spend-fields missing`);
-              } else if (!/10[.,]00/.test(metrics.spendText) || !/example-payee/.test(metrics.spendText)) {
+              } else if (!/240[.,]00/.test(metrics.spendText) || !/example-payee/.test(metrics.spendText)) {
                 fails.push(`${view.name}: spend-fields thin (${metrics.spendText.slice(0, 80)})`);
               }
               if (!metrics.pairText) {
