@@ -27,8 +27,8 @@ beforeEach(() => {
  * entirely.
  *
  * This asks the screens instead. One approval, three places that draw its
- * amount, and the number the ledger actually stores: the ledger says 1000, the
- * operator must read 10,00, and the stored number must appear nowhere.
+ * amount, and the number the ledger actually stores: the ledger says 24000, the
+ * operator must read 240,00, and the stored number must appear nowhere.
  */
 describe("one stored amount, three screens", () => {
   const approvals = loadDemoApprovals();
@@ -48,10 +48,11 @@ describe("one stored amount, three screens", () => {
   }
 
   it("agrees with the ledger about what the amount is", () => {
-    // Not the formatter's opinion of itself: 1000 minor units of a two-decimal
-    // currency is ten lira, and the test says so in its own words.
-    expect(minor).toBe(1000);
-    expect(money).toMatch(/10[.,]00/);
+    // Not the formatter's opinion of itself: 24000 minor units of a two-decimal
+    // currency is two hundred and forty dollars, and the test says so in its own words.
+    expect(stored.currency).toBe("USD");
+    expect(minor).toBe(24000);
+    expect(money).toMatch(/240[.,]00/);
   });
 
   it("draws it as money on the record line, in the detail, and on the status tab", () => {
