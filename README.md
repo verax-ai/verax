@@ -64,6 +64,22 @@ for the operator on this machine (approved when the terminal answers `y`).
 `--keep` leaves the temporary ledger on disk. `verax verify <dir>` reads it
 back without a body, as in [Read the ledger back without us](#read-the-ledger-back-without-us).
 
+### The same rules, animated
+
+Two short episodes show the same gate, with characters in place of a
+terminal. They are sample scenarios: the scenes are drawn in three.js and the
+voices are generated with ElevenLabs.
+
+Episode 1, "$1,850": a payment is held until a person approves it on a phone,
+and changing one cent in the record breaks its signature.
+
+https://github.com/user-attachments/assets/772ae1c4-2697-47a0-a228-36f0508b0d93
+
+Episode 2, "No rule, no way through": a call with no rule is refused, the same
+call under a new name is refused again, and both refusals are signed.
+
+https://github.com/user-attachments/assets/4fb86627-3310-4f10-b1a9-059d8fcffb28
+
 ## Connect your agent
 
 Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, in 0.4.0, an elevated CLI `approve` is the way to approve (the passkey panel ships in 0.4.1). It has to be run from a separate administrator account, not this account elevated, because a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`). Start that other account's PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
