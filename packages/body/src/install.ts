@@ -574,6 +574,25 @@ export function nodeTrustMessage(nodePath: string): string {
   return `Node at ${nodePath} can be changed by your user account; install Node for all users (nodejs.org installer) and run verax install from that Node`;
 }
 
+/** A directory Node or PowerShell searches for code to load, judged apart from Node itself. */
+function isModuleSearchDir(file: string): boolean {
+  const trimmed = file.replace(/[\\/]+$/, "");
+  return /(^|[\\/])node_modules$/i.test(trimmed) || /[\\/]WindowsPowerShell[\\/]Modules$/i.test(trimmed);
+}
+
+/**
+ * The remedy for a module directory is that directory, not a different Node:
+ * a user-writable /usr/local/lib/node_modules refuses every Node under /usr/local/lib.
+ */
+function moduleDirTrustMessage(dir: string, platform: InstallPlatform): string {
+  const head = `Module directory ${dir} can be changed by your user account. An elevated install loads code from it, so the install refuses it`;
+  if (platform === "win32") {
+    return `${head}. Remove it, or leave it writable only by Administrators and SYSTEM, then run verax install again`;
+  }
+  const owner = platform === "darwin" ? "root:wheel" : "root:root";
+  return `${head}. Remove it, or make it ${owner} and not group- or other-writable (sudo chown -R ${owner} ${dir}; sudo chmod -R go-w ${dir}), then run verax install again`;
+}
+
 function nodeTrustMessageFor(nodePath: string, platform: InstallPlatform): string {
   const head = `Node at ${nodePath} can be changed by your user account`;
   if (platform === "win32") return nodeTrustMessage(nodePath);
@@ -5429,14 +5448,16 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       for (const file of trustFiles) {
         const acl = sddlOrMiss(cache, file.path);
         if (acl.status !== 0 || windowsUserCanWrite(acl.text, { path: file.path, userSid: sid, ancestor: file.ancestor })) {
-          io.stderr.write(`${refuseAcl(acl.text, nodeTrustMessage(file.path))}\n`);
+          const said = isModuleSearchDir(file.path) ? moduleDirTrustMessage(file.path, "win32") : nodeTrustMessage(file.path);
+          io.stderr.write(`${refuseAcl(acl.text, said)}\n`);
           return EX_CONFIG;
         }
       }
     } else {
       for (const file of trustFiles) {
         if (posixEntryUntrusted(file.path, file.ancestor)) {
-          io.stderr.write(`${nodeTrustMessageFor(file.path, trustPlat)}\n`);
+          const said = isModuleSearchDir(file.path) ? moduleDirTrustMessage(file.path, trustPlat) : nodeTrustMessageFor(file.path, trustPlat);
+          io.stderr.write(`${said}\n`);
           return EX_CONFIG;
         }
       }

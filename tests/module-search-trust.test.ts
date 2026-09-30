@@ -106,6 +106,9 @@ describe("module search directories are trust-checked", () => {
     assert.notEqual(planted.code, 0, planted.err);
     assert.ok(planted.asked.includes("c:\\node_modules"), planted.asked.join("\n"));
     assert.match(planted.err, /C:\\node_modules/);
+    // The remedy is that directory, not another Node.
+    assert.match(planted.err, /Module directory C:\\node_modules .*Remove it/);
+    assert.doesNotMatch(planted.err, /install Node for all users/);
   });
 
   it("does not ask about a node_modules that is not on disk", async () => {
