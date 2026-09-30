@@ -271,7 +271,7 @@ async function dispatchCli(
     return runVerify(argv.slice(1), (s) => stdout.write(`${s}\n`));
   }
   if (argv[0] === "desktop") {
-    stderr.write("desktop-not-in-0.4.0: the desktop panel ships in 0.4.1\n");
+    stderr.write("desktop-not-released: the desktop panel is not in this release\n");
     return 64;
   }
   if (argv[0] === "witness") {

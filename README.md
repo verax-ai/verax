@@ -82,7 +82,7 @@ https://github.com/user-attachments/assets/4fb86627-3310-4f10-b1a9-059d8fcffb28
 
 ## Connect your agent
 
-Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows, in 0.4.0, an elevated CLI `approve` is the way to approve (the passkey panel ships in 0.4.1). It has to be run from a separate administrator account, not this account elevated, because a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`). Start that other account's PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
+Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows an elevated CLI `approve` is the way to approve until the passkey panel is released. It has to be run from a separate administrator account, not this account elevated, because a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`). Start that other account's PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
 
 ```powershell
 npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body
@@ -98,7 +98,7 @@ sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js in
 
 The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs that Node, and keeps the ledger under a service account. On Windows the agent token is `%ProgramData%\Verax\agent-token\<your SID>\agent.token` (Administrators and SYSTEM have full control, your SID can read the file and read-execute the directory). On Linux and macOS a child process running as your uid writes `~/.verax/agent.token` from its stdin. It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. The service account and the file permissions are the boundary.
 
-Approve a held call with `verax approve`. The passkey panel (`verax desktop`) is not in 0.4.0; it ships in 0.4.1. On Windows run the approve from a separate administrator account, not this account elevated, in a `-NoProfile` PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
+Approve a held call with `verax approve`. The passkey panel (`verax desktop`) is not released yet. On Windows run the approve from a separate administrator account, not this account elevated, in a `-NoProfile` PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
 
 To try it in your own user, which is not a boundary:
 
@@ -169,7 +169,7 @@ Not shown here: a real database (these are Conarium's sample rows); statement re
 
 | Package | What it is |
 | --- | --- |
-| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock` (`desktop` ships in 0.4.1). |
+| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock` (`desktop` is not released yet). |
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
@@ -264,9 +264,9 @@ Each line below is a row in the capability matrix in
 with what it does not do and the test that fails when it stops being
 true.
 
-- Approval: in 0.4.0 a held call is approved with `verax approve` on this
+- Approval: a held call is approved with `verax approve` on this
   machine. On Windows that runs from a separate administrator account. The
-  passkey panel (`verax operator`, `verax desktop`) ships in 0.4.1. The
+  passkey panel (`verax operator`, `verax desktop`) is not released yet. The
   approver's operator id is bound into the signed record by hash.
 - Witness: `verax witness` signs effect rows from a second process and writes
   durable checkpoints; without it the witness class stays `self`.

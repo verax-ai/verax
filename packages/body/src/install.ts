@@ -358,7 +358,9 @@ export const PS_ERROR_MARK = "verax-ps-error:";
  * AppData directory and must not receive install files.
  * On Windows, PSModulePath is only the System32 Windows PowerShell 5.1 module
  * directory. Without it, PowerShell 5.1 puts Documents\WindowsPowerShell\Modules
- * first, and -NoProfile does not change that list.
+ * first, and -NoProfile does not change that list. PowerShell 5.1 still inserts
+ * Program Files\WindowsPowerShell\Modules in front of the pinned value (measured
+ * on 5.1.26100); the install trust-checks that directory as an object.
  */
 export function systemToolEnv(platform: NodeJS.Platform = process.platform, tempDir?: string): NodeJS.ProcessEnv {
   if (platform === "win32") {
@@ -639,6 +641,9 @@ export function veraxCodeDirectories(entryUrl: string = import.meta.url): string
   if (!body) return [];
   add(body);
   add(path.join(body, "node_modules"));
+  // Node also searches every ancestor's node_modules, up to the drive root.
+  const hostFlavor: InstallPlatform = process.platform === "win32" ? "win32" : "linux";
+  for (const dir of moduleSearchDirs(body, hostFlavor)) add(dir);
   let deps: string[] = [];
   try {
     const parsed = JSON.parse(readFileSync(path.join(body, "package.json"), "utf8")) as {
@@ -910,6 +915,8 @@ export type InstallHooks = {
   elevated?: () => boolean;
   exec?: ToolExec;
   stateExists?: (dir: string) => boolean;
+  /** Whether a `node_modules` directory on a module search path exists. Defaults to `existsSync`. */
+  moduleDirExists?: (dir: string) => boolean;
   layout?: { execPath: string; bodyVersion: string; npmCli: string };
   io?: InstallIo;
   /**
@@ -1535,6 +1542,36 @@ export function trustTargets(file: string, platform: InstallPlatform): { path: s
     path: entry,
     ancestor: parentIsObject ? index > 1 : index > 0,
   }));
+}
+
+/**
+ * The `node_modules` directories Node searches for a bare specifier that code
+ * under `start` imports: `<dir>/node_modules` for `start` and every parent, up
+ * to the root, skipping a directory that is itself named `node_modules`.
+ * Stock Windows lets any authenticated user create a folder under `C:\`, so
+ * `C:\node_modules` can be planted beside an elevated or service Node. Each
+ * one that exists is judged as an object (add-file counts). A missing one is
+ * not listed: the loader skips it, and refusing every machine for a folder
+ * that is not there would refuse them all.
+ */
+export function moduleSearchDirs(
+  start: string,
+  platform: InstallPlatform,
+  exists: (dir: string) => boolean = existsSync,
+): string[] {
+  const p = platform === "win32" ? path.win32 : path.posix;
+  const out: string[] = [];
+  let cur = p.normalize(start);
+  for (;;) {
+    if (p.basename(cur).toLowerCase() !== "node_modules") {
+      const candidate = p.join(cur, "node_modules");
+      if (exists(candidate)) out.push(candidate);
+    }
+    const parent = p.dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+  return out;
 }
 
 /**
@@ -5015,6 +5052,10 @@ export function elevatedPreloadRefusal(env: NodeJS.ProcessEnv, execArgv: readonl
   if (options.trim() !== "" || flagged) {
     return "refusing: NODE_OPTIONS or a preload flag is set; an elevated verax runs with none";
   }
+  // NODE_PATH adds the caller's directories to the module search list of an elevated process.
+  if ((env.NODE_PATH ?? "").trim() !== "") {
+    return "refusing: NODE_PATH is set; an elevated verax resolves modules only from its own install";
+  }
   return null;
 }
 
@@ -5331,6 +5372,9 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
       const filesRoot = adopted?.programFiles ?? adoptWindowsInstallRoots(plannedEnv, hooks.windowsMachineRoots).programFiles;
       trustFiles.push(...trustTargets(path.win32.join(sys, "System32"), "win32"));
       for (const name of WIN32_TOOLS) trustFiles.push(...trustTargets(winToolUnder(sys, name), "win32"));
+      // PowerShell 5.1 autoloads from here before System32, whatever PSModulePath says.
+      const sharedModules = path.win32.join(filesRoot, "WindowsPowerShell", "Modules");
+      if ((hooks.moduleDirExists ?? existsSync)(sharedModules)) trustFiles.push(...trustTargets(sharedModules, "win32"));
       // The install roots are parents of what the installer creates and locks, and stock ProgramData lets Users create
       // folders. They are judged by the ancestor rule (no write-DAC, owner or delete-child for a non-admin), not as objects.
       for (const root of [data, filesRoot]) {
@@ -5342,6 +5386,22 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
         return EX_CONFIG;
       }
       throw err;
+    }
+  }
+  if (trustPlat) {
+    // npm (run by this install) and the installed body resolve bare specifiers
+    // through every ancestor's node_modules. Each one on disk is judged as an object.
+    const moduleExists = hooks.moduleDirExists ?? existsSync;
+    const starts = [
+      (trustPlat === "win32" ? path.win32 : path.posix).dirname(layout.npmCli),
+      codeDirFor(trustPlat, plannedEnv, posixRoot, adopted),
+    ];
+    const seen = new Set<string>();
+    for (const dir of starts.flatMap((start) => moduleSearchDirs(start, trustPlat, moduleExists))) {
+      const key = trustPlat === "win32" ? dir.toLowerCase() : dir;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      trustFiles.push(...trustTargets(dir, trustPlat));
     }
   }
   let sddlPlan: Map<string, SddlHit> | null = null;

@@ -78,7 +78,7 @@ function commandLines(): string {
 }
 
 describe("verax desktop CLI", () => {
-  it("0.4.0 refuses `verax desktop` and creates nothing, and the help does not list it", () => {
+  it("refuses `verax desktop` while it is not released, creates nothing, and the help does not list it", () => {
     const parent = privateTempDir("verax-desktop-off-");
     const stateDir = join(parent, "state");
     try {
@@ -91,7 +91,7 @@ describe("verax desktop CLI", () => {
       // An elevated runner refuses this checkout's code before any command (R15-1).
       if (refusedAsElevated(r.status, r.stderr)) return;
       assert.equal(r.status, 64, `${r.stdout}${r.stderr}`);
-      assert.match(r.stderr, /^desktop-not-in-0\.4\.0: the desktop panel ships in 0\.4\.1\n$/);
+      assert.match(r.stderr, /^desktop-not-released: the desktop panel is not in this release\n$/);
       const help = spawnSync(process.execPath, ["--experimental-strip-types", cli, "--help"], {
         encoding: "utf8",
         windowsHide: true,
@@ -163,15 +163,30 @@ describe("verax desktop CLI", () => {
         child.stdout?.on("data", feed);
         child.stderr?.on("data", feed);
 
+        // Windows CI has timed out here with nothing but the passkey hint in the
+        // output, and it did not reproduce on a workstation, alone or beside
+        // the other desktop suites. The failure names which part never came
+        // up and when each part did, so the next red run says where to look.
+        const startedAt = Date.now();
+        const firstSeen: Record<string, number> = {};
         const up = await waitUntil(async () => {
           if (elevatedRunner && child?.exitCode === 78) return true;
-          const a = await portOpen(issuerPort);
-          const b = await portOpen(bodyPort);
-          const c = await portOpen(panelPort);
-          return a && b && c && existsSync(pidPath);
+          const parts = {
+            issuer: await portOpen(issuerPort),
+            body: await portOpen(bodyPort),
+            panel: await portOpen(panelPort),
+            browser: existsSync(pidPath),
+          };
+          for (const [name, ok] of Object.entries(parts)) {
+            if (ok && firstSeen[name] === undefined) firstSeen[name] = Date.now() - startedAt;
+          }
+          return parts.issuer && parts.body && parts.panel && parts.browser;
         }, 150_000);
         if (child?.exitCode === 78 && refusedAsElevated(child.exitCode, sink.text)) return;
-        assert.equal(up, true, `ports-not-ready\n${sink.text}`);
+        const seen = ["issuer", "body", "panel", "browser"]
+          .map((name) => `${name}=${firstSeen[name] === undefined ? "never" : `${firstSeen[name]}ms`}`)
+          .join(" ");
+        assert.equal(up, true, `ports-not-ready ${seen} exit=${child?.exitCode ?? "running"}\n${sink.text}`);
 
         const token = readFileSync(join(stateDir, "dev-token"), "utf8").trim();
         assert.ok(token.startsWith("eyJ"), "token-shape");
