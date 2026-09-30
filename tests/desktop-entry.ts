@@ -1,4 +1,4 @@
-// The desktop launcher without the CLI. 0.4.0 does not ship `verax desktop`;
+// The desktop launcher without the CLI. No release ships `verax desktop` yet;
 // the launcher stays under test until it is released. Arguments are the ones the command took.
 
 import { desktopMain } from "../packages/body/src/desktop.ts";

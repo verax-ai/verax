@@ -37,7 +37,7 @@ of these:
 Not covered: anything that needs an administrator or root account; an
 elevated terminal the operator leaves open to the agent; local mode
 (`verax init --local`), which is not a boundary; `verax desktop`, which is
-not in 0.4.0; denial of service; and the issues already listed as known in
+not released; denial of service; and the issues already listed as known in
 the release notes of the version you tested.
 
 Report privately, with steps that reproduce on a clean machine. The first
