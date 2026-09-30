@@ -78,6 +78,10 @@ function stubLedgerFetch(
         // The agents list is its own door; these tests are about the ledger.
         return new Response(JSON.stringify({ fromMs: 0, toMs: 0, agents: [], unattributed: 0 }), { status: 200 });
       }
+      if (url.includes("/api/halt")) {
+        // The stop switch is its own door too.
+        return new Response(JSON.stringify({ halted: false }), { status: 200 });
+      }
       return handler(url, init);
     }),
   );

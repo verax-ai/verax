@@ -23,6 +23,7 @@ import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
+import { haltBody, readHalt, resumeBody } from "./halt.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 import {
@@ -548,7 +549,18 @@ export async function listen(config: BodyConfig): Promise<Server> {
     const contest = req.method === "POST" && url.pathname.startsWith("/api/contest/");
     const apiApprove = req.method === "POST" && url.pathname === "/api/approve";
     const apiAgents = req.method === "GET" && url.pathname === "/api/agents";
-    if (url.pathname !== "/mcp" && !apiLedger && !apiInventory && !contest && !apiApprove && !apiAgents) {
+    const apiHalt = url.pathname === "/api/halt" && (req.method === "GET" || req.method === "POST");
+    const apiResume = req.method === "POST" && url.pathname === "/api/resume";
+    if (
+      url.pathname !== "/mcp" &&
+      !apiLedger &&
+      !apiInventory &&
+      !contest &&
+      !apiApprove &&
+      !apiAgents &&
+      !apiHalt &&
+      !apiResume
+    ) {
       send(res, 404, { error: "not-found" });
       return;
     }
@@ -589,6 +601,26 @@ export async function listen(config: BodyConfig): Promise<Server> {
       return;
     }
     try {
+      if (apiHalt || apiResume) {
+        if (await refuseStaleBearer()) return;
+        const scopes = verified.principal.scopes;
+        const operator = scopes.has("verax:audit") || scopes.has("verax:approve");
+        // Stopping is the safe direction, so any operator session may do it.
+        // Lifting a halt lets everything through again: that is an approval of
+        // everything at once and needs the approve scope. The agent token
+        // carries neither, so an agent cannot stop itself being stopped.
+        if (!operator || (apiResume && !scopes.has("verax:approve"))) {
+          send(res, 403, { error: "scope-missing" });
+          return;
+        }
+        if (req.method === "GET") {
+          send(res, 200, readHalt(config.stateDir));
+          return;
+        }
+        const by = verified.principal.brain;
+        send(res, 200, apiResume ? resumeBody(config.stateDir, by, "http") : haltBody(config.stateDir, by, "http"));
+        return;
+      }
       if (apiApprove) {
         // Reading the ledger is not approving from it. The audit scope opens
         // every door above; this one signs a new decision and lets money go,

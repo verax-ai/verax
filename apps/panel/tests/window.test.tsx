@@ -51,6 +51,7 @@ function stubFetch(ledger: (url: string) => Response): string[] {
       if (url.includes("/api/agents")) {
         return new Response(JSON.stringify({ fromMs: 0, toMs: 0, agents: [], unattributed: 0 }), { status: 200 });
       }
+      if (url.includes("/api/halt")) return new Response(JSON.stringify({ halted: false }), { status: 200 });
       ledgerUrls.push(url);
       return ledger(url);
     }),
