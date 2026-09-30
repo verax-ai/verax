@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 // @ts-expect-error -- a plain .mjs script with no declaration file
-import { REVIEWED, scan } from "../scripts/optional-require-guard.mjs";
+import { guardedNames, resolvesInTree, REVIEWED, scan } from "../scripts/optional-require-guard.mjs";
 
 type Finding = { pkg: string; file: string; name: string; reviewed: boolean };
 type Reviewed = { pkg: string; file: string; name: string };
@@ -39,6 +39,26 @@ const BODY_MODULES = [
  * when a dependency bump opens it.
  */
 describe("optional require guard", () => {
+  it("finds every guarded load in a try block, not only the first", () => {
+    // R28b: the first scanner stopped at the first require after `try {`,
+    // skipped a block with a brace before the require, and ignored import().
+    const text = [
+      'try { require("first"); require("second"); } catch {}',
+      'try { if (x) { require("nested"); } } catch {}',
+      'try { await import("dynamic"); } catch {}',
+      'require("unguarded");',
+    ].join("\n");
+    assert.deepEqual((guardedNames(text) as string[]).sort(), ["dynamic", "first", "nested", "second"]);
+  });
+
+  it("does not count a copy outside the checkout as being in the tree", () => {
+    const here = join(repo, "scripts", "optional-require-guard.mjs");
+    assert.equal(resolvesInTree("jose", here), true);
+    // A planted C:\node_modules copy resolves, but outside the tree: the hole itself.
+    assert.equal(resolvesInTree("jose", here, join(repo, "packages")), false);
+    assert.equal(resolvesInTree("no-such-package-verax", here), false);
+  });
+
   it("finds no guarded require of a missing name outside the reviewed list", { timeout: 120_000 }, () => {
     const findings = scan() as Finding[];
     const open = findings.filter((f) => !f.reviewed);
