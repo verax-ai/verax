@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { Inventory } from "@verax-ai/inventory";
 import { panelCopy } from "../copy.ts";
 import { fillCopy } from "../fill.ts";
@@ -134,6 +134,7 @@ export function Observatory({
   onRefresh,
   onShowDemo,
   onSignIn,
+  stopSwitch,
   onContest,
   canApprove = false,
   onApprove,
@@ -167,6 +168,8 @@ export function Observatory({
   onShowDemo?: () => void;
   /** Starts the code flow again, so a passkey session can replace this one. */
   onSignIn?: () => void;
+  /** The stop switch, drawn at the end of the top bar so it takes no row of its own. */
+  stopSwitch?: ReactNode;
   onContest?: (ref: string) => Promise<RailContestResult | void>;
   /**
    * Whether this session carries the approve scope. The body decides for real;
@@ -345,6 +348,7 @@ export function Observatory({
             {copy.showDemo}
           </button>
         ) : null}
+        {stopSwitch}
       </div>
       {error?.code === "passkey" && !demo ? (
         <section className="passkey-needed" data-testid="passkey-required">

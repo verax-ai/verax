@@ -8,7 +8,7 @@ import { runDemo } from "./demo.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
-import { runHalt } from "./halt.ts";
+import { runHalt, runResume } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
@@ -52,6 +52,7 @@ Usage: verax <command> [options]
                        effect binding, and which key answered
   witness <stateDir>   run the witness alongside a body
   halt <stateDir>      stop the body from allowing anything further
+  resume <stateDir>    lift a halt; who and when go to halt-history.jsonl
   unlock [--force] <stateDir>   clear a stale ledger lock
 
   --help, -h           print this
@@ -181,6 +182,14 @@ async function dispatchCli(
       return 78;
     }
     return runHalt(stateDir, (s) => stderr.write(s));
+  }
+  if (argv[0] === "resume") {
+    const stateDir = argv[1];
+    if (!stateDir) {
+      stderr.write("verax resume <stateDir>\n");
+      return 78;
+    }
+    return runResume(stateDir, (s) => stderr.write(s));
   }
   if (argv[0] === "unlock") {
     const force = argv.includes("--force");

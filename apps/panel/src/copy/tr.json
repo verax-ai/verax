@@ -238,5 +238,20 @@
   "rec.health.trust.open": "Sabitlenmedi",
   "rec.health.trust.unread": "Okunmadı",
   "rec.health.verify": "İmza denetimi",
-  "rec.health.verify.value": "Bu ekranda yapılmaz. Çevrimdışı: verax verify <defter klasörü>"
+  "rec.health.verify.value": "Bu ekranda yapılmaz. Çevrimdışı: verax verify <defter klasörü>",
+  "stop.button": "Her şeyi durdur",
+  "stop.title": "Her şey durdurulsun mu?",
+  "stop.explain": "Bundan sonra yapay zekanın Verax'tan istediği her şey reddedilir ve her ret kayda geçer. Hiçbir şey silinmez.",
+  "stop.yes": "Evet, durdur",
+  "stop.no": "Vazgeç",
+  "stop.sending": "Gönderiliyor…",
+  "stop.failed": "Yapılmadı: {reason}",
+  "stop.sample": "Örnek senaryo. Hiçbir şey gönderilmedi.",
+  "stop.halted": "DURDURULDU",
+  "stop.halted.by": "{who} durdurdu, {when}.",
+  "stop.halted.explain": "Onay yetkisi olan biri devam ettirene kadar her istek reddedilir ve kayda geçer.",
+  "stop.resume": "Devam et",
+  "stop.resume.title": "Devam edilsin mi? Kurallar bu andan itibaren yeniden geçerli olur.",
+  "stop.resume.yes": "Evet, devam et",
+  "stop.resume.needApprove": "Devam ettirmek için onay yetkisi gerekir."
 }

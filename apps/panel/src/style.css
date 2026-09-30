@@ -719,3 +719,70 @@ aside {
   padding: 0.3rem 0.6rem;
   cursor: pointer;
 }
+/* The stop switch sits at the end of the top bar. Running, it is one red
+   button; halted, it turns into a red alarm with the resume control, so
+   nobody reads the screen beside it as a body that is still allowing things. */
+.stop-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  margin-left: auto;
+}
+.stop-switch p {
+  margin: 0;
+}
+.stop-switch button {
+  background: #162033;
+  color: inherit;
+  border: 1px solid #2a3b55;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+  font: inherit;
+}
+.stop-switch button.stop {
+  background: var(--no);
+  border-color: var(--no);
+  color: #ffffff;
+  font-weight: bold;
+}
+.stop-switch button.resume {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.stop-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.6rem;
+  max-width: 44rem;
+}
+.stop-title {
+  font-weight: bold;
+}
+.stop-switch.halted {
+  padding: 0.3rem 0.7rem;
+  background: #3a1111;
+  border: 2px solid var(--no);
+}
+.stop-switch.halted .stop-title {
+  color: #ff8a8a;
+  letter-spacing: 0.08em;
+}
+.stop-said {
+  color: var(--accent);
+}
+/* The sample badge is pinned to the top right corner; the switch keeps clear of it. */
+.demo-badge ~ .obs-top .stop-switch {
+  margin-right: 9rem;
+}
+@media (max-width: 720px) {
+  .stop-switch,
+  .demo-badge ~ .obs-top .stop-switch {
+    margin-left: 0;
+    margin-right: 0;
+  }
+  .stop-switch button {
+    min-height: 44px;
+  }
+}

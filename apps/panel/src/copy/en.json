@@ -238,5 +238,20 @@
   "rec.health.trust.open": "Not pinned",
   "rec.health.trust.unread": "Not read",
   "rec.health.verify": "Signature check",
-  "rec.health.verify.value": "Not done on this screen. Offline: verax verify <ledger folder>"
+  "rec.health.verify.value": "Not done on this screen. Offline: verax verify <ledger folder>",
+  "stop.button": "Stop everything",
+  "stop.title": "Stop everything?",
+  "stop.explain": "From now on every request the agent sends through Verax is refused, and each refusal is recorded. Nothing is deleted.",
+  "stop.yes": "Yes, stop",
+  "stop.no": "Cancel",
+  "stop.sending": "Sending…",
+  "stop.failed": "Not done: {reason}",
+  "stop.sample": "Sample scenario. Nothing was sent.",
+  "stop.halted": "STOPPED",
+  "stop.halted.by": "Stopped by {who}, {when}.",
+  "stop.halted.explain": "Every request is refused and recorded until someone with the approve permission resumes.",
+  "stop.resume": "Resume",
+  "stop.resume.title": "Resume? The rules apply again from this moment.",
+  "stop.resume.yes": "Yes, resume",
+  "stop.resume.needApprove": "Resuming needs the approve permission."
 }
