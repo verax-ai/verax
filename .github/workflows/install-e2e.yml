@@ -629,6 +629,28 @@ jobs:
           sudo chown -R root:root /opt/verax-cli
           sudo chmod -R go-w /opt/verax-cli
           echo "VERAX_TARBALLS=$dir" >> "$GITHUB_ENV"
+      - name: a module directory the runner account can change is refused
+        run: |
+          set -euo pipefail
+          # Node searches /usr/local/lib/node_modules for modules of anything under /usr/local/lib,
+          # the npm this install runs included. The runner image leaves that directory to the runner
+          # account, so the install must refuse it and name it. A normal system has it root-owned
+          # (sudo npm install -g); after the refusal is seen, make this one match.
+          dir=/usr/local/lib/node_modules
+          stat -c '%U:%G %a %n' "$dir" || true
+          if [ -n "$(find "$dir" -maxdepth 0 \( ! -uid 0 -o -perm /022 \) 2>/dev/null)" ]; then
+            set +e
+            out="$(sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801 2>&1)"
+            code=$?
+            set -e
+            echo "$out"
+            test "$code" = "78"
+            echo "$out" | grep -F "Module directory $dir can be changed by your user account"
+            sudo chown -R root:root "$dir"
+            sudo chmod -R go-w "$dir"
+          else
+            echo "$dir is not runner-writable on this image; nothing to refuse"
+          fi
       - name: install and probe as the invoking user
         id: install-probe
         run: |

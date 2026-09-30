@@ -120,7 +120,17 @@ describe("install-e2e workflow", () => {
     assert.match(step, /verax-cli\/bin\/verax uninstall/);
     assert.equal(step.includes("Write-Error"), false);
     assert.equal(step.includes("Write-Host"), false);
-    const installs = linux.split(/\r?\n/).filter((line) => line.includes("verax-cli/bin/verax install"));
+    // The module-directory step runs an install that must be refused; it is not one of the two that succeed.
+    const refusalAt = linux.indexOf("- name: a module directory the runner account can change is refused\n");
+    assert.ok(refusalAt > 0, "the module-directory refusal step is missing");
+    assert.ok(refusalAt < linux.indexOf("- name: install and probe as the invoking user\n"), "the refusal must come before the install");
+    const refusal = linux.slice(refusalAt, linux.indexOf("\n      - name: ", refusalAt + 1));
+    assert.match(refusal, /test "\$code" = "78"/);
+    assert.match(refusal, /grep -F "Module directory \$dir can be changed by your user account"/);
+    const installs = linux
+      .replace(refusal, "")
+      .split(/\r?\n/)
+      .filter((line) => line.includes("verax-cli/bin/verax install"));
     assert.equal(installs.length, 2);
   });
 
