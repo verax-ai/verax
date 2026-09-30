@@ -68,11 +68,16 @@ export function haltBody(stateDir: string, by: string, via: HaltEvent["via"], no
   return readHalt(stateDir);
 }
 
-/** Resuming a body that is not halted changes nothing and writes nothing. */
+/**
+ * Resuming a body that is not halted changes nothing and writes nothing.
+ * The line goes to the history before the switch is removed: if it cannot be
+ * written, the append throws and the body stays halted, rather than running
+ * again with no record of who let it.
+ */
 export function resumeBody(stateDir: string, by: string, via: HaltEvent["via"], now = Date.now()): HaltState {
   if (existsSync(join(stateDir, SWITCH))) {
-    rmSync(join(stateDir, SWITCH), { force: true });
     appendHistory(stateDir, { action: "resume", atMs: now, by, via });
+    rmSync(join(stateDir, SWITCH), { force: true });
   }
   return readHalt(stateDir);
 }

@@ -1,9 +1,10 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { haltBody, resumeBody } from "../packages/body/src/halt.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -137,5 +138,18 @@ describe("halt and resume over HTTP", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await issuer.close();
     }
+  });
+});
+
+describe("resume with a history it cannot write", () => {
+  it("stays halted rather than resuming with no record", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-halt-history-"));
+    haltBody(stateDir, "operator-7", "http");
+    // A directory where the history file should be: every append fails.
+    const history = join(stateDir, "halt-history.jsonl");
+    rmSync(history);
+    mkdirSync(history);
+    assert.throws(() => resumeBody(stateDir, "operator-7", "http"));
+    assert.equal(existsSync(join(stateDir, "halted")), true);
   });
 });
