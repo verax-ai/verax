@@ -14,6 +14,8 @@ import type {
   RailFinding,
 } from "./rail/types.ts";
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
+import { StopSwitch, type HaltState, type SwitchOutcome } from "./StopSwitch.tsx";
+import { panelCopy } from "./copy.ts";
 import { authorizedFetch, beginSession, restartCodeFlow, sessionIssueError, sessionScopes } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
@@ -90,6 +92,8 @@ export function App() {
   // screen draws it, and says so when it could not be read.
   const [agents, setAgents] = useState<AgentsAnswer | null>(null);
   const [agentsFailed, setAgentsFailed] = useState(false);
+  // Null until the body answers: an unknown switch is not drawn as "running".
+  const [halt, setHalt] = useState<HaltState | null>(null);
   const pollRef = useRef<() => Promise<void>>(async () => undefined);
   const passkeyHeld = useRef(false);
   const showPasskey = useCallback(() => {
@@ -139,6 +143,20 @@ export function App() {
       setInventory(null);
     }
   }, [showPasskey]);
+
+  const loadHalt = useCallback(async () => {
+    try {
+      const r = await authorizedFetch("/api/halt");
+      if (!r.ok) {
+        setHalt(null);
+        return;
+      }
+      const body = (await r.json()) as HaltState;
+      setHalt(body && typeof body.halted === "boolean" ? body : null);
+    } catch {
+      setHalt(null);
+    }
+  }, []);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -203,6 +221,7 @@ export function App() {
         // product, and a visitor had no way to know why.
         setAgents(loadDemoAgents());
         setAgentsFailed(false);
+        setHalt({ halted: false });
         setDemo(true);
         setStatus("ok");
         setLastReadMs(Date.now());
@@ -217,6 +236,7 @@ export function App() {
     // They are read together now, so the tab is one reading of one ledger.
     await loadHealth();
     await loadAgents();
+    await loadHalt();
     try {
       const body = await readLedger(`from=0&to=${END_OF_TIME}&limit=${PAGE}`);
       if (!body) {
@@ -248,7 +268,23 @@ export function App() {
         setError({ code: "network", detail: null });
       }
     }
-  }, [actions.length, loadAgents, loadHealth, loadInventory, readLedger, showPasskey]);
+  }, [actions.length, loadAgents, loadHalt, loadHealth, loadInventory, readLedger, showPasskey]);
+
+  /** One press of the stop or resume button; the screen then reads the body again. */
+  const pressSwitch = useCallback(
+    async (path: "/api/halt" | "/api/resume"): Promise<SwitchOutcome> => {
+      if (demo) return { ok: false, error: panelCopy()["stop.sample"] };
+      const res = await authorizedFetch(path, { method: "POST" });
+      const body = (await res.json().catch(() => ({}))) as HaltState & { error?: unknown };
+      if (res.ok && typeof body.halted === "boolean") {
+        setHalt(body);
+        void load();
+        return { ok: true, state: body };
+      }
+      return { ok: false, error: typeof body.error === "string" ? body.error : `http-${res.status}` };
+    },
+    [demo, load],
+  );
 
   /**
    * What is new since the newest row held, folded into the rows on screen.
@@ -265,6 +301,7 @@ export function App() {
     await loadInventory();
     await loadHealth();
     await loadAgents();
+    await loadHalt();
     try {
       const newestMs = actions[0]!.record.claims.timestampMs;
       const body = await readLedger(`from=${Math.max(0, newestMs - POLL_OVERLAP_MS)}&to=${END_OF_TIME}`);
@@ -287,7 +324,7 @@ export function App() {
         setError({ code: "network", detail: null });
       }
     }
-  }, [actions, load, loadAgents, loadHealth, loadInventory, readLedger, showPasskey]);
+  }, [actions, load, loadAgents, loadHalt, loadHealth, loadInventory, readLedger, showPasskey]);
 
   /** The page before the oldest row on screen, appended below it. */
   const loadOlder = useCallback(async () => {
@@ -410,6 +447,14 @@ export function App() {
             error: typeof body.error === "string" ? body.error : `http-${res.status}`,
           };
         }}
+        stopSwitch={
+          <StopSwitch
+            state={halt}
+            canResume={canApprove}
+            onHalt={() => pressSwitch("/api/halt")}
+            onResume={() => pressSwitch("/api/resume")}
+          />
+        }
         stale={stale}
         ageMs={ageMs}
         pending={pending}
@@ -426,6 +471,7 @@ export function App() {
           setReconcileReport(loadDemoReconcile());
           setAgents(loadDemoAgents());
           setAgentsFailed(false);
+          setHalt({ halted: false });
           setDemo(true);
         }}
         onSignIn={() => {

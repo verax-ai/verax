@@ -10,6 +10,11 @@ the policy will not decide alone is held until an operator on this machine
 approves it. The ledger stays on the machine the body runs on, and the body
 opens only when its authorization is configured: there is no default token.
 
+**Break it, and we pay.** USD 100 for each valid report of a way for the
+agent's account to get a refused call allowed, run a call with no decision
+record, or change the service's code, keys or ledger. The budget is USD 500
+in total. Terms: [SECURITY.md](SECURITY.md#break-it-and-we-pay).
+
 By [VERAX Teknoloji](https://verax-ai.com). Sister projects:
 [Conarium](https://github.com/dogrucanemek-alt/conarium) ·
 [Tugra](https://github.com/dogrucanemek-alt/tugra) ·
@@ -169,7 +174,7 @@ Not shown here: a real database (these are Conarium's sample rows); statement re
 
 | Package | What it is |
 | --- | --- |
-| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `unlock` (`desktop` is not released yet). |
+| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `resume` (unreleased), `unlock` (`desktop` is not released yet). |
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
