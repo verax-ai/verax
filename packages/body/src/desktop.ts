@@ -8,6 +8,7 @@ import { DESKTOP_PARENT_PID } from "./desktop-parent.ts";
 import {
   defaultExec,
   foreignAclPrincipals,
+  moduleSearchDirs,
   posixOthersCanReplace,
   readSddlBatch,
   restrictToOwnerWin32,
@@ -15,9 +16,11 @@ import {
   systemToolEnv,
   systemToolPath,
   toolArgv,
+  trustTargets,
   windowsDirectorySids,
   windowsInvokingSid,
   windowsUserCanWrite,
+  type InstallPlatform,
 } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
@@ -529,6 +532,12 @@ export type DesktopHooks = {
    * DACL hook is set and this is not, ancestors are not read from the machine.
    */
   windowsAncestorDacl?: (dir: string) => string;
+  /**
+   * Replaces the one Windows DACL read of the code this run launches.
+   * When set, that check runs even if `spawn` is also set, so a test can
+   * read the refusal's fix line without starting a child.
+   */
+  windowsCodeAcl?: (paths: readonly string[]) => Map<string, { sddl: string | null }>;
   /** Replaces `killTree` for the children this run started. */
   kill?: (pid: number | undefined) => void;
   /** Called with the capped stdout/stderr kept for one child. */
@@ -1078,12 +1087,70 @@ function defaultBrowser(): string | null {
   return null;
 }
 
+function codeInstallPlatform(platform: NodeJS.Platform): InstallPlatform {
+  if (platform === "win32" || platform === "darwin") return platform;
+  return "linux";
+}
+
 /**
- * First launched script, or its parent, that someone else can replace.
- * Null when every path is a real file or directory held tightly enough to run.
- * `detail` is the second line of the refusal: who can write, or why the path
- * could not be judged. `read`, when set, is the one Windows DACL read;
- * otherwise that read is `readWindowsAcls` of the whole list.
+ * Code the desktop launches, the directory that holds each file, and every
+ * `node_modules` Node would search from there. `trustTargets` marks the
+ * parent of a script as an ancestor; only a Windows executable's parent is
+ * an object there. Adding a file next to the script is the same threat, so
+ * the file and its parent are objects here and only the directories above
+ * them stay ancestors. A path that is both is kept once, as an object.
+ */
+function desktopCodeTargets(
+  files: readonly string[],
+  platform: InstallPlatform,
+): { path: string; ancestor: boolean }[] {
+  const merged = new Map<string, { path: string; ancestor: boolean }>();
+  const put = (file: string, ancestor: boolean): void => {
+    const key = platform === "win32" ? file.toLowerCase() : file;
+    const prev = merged.get(key);
+    if (!prev) {
+      merged.set(key, { path: file, ancestor });
+      return;
+    }
+    if (prev.ancestor && !ancestor) merged.set(key, { path: prev.path, ancestor: false });
+  };
+  for (const file of files) {
+    const chain = trustTargets(file, platform);
+    for (let i = 0; i < chain.length; i += 1) put(chain[i]!.path, i > 1);
+    for (const dir of moduleSearchDirs(dirname(file), platform)) put(dir, false);
+  }
+  return [...merged.values()];
+}
+
+function inspectCodePath(
+  file: string,
+): { ok: false; detail: string } | { ok: true; uid: number; mode: number } {
+  try {
+    const st = lstatSync(file);
+    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile())) {
+      return { ok: false, detail: " (is a link or not a regular file)" };
+    }
+    return { ok: true, uid: st.uid, mode: st.mode };
+  } catch {
+    return { ok: false, detail: " (could not be read)" };
+  }
+}
+
+/** Third line of a code refusal: what the operator can do about this checkout. */
+function desktopCodeFix(platform: NodeJS.Platform, repoRoot: string): string {
+  if (platform === "win32") {
+    return `fix: clone under your user profile, or run: icacls "${repoRoot}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T`;
+  }
+  return `fix: chmod -R go-w "${repoRoot}" and make sure every parent directory is owned by you or root`;
+}
+
+/**
+ * First launched script, parent, ancestor, or module directory that someone
+ * else can replace. Null when every target is held tightly enough to run.
+ * `detail` is the second line of the refusal. On Windows one `read` (or
+ * `readWindowsAcls`) judges the whole list with `svcSid`: someone other than
+ * the operator, Administrators, or SYSTEM. On POSIX the owner is trusted
+ * when it is the operator or root, then `posixOthersCanReplace`.
  */
 export function desktopCodeRefusal(
   paths: readonly string[],
@@ -1091,31 +1158,42 @@ export function desktopCodeRefusal(
   read?: (p: readonly string[]) => Map<string, { sddl: string | null }>,
   invoking?: string,
 ): { path: string; detail: string } | null {
-  for (const p of paths) {
-    let st: ReturnType<typeof lstatSync>;
-    try {
-      st = lstatSync(p);
-    } catch {
-      return { path: p, detail: " (could not be read)" };
-    }
-    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile())) {
-      return { path: p, detail: " (is a link or not a regular file)" };
-    }
-    if (platform === "win32") continue;
-    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-    if ((st.uid !== uid && st.uid !== 0) || (st.mode & 0o022) !== 0) {
-      return { path: p, detail: ` (owner uid ${st.uid}; mode ${(st.mode & 0o777).toString(8)})` };
-    }
-  }
-  if (platform !== "win32") return null;
-  const acls = read !== undefined ? read(paths) : readWindowsAcls(paths);
+  const targets = desktopCodeTargets(paths, codeInstallPlatform(platform));
+  const wanted = targets.map((target) => target.path);
+  const acls = platform === "win32" ? (read !== undefined ? read(wanted) : readWindowsAcls(wanted)) : null;
   const svc = invoking?.trim().toUpperCase() ?? "";
-  for (const p of paths) {
-    const sddl = acls.get(p)?.sddl ?? null;
-    if (sddl === null) return { path: p, detail: " (ACL could not be read)" };
-    if (windowsUserCanWrite(sddl, { svcSid: svc })) return { path: p, detail: aclWho(sddl, svc) };
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  for (const target of targets) {
+    const inspected = inspectCodePath(target.path);
+    if (!inspected.ok) return { path: target.path, detail: inspected.detail };
+    if (platform === "win32") {
+      const sddl = acls?.get(target.path)?.sddl ?? null;
+      if (sddl === null) return { path: target.path, detail: " (ACL could not be read)" };
+      if (windowsUserCanWrite(sddl, { path: target.path, svcSid: svc, ancestor: target.ancestor })) {
+        return { path: target.path, detail: aclWho(sddl, svc) };
+      }
+      continue;
+    }
+    const ownerIsOperator = inspected.uid === 0 || inspected.uid === uid;
+    if (
+      posixOthersCanReplace(
+        { uid: ownerIsOperator ? 0 : inspected.uid, mode: inspected.mode, symlink: false },
+        target.ancestor,
+      )
+    ) {
+      return {
+        path: target.path,
+        detail: ` (owner uid ${inspected.uid}; mode ${(inspected.mode & 0o777).toString(8)})`,
+      };
+    }
   }
   return null;
+}
+
+function codeInvoking(platform: NodeJS.Platform, stateDir: string, hooks?: DesktopHooks): string | undefined {
+  if (platform !== "win32") return undefined;
+  if (hooks?.windowsDirectoryOwner) return hooks.windowsDirectoryOwner(stateDir).invokingSid?.trim().toUpperCase() ?? "";
+  return windowsInvokingSid()?.trim().toUpperCase() ?? "";
 }
 
 export async function runDesktop(
@@ -1258,15 +1336,17 @@ export async function runDesktop(
       windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
       windowsAncestorDacl: hooks?.windowsAncestorDacl,
     });
-    // hooks.spawn stands in for the children, so those tests never execute these
-    // files. Skip the writability check there. Production, which has no spawn hook, always runs it.
-    if (!hooks?.spawn) {
-      const codePaths = [issuerScript, dirname(issuerScript), mainTs, dirname(mainTs), viteJs, dirname(viteJs)];
+    // A spawn hook stands in for the children, so those tests never execute these
+    // files and skip this check. `windowsCodeAcl` is the test that wants the
+    // refusal, including its fix line, and it runs even when spawn is set.
+    // Production, which has no spawn hook, always runs it.
+    if (!hooks?.spawn || hooks.windowsCodeAcl) {
+      const codeFiles = [issuerScript, mainTs, viteJs];
       const codePlatform = hooks?.platform ?? process.platform;
-      const invoking = codePlatform === "win32" ? (windowsInvokingSid()?.trim().toUpperCase() ?? "") : undefined;
-      const refused = desktopCodeRefusal(codePaths, codePlatform, undefined, invoking);
+      const invoking = codeInvoking(codePlatform, opts.stateDir, hooks);
+      const refused = desktopCodeRefusal(codeFiles, codePlatform, hooks?.windowsCodeAcl, invoking);
       if (refused !== null) {
-        writeErr(`desktop-code-writable:${refused.path}\n${refused.detail.trim()}\n`);
+        writeErr(`desktop-code-writable:${refused.path}\n${refused.detail.trim()}\n${desktopCodeFix(codePlatform, repoRoot)}\n`);
         stopAll();
         return 1;
       }

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -312,7 +312,7 @@ describe("verax desktop code paths", () => {
       t.skip("POSIX mode bits");
       return;
     }
-    const dir = mkdtempSync(join(tmpdir(), "verax-desktop-code-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-code-")));
     const file = join(dir, "dev-issuer.mjs");
     writeFileSync(file, "");
     chmodSync(file, 0o666);
@@ -325,39 +325,170 @@ describe("verax desktop code paths", () => {
     }
   });
 
+  it("refuses a parent directory others can write and keeps a sticky ancestor", (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX mode bits");
+      return;
+    }
+    const base = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-code-")));
+    const sticky = join(base, "sticky");
+    const parent = join(sticky, "parent");
+    mkdirSync(parent, { recursive: true });
+    const file = join(parent, "dev-issuer.mjs");
+    writeFileSync(file, "");
+    chmodSync(file, 0o644);
+    chmodSync(parent, 0o755);
+    chmodSync(sticky, 0o1777);
+    try {
+      assert.equal(desktopCodeRefusal([file], process.platform), null);
+      chmodSync(parent, 0o777);
+      const refused = desktopCodeRefusal([file], process.platform);
+      assert.equal(refused?.path, parent);
+      assert.match(refused?.detail ?? "", /owner uid \d+; mode 777/);
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
   it("refuses code Everyone can write and accepts owner, SYSTEM, and Administrators", (t) => {
     if (process.platform !== "win32") {
       t.skip("Windows ACL");
       return;
     }
-    const dir = mkdtempSync(join(tmpdir(), "verax-desktop-code-"));
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-code-")));
     const file = join(dir, "vite.js");
     writeFileSync(file, "");
-    const paths = [file, dir];
     const owner = "S-1-5-21-1";
     const safe = `O:${owner}G:SYD:(A;;FA;;;${owner})(A;;FA;;;BA)(A;;FA;;;SY)`;
+    const same = (p: string, q: string) => p.toLowerCase() === q.toLowerCase();
     try {
       let reads = 0;
+      let asked: readonly string[] = [];
       const everyone = desktopCodeRefusal(
-        paths,
+        [file],
         "win32",
-        (asked) => {
+        (paths) => {
           reads += 1;
-          assert.deepEqual([...asked], paths);
+          asked = paths;
           return new Map(paths.map((p) => [p, { sddl: "D:(A;;FA;;;WD)" }]));
         },
         owner,
       );
-      assert.equal(everyone?.path, file);
-      assert.match(everyone?.detail ?? "", /S-1-1-0|WD/);
       assert.equal(reads, 1);
+      assert.ok(asked.some((p) => same(p, file)));
+      assert.ok(asked.some((p) => same(p, dir)));
+      assert.ok(asked.some((p) => same(p, dirname(dir))));
+      assert.equal(everyone?.path.toLowerCase(), file.toLowerCase());
+      assert.match(everyone?.detail ?? "", /S-1-1-0|WD/);
       const accepted = desktopCodeRefusal(
-        paths,
+        [file],
         "win32",
-        () => new Map(paths.map((p) => [p, { sddl: safe }])),
+        (paths) => new Map(paths.map((p) => [p, { sddl: safe }])),
         owner,
       );
       assert.equal(accepted, null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses file-add by Users on the parent and ignores the same right on an ancestor", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows ACL");
+      return;
+    }
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-code-")));
+    const file = join(dir, "vite.js");
+    writeFileSync(file, "");
+    const owner = "S-1-5-21-1";
+    const safe = `O:${owner}G:SYD:(A;;FA;;;${owner})(A;;FA;;;BA)(A;;FA;;;SY)`;
+    const bu = `O:${owner}G:SYD:(A;;FA;;;${owner})(A;;0x2;;;S-1-5-32-545)(A;;FA;;;BA)(A;;FA;;;SY)`;
+    const same = (p: string, q: string) => p.toLowerCase() === q.toLowerCase();
+    const withLoose = (loose: string | null) => (asked: readonly string[]) =>
+      new Map(asked.map((p) => [p, { sddl: loose !== null && same(p, loose) ? bu : safe }]));
+    try {
+      assert.equal(desktopCodeRefusal([file], "win32", withLoose(null), owner), null);
+      let reads = 0;
+      const parent = desktopCodeRefusal(
+        [file],
+        "win32",
+        (asked) => {
+          reads += 1;
+          return withLoose(dir)(asked);
+        },
+        owner,
+      );
+      assert.equal(reads, 1);
+      assert.equal(parent?.path.toLowerCase(), dir.toLowerCase());
+      assert.match(parent?.detail ?? "", /S-1-5-32-545/);
+      assert.equal(desktopCodeRefusal([file], "win32", withLoose(dirname(dir)), owner), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("treats an existing node_modules on the walk as an object", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows ACL");
+      return;
+    }
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-code-")));
+    const modules = join(root, "node_modules");
+    const pkg = join(modules, "pkg");
+    mkdirSync(pkg, { recursive: true });
+    const file = join(pkg, "vite.js");
+    writeFileSync(file, "");
+    const owner = "S-1-5-21-1";
+    const safe = `O:${owner}G:SYD:(A;;FA;;;${owner})(A;;FA;;;BA)(A;;FA;;;SY)`;
+    const bu = `O:${owner}G:SYD:(A;;FA;;;${owner})(A;;0x2;;;S-1-5-32-545)(A;;FA;;;BA)(A;;FA;;;SY)`;
+    const same = (p: string, q: string) => p.toLowerCase() === q.toLowerCase();
+    try {
+      const refused = desktopCodeRefusal(
+        [file],
+        "win32",
+        (asked) => new Map(asked.map((p) => [p, { sddl: same(p, modules) ? bu : safe }])),
+        owner,
+      );
+      assert.equal(refused?.path.toLowerCase(), modules.toLowerCase());
+      assert.match(refused?.detail ?? "", /S-1-5-32-545/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("prints a fix line when launched code is writable by someone else", async () => {
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-fix-")));
+    if (process.platform !== "win32") chmodSync(dir, 0o700);
+    const issuerPort = await freePort();
+    const bodyPort = await freePort();
+    const panelPort = await freePort();
+    const sid = "S-1-5-21-1";
+    const err: string[] = [];
+    let spawned = false;
+    try {
+      const code = await runDesktop(
+        { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
+        (line) => err.push(line),
+        {
+          platform: "win32",
+          readyMs: 200,
+          restrictOwner: () => {},
+          windowsDirectoryOwner: () => ({ ownerSid: sid, invokingSid: sid }),
+          windowsDirectoryDacl: () => `O:${sid}D:(A;;FA;;;${sid})`,
+          windowsCodeAcl: (asked) => new Map([...asked].map((p) => [p, { sddl: "D:(A;;FA;;;WD)" }])),
+          spawn: () => {
+            spawned = true;
+            throw new Error("spawned after a code refusal");
+          },
+        },
+      );
+      assert.equal(spawned, false);
+      assert.equal(code, 1);
+      const block = err.find((line) => line.startsWith("desktop-code-writable:"));
+      const rows = block?.split("\n") ?? [];
+      assert.match(rows[0] ?? "", /^desktop-code-writable:/);
+      assert.match(rows[2] ?? "", /^fix:/);
+      assert.match(rows[2] ?? "", /icacls/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
