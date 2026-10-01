@@ -200,7 +200,8 @@ function sddlJson(paths: readonly string[], sddlFor: (target: string) => string)
 }
 
 function sddlPowerShell(argv: readonly string[]): boolean {
-  return systemToolName(argv[0] ?? "") === "powershell" && argv.join("\n").includes(".Sddl");
+  const cmd = argv.join("\n");
+  return systemToolName(argv[0] ?? "") === "powershell" && (cmd.includes(".Sddl") || cmd.includes("GetAccessControl"));
 }
 
 function sddlStdout(argv: readonly string[], stdin?: string): string | null {
@@ -2818,6 +2819,38 @@ describe("verax uninstall", () => {
       assert.equal(windowsUserCanWrite(map[p] as string, { path: p, ancestor: true }), false, `${p} is writable: ${map[p] as string}`);
     }
     assert.equal(typeof (map[missing] as { error?: unknown })?.error, "string");
+  });
+
+  it("the batch SDDL reader answers exactly what Get-Acl answers for the same paths", { skip: process.platform !== "win32" && "runs powershell.exe" }, () => {
+    const pkg = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    const made = mkdtempSync(join(tmpdir(), "verax-sddl-equiv-"));
+    const paths = ["C:\\", process.env.ProgramData ?? "C:\\ProgramData", tmpdir(), pkg, made];
+    try {
+      const argv = windowsSddlBatchArgv(paths);
+      const stdin = windowsSddlBatchStdin(paths);
+      const batchStarted = Date.now();
+      const ran = spawnSync(argv[0]!, argv.slice(1), { encoding: "utf8", env: systemToolEnv("win32"), input: stdin });
+      const batchMs = Date.now() - batchStarted;
+      assert.equal(ran.status, 0, ran.stderr);
+      const batch = JSON.parse(ran.stdout) as Record<string, unknown>;
+      let getAclMs = 0;
+      for (const p of paths) {
+        const literal = p.replaceAll("'", "''");
+        const started = Date.now();
+        const ref = spawnSync(
+          argv[0]!,
+          ["-NoProfile", "-NonInteractive", "-Command", `(Get-Acl -LiteralPath '${literal}').Sddl`],
+          { encoding: "utf8", env: systemToolEnv("win32") },
+        );
+        getAclMs += Date.now() - started;
+        assert.equal(ref.status, 0, `${p}: ${ref.stderr}`);
+        const reference = (ref.stdout ?? "").trim();
+        assert.equal(batch[p], reference, p);
+      }
+      process.stdout.write(`sddl-batch-ms=${batchMs} get-acl-ms=${getAclMs}\n`);
+    } finally {
+      rmSync(made, { recursive: true, force: true });
+    }
   });
 
   it("F10e the plan reads every SDDL in one PowerShell call", { skip: process.platform !== "win32" && "creates real Windows paths" }, async () => {

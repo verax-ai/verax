@@ -1211,10 +1211,15 @@ $result = @{}
 foreach ($p in $paths) {
   $key = [string]$p
   try {
-    $acl = Get-Acl -LiteralPath $key
-    $result[$key] = [string]$acl.Sddl
+    if ([System.IO.Directory]::Exists($key)) {
+      $sec = [System.IO.Directory]::GetAccessControl($key)
+    } else {
+      $sec = [System.IO.File]::GetAccessControl($key)
+    }
+    $result[$key] = [string]$sec.GetSecurityDescriptorSddlForm('All')
   } catch {
-    $err = @{ error = [string]$_.Exception.Message }
+    $e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }
+    $err = @{ error = [string]$e.Message }
     $result[$key] = $err
   }
 }

@@ -248,7 +248,7 @@ describe("attack R14", () => {
     const refusal = refuseWritableCode("win32", {}, (argv) => {
       const line = argv.join(" ");
       if (/whoami/i.test(argv[0] ?? "")) return { status: 0, stdout: "desk\\op S-1-5-21-1001\n", stderr: "" };
-      if (line.includes("Get-Acl")) sddlCalls += 1;
+      if (line.includes("GetAccessControl")) sddlCalls += 1;
       return { status: 0, stdout: "{}", stderr: "" };
     });
     assert.equal(sddlCalls, 1, "one PowerShell process for every code path");
