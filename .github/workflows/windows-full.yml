@@ -52,6 +52,13 @@ jobs:
           icacls "$env:GITHUB_WORKSPACE" /inheritance:r /grant:r "*$($me.User.Value):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /C /Q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           icacls "$env:GITHUB_WORKSPACE\scripts"
+          # The image leaves the drive root owned by NETWORK SERVICE, and an
+          # owner can rewrite the ACL of everything below. An operator's
+          # system drive is owned by an administrator or TrustedInstaller.
+          $root = [IO.Path]::GetPathRoot($env:GITHUB_WORKSPACE)
+          icacls $root /setowner "*S-1-5-32-544" /C /Q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "drive root $root $((Get-Acl $root).Sddl)"
           $null = [IO.File]::ReadAllBytes("$env:GITHUB_WORKSPACE\package-lock.json")
           "package-lock.json readable after the change"
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0

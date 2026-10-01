@@ -1139,7 +1139,7 @@ function inspectCodePath(
 /** Third line of a code refusal: what the operator can do about this checkout. */
 function desktopCodeFix(platform: NodeJS.Platform, repoRoot: string): string {
   if (platform === "win32") {
-    return `fix: clone under your user profile, or run: icacls "${repoRoot}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T`;
+    return `fix: clone under your user profile, or run: icacls "${repoRoot}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"`;
   }
   return `fix: chmod -R go-w "${repoRoot}" and make sure every parent directory is owned by you or root`;
 }
