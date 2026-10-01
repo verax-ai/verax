@@ -22,6 +22,14 @@ import {
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
 
+// With VERAX_DESKTOP_TRACE=1 each startup step writes one stderr line with the
+// milliseconds since this module loaded. Windows CI has waited ~87 s before the
+// issuer port opened; these lines say which step held it.
+const traceZero = Date.now();
+function trace(step: string): void {
+  if (process.env.VERAX_DESKTOP_TRACE === "1") process.stderr.write(`desktop-trace ${step} ${Date.now() - traceZero}ms\n`);
+}
+
 /** One stderr line when this state has no enrolled operator. */
 export const DESKTOP_PASSKEY_HINT =
   "the panel reads the ledger after a passkey sign-in; run verax operator enroll\n";
@@ -564,6 +572,7 @@ function localAccountSids(): { LA?: string; LG?: string } {
     ),
   );
   const sids = (ran.status ?? 1) === 0 ? (ran.stdout ?? "").match(/S-1-5-21-[0-9-]+/g) ?? [] : [];
+  trace("local-account-sids");
   localAccounts = sids.length === 2 && sids[0]!.endsWith("-500") && sids[1]!.endsWith("-501") ? { LA: sids[0], LG: sids[1] } : {};
   return localAccounts;
 }
@@ -721,6 +730,7 @@ function ancestorInvokingSid(dir: string, opts?: DesktopDirectoryOpts): string {
 function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void {
   if ((opts?.windowsDirectoryDacl || opts?.windowsDirectoryOwner) && !opts?.windowsAncestorDacl) return;
   const svc = ancestorInvokingSid(dir, opts);
+  trace("ancestors-invoking-sid");
   const ancestors = ancestorPaths(dir);
   let read: Map<string, WindowsAcl> | null = null;
   if (!opts?.windowsAncestorDacl) {
@@ -734,6 +744,7 @@ function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void 
       }
     });
     read = readWindowsAcls(present);
+    trace(`ancestors-acl-read n=${present.length}`);
   }
   for (const ancestor of ancestors) {
     let acl: WindowsAcl;
@@ -782,7 +793,9 @@ function ensureDesktopDirectory(
   opts?: DesktopDirectoryOpts,
 ): void {
   const platform = opts?.platform ?? process.platform;
+  trace(`dir-start ${basename(dir)}`);
   refuseDesktopAncestors(dir, platform, opts);
+  trace("dir-ancestors");
   let existing: ReturnType<typeof lstatSync> | null = null;
   try {
     existing = lstatSync(dir);
@@ -795,6 +808,7 @@ function ensureDesktopDirectory(
       // Production passes no hook: owner and DACL come from one SDDL read.
       const daclHook = opts?.windowsDirectoryDacl;
       const leaf = !opts?.windowsDirectoryOwner && !daclHook ? readWindowsAcls([dir]).get(dir) : undefined;
+      trace("dir-leaf-acl");
       if (leaf && leaf.sddl === null) {
         refuseDesktopDirectory(dir, `the directory ACL could not be read${unreadable(leaf.why)}; use a new directory`);
       }
@@ -803,6 +817,7 @@ function ensureDesktopDirectory(
       if (leaf?.sddl) {
         owner = sddlOwner(leaf.sddl)?.toUpperCase() ?? "";
         invoking = windowsInvokingSid()?.trim().toUpperCase() ?? "";
+        trace("dir-invoking-sid");
       } else {
         const found = (opts?.windowsDirectoryOwner ?? windowsDirectorySids)(dir);
         owner = found.ownerSid?.trim().toUpperCase() ?? "";
@@ -829,6 +844,7 @@ function ensureDesktopDirectory(
         refuseDesktopDirectory(dir, "dev-issuer in that directory is a symlink or junction; use a new directory");
       }
       restrict(dir);
+      trace("dir-restrict");
       return;
     }
     const uid = typeof process.getuid === "function" ? process.getuid() : existing.uid;
@@ -843,10 +859,12 @@ function ensureDesktopDirectory(
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // A missing intermediate directory another user created between the first check and mkdir is theirs now.
   refuseDesktopAncestors(dir, platform, opts);
+  trace("dir-ancestors-after-mkdir");
   const created = lstatSync(dir);
   if (created.isSymbolicLink() || !created.isDirectory()) refuseDesktopDirectory(dir);
   if (platform === "win32") {
     restrict(dir);
+    trace("dir-restrict");
     return;
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : created.uid;
@@ -1100,6 +1118,7 @@ export async function runDesktop(
       windowsAncestorDacl: hooks?.windowsAncestorDacl,
     });
     const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
+    trace("mode-decided");
     if ("error" in decided) {
       const named = decided.lockPort === null ? "unknown" : String(decided.lockPort);
       writeErr(`${decided.error}:${decided.pid}:${named}\n`);
@@ -1135,6 +1154,7 @@ export async function runDesktop(
       discardStaleFile(tokenPath);
       discardStaleFile(issuerJwksPinPath(opts.stateDir));
       if (await busy("issuer", opts.issuerPort)) return 1;
+      trace("issuer-launch");
       const issuer = launch(
         "issuer",
         process.execPath,
@@ -1152,6 +1172,7 @@ export async function runDesktop(
         (text) => text.includes(issuerReadyLine(opts.issuerPort)),
         hooks?.readyMs ?? 15_000,
       );
+      trace(`issuer-${issuerReady}`);
       if (issuerReady === "exited") return childFailed("issuer");
       if (issuerReady === "timeout") {
         writeErr("desktop-issuer-timeout\n");
@@ -1187,6 +1208,7 @@ export async function runDesktop(
       }
 
       if (await busy("body", opts.bodyPort)) return 1;
+      trace("body-launch");
       const body = launch(
         "body",
         process.execPath,
@@ -1216,6 +1238,7 @@ export async function runDesktop(
         (text) => text.includes(bodyReadyLine(opts.bodyPort)),
         hooks?.readyMs ?? 15_000,
       );
+      trace(`body-${bodyReady}`);
       if (bodyReady === "exited") return childFailed("body");
       if (bodyReady === "timeout") {
         writeErr("desktop-body-timeout\n");
@@ -1230,6 +1253,7 @@ export async function runDesktop(
       join(repoRoot, "packages"),
     ];
     if (!hooks?.spawn && panelBuildNeeded(join(panelDir, "dist", "index.html"), panelSources)) {
+      trace("panel-build");
       const built = spawnSync(process.execPath, [viteJs, "build"], {
         cwd: panelDir,
         env: { ...cleanEnv(), VERAX_BODY_URL: bodyLoopback },
@@ -1268,6 +1292,7 @@ export async function runDesktop(
       (text) => text.includes(panelReadyLine(opts.panelPort)),
       hooks?.readyMs ?? 20_000,
     );
+    trace(`panel-${panelReady}`);
     if (panelReady === "exited") return childFailed("panel");
     if (panelReady === "timeout") {
       writeErr("desktop-panel-timeout\n");
@@ -1299,6 +1324,7 @@ export async function runDesktop(
           `--app=${url}`,
           "--window-size=1360,880",
         ];
+    trace("browser-launch");
     const browser = launch("browser", browserBin, browserArgv, cleanEnv(), repoRoot, false);
     kids.push(browser);
     pipe("browser", browser, { text: "" });
