@@ -223,12 +223,15 @@ describe("verax desktop CLI", () => {
         const traced = sink.text.split(/\r?\n/).filter((line) => line.startsWith("desktop-trace "));
         if (process.platform === "win32") {
           const aclReads = sink.text.split(/\r?\n/).filter((line) => line.startsWith("desktop-trace acl-read "));
-          assert.equal(aclReads.length, 3, `acl-read-calls\n${aclReads.join("\n")}`);
+          // Four acl-read lines: state directory (ancestors + leaf), executed code
+          // (scripts plus parent dirs), profile before mkdir, profile after mkdir.
+          // The two before dir-start browser-profile are the state directory and the code.
+          assert.equal(aclReads.length, 4, `acl-read-calls\n${aclReads.join("\n")}`);
           const beforeProfile = sink.text.split("desktop-trace dir-start browser-profile")[0] ?? "";
           const aclBeforeProfile = beforeProfile
             .split(/\r?\n/)
             .filter((line) => line.startsWith("desktop-trace acl-read "));
-          assert.equal(aclBeforeProfile.length, 1, `acl-read-calls\n${aclReads.join("\n")}`);
+          assert.equal(aclBeforeProfile.length, 2, `acl-read-calls\n${aclReads.join("\n")}`);
         }
         process.stdout.write(`${traced.join("\n")}\n`);
       } finally {

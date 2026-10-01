@@ -8,6 +8,7 @@ import { DESKTOP_PARENT_PID } from "./desktop-parent.ts";
 import {
   defaultExec,
   foreignAclPrincipals,
+  moduleSearchDirs,
   posixOthersCanReplace,
   readSddlBatch,
   restrictToOwnerWin32,
@@ -15,9 +16,11 @@ import {
   systemToolEnv,
   systemToolPath,
   toolArgv,
+  trustTargets,
   windowsDirectorySids,
   windowsInvokingSid,
   windowsUserCanWrite,
+  type InstallPlatform,
 } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
 import { pidAlive, readLockFile } from "./unlock.ts";
@@ -151,11 +154,25 @@ export function parseDesktopArgs(
     if (a.startsWith("-")) return { error: `flag-unknown:${a}` };
   }
   if (!stateDir) return { error: "usage" };
-  if (platform === "win32" && desktopStateUncOrDevice(stateDir)) return { error: "desktop-state-unc" };
+  // Resolved against this process's cwd. The children start with cwd = repoRoot,
+  // so a relative --state or --inventory would otherwise be created somewhere
+  // other than the path this check judged. A relative name under a UNC cwd
+  // resolves onto that share, so the device check sees both strings.
+  const resolvedState = resolve(stateDir);
+  if (platform === "win32" && (desktopStateUncOrDevice(stateDir) || desktopStateUncOrDevice(resolvedState))) {
+    return { error: "desktop-state-unc" };
+  }
   if (![panelPort, issuerPort, bodyPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) {
     return { error: "port-invalid" };
   }
-  return { stateDir, panelPort, issuerPort, bodyPort, browser, inventoryFile };
+  return {
+    stateDir: resolvedState,
+    panelPort,
+    issuerPort,
+    bodyPort,
+    browser,
+    inventoryFile: inventoryFile === undefined ? undefined : resolve(inventoryFile),
+  };
 }
 
 export function portOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
@@ -260,15 +277,30 @@ export function discardStaleFile(file: string): void {
   }
 }
 
+/** JWK members that carry private or symmetric key material. A pin is public verification material. */
+const JWK_PRIVATE_FIELDS = new Set(["d", "p", "q", "dp", "dq", "qi", "k"]);
+
+function jwkCarriesPrivateMaterial(key: unknown): boolean {
+  if (key === null || typeof key !== "object") return false;
+  return Object.keys(key).some((field) => JWK_PRIVATE_FIELDS.has(field));
+}
+
 /**
  * The pin is the file the issuer just wrote. Compact JSON, or a throw when
- * it is not a key set. Nothing is fetched.
+ * it is not a key set. Nothing is fetched. A symlink for `dev-issuer` or for
+ * the pin file is refused, and so is any key that carries private material:
+ * those fail closed instead of being stripped out.
  */
 export function readIssuerJwksPin(stateDir: string): string {
+  if (devIssuerIsLink(stateDir)) throw new Error("desktop-jwks-pin-failed");
+  const pinPath = issuerJwksPinPath(stateDir);
   let text: string;
   try {
-    text = readFileSync(issuerJwksPinPath(stateDir), "utf8");
-  } catch {
+    const st = lstatSync(pinPath);
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error("desktop-jwks-pin-failed");
+    text = readFileSync(pinPath, "utf8");
+  } catch (err) {
+    if (err instanceof Error && err.message === "desktop-jwks-pin-failed") throw err;
     throw new Error("desktop-jwks-pin-failed");
   }
   try {
@@ -276,6 +308,7 @@ export function readIssuerJwksPin(stateDir: string): string {
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
       throw new Error("desktop-jwks-pin-failed");
     }
+    if (parsed.keys.some((key) => jwkCarriesPrivateMaterial(key))) throw new Error("desktop-jwks-pin-failed");
     return JSON.stringify({ keys: parsed.keys });
   } catch (err) {
     if (err instanceof Error && err.message === "desktop-jwks-pin-failed") throw err;
@@ -499,6 +532,12 @@ export type DesktopHooks = {
    * DACL hook is set and this is not, ancestors are not read from the machine.
    */
   windowsAncestorDacl?: (dir: string) => string;
+  /**
+   * Replaces the one Windows DACL read of the code this run launches.
+   * When set, that check runs even if `spawn` is also set, so a test can
+   * read the refusal's fix line without starting a child.
+   */
+  windowsCodeAcl?: (paths: readonly string[]) => Map<string, { sddl: string | null }>;
   /** Replaces `killTree` for the children this run started. */
   kill?: (pid: number | undefined) => void;
   /** Called with the capped stdout/stderr kept for one child. */
@@ -980,10 +1019,33 @@ export function issuerEnv(
   };
 }
 
-function cleanEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" };
-  delete env.VERAX_DEV_TOKEN;
+/** Removed from every child. Compared case-insensitively: on Windows `node_options` is `NODE_OPTIONS`. */
+const DESKTOP_CHILD_ENV_DROPPED = new Set([
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "VERAX_DEV_TOKEN",
+]);
+
+/**
+ * Environment handed to a desktop child. Bootstrap and preload variables are
+ * removed. Other `VERAX_*` names are left as given. `NO_COLOR` and `FORCE_COLOR`
+ * stay forced off, as they were before this filter.
+ */
+export function desktopChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, NO_COLOR: "1", FORCE_COLOR: "0" };
+  for (const key of Object.keys(env)) {
+    if (DESKTOP_CHILD_ENV_DROPPED.has(key.toUpperCase())) delete env[key];
+  }
   return env;
+}
+
+function cleanEnv(): NodeJS.ProcessEnv {
+  return desktopChildEnv(process.env);
 }
 
 /**
@@ -1023,6 +1085,115 @@ function defaultBrowser(): string | null {
   for (const p of edge) if (existsSync(p)) return p;
   for (const p of chrome) if (existsSync(p)) return p;
   return null;
+}
+
+function codeInstallPlatform(platform: NodeJS.Platform): InstallPlatform {
+  if (platform === "win32" || platform === "darwin") return platform;
+  return "linux";
+}
+
+/**
+ * Code the desktop launches, the directory that holds each file, and every
+ * `node_modules` Node would search from there. `trustTargets` marks the
+ * parent of a script as an ancestor; only a Windows executable's parent is
+ * an object there. Adding a file next to the script is the same threat, so
+ * the file and its parent are objects here and only the directories above
+ * them stay ancestors. A path that is both is kept once, as an object.
+ */
+function desktopCodeTargets(
+  files: readonly string[],
+  platform: InstallPlatform,
+): { path: string; ancestor: boolean }[] {
+  const merged = new Map<string, { path: string; ancestor: boolean }>();
+  const put = (file: string, ancestor: boolean): void => {
+    const key = platform === "win32" ? file.toLowerCase() : file;
+    const prev = merged.get(key);
+    if (!prev) {
+      merged.set(key, { path: file, ancestor });
+      return;
+    }
+    if (prev.ancestor && !ancestor) merged.set(key, { path: prev.path, ancestor: false });
+  };
+  for (const file of files) {
+    const chain = trustTargets(file, platform);
+    for (let i = 0; i < chain.length; i += 1) put(chain[i]!.path, i > 1);
+    for (const dir of moduleSearchDirs(dirname(file), platform)) put(dir, false);
+  }
+  return [...merged.values()];
+}
+
+function inspectCodePath(
+  file: string,
+): { ok: false; detail: string } | { ok: true; uid: number; mode: number } {
+  try {
+    const st = lstatSync(file);
+    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile())) {
+      return { ok: false, detail: " (is a link or not a regular file)" };
+    }
+    return { ok: true, uid: st.uid, mode: st.mode };
+  } catch {
+    return { ok: false, detail: " (could not be read)" };
+  }
+}
+
+/** Third line of a code refusal: what the operator can do about this checkout. */
+function desktopCodeFix(platform: NodeJS.Platform, repoRoot: string): string {
+  if (platform === "win32") {
+    return `fix: clone under your user profile, or run: icacls "${repoRoot}" /inheritance:r /grant:r "%USERNAME%:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"`;
+  }
+  return `fix: chmod -R go-w "${repoRoot}" and make sure every parent directory is owned by you or root`;
+}
+
+/**
+ * First launched script, parent, ancestor, or module directory that someone
+ * else can replace. Null when every target is held tightly enough to run.
+ * `detail` is the second line of the refusal. On Windows one `read` (or
+ * `readWindowsAcls`) judges the whole list with `svcSid`: someone other than
+ * the operator, Administrators, or SYSTEM. On POSIX the owner is trusted
+ * when it is the operator or root, then `posixOthersCanReplace`.
+ */
+export function desktopCodeRefusal(
+  paths: readonly string[],
+  platform: NodeJS.Platform,
+  read?: (p: readonly string[]) => Map<string, { sddl: string | null }>,
+  invoking?: string,
+): { path: string; detail: string } | null {
+  const targets = desktopCodeTargets(paths, codeInstallPlatform(platform));
+  const wanted = targets.map((target) => target.path);
+  const acls = platform === "win32" ? (read !== undefined ? read(wanted) : readWindowsAcls(wanted)) : null;
+  const svc = invoking?.trim().toUpperCase() ?? "";
+  const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  for (const target of targets) {
+    const inspected = inspectCodePath(target.path);
+    if (!inspected.ok) return { path: target.path, detail: inspected.detail };
+    if (platform === "win32") {
+      const sddl = acls?.get(target.path)?.sddl ?? null;
+      if (sddl === null) return { path: target.path, detail: " (ACL could not be read)" };
+      if (windowsUserCanWrite(sddl, { path: target.path, svcSid: svc, ancestor: target.ancestor })) {
+        return { path: target.path, detail: aclWho(sddl, svc) };
+      }
+      continue;
+    }
+    const ownerIsOperator = inspected.uid === 0 || inspected.uid === uid;
+    if (
+      posixOthersCanReplace(
+        { uid: ownerIsOperator ? 0 : inspected.uid, mode: inspected.mode, symlink: false },
+        target.ancestor,
+      )
+    ) {
+      return {
+        path: target.path,
+        detail: ` (owner uid ${inspected.uid}; mode ${(inspected.mode & 0o777).toString(8)})`,
+      };
+    }
+  }
+  return null;
+}
+
+function codeInvoking(platform: NodeJS.Platform, stateDir: string, hooks?: DesktopHooks): string | undefined {
+  if (platform !== "win32") return undefined;
+  if (hooks?.windowsDirectoryOwner) return hooks.windowsDirectoryOwner(stateDir).invokingSid?.trim().toUpperCase() ?? "";
+  return windowsInvokingSid()?.trim().toUpperCase() ?? "";
 }
 
 export async function runDesktop(
@@ -1165,6 +1336,21 @@ export async function runDesktop(
       windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
       windowsAncestorDacl: hooks?.windowsAncestorDacl,
     });
+    // A spawn hook stands in for the children, so those tests never execute these
+    // files and skip this check. `windowsCodeAcl` is the test that wants the
+    // refusal, including its fix line, and it runs even when spawn is set.
+    // Production, which has no spawn hook, always runs it.
+    if (!hooks?.spawn || hooks.windowsCodeAcl) {
+      const codeFiles = [issuerScript, mainTs, viteJs];
+      const codePlatform = hooks?.platform ?? process.platform;
+      const invoking = codeInvoking(codePlatform, opts.stateDir, hooks);
+      const refused = desktopCodeRefusal(codeFiles, codePlatform, hooks?.windowsCodeAcl, invoking);
+      if (refused !== null) {
+        writeErr(`desktop-code-writable:${refused.path}\n${refused.detail.trim()}\n${desktopCodeFix(codePlatform, repoRoot)}\n`);
+        stopAll();
+        return 1;
+      }
+    }
     const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
     trace("mode-decided");
     if ("error" in decided) {
