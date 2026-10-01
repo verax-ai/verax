@@ -152,6 +152,7 @@ describe("verax desktop CLI", () => {
               NO_COLOR: "1",
               FORCE_COLOR: "0",
               VERAX_FAKE_BROWSER_PID: pidPath,
+              VERAX_DESKTOP_TRACE: "1",
             },
             stdio: ["ignore", "pipe", "pipe"],
             windowsHide: true,
@@ -219,6 +220,8 @@ describe("verax desktop CLI", () => {
         // longer turns red on the runner's mood.
         assert.equal(empty, true, `ports-still-open after ${emptiedMs}ms\n${sink.text}`);
         process.stdout.write(`desktop-teardown-ms=${emptiedMs}\n`);
+        const traced = sink.text.split(/\r?\n/).filter((line) => line.startsWith("desktop-trace "));
+        process.stdout.write(`${traced.join("\n")}\n`);
       } finally {
         if (child?.pid) killTree(child.pid);
         rmSync(stateDir, { recursive: true, force: true });
