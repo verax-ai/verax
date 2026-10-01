@@ -1081,33 +1081,39 @@ function defaultBrowser(): string | null {
 /**
  * First launched script, or its parent, that someone else can replace.
  * Null when every path is a real file or directory held tightly enough to run.
- * `read`, when set, is the one Windows DACL read; otherwise that read is
- * `readWindowsAcls` of the whole list.
+ * `detail` is the second line of the refusal: who can write, or why the path
+ * could not be judged. `read`, when set, is the one Windows DACL read;
+ * otherwise that read is `readWindowsAcls` of the whole list.
  */
 export function desktopCodeRefusal(
   paths: readonly string[],
   platform: NodeJS.Platform,
   read?: (p: readonly string[]) => Map<string, { sddl: string | null }>,
   invoking?: string,
-): string | null {
+): { path: string; detail: string } | null {
   for (const p of paths) {
     let st: ReturnType<typeof lstatSync>;
     try {
       st = lstatSync(p);
     } catch {
-      return p;
+      return { path: p, detail: " (could not be read)" };
     }
-    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile())) return p;
+    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile())) {
+      return { path: p, detail: " (is a link or not a regular file)" };
+    }
     if (platform === "win32") continue;
     const uid = typeof process.getuid === "function" ? process.getuid() : 0;
-    if ((st.uid !== uid && st.uid !== 0) || (st.mode & 0o022) !== 0) return p;
+    if ((st.uid !== uid && st.uid !== 0) || (st.mode & 0o022) !== 0) {
+      return { path: p, detail: ` (owner uid ${st.uid}; mode ${(st.mode & 0o777).toString(8)})` };
+    }
   }
   if (platform !== "win32") return null;
   const acls = read !== undefined ? read(paths) : readWindowsAcls(paths);
   const svc = invoking?.trim().toUpperCase() ?? "";
   for (const p of paths) {
     const sddl = acls.get(p)?.sddl ?? null;
-    if (sddl === null || windowsUserCanWrite(sddl, { svcSid: svc })) return p;
+    if (sddl === null) return { path: p, detail: " (ACL could not be read)" };
+    if (windowsUserCanWrite(sddl, { svcSid: svc })) return { path: p, detail: aclWho(sddl, svc) };
   }
   return null;
 }
@@ -1260,7 +1266,7 @@ export async function runDesktop(
       const invoking = codePlatform === "win32" ? (windowsInvokingSid()?.trim().toUpperCase() ?? "") : undefined;
       const refused = desktopCodeRefusal(codePaths, codePlatform, undefined, invoking);
       if (refused !== null) {
-        writeErr(`desktop-code-writable:${refused}\n`);
+        writeErr(`desktop-code-writable:${refused.path}\n${refused.detail.trim()}\n`);
         stopAll();
         return 1;
       }

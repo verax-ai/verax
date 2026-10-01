@@ -317,7 +317,9 @@ describe("verax desktop code paths", () => {
     writeFileSync(file, "");
     chmodSync(file, 0o666);
     try {
-      assert.equal(desktopCodeRefusal([file], process.platform), file);
+      const refused = desktopCodeRefusal([file], process.platform);
+      assert.equal(refused?.path, file);
+      assert.match(refused?.detail ?? "", /owner uid \d+; mode 666/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -346,7 +348,8 @@ describe("verax desktop code paths", () => {
         },
         owner,
       );
-      assert.equal(everyone, file);
+      assert.equal(everyone?.path, file);
+      assert.match(everyone?.detail ?? "", /S-1-1-0|WD/);
       assert.equal(reads, 1);
       const accepted = desktopCodeRefusal(
         paths,
