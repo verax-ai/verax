@@ -41,11 +41,20 @@ jobs:
       # desktop refuses a code path someone else can add to, and that refusal
       # is the right behaviour. This step gives the job the checkout an
       # operator's own clone would have. It does not loosen the product's rule.
+      # The account is granted by SID, and the step prints who runs it and
+      # the ACL before and after, so a later permission error has evidence.
       - name: keep the checkout writable only by this account, SYSTEM and Administrators
         shell: pwsh
         run: |
-          icacls "$env:GITHUB_WORKSPACE" /inheritance:r /grant:r "${env:USERNAME}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /C /Q
+          $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+          "identity $($me.Name) $($me.User.Value) USERNAME=$env:USERNAME"
+          whoami /groups /fo csv | Select-String 'S-1-5-32-544|S-1-5-32-545|Mandatory Label'
+          icacls "$env:GITHUB_WORKSPACE\package-lock.json"
+          icacls "$env:GITHUB_WORKSPACE" /inheritance:r /grant:r "*$($me.User.Value):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /T /C /Q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls "$env:GITHUB_WORKSPACE\package-lock.json"
+          $null = [IO.File]::ReadAllBytes("$env:GITHUB_WORKSPACE\package-lock.json")
+          "package-lock.json readable after the change"
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: "22"
