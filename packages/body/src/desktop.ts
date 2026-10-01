@@ -540,6 +540,7 @@ type WindowsAcl = { sddl: string | null; why: string };
  */
 function readWindowsAcls(paths: readonly string[]): Map<string, WindowsAcl> {
   const read = readSddlBatch(defaultExec, paths);
+  trace(`acl-read n=${paths.length}`);
   const out = new Map<string, WindowsAcl>();
   for (const p of paths) {
     const hit = read.get(p);
@@ -559,6 +560,7 @@ let localAccounts: { LA?: string; LG?: string } | null = null;
 /** This machine's built-in Administrator and Guest SIDs, which an SDDL writes as `LA` and `LG`. Empty when the lookup fails. */
 function localAccountSids(): { LA?: string; LG?: string } {
   if (localAccounts) return localAccounts;
+  trace("local-account-sids-start");
   const ran = defaultExec(
     toolArgv(
       "powershell",
@@ -727,22 +729,47 @@ function ancestorInvokingSid(dir: string, opts?: DesktopDirectoryOpts): string {
   }
 }
 
-function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void {
+/** Ancestors that exist. A missing ancestor is skipped; any other stat error is a refusal. */
+function presentAncestors(dir: string): string[] {
+  return ancestorPaths(dir).filter((ancestor) => {
+    try {
+      lstatSync(ancestor);
+      return true;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
+      return refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
+    }
+  });
+}
+
+/**
+ * True when `dir` is already a real directory. A missing path, a link, or a
+ * non-directory stays on the caller's existing path, including a stat error
+ * that the later `lstat` still reports.
+ */
+function isExistingRealDirectory(dir: string): boolean {
+  try {
+    const st = lstatSync(dir);
+    return !st.isSymbolicLink() && st.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function refuseWindowsAncestors(
+  dir: string,
+  opts?: DesktopDirectoryOpts,
+  preread?: Map<string, WindowsAcl>,
+): void {
   if ((opts?.windowsDirectoryDacl || opts?.windowsDirectoryOwner) && !opts?.windowsAncestorDacl) return;
   const svc = ancestorInvokingSid(dir, opts);
   trace("ancestors-invoking-sid");
   const ancestors = ancestorPaths(dir);
   let read: Map<string, WindowsAcl> | null = null;
-  if (!opts?.windowsAncestorDacl) {
-    const present = ancestors.filter((ancestor) => {
-      try {
-        lstatSync(ancestor);
-        return true;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "ENOENT") return false;
-        return refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
-      }
-    });
+  if (preread) {
+    read = preread;
+  } else if (!opts?.windowsAncestorDacl) {
+    const present = presentAncestors(dir);
     read = readWindowsAcls(present);
     trace(`ancestors-acl-read n=${present.length}`);
   }
@@ -767,10 +794,15 @@ function refuseWindowsAncestors(dir: string, opts?: DesktopDirectoryOpts): void 
 }
 
 /** Intermediate link, or an ancestor another user can replace. Same rule for a new directory and an existing one. */
-function refuseDesktopAncestors(dir: string, platform: NodeJS.Platform, opts?: DesktopDirectoryOpts): void {
+function refuseDesktopAncestors(
+  dir: string,
+  platform: NodeJS.Platform,
+  opts?: DesktopDirectoryOpts,
+  preread?: Map<string, WindowsAcl>,
+): void {
   const link = intermediateLink(dir);
   if (link) refuseDesktopDirectory(dir, `ancestor ${link} is a link`);
-  if (platform === "win32") refuseWindowsAncestors(dir, opts);
+  if (platform === "win32") refuseWindowsAncestors(dir, opts, preread);
   else refusePosixAncestors(dir);
 }
 
@@ -794,7 +826,19 @@ function ensureDesktopDirectory(
 ): void {
   const platform = opts?.platform ?? process.platform;
   trace(`dir-start ${basename(dir)}`);
-  refuseDesktopAncestors(dir, platform, opts);
+  // An existing directory and the ancestors that already exist share one SDDL
+  // read. A path that is not there yet still reads ancestors before mkdir and
+  // again after mkdir, so a directory created in between is not missed.
+  // Hooked owner and DACL lookups stay on their own calls.
+  const noWindowsAclHooks =
+    !opts?.windowsDirectoryOwner && !opts?.windowsDirectoryDacl && !opts?.windowsAncestorDacl;
+  let preread: Map<string, WindowsAcl> | undefined;
+  if (platform === "win32" && noWindowsAclHooks && isExistingRealDirectory(dir)) {
+    const link = intermediateLink(dir);
+    if (link) refuseDesktopDirectory(dir, `ancestor ${link} is a link`);
+    preread = readWindowsAcls([...presentAncestors(dir), dir]);
+  }
+  refuseDesktopAncestors(dir, platform, opts, preread);
   trace("dir-ancestors");
   let existing: ReturnType<typeof lstatSync> | null = null;
   try {
@@ -807,7 +851,11 @@ function ensureDesktopDirectory(
     if (platform === "win32") {
       // Production passes no hook: owner and DACL come from one SDDL read.
       const daclHook = opts?.windowsDirectoryDacl;
-      const leaf = !opts?.windowsDirectoryOwner && !daclHook ? readWindowsAcls([dir]).get(dir) : undefined;
+      const leaf = preread
+        ? preread.get(dir)
+        : !opts?.windowsDirectoryOwner && !daclHook
+          ? readWindowsAcls([dir]).get(dir)
+          : undefined;
       trace("dir-leaf-acl");
       if (leaf && leaf.sddl === null) {
         refuseDesktopDirectory(dir, `the directory ACL could not be read${unreadable(leaf.why)}; use a new directory`);
