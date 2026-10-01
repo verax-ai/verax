@@ -151,11 +151,25 @@ export function parseDesktopArgs(
     if (a.startsWith("-")) return { error: `flag-unknown:${a}` };
   }
   if (!stateDir) return { error: "usage" };
-  if (platform === "win32" && desktopStateUncOrDevice(stateDir)) return { error: "desktop-state-unc" };
+  // Resolved against this process's cwd. The children start with cwd = repoRoot,
+  // so a relative --state or --inventory would otherwise be created somewhere
+  // other than the path this check judged. A relative name under a UNC cwd
+  // resolves onto that share, so the device check sees both strings.
+  const resolvedState = resolve(stateDir);
+  if (platform === "win32" && (desktopStateUncOrDevice(stateDir) || desktopStateUncOrDevice(resolvedState))) {
+    return { error: "desktop-state-unc" };
+  }
   if (![panelPort, issuerPort, bodyPort].every((n) => Number.isInteger(n) && n > 0 && n < 65536)) {
     return { error: "port-invalid" };
   }
-  return { stateDir, panelPort, issuerPort, bodyPort, browser, inventoryFile };
+  return {
+    stateDir: resolvedState,
+    panelPort,
+    issuerPort,
+    bodyPort,
+    browser,
+    inventoryFile: inventoryFile === undefined ? undefined : resolve(inventoryFile),
+  };
 }
 
 export function portOpen(port: number, host = "127.0.0.1"): Promise<boolean> {
@@ -260,15 +274,30 @@ export function discardStaleFile(file: string): void {
   }
 }
 
+/** JWK members that carry private or symmetric key material. A pin is public verification material. */
+const JWK_PRIVATE_FIELDS = new Set(["d", "p", "q", "dp", "dq", "qi", "k"]);
+
+function jwkCarriesPrivateMaterial(key: unknown): boolean {
+  if (key === null || typeof key !== "object") return false;
+  return Object.keys(key).some((field) => JWK_PRIVATE_FIELDS.has(field));
+}
+
 /**
  * The pin is the file the issuer just wrote. Compact JSON, or a throw when
- * it is not a key set. Nothing is fetched.
+ * it is not a key set. Nothing is fetched. A symlink for `dev-issuer` or for
+ * the pin file is refused, and so is any key that carries private material:
+ * those fail closed instead of being stripped out.
  */
 export function readIssuerJwksPin(stateDir: string): string {
+  if (devIssuerIsLink(stateDir)) throw new Error("desktop-jwks-pin-failed");
+  const pinPath = issuerJwksPinPath(stateDir);
   let text: string;
   try {
-    text = readFileSync(issuerJwksPinPath(stateDir), "utf8");
-  } catch {
+    const st = lstatSync(pinPath);
+    if (st.isSymbolicLink() || !st.isFile()) throw new Error("desktop-jwks-pin-failed");
+    text = readFileSync(pinPath, "utf8");
+  } catch (err) {
+    if (err instanceof Error && err.message === "desktop-jwks-pin-failed") throw err;
     throw new Error("desktop-jwks-pin-failed");
   }
   try {
@@ -276,6 +305,7 @@ export function readIssuerJwksPin(stateDir: string): string {
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
       throw new Error("desktop-jwks-pin-failed");
     }
+    if (parsed.keys.some((key) => jwkCarriesPrivateMaterial(key))) throw new Error("desktop-jwks-pin-failed");
     return JSON.stringify({ keys: parsed.keys });
   } catch (err) {
     if (err instanceof Error && err.message === "desktop-jwks-pin-failed") throw err;
@@ -980,10 +1010,33 @@ export function issuerEnv(
   };
 }
 
-function cleanEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" };
-  delete env.VERAX_DEV_TOKEN;
+/** Removed from every child. Compared case-insensitively: on Windows `node_options` is `NODE_OPTIONS`. */
+const DESKTOP_CHILD_ENV_DROPPED = new Set([
+  "NODE_OPTIONS",
+  "NODE_PATH",
+  "NODE_REPL_EXTERNAL_MODULE",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "VERAX_DEV_TOKEN",
+]);
+
+/**
+ * Environment handed to a desktop child. Bootstrap and preload variables are
+ * removed. Other `VERAX_*` names are left as given. `NO_COLOR` and `FORCE_COLOR`
+ * stay forced off, as they were before this filter.
+ */
+export function desktopChildEnv(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...base, NO_COLOR: "1", FORCE_COLOR: "0" };
+  for (const key of Object.keys(env)) {
+    if (DESKTOP_CHILD_ENV_DROPPED.has(key.toUpperCase())) delete env[key];
+  }
   return env;
+}
+
+function cleanEnv(): NodeJS.ProcessEnv {
+  return desktopChildEnv(process.env);
 }
 
 /**
@@ -1022,6 +1075,40 @@ function defaultBrowser(): string | null {
   ];
   for (const p of edge) if (existsSync(p)) return p;
   for (const p of chrome) if (existsSync(p)) return p;
+  return null;
+}
+
+/**
+ * First launched script, or its parent, that someone else can replace.
+ * Null when every path is a real file or directory held tightly enough to run.
+ * `read`, when set, is the one Windows DACL read; otherwise that read is
+ * `readWindowsAcls` of the whole list.
+ */
+export function desktopCodeRefusal(
+  paths: readonly string[],
+  platform: NodeJS.Platform,
+  read?: (p: readonly string[]) => Map<string, { sddl: string | null }>,
+  invoking?: string,
+): string | null {
+  for (const p of paths) {
+    let st: ReturnType<typeof lstatSync>;
+    try {
+      st = lstatSync(p);
+    } catch {
+      return p;
+    }
+    if (st.isSymbolicLink() || (!st.isDirectory() && !st.isFile())) return p;
+    if (platform === "win32") continue;
+    const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+    if ((st.uid !== uid && st.uid !== 0) || (st.mode & 0o022) !== 0) return p;
+  }
+  if (platform !== "win32") return null;
+  const acls = read !== undefined ? read(paths) : readWindowsAcls(paths);
+  const svc = invoking?.trim().toUpperCase() ?? "";
+  for (const p of paths) {
+    const sddl = acls.get(p)?.sddl ?? null;
+    if (sddl === null || windowsUserCanWrite(sddl, { svcSid: svc })) return p;
+  }
   return null;
 }
 
@@ -1165,6 +1252,19 @@ export async function runDesktop(
       windowsDirectoryDacl: hooks?.windowsDirectoryDacl,
       windowsAncestorDacl: hooks?.windowsAncestorDacl,
     });
+    // hooks.spawn stands in for the children, so those tests never execute these
+    // files. Skip the writability check there. Production, which has no spawn hook, always runs it.
+    if (!hooks?.spawn) {
+      const codePaths = [issuerScript, dirname(issuerScript), mainTs, dirname(mainTs), viteJs, dirname(viteJs)];
+      const codePlatform = hooks?.platform ?? process.platform;
+      const invoking = codePlatform === "win32" ? (windowsInvokingSid()?.trim().toUpperCase() ?? "") : undefined;
+      const refused = desktopCodeRefusal(codePaths, codePlatform, undefined, invoking);
+      if (refused !== null) {
+        writeErr(`desktop-code-writable:${refused}\n`);
+        stopAll();
+        return 1;
+      }
+    }
     const decided = await desktopMode(opts.stateDir, opts.bodyPort, hooks?.listenerPid);
     trace("mode-decided");
     if ("error" in decided) {

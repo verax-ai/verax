@@ -1,11 +1,21 @@
 import { strict as assert } from "node:assert";
-import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 
-import { desktopMode, desktopPasskeyHint, forwardIpv6Loopback, issuerEnv, parseDesktopArgs, runDesktop } from "../src/desktop.ts";
+import {
+  desktopChildEnv,
+  desktopCodeRefusal,
+  desktopMode,
+  desktopPasskeyHint,
+  forwardIpv6Loopback,
+  issuerEnv,
+  parseDesktopArgs,
+  readIssuerJwksPin,
+  runDesktop,
+} from "../src/desktop.ts";
 import { CREDENTIALS_FILE } from "../src/operator-credentials.ts";
 
 function freePort(): Promise<number> {
@@ -147,7 +157,16 @@ describe("verax desktop args", () => {
   it("parseDesktopArgs accepts --inventory", () => {
     const parsed = parseDesktopArgs(["desktop", "--state", "s", "--inventory", "roster.json"]);
     assert.ok(!("error" in parsed));
-    if (!("error" in parsed)) assert.equal(parsed.inventoryFile, "roster.json");
+    if (!("error" in parsed)) {
+      assert.equal(parsed.stateDir, resolve("s"));
+      assert.equal(parsed.inventoryFile, resolve("roster.json"));
+    }
+  });
+
+  it("parseDesktopArgs resolves a relative state directory", () => {
+    const parsed = parseDesktopArgs(["desktop", "--state", "st"]);
+    assert.ok(!("error" in parsed));
+    if (!("error" in parsed)) assert.equal(parsed.stateDir, resolve("st"));
   });
 });
 
@@ -197,5 +216,147 @@ describe("verax desktop wiring", () => {
     assert.equal(kept.VERAX_RP_ID, "login.example");
     assert.equal(kept.VERAX_RP_ORIGINS, "https://login.example");
     assert.equal(kept.VERAX_DEV_REDIRECT_URIS, "http://localhost:5200/");
+  });
+});
+
+function jwksState(): string {
+  const dir = mkdtempSync(join(tmpdir(), "verax-desktop-jwks-"));
+  mkdirSync(join(dir, "dev-issuer"));
+  return dir;
+}
+
+const PUBLIC_JWKS = { keys: [{ kty: "EC", kid: "verax-dev", alg: "ES256" }] };
+
+describe("verax desktop jwks pin", () => {
+  it("refuses a jwks pin that contains a private field", () => {
+    const dir = jwksState();
+    try {
+      writeFileSync(
+        join(dir, "dev-issuer", "jwks.json"),
+        `${JSON.stringify({ keys: [{ kty: "EC", kid: "verax-dev", d: "secret" }] })}\n`,
+      );
+      assert.throws(() => readIssuerJwksPin(dir), { message: "desktop-jwks-pin-failed" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses a jwks pin that is a symbolic link", (t) => {
+    const dir = jwksState();
+    try {
+      const target = join(dir, "elsewhere.json");
+      const pin = join(dir, "dev-issuer", "jwks.json");
+      writeFileSync(target, `${JSON.stringify(PUBLIC_JWKS)}\n`);
+      try {
+        symlinkSync(target, pin);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (process.platform === "win32" && (code === "EPERM" || code === "EACCES")) {
+          t.skip("no symbolic-link privilege on this Windows account");
+          return;
+        }
+        throw error;
+      }
+      assert.throws(() => readIssuerJwksPin(dir), { message: "desktop-jwks-pin-failed" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns the public key set from a regular pin file", () => {
+    const dir = jwksState();
+    try {
+      writeFileSync(join(dir, "dev-issuer", "jwks.json"), `${JSON.stringify(PUBLIC_JWKS)}\n`);
+      assert.equal(readIssuerJwksPin(dir), JSON.stringify(PUBLIC_JWKS));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("verax desktop child environment", () => {
+  it("drops bootstrap variables and keeps PATH", () => {
+    assert.deepEqual(
+      desktopChildEnv({
+        NODE_OPTIONS: "--require x",
+        node_path: "y",
+        PATH: "p",
+        VERAX_DEV_TOKEN: "t",
+      }),
+      { PATH: "p", NO_COLOR: "1", FORCE_COLOR: "0" },
+    );
+    const dropped = [
+      "NODE_REPL_EXTERNAL_MODULE",
+      "LD_PRELOAD",
+      "LD_LIBRARY_PATH",
+      "DYLD_INSERT_LIBRARIES",
+      "DYLD_LIBRARY_PATH",
+      "ld_preload",
+    ];
+    const env = desktopChildEnv({
+      PATH: "p",
+      VERAX_AUDIENCE: "a",
+      ...Object.fromEntries(dropped.map((key) => [key, "x"])),
+    });
+    assert.equal(env.PATH, "p");
+    assert.equal(env.VERAX_AUDIENCE, "a");
+    assert.equal(env.NO_COLOR, "1");
+    assert.equal(env.FORCE_COLOR, "0");
+    for (const key of dropped) assert.equal(env[key], undefined);
+  });
+});
+
+describe("verax desktop code paths", () => {
+  it("refuses a group-and-other-writable code file", (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX mode bits");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "verax-desktop-code-"));
+    const file = join(dir, "dev-issuer.mjs");
+    writeFileSync(file, "");
+    chmodSync(file, 0o666);
+    try {
+      assert.equal(desktopCodeRefusal([file], process.platform), file);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses code Everyone can write and accepts owner, SYSTEM, and Administrators", (t) => {
+    if (process.platform !== "win32") {
+      t.skip("Windows ACL");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "verax-desktop-code-"));
+    const file = join(dir, "vite.js");
+    writeFileSync(file, "");
+    const paths = [file, dir];
+    const owner = "S-1-5-21-1";
+    const safe = `O:${owner}G:SYD:(A;;FA;;;${owner})(A;;FA;;;BA)(A;;FA;;;SY)`;
+    try {
+      let reads = 0;
+      const everyone = desktopCodeRefusal(
+        paths,
+        "win32",
+        (asked) => {
+          reads += 1;
+          assert.deepEqual([...asked], paths);
+          return new Map(paths.map((p) => [p, { sddl: "D:(A;;FA;;;WD)" }]));
+        },
+        owner,
+      );
+      assert.equal(everyone, file);
+      assert.equal(reads, 1);
+      const accepted = desktopCodeRefusal(
+        paths,
+        "win32",
+        () => new Map(paths.map((p) => [p, { sddl: safe }])),
+        owner,
+      );
+      assert.equal(accepted, null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
