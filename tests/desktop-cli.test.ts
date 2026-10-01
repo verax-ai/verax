@@ -221,6 +221,15 @@ describe("verax desktop CLI", () => {
         assert.equal(empty, true, `ports-still-open after ${emptiedMs}ms\n${sink.text}`);
         process.stdout.write(`desktop-teardown-ms=${emptiedMs}\n`);
         const traced = sink.text.split(/\r?\n/).filter((line) => line.startsWith("desktop-trace "));
+        if (process.platform === "win32") {
+          const aclReads = sink.text.split(/\r?\n/).filter((line) => line.startsWith("desktop-trace acl-read "));
+          assert.equal(aclReads.length, 3, `acl-read-calls\n${aclReads.join("\n")}`);
+          const beforeProfile = sink.text.split("desktop-trace dir-start browser-profile")[0] ?? "";
+          const aclBeforeProfile = beforeProfile
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith("desktop-trace acl-read "));
+          assert.equal(aclBeforeProfile.length, 1, `acl-read-calls\n${aclReads.join("\n")}`);
+        }
         process.stdout.write(`${traced.join("\n")}\n`);
       } finally {
         if (child?.pid) killTree(child.pid);
