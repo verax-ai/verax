@@ -121,6 +121,8 @@ export function renderVerify(r: VerifyResult): string {
     lines.push(`checkpoint    newest covers ${covered}, head ${head}, ${holds}`);
   }
   lines.push(r.tail.line);
+  lines.push(r.control.line);
+  for (const warning of r.control.warnings) lines.push(`warning       ${warning}`);
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");
@@ -219,6 +221,7 @@ export async function runVerify(
         line: "tail: no checkpoint; removing the newest records with their effects is not detectable from these files",
         checkpoint: null,
       },
+      control: { line: "control: not checked", windows: 0, warnings: [] },
       problems: [problem],
     };
     out(json ? JSON.stringify(failed, null, 2) : renderVerify(failed));

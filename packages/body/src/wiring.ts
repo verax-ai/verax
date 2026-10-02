@@ -137,6 +137,9 @@ export function createBodyServices(opts: {
     return fn(call, principal, ref);
   };
 
+  // Halt and resume lines are copied into the ledger when the body opens
+  // (`listen` awaits `proxy.syncControlRecords` before the socket accepts)
+  // and again before each call. A CLI halt waits for one of those.
   const proxy = createProxy({
     policy,
     recordSigner: opts.recordSigner,

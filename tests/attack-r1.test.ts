@@ -74,6 +74,19 @@ function readDecisions(stateDir: string): DecisionRow[] {
     .map((line) => JSON.parse(line) as DecisionRow);
 }
 
+function controlVia(stateDir: string, ref: string | undefined): string | undefined {
+  if (!ref) return undefined;
+  const path = join(stateDir, "inputs.jsonl");
+  if (!existsSync(path)) return undefined;
+  let via: string | undefined;
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (line === "") continue;
+    const row = JSON.parse(line) as { ref?: string; inputs?: { control?: { via?: string } } };
+    if (row.ref === ref) via = row.inputs?.control?.via;
+  }
+  return via;
+}
+
 function readEffects(stateDir: string): EffectRow[] {
   const path = join(stateDir, "effects.jsonl");
   if (!existsSync(path)) return [];
@@ -731,6 +744,7 @@ describe("attack R1", () => {
     const box: Boot = booted;
     try {
       assert.equal(runHalt(box.stateDir, () => undefined), 0);
+      let callIndex = 0;
       for (const name of ["memory.get", "memory.put"] as const) {
         const before = readDecisions(box.stateDir).length;
         const res = await rpc(box.mcp, box.token, "tools/call", {
@@ -749,10 +763,29 @@ describe("attack R1", () => {
         assert.match(text, /denied:halted:/, `${name} ${text}`);
         const added = readDecisions(box.stateDir).slice(before);
         assert.ok(added.length > 0, name);
+        if (callIndex === 0) {
+          assert.deepEqual(
+            added.map((row) => [row.claims.decision, row.claims.subject, row.claims.reasonCode]),
+            [
+              ["allow", "verax.halt", "operator-halt"],
+              ["deny", name, "halted"],
+            ],
+            name,
+          );
+          assert.equal(controlVia(box.stateDir, added[0]?.claims.ref), "cli", name);
+        } else {
+          assert.equal(
+            added.some((row) => row.claims.subject === "verax.halt" || row.claims.subject === "verax.resume"),
+            false,
+            name,
+          );
+        }
         for (const row of added) {
+          if (row.claims.subject === "verax.halt" || row.claims.subject === "verax.resume") continue;
           assertSignedDeny(row, name);
           assert.equal(row.claims.reasonCode, "halted", name);
         }
+        callIndex += 1;
       }
     } finally {
       await box.close();

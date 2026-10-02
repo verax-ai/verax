@@ -403,6 +403,14 @@ export async function listen(config: BodyConfig): Promise<Server> {
     await closeAll(sessions);
     throw err;
   }
+  try {
+    await services.proxy.syncControlRecords();
+  } catch (err) {
+    // syncControlRecords reports its own failure and does not throw. This
+    // catch is the door: a sync miss must not close the ledger or refuse to listen.
+    const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
+    process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
+  }
   const toolMeta = [...TOOL_META, ...extraTools.map(downstreamMeta)];
   const verify = createVerifier(config.jwksUrl, config.issuer, config.audience, config.jwksFile, config.jwksPin);
 
@@ -618,7 +626,15 @@ export async function listen(config: BodyConfig): Promise<Server> {
           return;
         }
         const by = verified.principal.brain;
-        send(res, 200, apiResume ? resumeBody(config.stateDir, by, "http") : haltBody(config.stateDir, by, "http"));
+        const state = apiResume ? resumeBody(config.stateDir, by, "http") : haltBody(config.stateDir, by, "http");
+        try {
+          await services.proxy.syncControlRecords();
+        } catch (err) {
+          // The switch is already on disk. A sync miss must not turn this into a 500.
+          const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
+          process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
+        }
+        send(res, 200, state);
         return;
       }
       if (apiApprove) {

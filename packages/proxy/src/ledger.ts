@@ -60,6 +60,12 @@ import { SerialQueue } from "./serial-queue.ts";
 
 export type PermissionCheck = "owner-only" | "not checked on this platform";
 
+/** Appends that already hold the ledger queue. Calling the public methods from here deadlocks. */
+export type LedgerWriter = {
+  appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void>;
+  appendEffect(row: EffectRow, witnessClass: WitnessClass, resultHash?: string): Promise<void>;
+};
+
 const DEFAULT_WITNESS: WitnessClass = "self";
 
 function lineOf(value: unknown): string {
@@ -290,6 +296,8 @@ function noteReauth(map: Map<string, string>, row: DecisionIndexRow): void {
 }
 
 function noteCounted(times: number[], row: DecisionIndexRow): void {
+  // A halt or resume is not a tool call. Counting it would spend the rate budget on the switch.
+  if (row.reasonCode === "operator-halt" || row.reasonCode === "operator-resume") return;
   if (row.decision === "allow" || row.decision === "defer") times.push(row.timestampMs);
 }
 
@@ -347,17 +355,31 @@ export class MemoryLedger implements Ledger {
   }
 
   async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
-    return this.q.enqueue(async () => {
-      const last = this._decisions[this._decisions.length - 1];
-      const signed = build(last ? decisionRecordHash(last) : null);
-      this._decisions.push(signed);
-      const row = indexRowOf(signed);
-      if (row) {
-        this.byRef.set(row.ref, row);
-        noteReauth(this.reauthByHash, row);
-        noteCounted(this.countedAt, row);
-      }
-    });
+    return this.q.enqueue(() => this.appendDecisionChainedUnlocked(build));
+  }
+
+  private async appendDecisionChainedUnlocked(
+    build: (prevRecordHash: string | null) => SignedDecisionRecord,
+  ): Promise<void> {
+    const last = this._decisions[this._decisions.length - 1];
+    const signed = build(last ? decisionRecordHash(last) : null);
+    this._decisions.push(signed);
+    const row = indexRowOf(signed);
+    if (row) {
+      this.byRef.set(row.ref, row);
+      noteReauth(this.reauthByHash, row);
+      noteCounted(this.countedAt, row);
+    }
+  }
+
+  /** One turn of this ledger's queue: read a cursor and append without a second writer seeing the same cursor. */
+  async exclusive<T>(fn: (writer: LedgerWriter) => Promise<T>): Promise<T> {
+    return this.q.enqueue(() =>
+      fn({
+        appendDecisionChained: (build) => this.appendDecisionChainedUnlocked(build),
+        appendEffect: (row, witnessClass, resultHash) => this.appendEffectUnlocked(row, witnessClass, resultHash),
+      }),
+    );
   }
 
   async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
@@ -945,27 +967,41 @@ export class FileLedger implements Ledger {
   }
 
   async appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void> {
-    return this.q.enqueue(async () => {
-      this.assertOwned();
-      const prev = await this.lastDecisionHashUnlocked();
-      await mkdir(this.dir, { recursive: true, mode: 0o700 });
-      const signed = build(prev);
-      const line = lineOf(signed);
-      await appendDurable(this.decisionsPath, line);
-      await this.pulse("decisions.jsonl", line, "decision");
-      this.tailHash = decisionRecordHash(signed);
-      this.lastDecisionMs = signed.claims.timestampMs;
-      this.noteActiveStamp(signed.claims.timestampMs);
-      this.activeDecisionN += 1;
-      const row = indexRowOf(signed);
-      if (row) {
-        this.byRef.set(row.ref, row);
-        noteReauth(this.reauthByHash, row);
-        noteCounted(this.countedAt, row);
-      }
-      await this.writeIndexForDecision(signed);
-      await this.maybeRotate();
-    });
+    return this.q.enqueue(() => this.appendDecisionChainedUnlocked(build));
+  }
+
+  private async appendDecisionChainedUnlocked(
+    build: (prevRecordHash: string | null) => SignedDecisionRecord,
+  ): Promise<void> {
+    this.assertOwned();
+    const prev = await this.lastDecisionHashUnlocked();
+    await mkdir(this.dir, { recursive: true, mode: 0o700 });
+    const signed = build(prev);
+    const line = lineOf(signed);
+    await appendDurable(this.decisionsPath, line);
+    await this.pulse("decisions.jsonl", line, "decision");
+    this.tailHash = decisionRecordHash(signed);
+    this.lastDecisionMs = signed.claims.timestampMs;
+    this.noteActiveStamp(signed.claims.timestampMs);
+    this.activeDecisionN += 1;
+    const row = indexRowOf(signed);
+    if (row) {
+      this.byRef.set(row.ref, row);
+      noteReauth(this.reauthByHash, row);
+      noteCounted(this.countedAt, row);
+    }
+    await this.writeIndexForDecision(signed);
+    await this.maybeRotate();
+  }
+
+  /** One turn of this ledger's queue: read a cursor and append without a second writer seeing the same cursor. */
+  async exclusive<T>(fn: (writer: LedgerWriter) => Promise<T>): Promise<T> {
+    return this.q.enqueue(() =>
+      fn({
+        appendDecisionChained: (build) => this.appendDecisionChainedUnlocked(build),
+        appendEffect: (row, witnessClass, resultHash) => this.appendEffectUnlocked(row, witnessClass, resultHash),
+      }),
+    );
   }
 
   /**
@@ -1086,6 +1122,7 @@ export class FileLedger implements Ledger {
     witnessClass: WitnessClass = DEFAULT_WITNESS,
     resultHash?: string,
   ): Promise<void> {
+    this.assertOwned();
     if (row.effectClass !== "duplicate-effect" && this.effectRefs.has(row.ref)) {
       const dup = lineOf(
         asStoredEffect(

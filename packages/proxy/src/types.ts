@@ -109,10 +109,29 @@ export type DecisionInputRow = {
   source?: Record<string, unknown>;
 };
 
+/**
+ * One halt or resume copied from `halt-history.jsonl`, or a file switch the
+ * history does not explain. `line` is the 0-based index of a history line.
+ * A switch with no history halt uses `line: -1`, `via: "file"`, and
+ * `action: "halt"`. Deleting that switch while a halt window is still open,
+ * with no history resume that closes it, uses the same line and via with
+ * `action: "resume"`. On a `halt-history-mismatch` deny, `line` is the index
+ * sync resumes from, not a history row.
+ */
+export type ControlInput = {
+  action: "halt" | "resume";
+  by: string;
+  via: "cli" | "http" | "file";
+  atMs: number;
+  line: number;
+  lineHash: string;
+};
+
 export type DecisionInputs = {
   principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: DecisionInputRow[];
   approver?: { id: string; via: ApprovalChannel | "proxy"; resolves: string };
+  control?: ControlInput;
 };
 
 /** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */

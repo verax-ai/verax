@@ -8,8 +8,13 @@ import { join } from "node:path";
  * `halt-history.jsonl` beside it, one line per halt or resume, so the panel
  * can say "stopped by operator-7 at 14:02" and a resume is not silent.
  *
- * The history is a plain append-only file, not a signed ledger record. The
- * calls refused while halted are signed; the switch itself is not.
+ * The history file itself stays plain text. Each line is copied into the
+ * ledger as a signed control record (subject `verax.halt` or `verax.resume`)
+ * when the body opens, when `POST /api/halt` or `POST /api/resume` returns,
+ * or on the next call. A CLI halt is not in the ledger until one of those,
+ * and that delay is part of the record rather than something the file hides.
+ * Calls refused while halted are signed deny records, and they come after
+ * the halt control record in the chain.
  */
 export type HaltEvent = { action: "halt" | "resume"; atMs: number; by: string; via: "cli" | "http" };
 

@@ -51,6 +51,14 @@
  * that verified. A key taken from the file shows the checkpoints agree
  * with each other, not that the key was ever trusted.
  *
+ * Control records are a further statement. An allow whose subject is
+ * `verax.halt` opens a halt window; an allow whose subject is `verax.resume`
+ * closes it. An allow whose subject does not start with `verax.` while a
+ * window is open is `allow-while-halted <ref>` and `ok` is false. A deny
+ * whose reason is `halted` and which sits outside every window is the
+ * warning `halted-deny-without-halt-record <ref>` and does not change `ok`.
+ * A ledger with no control record says so, and that sentence is not a violation.
+ *
  * And a fourth, which matters most and is the easiest to fudge: **which key**.
  * A ledger checked against the key sitting next to it is internally
  * consistent and nothing more — whatever could write the file could write
@@ -120,6 +128,8 @@ export type VerifyResult = {
   effectCompleteness: string;
   /** What the newest checkpoint covers, and the records after it. */
   tail: VerifyTail;
+  /** Halt windows. A ledger with none says so; that sentence is not a violation. */
+  control: VerifyControl;
   problems: string[];
 };
 
@@ -139,6 +149,13 @@ export type VerifyTail = {
     /** True when some decision's hash is the checkpoint head. Null when the checkpoint carries no head. */
     ledgerHoldsRecord: boolean | null;
   } | null;
+};
+
+/** Halt windows taken from control records. Warnings do not change `ok`. */
+export type VerifyControl = {
+  line: string;
+  windows: number;
+  warnings: string[];
 };
 
 export type VerifyOptions = {
@@ -499,6 +516,16 @@ const EFFECT_COMPLETENESS_UNCHECKED = "effect completeness was not checked";
 const EFFECT_COMPLETENESS_CHECKED = "effect completeness checked";
 const TAIL_NONE =
   "tail: no checkpoint; removing the newest records with their effects is not detectable from these files";
+const CONTROL_NONE: VerifyControl = {
+  line: "control: no control records",
+  windows: 0,
+  warnings: [],
+};
+const CONTROL_UNCHECKED: VerifyControl = {
+  line: "control: not checked",
+  windows: 0,
+  warnings: [],
+};
 
 /**
  * A torn last line is the crash the writer already documents: earlier lines
@@ -670,6 +697,47 @@ function tailStatement(
   };
 }
 
+function controlStatement(records: readonly SignedDecisionRecord[]): {
+  control: VerifyControl;
+  violations: string[];
+} {
+  let open = false;
+  let windows = 0;
+  let controlRecords = 0;
+  const warnings: string[] = [];
+  const violations: string[] = [];
+  for (const record of records) {
+    const subject = typeof record.claims?.subject === "string" ? record.claims.subject : "";
+    const decision = record.claims?.decision;
+    const reason = record.claims?.reasonCode;
+    const ref = typeof record.claims?.ref === "string" ? record.claims.ref : "?";
+    const halt = decision === "allow" && subject === "verax.halt";
+    const resume = decision === "allow" && subject === "verax.resume";
+    if (halt || resume) controlRecords += 1;
+    if (halt) {
+      if (!open) windows += 1;
+      open = true;
+      continue;
+    }
+    if (resume) {
+      open = false;
+      continue;
+    }
+    if (decision === "allow" && !subject.startsWith("verax.")) {
+      if (open) violations.push(`allow-while-halted ${ref}`);
+      continue;
+    }
+    if (decision === "deny" && reason === "halted" && !open) {
+      warnings.push(`halted-deny-without-halt-record ${ref}`);
+    }
+  }
+  if (controlRecords === 0) return { control: { ...CONTROL_NONE, warnings }, violations };
+  return {
+    control: { line: `control: ${windows} halt window(s)`, windows, warnings },
+    violations,
+  };
+}
+
 function unreadableResult(dir: string, problem: string): VerifyResult {
   const trust = { source: "none" as const, publicKeyPem: null, note: problem };
   return {
@@ -689,6 +757,7 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     index: { present: false, missing: 0, line: INDEX_NONE },
     effectCompleteness: EFFECT_COMPLETENESS_UNCHECKED,
     tail: { line: TAIL_NONE, checkpoint: null },
+    control: CONTROL_UNCHECKED,
     problems: [problem],
   };
 }
@@ -733,6 +802,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     const emptyTail = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
     const effectCompleteness = noteEffectCompleteness(emptyIndex.effectRefs, new Set(), problems);
     problems.push(...emptyIndex.problems, ...emptyTail.problems);
+    const emptyControl = controlStatement(records);
     return {
       ok: false,
       directory: dir,
@@ -750,6 +820,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       index: emptyIndex.index,
       effectCompleteness,
       tail: emptyTail.tail,
+      control: emptyControl.control,
       problems,
     };
   }
@@ -945,6 +1016,8 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   const effectCompleteness = noteEffectCompleteness(indexed.effectRefs, boundPrimaryRefs, problems);
   const tailed = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
   problems.push(...indexed.problems, ...tailed.problems);
+  const stated = controlStatement(records);
+  problems.push(...stated.violations);
 
   const ok =
     problems.length === 0 && signaturesInvalid === 0 && chainBreakAt === null && effectsOrphaned === 0;
@@ -966,6 +1039,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     index: indexed.index,
     effectCompleteness,
     tail: tailed.tail,
+    control: stated.control,
     problems,
   };
 }
