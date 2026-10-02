@@ -46,6 +46,7 @@ import {
   type UserTokenSpawn,
 } from "../packages/body/src/install.ts";
 import { runInitLocal } from "../packages/body/src/init-local.ts";
+import { psModuleImportLine } from "../packages/body/src/ps-module-imports.ts";
 
 const winEnv = {
   ProgramFiles: "C:\\Program Files",
@@ -2770,9 +2771,7 @@ describe("verax uninstall", () => {
     // Left to autoload under systemToolEnv(), resolving ConvertFrom-Json took 23 to 30 s on a GitHub runner.
     const script = windowsSddlBatchArgv(["C:\\x"]).at(-1)!;
     const lines = script.split("\n");
-    const imported = lines.findIndex((line) =>
-      /^Import-Module "\$env:SystemRoot\\System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Utility\\Microsoft\.PowerShell\.Utility\.psd1"$/.test(line),
-    );
+    const imported = lines.findIndex((line) => line === psModuleImportLine("Microsoft.PowerShell.Utility"));
     const firstJson = lines.findIndex((line) => /ConvertFrom-Json|ConvertTo-Json/.test(line));
     assert.ok(imported >= 0, script);
     assert.ok(firstJson > imported, `import at ${imported}, first JSON cmdlet at ${firstJson}`);

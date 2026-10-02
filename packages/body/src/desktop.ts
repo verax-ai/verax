@@ -596,6 +596,13 @@ function readWindowsAcls(paths: readonly string[]): Map<string, WindowsAcl> {
 
 let localAccounts: { LA?: string; LG?: string } | null = null;
 
+/**
+ * Built-in Administrator (`LA`) and Guest (`LG`) via the SID constructor.
+ * The constructor lives in the runtime, so this command loads no module.
+ */
+export const LOCAL_ACCOUNT_SIDS_COMMAND =
+  "[Security.Principal.SecurityIdentifier]::new('LA').Value; [Security.Principal.SecurityIdentifier]::new('LG').Value";
+
 /** This machine's built-in Administrator and Guest SIDs, which an SDDL writes as `LA` and `LG`. Empty when the lookup fails. */
 function localAccountSids(): { LA?: string; LG?: string } {
   if (localAccounts) return localAccounts;
@@ -607,7 +614,7 @@ function localAccountSids(): { LA?: string; LG?: string } {
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        "[Security.Principal.SecurityIdentifier]::new('LA').Value; [Security.Principal.SecurityIdentifier]::new('LG').Value",
+        LOCAL_ACCOUNT_SIDS_COMMAND,
       ],
       "win32",
     ),

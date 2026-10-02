@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { EX_CONFIG } from "./config.ts";
 import { INSTALL_HEALTH_NONCE } from "./health-extras.ts";
 import { runInitLocal } from "./init-local.ts";
+import { psModuleImports, type PsModule } from "./ps-module-imports.ts";
 
 export const EX_ELEVATION = 77;
 
@@ -249,6 +250,7 @@ function expandMachineRoot(raw: string, drive: string, label: string): string {
 
 const MACHINE_ROOTS_SCRIPT = [
   "$ErrorActionPreference = 'Stop'",
+  psModuleImports(["Microsoft.PowerShell.Management"]),
   "$files = (Get-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion').GetValue('ProgramFilesDir', $null, 'DoNotExpandEnvironmentNames')",
   "$data = (Get-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList').GetValue('ProgramData', $null, 'DoNotExpandEnvironmentNames')",
   "$root = (Get-Item -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion').GetValue('SystemRoot', $null, 'DoNotExpandEnvironmentNames')",
@@ -1167,7 +1169,7 @@ export function windowsSddlArgv(target: string): string[] {
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    `(Get-Acl -LiteralPath '${literal}').Sddl`,
+    psPrefixed(["Microsoft.PowerShell.Security"], `(Get-Acl -LiteralPath '${literal}').Sddl`),
   ], "win32");
 }
 
@@ -1196,17 +1198,15 @@ export function windowsSddlBatchStdin(paths: readonly string[]): string {
  * object: `{ "<path>": "<sddl>" | { "error": "<msg>" } }`.
  * PowerShell 5.1 unwraps a one-element JSON array, so the script re-wraps with
  * `| ForEach-Object { $_ }`.
- * The JSON cmdlets live in Microsoft.PowerShell.Utility, which is imported by
- * its System32 path before first use. Left to autoload under systemToolEnv(),
- * finding ConvertFrom-Json took 23 to 30 s on a GitHub Windows runner and
- * 0.27 s once the module is loaded first; measured on windows-full 5a75875. The explicit path
- * also means no other module directory is consulted to resolve the cmdlet.
+ * JSON cmdlets are loaded with psModuleImports before first use. #119, measured
+ * on windows-full 5a75875: autoload of ConvertFrom-Json took 23 to 30 s on a
+ * GitHub Windows runner, and 0.27 s once the module was loaded from System32 first.
  */
 export function windowsSddlBatchArgv(paths: readonly string[]): string[] {
   // Intentionally unused. Interpolating `paths` here is the overflow F17b closes.
   void paths;
   const script = `$ErrorActionPreference = 'Stop'
-Import-Module "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1"
+${psModuleImports(["Microsoft.PowerShell.Utility"])}
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8
@@ -1831,14 +1831,20 @@ function psNative(command: string, tool: string): string {
   return `${command}; if ($LASTEXITCODE -ne 0) { [Console]::Error.WriteLine("${PS_ERROR_MARK} ${tool} exited $LASTEXITCODE"); exit $LASTEXITCODE }`;
 }
 
-function windowsAccountOps(password: string, create: boolean, tempDir: string): PlanOp[] {
+function windowsAccountBody(create: boolean, tempDir: string): string {
   const user = create
     ? "New-LocalUser -Name 'verax-svc' -Password $sec -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires -Description 'Verax body service account'"
     : "Set-LocalUser -Name 'verax-svc' -Password $sec";
   const cfg = psSingle(path.win32.join(tempDir, "verax-rights.cfg"));
   const db = psSingle(path.win32.join(tempDir, "verax-rights.sdb"));
   const after = psSingle(path.win32.join(tempDir, "verax-rights-after.cfg"));
-  const script = [
+  return [
+    psModuleImports([
+      "Microsoft.PowerShell.Security",
+      "Microsoft.PowerShell.LocalAccounts",
+      "Microsoft.PowerShell.Management",
+      "Microsoft.PowerShell.Utility",
+    ]),
     "$plain = [Console]::In.ReadLine()",
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     "$sec = ConvertTo-SecureString -String $plain -AsPlainText -Force",
@@ -1876,12 +1882,20 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
     "[Console]::Out.WriteLine(('SeBatchLogonRight: ' + $gotSet.Count + ' holders, service account added'))",
     "Remove-Item $cfg,$db,$after -ErrorAction SilentlyContinue",
   ].join("; ");
-  return [powershellStdin(script, password, tempDir)];
 }
 
-function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string, logFile: string, tempDir: string): PlanOp {
+function windowsAccountOps(password: string, create: boolean, tempDir: string): PlanOp[] {
+  return [powershellStdin(windowsAccountBody(create, tempDir), password, tempDir)];
+}
+
+function windowsTaskBody(nodeBin: string, cliBin: string, envFile: string, logFile: string): string {
   const argument = `"${cliBin}" serve --env-file "${envFile}" --log-file "${logFile}"`;
-  const script = [
+  return [
+    psModuleImports([
+      "ScheduledTasks",
+      "Microsoft.PowerShell.Utility",
+      "Microsoft.PowerShell.LocalAccounts",
+    ]),
     "$plain = [Console]::In.ReadLine()",
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     `$action = New-ScheduledTaskAction -Execute ${psSingle(nodeBin)} -Argument ${psSingle(argument)}`,
@@ -1891,7 +1905,73 @@ function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFil
     "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger $trigger -User $sid -Password $plain -RunLevel Limited -Settings $settings -Force",
     "Start-ScheduledTask -TaskName 'Verax Body'",
   ].join("; ");
-  return powershellStdin(script, password, tempDir);
+}
+
+function windowsTaskOp(password: string, nodeBin: string, cliBin: string, envFile: string, logFile: string, tempDir: string): PlanOp {
+  return powershellStdin(windowsTaskBody(nodeBin, cliBin, envFile, logFile), password, tempDir);
+}
+
+/** Module import lines, then `command` unchanged. */
+function psPrefixed(modules: readonly PsModule[], command: string): string {
+  return `${psModuleImports(modules)}\n${command}`;
+}
+
+function aclOwnerCommand(dir: string): string {
+  const literal = dir.replaceAll("'", "''");
+  return psPrefixed(["Microsoft.PowerShell.Security"], `(Get-Acl -LiteralPath '${literal}').Owner`);
+}
+
+function directoryOwnerSidCommand(dir: string): string {
+  const literal = dir.replaceAll("'", "''");
+  return psPrefixed(
+    ["Microsoft.PowerShell.Security"],
+    `(Get-Acl -LiteralPath '${literal}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
+  );
+}
+
+const WINDOWS_SERVICE_SID_COMMAND = psPrefixed(
+  ["Microsoft.PowerShell.LocalAccounts"],
+  "(Get-LocalUser -Name 'verax-svc').SID.Value",
+);
+
+function profileImagePathCommand(sid: string): string {
+  return psPrefixed(
+    ["Microsoft.PowerShell.Management"],
+    `(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\${sid}').ProfileImagePath`,
+  );
+}
+
+export type WindowsPowerShellScript = { id: string; script: string };
+
+/**
+ * Every PowerShell -Command install.ts runs, with sample paths.
+ * Call sites: readWindowsMachineRoots, windowsSddlArgv, windowsSddlBatchArgv,
+ * powershellStdin (account create, account update, scheduled task), ownerModeLine,
+ * the service SID lookup in execute, directoryOwnerSid, the ProfileImagePath lookup,
+ * and windowsServiceSid. desktop.ts local account SIDs are a separate command.
+ */
+export function windowsPowerShellScripts(): WindowsPowerShellScript[] {
+  const temp = "C:\\ProgramData\\Verax\\install-tmp";
+  return [
+    { id: "machine-roots", script: MACHINE_ROOTS_SCRIPT },
+    { id: "sddl", script: windowsSddlArgv("C:\\ProgramData\\Verax").at(-1) ?? "" },
+    { id: "sddl-batch", script: windowsSddlBatchArgv(["C:\\ProgramData\\Verax"]).at(-1) ?? "" },
+    { id: "acl-owner", script: aclOwnerCommand("C:\\ProgramData\\Verax") },
+    { id: "directory-owner-sid", script: directoryOwnerSidCommand("C:\\ProgramData\\Verax") },
+    { id: "service-sid", script: WINDOWS_SERVICE_SID_COMMAND },
+    { id: "profile-image-path", script: profileImagePathCommand("S-1-5-21-1001") },
+    { id: "account-create", script: powerShellScript(windowsAccountBody(true, temp)) },
+    { id: "account-update", script: powerShellScript(windowsAccountBody(false, temp)) },
+    {
+      id: "scheduled-task",
+      script: powerShellScript(windowsTaskBody(
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Program Files\\Verax\\node_modules\\@verax-ai\\body\\dist\\cli.js",
+        "C:\\ProgramData\\Verax\\state\\body.env",
+        "C:\\ProgramData\\Verax\\state\\body.log",
+      )),
+    },
+  ];
 }
 
 function xmlEscape(value: string): string {
@@ -3371,7 +3451,7 @@ function ownerModeLine(platform: InstallPlatform, dir: string, exec: (argv: stri
     const ran = exec(toolArgv("powershell", [
       "-NoProfile",
       "-Command",
-      `(Get-Acl -LiteralPath '${dir.replaceAll("'", "''")}').Owner`,
+      aclOwnerCommand(dir),
     ], "win32"));
     const owner = (ran.stdout ?? "").trim().split(/\r?\n/).filter((line) => line.trim() !== "").pop() ?? (ran.stderr ?? "").trim();
     return `${owner} ntfs ${dir}`;
@@ -4218,7 +4298,7 @@ async function execute(
       const ran = call(toolArgv("powershell", [
         "-NoProfile",
         "-Command",
-        "(Get-LocalUser -Name 'verax-svc').SID.Value",
+        WINDOWS_SERVICE_SID_COMMAND,
       ], "win32"));
       svcSid = (ran.stdout ?? "").match(/S-1-[0-9-]+/)?.[0] ?? "";
       if (svcSid === "") return { error: "verax-svc has no SID\n" };
@@ -4744,11 +4824,10 @@ export function windowsDirectorySids(
 function directoryOwnerSid(dir: string, exec: (argv: string[]) => ExecResult): string | undefined {
   const cached = winOwnerCache?.owners;
   if (cached?.has(dir)) return cached.get(dir);
-  const literal = dir.replaceAll("'", "''");
   const ran = exec(toolArgv("powershell", [
     "-NoProfile",
     "-Command",
-    `(Get-Acl -LiteralPath '${literal}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
+    directoryOwnerSidCommand(dir),
   ], "win32"));
   const sid = (ran.status ?? 1) !== 0 ? undefined : `${ran.stdout ?? ""}`.match(/S-1-[0-9-]+/i)?.[0];
   cached?.set(dir, sid);
@@ -5541,7 +5620,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     const looked = exec(toolArgv("powershell", [
       "-NoProfile",
       "-Command",
-      `(Get-ItemProperty -Path 'HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\${sid}').ProfileImagePath`,
+      profileImagePathCommand(sid),
     ], "win32"));
     // The agent token no longer lives in the profile (R14-8), so an unreadable
     // ProfileImagePath is not a refusal; a readable one that disagrees still is.
@@ -5735,7 +5814,7 @@ function windowsServiceSid(exec: ToolExec): string | null {
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    "(Get-LocalUser -Name 'verax-svc').SID.Value",
+    WINDOWS_SERVICE_SID_COMMAND,
   ], "win32"));
   if ((ran.status ?? 1) !== 0) return null;
   return (ran.stdout ?? "").match(/S-1-[0-9-]+/i)?.[0]?.toUpperCase() ?? null;
