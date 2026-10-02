@@ -1199,7 +1199,7 @@ export function windowsSddlBatchStdin(paths: readonly string[]): string {
  * The JSON cmdlets live in Microsoft.PowerShell.Utility, which is imported by
  * its System32 path before first use. Left to autoload under systemToolEnv(),
  * finding ConvertFrom-Json took 23 to 30 s on a GitHub Windows runner and
- * 0.27 s with this import (measured, windows-full 5a75875). The explicit path
+ * 0.27 s once the module is loaded first; measured on windows-full 5a75875. The explicit path
  * also means no other module directory is consulted to resolve the cmdlet.
  */
 export function windowsSddlBatchArgv(paths: readonly string[]): string[] {
