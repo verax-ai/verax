@@ -7,6 +7,12 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const startAuthentication = vi.hoisted(() => vi.fn());
+vi.mock("@simplewebauthn/browser", () => ({
+  startAuthentication,
+}));
+
 import { App } from "../src/App.tsx";
 import { rememberToken } from "../src/session.ts";
 import { parseLedger } from "../src/rail/parse.ts";
@@ -29,6 +35,24 @@ const actions = parseLedger(
 afterEach(() => {
   cleanup();
 });
+const SIGNED_ASSERTION = {
+  id: "cred-1",
+  rawId: "cred-1",
+  type: "public-key" as const,
+  response: {
+    clientDataJSON: "Y2xpZW50",
+    authenticatorData: "YXV0aA",
+    signature: "c2ln",
+  },
+  clientExtensionResults: {},
+};
+
+const APPROVAL_CHALLENGE = {
+  challenge: "Y2hhbGxlbmdl",
+  rpId: "localhost",
+  allowCredentials: [{ id: "cred-1", type: "public-key" }],
+};
+
 const histDecision = {
   claims: {
     subject: "memory.put",
@@ -96,6 +120,8 @@ describe("panel ledger fetch states", () => {
 
   beforeEach(() => {
     rememberToken("test-session");
+    startAuthentication.mockReset();
+    startAuthentication.mockResolvedValue(SIGNED_ASSERTION);
   });
 
   it("shows error and the HTTP status when the ledger returns 500", async () => {
@@ -189,6 +215,9 @@ describe("panel ledger fetch states", () => {
     let approveBody: Record<string, unknown> | null = null;
     let ledgerReads = 0;
     stubLedgerFetch((url, init) => {
+      if (url.includes("/api/approve/challenge")) {
+        return new Response(JSON.stringify(APPROVAL_CHALLENGE), { status: 200 });
+      }
       if (url.includes("/api/approve")) {
         approveBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
         return new Response(JSON.stringify({ allowRef: "a-9" }), { status: 200 });
@@ -209,7 +238,11 @@ describe("panel ledger fetch states", () => {
     const before = ledgerReads;
     fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
     await waitFor(() => {
-      expect(approveBody).toEqual({ ref: "d-open", requestHash: "cd".repeat(32) });
+      expect(approveBody).toEqual({
+        ref: "d-open",
+        requestHash: "cd".repeat(32),
+        assertion: SIGNED_ASSERTION,
+      });
     });
     await waitFor(() => {
       expect(screen.getByTestId("approve-outcome").textContent).toContain("a-9");
@@ -261,6 +294,9 @@ describe("panel ledger fetch states", () => {
     let approved = false;
     let ledgerReads = 0;
     stubLedgerFetch((url) => {
+      if (url.includes("/api/approve/challenge")) {
+        return new Response(JSON.stringify(APPROVAL_CHALLENGE), { status: 200 });
+      }
       if (url.includes("/api/approve")) {
         approved = true;
         return new Response(JSON.stringify({ allowRef: "a-9" }), { status: 200 });

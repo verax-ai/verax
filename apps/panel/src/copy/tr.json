@@ -101,6 +101,8 @@
   "approve.refused": "Onaylanmadı: {reason}",
   "approve.sending": "Gönderiliyor…",
   "approve.sample": "Örnek senaryo — onay gönderilmedi.",
+  "approve.cancelled": "Passkey penceresi kapatıldı — onay gönderilmedi.",
+  "approve.passkeyClosed": "Passkey kapalı — onay gönderilmedi.",
   "unmeasured": "ölçülemedi",
   "summary.empty": "Henüz karar üretilmedi.",
   "summary.line": "{decisions} karar · {denied} reddedildi · {pending} onay bekliyor · {unmatched} ekstreyle eşleşmedi",

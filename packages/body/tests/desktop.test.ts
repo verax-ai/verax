@@ -1,22 +1,33 @@
 import { strict as assert } from "node:assert";
+import { EventEmitter } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { PassThrough } from "node:stream";
 import { describe, it } from "node:test";
 
 import {
+  bodyReadyLine,
+  bodyRpEnv,
   desktopChildEnv,
   desktopCodeRefusal,
   desktopMode,
   desktopPasskeyHint,
   forwardIpv6Loopback,
   issuerEnv,
+  issuerJwksPinPath,
+  issuerReadyLine,
   parseDesktopArgs,
   readIssuerJwksPin,
   runDesktop,
+  type DesktopHooks,
 } from "../src/desktop.ts";
 import { CREDENTIALS_FILE } from "../src/operator-credentials.ts";
+
+/** What the spawn hook hands back; named through the hook so this file does not import the process module. */
+type SpawnedChild = ReturnType<NonNullable<DesktopHooks["spawn"]>>;
 
 function freePort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -216,6 +227,18 @@ describe("verax desktop wiring", () => {
     assert.equal(kept.VERAX_RP_ID, "login.example");
     assert.equal(kept.VERAX_RP_ORIGINS, "https://login.example");
     assert.equal(kept.VERAX_DEV_REDIRECT_URIS, "http://localhost:5200/");
+  });
+
+  it("names the panel origin on the body, where the approval ceremony runs", () => {
+    const env = bodyRpEnv({}, "http://localhost:5200");
+    assert.equal(env.VERAX_RP_ID, "localhost");
+    assert.equal(env.VERAX_RP_ORIGINS, "http://localhost:5200");
+    const kept = bodyRpEnv(
+      { VERAX_RP_ID: "login.example", VERAX_RP_ORIGINS: "https://panel.example" },
+      "http://localhost:5200",
+    );
+    assert.equal(kept.VERAX_RP_ID, "login.example");
+    assert.equal(kept.VERAX_RP_ORIGINS, "https://panel.example");
   });
 });
 
@@ -490,6 +513,146 @@ describe("verax desktop code paths", () => {
       assert.match(rows[2] ?? "", /^fix:/);
       assert.match(rows[2] ?? "", /icacls/);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Child the readiness wait can pass. It binds `port` and writes `readyLine`
+ * once that bind has succeeded. `kill` only marks the child exited; the
+ * caller closes every server it pushed onto `listeners`.
+ */
+function listeningChild(port: number, readyLine: string, listeners: Server[]): SpawnedChild {
+  const stdout = new PassThrough();
+  const stderr = new PassThrough();
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(204);
+    res.end();
+  });
+  server.unref();
+  listeners.push(server);
+  const pid = 2_100_000 + listeners.length;
+  let exitCode: number | null = null;
+  const emitter = new EventEmitter();
+  const child = Object.assign(emitter, {
+    pid,
+    signalCode: null as NodeJS.Signals | null,
+    stdout,
+    stderr,
+    stdin: null,
+    kill() {
+      if (exitCode !== null) return true;
+      exitCode = 0;
+      emitter.emit("exit", 0, null);
+      return true;
+    },
+  }) as unknown as SpawnedChild;
+  // `Object.assign` would copy a getter as the value it returns once.
+  Object.defineProperty(emitter, "exitCode", {
+    enumerable: true,
+    get() {
+      return exitCode;
+    },
+  });
+  server.once("error", () => {
+    if (exitCode !== null) return;
+    exitCode = 1;
+    emitter.emit("exit", 1, null);
+  });
+  server.listen(port, "127.0.0.1", () => {
+    stdout.write(`${readyLine}\n`);
+  });
+  return child;
+}
+
+function closeListeners(servers: readonly Server[]): Promise<void> {
+  return Promise.all(
+    servers.map(
+      (server) =>
+        new Promise<void>((resolve) => {
+          const finish = () => resolve();
+          server.once("close", finish);
+          try {
+            server.close();
+          } catch {
+            finish();
+            return;
+          }
+          if (!server.listening) finish();
+        }),
+    ),
+  ).then(() => undefined);
+}
+
+/** Token and JWKS pin the desktop reads after the issuer prints its ready line. */
+function writeIssuerDesk(dir: string): void {
+  const pinDir = join(dir, "dev-issuer");
+  mkdirSync(pinDir, { recursive: true });
+  if (process.platform !== "win32") chmodSync(pinDir, 0o700);
+  writeFileSync(issuerJwksPinPath(dir), `${JSON.stringify(PUBLIC_JWKS)}\n`, { mode: 0o600 });
+  writeFileSync(join(dir, "dev-token"), "fresh-token\n", { mode: 0o600 });
+}
+
+describe("verax desktop body launch", () => {
+  it("passes the panel RP into the body process it launches", async () => {
+    // `bodyRpEnv` by itself stays green when launch stops spreading it.
+    // This reads the environment the body spawn actually receives.
+    // An operator value would be kept; this run sets neither, so the
+    // launch site has to supply localhost and the panel origin.
+    const dir = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-desktop-body-rp-")));
+    if (process.platform !== "win32") chmodSync(dir, 0o700);
+    const listeners: Server[] = [];
+    const children = new Map<number, SpawnedChild>();
+    const savedRpId = process.env.VERAX_RP_ID;
+    const savedOrigins = process.env.VERAX_RP_ORIGINS;
+    delete process.env.VERAX_RP_ID;
+    delete process.env.VERAX_RP_ORIGINS;
+    const err: string[] = [];
+    let bodyEnv: NodeJS.ProcessEnv | undefined;
+    const sid = "S-1-5-21-1";
+    try {
+      const [issuerPort, bodyPort, panelPort] = await Promise.all([freePort(), freePort(), freePort()]);
+      const code = await runDesktop(
+        { stateDir: dir, issuerPort, bodyPort, panelPort, browser: "fake-browser.mjs" },
+        (line) => err.push(line),
+        {
+          readyMs: 1_000,
+          restrictOwner: () => {},
+          ...(process.platform === "win32"
+            ? {
+                windowsDirectoryOwner: () => ({ ownerSid: sid, invokingSid: sid }),
+                windowsDirectoryDacl: () => `O:${sid}D:(A;;FA;;;${sid})`,
+              }
+            : {}),
+          kill: (pid) => {
+            if (pid === undefined) return;
+            children.get(pid)?.kill();
+          },
+          spawn: (name, _cmd, _args, env) => {
+            if (name === "body") bodyEnv = { ...env };
+            if (name === "panel" || name === "browser") throw new Error("stop-before-panel");
+            const port = name === "issuer" ? issuerPort : bodyPort;
+            const line = name === "issuer" ? issuerReadyLine(issuerPort) : bodyReadyLine(bodyPort);
+            if (name === "issuer") writeIssuerDesk(dir);
+            const child = listeningChild(port, line, listeners);
+            if (child.pid !== undefined) children.set(child.pid, child);
+            return child;
+          },
+        },
+      );
+      const text = err.join("");
+      assert.equal(code, 1, text);
+      assert.match(text, /desktop-failed:stop-before-panel/);
+      assert.equal(bodyEnv?.VERAX_RP_ID, "localhost");
+      assert.equal(bodyEnv?.VERAX_RP_ORIGINS, `http://localhost:${panelPort}`);
+    } finally {
+      for (const child of children.values()) child.kill();
+      await closeListeners(listeners);
+      if (savedRpId === undefined) delete process.env.VERAX_RP_ID;
+      else process.env.VERAX_RP_ID = savedRpId;
+      if (savedOrigins === undefined) delete process.env.VERAX_RP_ORIGINS;
+      else process.env.VERAX_RP_ORIGINS = savedOrigins;
       rmSync(dir, { recursive: true, force: true });
     }
   });

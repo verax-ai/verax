@@ -1,8 +1,16 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+const startAuthentication = vi.hoisted(() => vi.fn());
+vi.mock("@simplewebauthn/browser", () => ({
+  startAuthentication,
+}));
+
+import { App } from "../src/App.tsx";
+import { approveWithPasskey } from "../src/approve-ceremony.ts";
 import { Observatory } from "../src/observatory/Observatory.tsx";
 import { panelCopy } from "../src/copy.ts";
+import { rememberToken } from "../src/session.ts";
 import type { PendingApproval, RailAction } from "../src/rail/types.ts";
 import { setLang } from "./with-lang.ts";
 
@@ -180,5 +188,171 @@ describe("approving from the record", () => {
     fireEvent.click(waitingRow!);
     expect(screen.queryByRole("button", { name: panelCopy()["approve.button"] })).toBeNull();
     expect(screen.queryByTestId("record-approve")).toBeNull();
+  });
+});
+
+const SIGNED = {
+  id: "cred-1",
+  rawId: "cred-1",
+  type: "public-key" as const,
+  response: {
+    clientDataJSON: "Y2xpZW50",
+    authenticatorData: "YXV0aA",
+    signature: "c2ln",
+  },
+  clientExtensionResults: {},
+};
+
+const CHALLENGE = {
+  challenge: "Y2hhbGxlbmdl",
+  rpId: "localhost",
+  allowCredentials: [{ id: "cred-1", type: "public-key" }],
+};
+
+function postsOf(fetchMock: ReturnType<typeof vi.fn>): RequestInit[] {
+  return fetchMock.mock.calls
+    .filter((call) => {
+      const init = call[1] as RequestInit | undefined;
+      return String(call[0]) === "/api/approve" && init?.method === "POST";
+    })
+    .map((call) => call[1] as RequestInit);
+}
+
+/**
+ * The button asks the body for a challenge and posts the authenticator's
+ * answer. The sample scenario never reaches that door.
+ */
+describe("signing an approval", () => {
+  afterEach(() => {
+    rememberToken(null);
+    vi.unstubAllGlobals();
+  });
+
+  beforeEach(() => {
+    startAuthentication.mockReset();
+  });
+
+  async function confirm(): Promise<void> {
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.button"] }));
+    fireEvent.click(screen.getByRole("button", { name: panelCopy()["approve.yes"] }));
+  }
+
+  it("asks for the challenge, signs it, and posts the assertion", async () => {
+    startAuthentication.mockResolvedValue(SIGNED);
+    const fetchMock = vi.fn(async (input: RequestInfo) => {
+      const url = String(input);
+      if (url.startsWith("/api/approve/challenge")) {
+        return new Response(JSON.stringify(CHALLENGE), { status: 200 });
+      }
+      return new Response(JSON.stringify({ allowRef: "a-1" }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    open({ canApprove: true, onApprove: (ref: string, requestHash: string) => approveWithPasskey(ref, requestHash) });
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toContain("a-1");
+    });
+    const challenge = fetchMock.mock.calls.find((call) => String(call[0]).startsWith("/api/approve/challenge"));
+    expect(String(challenge?.[0])).toBe("/api/approve/challenge?ref=d-open");
+    expect(startAuthentication).toHaveBeenCalledWith({
+      optionsJSON: {
+        challenge: CHALLENGE.challenge,
+        rpId: CHALLENGE.rpId,
+        allowCredentials: CHALLENGE.allowCredentials,
+        userVerification: "required",
+        timeout: 60_000,
+      },
+    });
+    const posts = postsOf(fetchMock);
+    expect(posts).toHaveLength(1);
+    expect(JSON.parse(String(posts[0]?.body))).toEqual({
+      ref: "d-open",
+      requestHash: "ab".repeat(32),
+      assertion: SIGNED,
+    });
+  });
+
+  it("shows the cancelled sentence and does not post when the passkey prompt is dismissed", async () => {
+    startAuthentication.mockRejectedValue(Object.assign(new Error("dismissed"), { name: "NotAllowedError" }));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(CHALLENGE), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    open({ canApprove: true, onApprove: (ref: string, requestHash: string) => approveWithPasskey(ref, requestHash) });
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.cancelled"]);
+    });
+    expect(postsOf(fetchMock)).toHaveLength(0);
+  });
+
+  it("shows the cancelled sentence and does not post when the ceremony is aborted", async () => {
+    startAuthentication.mockRejectedValue(Object.assign(new Error("aborted"), { name: "AbortError" }));
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(CHALLENGE), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    open({ canApprove: true, onApprove: (ref: string, requestHash: string) => approveWithPasskey(ref, requestHash) });
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.cancelled"]);
+    });
+    expect(postsOf(fetchMock)).toHaveLength(0);
+  });
+
+  it("shows that passkey is closed and does not post when the challenge is closed", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "passkey-closed" }), { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    open({ canApprove: true, onApprove: (ref: string, requestHash: string) => approveWithPasskey(ref, requestHash) });
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.passkeyClosed"]);
+    });
+    expect(startAuthentication).not.toHaveBeenCalled();
+    expect(postsOf(fetchMock)).toHaveLength(0);
+  });
+
+  it("says unknown-ref when the challenge is missing and does not post", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "unknown-ref" }), { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    open({ canApprove: true, onApprove: (ref: string, requestHash: string) => approveWithPasskey(ref, requestHash) });
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toContain("unknown-ref");
+    });
+    expect(startAuthentication).not.toHaveBeenCalled();
+    expect(postsOf(fetchMock)).toHaveLength(0);
+  });
+
+  it("names the status when the challenge is forbidden and does not post", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: "scope-missing" }), { status: 403 }));
+    vi.stubGlobal("fetch", fetchMock);
+    open({ canApprove: true, onApprove: (ref: string, requestHash: string) => approveWithPasskey(ref, requestHash) });
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toContain("http-403");
+    });
+    expect(screen.getByTestId("approve-outcome").textContent).not.toContain("scope-missing");
+    expect(startAuthentication).not.toHaveBeenCalled();
+    expect(postsOf(fetchMock)).toHaveLength(0);
+  });
+
+  it("leaves the sample scenario off the network", async () => {
+    vi.stubGlobal("location", {
+      search: "?demo=1&lang=tr",
+      origin: "http://127.0.0.1:5173",
+      pathname: "/",
+      hash: "",
+      assign: vi.fn(),
+    });
+    const fetchMock = vi.fn(async () => new Response("{}", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(<App />);
+    await waitFor(() => {
+      expect(document.querySelector(".record-row.defer")).toBeTruthy();
+    });
+    fireEvent.click(document.querySelector(".record-row.defer")!);
+    await confirm();
+    await waitFor(() => {
+      expect(screen.getByTestId("approve-outcome").textContent).toBe(panelCopy()["approve.sample"]);
+    });
+    expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes("/api/approve"))).toHaveLength(0);
+    expect(startAuthentication).not.toHaveBeenCalled();
   });
 });

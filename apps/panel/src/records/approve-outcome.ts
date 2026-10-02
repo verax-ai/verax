@@ -11,6 +11,8 @@ export function approveOutcomeText(copy: Copy, out: ApproveOutcome): string {
   if (out.ok) return fillCopy(copy["approve.done"], { ref: out.allowRef });
   if (out.error === "stale") return copy["approve.stale"];
   if (out.error === "sample-not-sent") return copy["approve.sample"];
+  if (out.error === "approve-cancelled") return copy["approve.cancelled"];
+  if (out.error === "passkey-closed") return copy["approve.passkeyClosed"];
   return fillCopy(copy["approve.refused"], { reason: out.error });
 }
 

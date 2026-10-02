@@ -1019,6 +1019,18 @@ export function issuerEnv(
   };
 }
 
+/**
+ * The approval ceremony runs on the panel page, so the body names that
+ * origin. An operator who already set either value keeps it. This does not
+ * touch the issuer: `/authorize` and `/enroll` still use `issuerEnv`.
+ */
+export function bodyRpEnv(base: NodeJS.ProcessEnv, panelOrigin: string): NodeJS.ProcessEnv {
+  return {
+    VERAX_RP_ID: keptOr(base, "VERAX_RP_ID", "localhost"),
+    VERAX_RP_ORIGINS: keptOr(base, "VERAX_RP_ORIGINS", panelOrigin),
+  };
+}
+
 /** Removed from every child. Compared case-insensitively: on Windows `node_options` is `NODE_OPTIONS`. */
 const DESKTOP_CHILD_ENV_DROPPED = new Set([
   "NODE_OPTIONS",
@@ -1449,6 +1461,7 @@ export async function runDesktop(
         ["--experimental-strip-types", mainTs],
         {
           ...cleanEnv(),
+          ...bodyRpEnv(cleanEnv(), panelOrigin),
           VERAX_STATE_DIR: opts.stateDir,
           VERAX_ISSUER: issuerUrl,
           VERAX_JWKS_URL: `${issuerLoopback}/.well-known/jwks.json`,
