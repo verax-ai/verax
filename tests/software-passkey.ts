@@ -1,8 +1,8 @@
 /**
- * A software authenticator used only by tests. Production verification stays
- * in @simplewebauthn/server; this file is never imported from the issuer.
+ * A software authenticator used only by tests. The body verifies assertions
+ * with node:crypto. This file is never imported from the issuer.
  */
-import { createHash, createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
+import { createHash, createSign, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { isoBase64URL, isoCBOR } from "@simplewebauthn/server/helpers";
 import type { AuthenticationResponseJSON, RegistrationResponseJSON } from "@simplewebauthn/server";
 
@@ -17,8 +17,15 @@ function sha256(data: string | Uint8Array): Buffer {
   return createHash("sha256").update(data).digest();
 }
 
-function clientData(type: "webauthn.create" | "webauthn.get", challenge: string, origin: string): string {
-  return JSON.stringify({ type, challenge, origin, crossOrigin: false });
+function clientData(
+  type: "webauthn.create" | "webauthn.get",
+  challenge: string,
+  origin: string,
+  extra: { crossOrigin?: boolean; topOrigin?: string } = {},
+): string {
+  const doc: Record<string, unknown> = { type, challenge, origin, crossOrigin: extra.crossOrigin ?? false };
+  if (extra.topOrigin !== undefined) doc.topOrigin = extra.topOrigin;
+  return JSON.stringify(doc);
 }
 
 function coseEs256(x: Buffer, y: Buffer): Uint8Array {
@@ -31,7 +38,28 @@ function coseEs256(x: Buffer, y: Buffer): Uint8Array {
   return isoCBOR.encode(map);
 }
 
-export function mintSoftwarePasskey(): SoftwarePasskey {
+function coseOkp(x: Buffer): Uint8Array {
+  const map = new Map<number, number | Uint8Array>();
+  map.set(1, 1);
+  map.set(3, -8);
+  map.set(-1, 6);
+  map.set(-2, new Uint8Array(x));
+  return isoCBOR.encode(map);
+}
+
+export function mintSoftwarePasskey(alg: "ES256" | "Ed25519" = "ES256"): SoftwarePasskey {
+  if (alg === "Ed25519") {
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const jwk = publicKey.export({ format: "jwk" });
+    if (typeof jwk.x !== "string") throw new Error("software-passkey-jwk");
+    const x = Buffer.from(jwk.x, "base64url");
+    return {
+      id: isoBase64URL.fromBuffer(new Uint8Array(sha256(x))),
+      privateKey,
+      publicKeyCose: coseOkp(x),
+      counter: 0,
+    };
+  }
   const { publicKey, privateKey } = generateKeyPairSync("ec", { namedCurve: "P-256" });
   const jwk = publicKey.export({ format: "jwk" });
   if (typeof jwk.x !== "string" || typeof jwk.y !== "string") {
@@ -92,17 +120,31 @@ export function registerWithSoftwarePasskey(
 
 export function assertWithSoftwarePasskey(
   passkey: SoftwarePasskey,
-  options: { challenge: string; rpID: string; origin: string; counter?: number },
+  options: {
+    challenge: string;
+    rpID: string;
+    origin: string;
+    counter?: number;
+    flags?: number;
+    crossOrigin?: boolean;
+    topOrigin?: string;
+  },
 ): AuthenticationResponseJSON {
   const next = options.counter ?? passkey.counter + 1;
   passkey.counter = next;
-  const flags = 0x01 | 0x04;
+  // UP (0x01) and UV (0x04) unless a test asks for something else.
+  const flags = options.flags ?? (0x01 | 0x04);
   const authenticatorData = authData(options.rpID, flags, next);
-  const clientDataJSON = clientData("webauthn.get", options.challenge, options.origin);
+  const clientDataJSON = clientData("webauthn.get", options.challenge, options.origin, {
+    ...(options.crossOrigin !== undefined ? { crossOrigin: options.crossOrigin } : {}),
+    ...(options.topOrigin !== undefined ? { topOrigin: options.topOrigin } : {}),
+  });
   const clientDataHash = sha256(clientDataJSON);
-  const signature = createSign("SHA256")
-    .update(Buffer.concat([authenticatorData, clientDataHash]))
-    .sign(passkey.privateKey);
+  const signed = Buffer.concat([authenticatorData, clientDataHash]);
+  const signature =
+    passkey.privateKey.asymmetricKeyType === "ed25519"
+      ? sign(null, signed, passkey.privateKey)
+      : createSign("SHA256").update(signed).sign(passkey.privateKey);
   return {
     id: passkey.id,
     rawId: passkey.id,

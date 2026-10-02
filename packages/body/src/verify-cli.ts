@@ -16,13 +16,14 @@
 import { readFileSync } from "node:fs";
 
 import { verifyLedger, type VerifyResult } from "@verax-ai/proxy";
+import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
 import { directoryAccess, unreadableSentence } from "./install.ts";
 
 export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--operator-credentials <file>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
     "  --key <file>      verify decision records against a public key you hold,",
@@ -45,6 +46,11 @@ function usage(): string {
     "                    verify every checkpoint row against a public key you",
     "                    hold, instead of one key taken from the checkpoint",
     "                    file. Same distinction as --key, for the witness.",
+    "  --operator-credentials <file>",
+    "                    verify HTTP approval signatures against this operator",
+    "                    credential file, instead of operator-credentials.json",
+    "                    in the state directory. A CLI approval is unsigned and",
+    "                    is counted as such. Same distinction as --key.",
     "  --json            machine-readable result on stdout",
     "",
     "Exit code is 0 when the ledger verifies and 1 when it does not.",
@@ -52,7 +58,18 @@ function usage(): string {
 }
 
 /** Lines a person reads. The trust line is never omitted. */
-export function renderVerify(r: VerifyResult): string {
+const APPROVAL_NOT_CHECKED: ApprovalSignatureReport = {
+  ok: true,
+  signedVerified: 0,
+  signedFailed: 0,
+  unsignedHttp: 0,
+  cli: 0,
+  line: "approval signatures  not checked",
+  trustSource: "none",
+  trustNote: "approval signatures were not checked",
+};
+
+export function renderVerify(r: VerifyResult, approval: ApprovalSignatureReport = APPROVAL_NOT_CHECKED): string {
   const lines: string[] = [];
   lines.push(`ledger        ${r.directory}`);
   lines.push(`decisions     ${r.decisions}`);
@@ -123,6 +140,8 @@ export function renderVerify(r: VerifyResult): string {
   lines.push(r.tail.line);
   lines.push(r.control.line);
   for (const warning of r.control.warnings) lines.push(`warning       ${warning}`);
+  lines.push(approval.line);
+  lines.push(`              ${approval.trustNote}`);
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");
@@ -181,6 +200,27 @@ export async function runVerify(
   const checkpointKey = readKeyFlag("--checkpoint-key");
   if (!checkpointKey.ok) return EX_VERIFY_FAILED;
   checkpointPublicKeyPem = checkpointKey.pem;
+  let credentialsFile: string | undefined;
+  const credentialsAt = args.indexOf("--operator-credentials");
+  if (credentialsAt !== -1) {
+    const path = args[credentialsAt + 1];
+    if (!path || path.startsWith("-")) {
+      out("verify: --operator-credentials needs a file path");
+      return EX_VERIFY_FAILED;
+    }
+    try {
+      const text = readFileSync(path, "utf8");
+      if (text.trim() === "") {
+        out("verify: operator credentials file is empty");
+        return EX_VERIFY_FAILED;
+      }
+    } catch {
+      out(`verify: cannot read operator credentials file ${path}`);
+      return EX_VERIFY_FAILED;
+    }
+    args.splice(credentialsAt, 2);
+    credentialsFile = path;
+  }
   const dir = args.find((a) => !a.startsWith("-"));
   if (!dir) {
     out(usage());
@@ -224,9 +264,26 @@ export async function runVerify(
       control: { line: "control: not checked", windows: 0, warnings: [] },
       problems: [problem],
     };
-    out(json ? JSON.stringify(failed, null, 2) : renderVerify(failed));
+    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED };
+    out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED));
     return EX_VERIFY_FAILED;
   }
-  out(json ? JSON.stringify(result, null, 2) : renderVerify(result));
-  return result.ok ? 0 : EX_VERIFY_FAILED;
+  let approval: ApprovalSignatureReport;
+  try {
+    approval = await verifyApprovalSignatures(dir, credentialsFile ? { credentialsFile } : {});
+  } catch (err) {
+    const problem = err instanceof Error ? err.message : "approval signatures could not be read";
+    approval = { ...APPROVAL_NOT_CHECKED, ok: false, trustNote: problem };
+    result = { ...result, ok: false, problems: [...result.problems, problem] };
+  }
+  if (approval.signedFailed > 0) {
+    result = {
+      ...result,
+      ok: false,
+      problems: [...result.problems, `approval signatures: ${approval.signedFailed} did not verify`],
+    };
+  }
+  const reported = { ...result, approvalSignatures: approval };
+  out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval));
+  return reported.ok ? 0 : EX_VERIFY_FAILED;
 }

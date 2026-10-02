@@ -5,7 +5,11 @@ import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { isLoopbackHost, type BodyConfig } from "./config.ts";
+import { approvalChallenge, gateApprovalSignature } from "./approval-signature.ts";
+import { readCredentials } from "./operator-credentials.ts";
+import { readRpConfig } from "./rp-config.ts";
 import {
   approvalsLogFor,
   approvePending,
@@ -297,6 +301,14 @@ function isProtectedResourcePath(pathname: string, audience: string): boolean {
   return pathname === want || pathname === "/.well-known/oauth-protected-resource";
 }
 
+async function signedDefer(
+  ledger: { decisions(): Promise<SignedDecisionRecord[]> },
+  ref: string,
+): Promise<SignedDecisionRecord | null> {
+  const rows = await ledger.decisions();
+  return rows.find((row) => row.claims.ref === ref && row.claims.decision === "defer") ?? null;
+}
+
 function send(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void {
   const text = typeof body === "string" ? body : JSON.stringify(body);
   res.writeHead(status, {
@@ -556,6 +568,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     const apiInventory = url.pathname === "/api/inventory";
     const contest = req.method === "POST" && url.pathname.startsWith("/api/contest/");
     const apiApprove = req.method === "POST" && url.pathname === "/api/approve";
+    const apiApproveChallenge = req.method === "GET" && url.pathname === "/api/approve/challenge";
     const apiAgents = req.method === "GET" && url.pathname === "/api/agents";
     const apiHalt = url.pathname === "/api/halt" && (req.method === "GET" || req.method === "POST");
     const apiResume = req.method === "POST" && url.pathname === "/api/resume";
@@ -565,6 +578,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       !apiInventory &&
       !contest &&
       !apiApprove &&
+      !apiApproveChallenge &&
       !apiAgents &&
       !apiHalt &&
       !apiResume
@@ -637,6 +651,34 @@ export async function listen(config: BodyConfig): Promise<Server> {
         send(res, 200, state);
         return;
       }
+      if (apiApproveChallenge) {
+        if (!verified.principal.scopes.has("verax:approve")) {
+          send(res, 403, { error: "scope-missing" });
+          return;
+        }
+        if (await refuseStaleBearer()) return;
+        const ref = url.searchParams.get("ref") ?? "";
+        const deferRecord = ref === "" ? null : await signedDefer(services.ledger, ref);
+        if (!deferRecord) {
+          send(res, 404, { error: "unknown-ref" });
+          return;
+        }
+        const rp = readRpConfig(process.env);
+        if (!rp.ok) {
+          send(res, 503, { error: "passkey-closed", reason: rp.reason });
+          return;
+        }
+        send(res, 200, {
+          challenge: approvalChallenge({
+            ref,
+            requestHash: deferRecord.claims.requestHash,
+            deferRecordHash: decisionRecordHash(deferRecord),
+          }),
+          rpId: rp.config.rpID,
+          allowCredentials: readCredentials(config.stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
+        });
+        return;
+      }
       if (apiApprove) {
         // Reading the ledger is not approving from it. The audit scope opens
         // every door above; this one signs a new decision and lets money go,
@@ -651,7 +693,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           send(res, 400, { error: "bad-body" });
           return;
         }
-        const asked = (parsed.value ?? {}) as { ref?: unknown; requestHash?: unknown };
+        const asked = (parsed.value ?? {}) as { ref?: unknown; requestHash?: unknown; assertion?: unknown };
         const ref = typeof asked.ref === "string" ? asked.ref : "";
         const sawHash = typeof asked.requestHash === "string" ? asked.requestHash : "";
         if (ref === "" || sawHash === "") {
@@ -671,9 +713,26 @@ export async function listen(config: BodyConfig): Promise<Server> {
           send(res, 409, { error: "stale", requestHash: waiting.requestHash });
           return;
         }
-        const defer = services.ledger.lookupByRef(ref);
-        if (!defer || defer.decision !== "defer") {
+        const deferRecord = await signedDefer(services.ledger, ref);
+        if (!deferRecord) {
           send(res, 404, { error: "unknown-ref" });
+          return;
+        }
+        const deferRecordHash = decisionRecordHash(deferRecord);
+        // The challenge is rebuilt from the defer on disk, not from anything the client sent.
+        const gated = await gateApprovalSignature({
+          stateDir: config.stateDir,
+          env: process.env,
+          assertion: asked.assertion,
+          ref,
+          requestHash: deferRecord.claims.requestHash,
+          deferRecordHash,
+        });
+        if (!gated.ok) {
+          send(res, gated.status, {
+            error: gated.error,
+            ...(gated.reason ? { reason: gated.reason } : {}),
+          });
           return;
         }
         // Who approved, on the record. The CLI writes the machine's login name,
@@ -689,7 +748,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
           ref,
           approverId: approver,
           via: "http",
-          policyHash: defer.policyHash,
+          policyHash: deferRecord.claims.policyHash,
+          ...(gated.signature ? { signature: gated.signature } : {}),
           approvals,
           budgetGuard: createApprovalBudgetGuard({
             policy: services.policy,

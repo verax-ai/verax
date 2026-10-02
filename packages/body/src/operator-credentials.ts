@@ -20,8 +20,7 @@ export function credentialsPath(stateDir: string): string {
   return join(stateDir, CREDENTIALS_FILE);
 }
 
-export function readCredentials(stateDir: string): StoredCredential[] {
-  const path = credentialsPath(stateDir);
+export function readCredentialsAt(path: string): StoredCredential[] {
   if (!existsSync(path)) return [];
   try {
     const row = JSON.parse(readFileSync(path, "utf8")) as Partial<CredentialStore>;
@@ -36,6 +35,10 @@ export function readCredentials(stateDir: string): StoredCredential[] {
   } catch {
     return [];
   }
+}
+
+export function readCredentials(stateDir: string): StoredCredential[] {
+  return readCredentialsAt(credentialsPath(stateDir));
 }
 
 /**

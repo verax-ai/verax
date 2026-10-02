@@ -127,10 +127,33 @@ export type ControlInput = {
   lineHash: string;
 };
 
+/**
+ * The operator's own WebAuthn assertion for one HTTP approval.
+ * `authenticatorData`, `clientDataJSON` and `signature` are base64url.
+ * The challenge is not stored: it is rebuilt as the hash of a canonical
+ * document that names this defer record. `rpId` is the relying party id
+ * checked against authenticatorData, so a later read can rebuild rpIdHash
+ * without the body's configuration.
+ */
+export type ApprovalSignature = {
+  credentialId: string;
+  sub: string;
+  authenticatorData: string;
+  clientDataJSON: string;
+  signature: string;
+  deferRecordHash: string;
+  rpId: string;
+};
+
 export type DecisionInputs = {
   principal: { brain: string; scopes: string[]; iss?: string; tenant?: string; org?: string };
   inputs: DecisionInputRow[];
-  approver?: { id: string; via: ApprovalChannel | "proxy"; resolves: string };
+  approver?: {
+    id: string;
+    via: ApprovalChannel | "proxy";
+    resolves: string;
+    signature?: ApprovalSignature;
+  };
   control?: ControlInput;
 };
 
