@@ -49,4 +49,4 @@ export type {
 } from "./types.ts";
 
 export { verifyLedger } from "./verify-ledger.ts";
-export type { VerifyResult, VerifyOptions, VerifyTrust, VerifyControl } from "./verify-ledger.ts";
+export type { VerifyResult, VerifyOptions, VerifyTrust, VerifyControl, VerifyInputs } from "./verify-ledger.ts";

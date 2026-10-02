@@ -1,0 +1,22 @@
+{
+  "id": "fail-record-claim-rule",
+  "description": "The refused spend record re-signed with a non-null effectHash, which the claim rules forbid on a refusal. Header, signature and chain are valid; the verifier must apply the rules itself.",
+  "spec": [
+    "decision-profile-03 4.2 (MUST-DP-2, MUST-DP-3)"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "record-claims",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "dd92c6de94f5e5fcae5a97a6a4b661b95168b41a769f0d52d16ccc5c46c68601",
+    "dad778ccba9bdd825f79d33d95cfe19511e997a53e528c91a119a5b8bf838a29",
+    "72537c0f4ae214bc6b482b1759790d43673619e1e1594e8c65a863059d525947",
+    "a440a3c006c284ff95f305a397fb92cb13469ac73ccb9146ab95150186b15a82",
+    "ec15e55b9698ea4d5395cf9a7cf0a91ac1be241b28b508d5853c9380207e02ff",
+    "96fefb3c9665f05c7611a7edaf6812a0886033a5fb3aaeacf0ab6f6d2283a63f",
+    "f2ad852f7a40fd4b2f550c1dad5e0325c2e83873cf3cb50458fdd8b2a4d9429d"
+  ]
+}

@@ -297,6 +297,8 @@ describe("signed halt and resume", () => {
     const ledger = new FileLedger(dir);
     try {
       const inputs = { principal: { brain: "brain-1", scopes: ["verax:read"] }, inputs: [] };
+      // The writer appends the inputs row before the record that commits to it.
+      appendFileSync(join(dir, "inputs.jsonl"), `${JSON.stringify({ ref: "old-halt", inputs })}\n`);
       await ledger.appendDecisionChained((prev) =>
         signDecisionRecord(
           {

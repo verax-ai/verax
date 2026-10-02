@@ -1,0 +1,22 @@
+{
+  "id": "fail-record-signature",
+  "description": "One byte of the refused spend record's Ed25519 signature is flipped. Later records are re-linked to the changed octets and the checkpoint is re-signed, so only that signature fails.",
+  "spec": [
+    "core-03 7.2"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "record-signature",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "dd92c6de94f5e5fcae5a97a6a4b661b95168b41a769f0d52d16ccc5c46c68601",
+    "dad778ccba9bdd825f79d33d95cfe19511e997a53e528c91a119a5b8bf838a29",
+    "799e58ca60b336c0dd3f9cb8995b326fb5305786290cbea5fbff478e1c4bd9d8",
+    "718604f6fb29b001b19db72adf99c6594c20340687e072a9a42bb956611f20df",
+    "bec6af1ae5c5c05bc173cf246987e29f51ff49eb0c2550c4c546d0c737455c1b",
+    "0483b4ae6f50717072fa678379ead73b92cd3502730e56796e30082c4ab1df89",
+    "2f482770ff42bb4ead5953347430c3f62fb12c6e729c18049955e614f4410ab7"
+  ]
+}

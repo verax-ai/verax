@@ -123,6 +123,7 @@ export function renderVerify(r: VerifyResult, approval: ApprovalSignatureReport 
   lines.push(`              ${r.checkpointTrust.note}`);
   lines.push(r.index.line);
   lines.push(r.effectCompleteness);
+  lines.push(r.inputs.line);
   if (r.tail.checkpoint) {
     const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
     const holds =
@@ -262,6 +263,7 @@ export async function runVerify(
         checkpoint: null,
       },
       control: { line: "control: not checked", windows: 0, warnings: [] },
+      inputs: { line: "inputs: not checked", matched: 0, missing: 0, mismatched: 0 },
       problems: [problem],
     };
     const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED };

@@ -1,0 +1,23 @@
+{
+  "id": "fail-record-alg-8",
+  "description": "The refused spend record re-signed by the same key over the same payload, with protected alg -8 (generic EdDSA) instead of -19. The signature is valid; the profile requires -19.",
+  "spec": [
+    "core-03 7.2 (MUST-T4-1)",
+    "RFC 9864"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "record-header",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "dd92c6de94f5e5fcae5a97a6a4b661b95168b41a769f0d52d16ccc5c46c68601",
+    "dad778ccba9bdd825f79d33d95cfe19511e997a53e528c91a119a5b8bf838a29",
+    "4dd5ab03652eaecc81d84a5b1d8869aae54a482b0bc0b575d0c7850a82524ffa",
+    "7713f5c17efd64d4faa121f13e37262bee123d8e28430dbdf0901ed9bb23f5f2",
+    "9c980096a70bcc7d7220482625ac102ae3129141cb78a594bb873b79bc01d008",
+    "70f1b8160d571c9650dd05bb201a905c2de204cb41483ca6f10ca245cfeb7a73",
+    "dfb1fcf992dc39477701c921d196dc116139b628e47b5c9f0e54691d5a7eec87"
+  ]
+}
