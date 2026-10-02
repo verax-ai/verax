@@ -259,14 +259,21 @@ export async function verifyApprovalSignatures(
   let signedFailed = 0;
   let unsignedHttp = 0;
   let cli = 0;
+  let other = 0;
   const origins: string[] = [];
+  // A defer resolves once. A second signed allow for the same defer reuses an
+  // operator signature the operator gave for one approval.
+  const signedDefers = new Set<string>();
   for (const row of decisions) {
+    // A parsed line that is not a decision record is the ledger statement's problem, not a crash here.
+    if (!row || typeof row !== "object" || !row.claims || typeof row.claims !== "object") continue;
     if (row.claims.decision !== "allow" || typeof row.claims.ref !== "string") continue;
     const approver = approverByAllow.get(row.claims.ref);
     if (!approver) continue;
     if (approver.signature === undefined) {
       if (approver.via === "http") unsignedHttp += 1;
       else if (approver.via === "cli" || approver.via === "cli-script") cli += 1;
+      else other += 1;
       continue;
     }
     const seen = originOnSignature(approver.signature);
@@ -275,7 +282,7 @@ export async function verifyApprovalSignatures(
     const cred = sig ? credentials.find((c) => c.id === sig.credentialId && c.sub === sig.sub) : undefined;
     const defer =
       sig && typeof approver.resolves === "string"
-        ? decisions.find((d) => d.claims.ref === approver.resolves && d.claims.decision === "defer")
+        ? decisions.find((d) => d?.claims?.ref === approver.resolves && d.claims.decision === "defer")
         : undefined;
     let recordHash: string | null = null;
     if (defer) {
@@ -285,8 +292,13 @@ export async function verifyApprovalSignatures(
         recordHash = null;
       }
     }
+    // The signature covers the defer; the allow must be for that same request,
+    // or a body holding one genuine signature could attach it to another allow.
+    const sameRequest = defer !== undefined && row.claims.requestHash === defer.claims.requestHash;
+    const firstUse = recordHash !== null && !signedDefers.has(recordHash);
+    if (recordHash !== null) signedDefers.add(recordHash);
     const challenge =
-      sig && defer && recordHash && recordHash === sig.deferRecordHash && typeof defer.claims.requestHash === "string"
+      sig && defer && sameRequest && firstUse && recordHash && recordHash === sig.deferRecordHash && typeof defer.claims.requestHash === "string"
         ? approvalChallenge({ ref: approver.resolves as string, requestHash: defer.claims.requestHash, deferRecordHash: recordHash })
         : null;
     if (sig && cred && challenge && assertionMatches(sig, cred.publicKey, challenge)) signedVerified += 1;
@@ -300,7 +312,7 @@ export async function verifyApprovalSignatures(
     signedFailed,
     unsignedHttp,
     cli,
-    line: `approval signatures  signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli}${originSuffix}`,
+    line: `approval signatures  signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli}${other > 0 ? ` · other ${other}` : ""}${originSuffix}`,
     trustSource: trust.trustSource,
     trustNote: trust.trustNote,
   };

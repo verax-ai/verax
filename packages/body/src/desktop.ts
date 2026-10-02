@@ -1092,6 +1092,8 @@ const DESKTOP_CHILD_ENV_DROPPED = new Set([
   "NODE_REPL_EXTERNAL_MODULE",
   "LD_PRELOAD",
   "LD_LIBRARY_PATH",
+  // glibc loads an audit library named here into the child, like LD_PRELOAD.
+  "LD_AUDIT",
   "DYLD_INSERT_LIBRARIES",
   "DYLD_LIBRARY_PATH",
   "VERAX_DEV_TOKEN",

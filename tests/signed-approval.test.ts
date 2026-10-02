@@ -509,6 +509,82 @@ describe("signed approval", () => {
     });
   });
 
+  /** One signed approval through the door; returns the state dir and the allow ref it wrote. */
+  async function oneSignedApproval(passkey: SoftwarePasskey): Promise<{ stateDir: string; allowRef: string }> {
+    let out: { stateDir: string; allowRef: string } | null = null;
+    await withRp(async () => {
+      const door = await openDoor(passkey);
+      try {
+        await hold(door, "n1");
+        const row = (await waiting(door))[0]!;
+        const assertion = signApproval(passkey, door.stateDir, row.ref, row.requestHash);
+        const ok = await postApprove(door, { ref: row.ref, requestHash: row.requestHash, assertion });
+        assert.equal(ok.status, 200);
+        out = { stateDir: door.stateDir, allowRef: ((await ok.json()) as { allowRef: string }).allowRef };
+      } finally {
+        await door.close();
+      }
+    });
+    if (!out) throw new Error("no approval");
+    return out;
+  }
+
+  function readJsonl<T>(path: string): T[] {
+    return readFileSync(path, "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as T);
+  }
+
+  function writeJsonl(path: string, rows: unknown[]): void {
+    writeFileSync(path, `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
+  }
+
+  it("A11 verify fails a genuine signature attached to an allow for another request", async () => {
+    const { stateDir, allowRef } = await oneSignedApproval(mintSoftwarePasskey());
+    const clean = await verifyApprovalSignatures(stateDir);
+    assert.equal(clean.signedVerified, 1);
+    // A body that holds the record key mints an allow for a different request
+    // and attaches the operator's signature from the real one.
+    const decisionsPath = join(stateDir, "decisions.jsonl");
+    const decisions = readJsonl<SignedDecisionRecord>(decisionsPath);
+    const allow = decisions.find((row) => row.claims.ref === allowRef);
+    assert.ok(allow);
+    allow.claims.requestHash = "cd".repeat(32);
+    writeJsonl(decisionsPath, decisions);
+    const report = await verifyApprovalSignatures(stateDir);
+    assert.equal(report.signedVerified, 0);
+    assert.equal(report.signedFailed, 1);
+    assert.equal(report.ok, false);
+  });
+
+  it("A12 verify counts a second signed allow for the same defer as failed", async () => {
+    const { stateDir, allowRef } = await oneSignedApproval(mintSoftwarePasskey());
+    const decisionsPath = join(stateDir, "decisions.jsonl");
+    const inputsPath = join(stateDir, "inputs.jsonl");
+    const decisions = readJsonl<SignedDecisionRecord>(decisionsPath);
+    const inputs = readJsonl<InputsRow>(inputsPath);
+    const allow = decisions.find((row) => row.claims.ref === allowRef);
+    const allowInputs = inputs.find((row) => row.ref === allowRef);
+    assert.ok(allow && allowInputs);
+    const copyRef = `${allowRef}-again`;
+    writeJsonl(decisionsPath, [...decisions, { ...allow, claims: { ...allow.claims, ref: copyRef } }]);
+    writeJsonl(inputsPath, [...inputs, { ...allowInputs, ref: copyRef }]);
+    const report = await verifyApprovalSignatures(stateDir);
+    assert.equal(report.signedVerified, 1);
+    assert.equal(report.signedFailed, 1);
+    assert.equal(report.ok, false);
+  });
+
+  it("A13 verify does not throw on a parsed line that is not a decision record", async () => {
+    const { stateDir } = await oneSignedApproval(mintSoftwarePasskey());
+    const decisionsPath = join(stateDir, "decisions.jsonl");
+    writeFileSync(decisionsPath, `${readFileSync(decisionsPath, "utf8")}{}\nnull\n`, "utf8");
+    const report = await verifyApprovalSignatures(stateDir);
+    assert.equal(report.signedVerified, 1);
+    assert.equal(report.signedFailed, 0);
+  });
+
   it("A9 counts a CLI approval as cli and does not expect a signature", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-signed-approval-cli-"));
     const signers = loadOrCreateSigners(dir);

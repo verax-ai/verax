@@ -312,6 +312,7 @@ describe("verax desktop child environment", () => {
       "NODE_REPL_EXTERNAL_MODULE",
       "LD_PRELOAD",
       "LD_LIBRARY_PATH",
+      "LD_AUDIT",
       "DYLD_INSERT_LIBRARIES",
       "DYLD_LIBRARY_PATH",
       "ld_preload",
