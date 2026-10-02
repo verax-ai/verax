@@ -137,7 +137,8 @@ export function verifyAssertion(opts: {
     if (typeof client.origin !== "string" || !opts.expectedOrigins.includes(client.origin)) {
       return { ok: false, reason: "origin" };
     }
-    if (client.crossOrigin === true) return { ok: false, reason: "cross-origin" };
+    // Absent or false only: a string such as "true" is not a same-origin answer either.
+    if (client.crossOrigin !== undefined && client.crossOrigin !== false) return { ok: false, reason: "cross-origin" };
     if (authenticatorData.length < 37) return { ok: false, reason: "authenticator-data" };
     const rpIdHash = createHash("sha256").update(opts.rpId).digest();
     if (Buffer.compare(authenticatorData.subarray(0, 32), rpIdHash) !== 0) return { ok: false, reason: "rp-id" };

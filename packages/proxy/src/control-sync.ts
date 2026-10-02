@@ -110,15 +110,34 @@ export async function syncHaltControl(opts: {
   decisions: () => Promise<SignedDecisionRecord[]>;
   memory: ControlMemory;
   writer: LedgerWriter;
+  /** Test seam: runs just before the history file is read. */
+  beforeHistoryRead?: () => void;
 }): Promise<void> {
-  const stamp = historyStamp(opts.stateDir);
-  const haltedPresent = existsSync(join(opts.stateDir, HALT_SWITCH));
   const memory = opts.memory;
-  if (memory.loaded && sameStamp(memory.stamp, stamp) && memory.haltedPresent === haltedPresent) {
+  if (
+    memory.loaded &&
+    sameStamp(memory.stamp, historyStamp(opts.stateDir)) &&
+    memory.haltedPresent === existsSync(join(opts.stateDir, HALT_SWITCH))
+  ) {
     return;
   }
 
-  const history = readHistory(opts.stateDir);
+  // Read the history first and the switch after it. haltBody creates the
+  // switch before it writes its line, so a halt line read here means the
+  // switch already existed; reading the switch first let a halt that landed
+  // in between look like a hand-removed switch and wrote a resume while the
+  // body was halted. If the history changed while it was read, read again.
+  let stamp = historyStamp(opts.stateDir);
+  let history: string[] = [];
+  let haltedPresent = false;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    opts.beforeHistoryRead?.();
+    history = readHistory(opts.stateDir);
+    haltedPresent = existsSync(join(opts.stateDir, HALT_SWITCH));
+    const after = historyStamp(opts.stateDir);
+    if (sameStamp(stamp, after)) break;
+    stamp = after;
+  }
   if (!memory.loaded) {
     memory.recorded = await readRecorded(opts, history);
     memory.loaded = true;
@@ -252,7 +271,9 @@ function parseHistoryLine(raw: string, line: number): ParsedLine | null {
     return null;
   }
   if (row.action !== "halt" && row.action !== "resume") return null;
-  if (typeof row.atMs !== "number" || typeof row.by !== "string") return null;
+  // A line that names no finite time or an implausible actor is not copied into a signed record.
+  if (typeof row.atMs !== "number" || !Number.isFinite(row.atMs)) return null;
+  if (typeof row.by !== "string" || row.by.length === 0 || row.by.length > 256) return null;
   const via: Via = row.via === "http" ? "http" : row.via === "file" ? "file" : "cli";
   return { action: row.action, atMs: row.atMs, by: row.by, via, line };
 }

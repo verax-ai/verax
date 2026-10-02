@@ -711,8 +711,12 @@ function controlStatement(records: readonly SignedDecisionRecord[]): {
     const decision = record.claims?.decision;
     const reason = record.claims?.reasonCode;
     const ref = typeof record.claims?.ref === "string" ? record.claims.ref : "?";
-    const halt = decision === "allow" && subject === "verax.halt";
-    const resume = decision === "allow" && subject === "verax.resume";
+    // Only the two control subjects, with the control effect class, open or
+    // close a window. Any other allow inside one is a violation, including a
+    // downstream tool whose prefix happens to be "verax".
+    const control = record.claims?.effectClass === "verax.control";
+    const halt = control && decision === "allow" && subject === "verax.halt";
+    const resume = control && decision === "allow" && subject === "verax.resume";
     if (halt || resume) controlRecords += 1;
     if (halt) {
       if (!open) windows += 1;
@@ -723,7 +727,7 @@ function controlStatement(records: readonly SignedDecisionRecord[]): {
       open = false;
       continue;
     }
-    if (decision === "allow" && !subject.startsWith("verax.")) {
+    if (decision === "allow") {
       if (open) violations.push(`allow-while-halted ${ref}`);
       continue;
     }

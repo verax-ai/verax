@@ -804,6 +804,34 @@ describe("signed approval", () => {
     }
   });
 
+  it("D4 refuses a crossOrigin that is the string \"true\" rather than false or absent", async () => {
+    const { createHash, createSign } = await import("node:crypto");
+    const passkey = mintSoftwarePasskey();
+    const origin = "http://localhost:5173";
+    const challenge = isoBase64URL.fromBuffer(new Uint8Array(32).fill(7));
+    const base = assertWithSoftwarePasskey(passkey, { challenge, rpID: "localhost", origin });
+    const clientDataJSON = JSON.stringify({ type: "webauthn.get", challenge, origin, crossOrigin: "true" });
+    const authenticatorData = Buffer.from(isoBase64URL.toBuffer(base.response.authenticatorData));
+    const signature = createSign("SHA256")
+      .update(Buffer.concat([authenticatorData, createHash("sha256").update(clientDataJSON).digest()]))
+      .sign(passkey.privateKey);
+    const result = verifyAssertion({
+      response: {
+        ...base,
+        response: {
+          ...base.response,
+          clientDataJSON: isoBase64URL.fromUTF8String(clientDataJSON),
+          signature: isoBase64URL.fromBuffer(new Uint8Array(signature)),
+        },
+      },
+      expectedChallenge: challenge,
+      expectedOrigins: [origin],
+      rpId: "localhost",
+      publicKeyCose: isoBase64URL.fromBuffer(new Uint8Array(passkey.publicKeyCose)),
+    });
+    assert.deepEqual(result, { ok: false, reason: "cross-origin" });
+  });
+
   it("D3 body source does not import @simplewebauthn", () => {
     const src = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src");
     const importPattern =
