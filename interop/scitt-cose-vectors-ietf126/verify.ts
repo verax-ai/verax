@@ -1,8 +1,9 @@
 /**
- * A verifier for the `vectors-ietf126` set of action-state-group/scitt-cose,
- * written from RFC 8949 (CBOR), RFC 9052 (COSE_Sign1), RFC 9162 (Merkle
- * inclusion) and the set's own README. It uses Node built-ins only and no
- * code from that repository.
+ * A verifier for the `vectors-ietf126` set of action-state-group/scitt-cose.
+ * The CBOR, COSE_Sign1 and RFC 9162 inclusion code is Verax's own receipt
+ * reader (packages/proxy/src/transparency-receipt.ts), the code `verax verify`
+ * checks anchor receipts with; the stages around it follow the set's README.
+ * No code from that repository is used.
  *
  *   node --experimental-strip-types verify.ts <path-to-scitt-cose>/test-vectors [--json]
  *   node --experimental-strip-types verify.ts <path> --mutate
@@ -12,183 +13,19 @@
  * does not cover (vds other than 1 on a VALID vector) is reported SCOPE-OUT
  * rather than counted as a pass or a failure.
  */
-import { createHash, createPublicKey, verify as verifySignature } from "node:crypto";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-// ---- CBOR (RFC 8949): the subset these objects use ----
-
-class Tagged {
-  readonly tag: number;
-  readonly value: unknown;
-  constructor(tag: number, value: unknown) {
-    this.tag = tag;
-    this.value = value;
-  }
-}
-
-function decodeCbor(bytes: Uint8Array): unknown {
-  let at = 0;
-  const need = (n: number) => {
-    if (at + n > bytes.length) throw new Error("cbor-eof");
-  };
-  const length = (ai: number): number => {
-    if (ai < 24) return ai;
-    const size = ai === 24 ? 1 : ai === 25 ? 2 : ai === 26 ? 4 : ai === 27 ? 8 : 0;
-    if (size === 0) throw new Error("cbor-indefinite-or-reserved");
-    need(size);
-    let n = 0n;
-    for (let i = 0; i < size; i += 1) n = (n << 8n) | BigInt(bytes[at + i]!);
-    at += size;
-    if (n > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("cbor-int-too-large");
-    return Number(n);
-  };
-  const item = (depth: number): unknown => {
-    if (depth > 32) throw new Error("cbor-too-deep");
-    need(1);
-    const ib = bytes[at]!;
-    at += 1;
-    const major = ib >> 5;
-    const ai = ib & 31;
-    if (major === 7) {
-      if (ai === 20) return false;
-      if (ai === 21) return true;
-      if (ai === 22) return null;
-      if (ai === 23) return undefined;
-      throw new Error("cbor-simple-or-float");
-    }
-    const n = length(ai);
-    switch (major) {
-      case 0:
-        return n;
-      case 1:
-        return -1 - n;
-      case 2:
-        need(n);
-        at += n;
-        return bytes.slice(at - n, at);
-      case 3:
-        need(n);
-        at += n;
-        return new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(at - n, at));
-      case 4: {
-        const out: unknown[] = [];
-        for (let i = 0; i < n; i += 1) out.push(item(depth + 1));
-        return out;
-      }
-      case 5: {
-        const out = new Map<unknown, unknown>();
-        for (let i = 0; i < n; i += 1) {
-          const key = item(depth + 1);
-          if (out.has(key)) throw new Error("cbor-duplicate-key");
-          out.set(key, item(depth + 1));
-        }
-        return out;
-      }
-      case 6:
-        return new Tagged(n, item(depth + 1));
-      default:
-        throw new Error("cbor-major");
-    }
-  };
-  const value = item(0);
-  if (at !== bytes.length) throw new Error("cbor-trailing");
-  return value;
-}
-
-function head(major: number, n: number): Uint8Array {
-  if (n < 24) return Uint8Array.of((major << 5) | n);
-  if (n < 0x100) return Uint8Array.of((major << 5) | 24, n);
-  if (n < 0x10000) return Uint8Array.of((major << 5) | 25, n >> 8, n & 0xff);
-  return Uint8Array.of((major << 5) | 26, (n >>> 24) & 0xff, (n >>> 16) & 0xff, (n >>> 8) & 0xff, n & 0xff);
-}
-
-const bstr = (b: Uint8Array) => Buffer.concat([head(2, b.length), b]);
-const tstr = (s: string) => {
-  const b = Buffer.from(s, "utf8");
-  return Buffer.concat([head(3, b.length), b]);
-};
-
-/** RFC 9052 4.4: Sig_structure = ["Signature1", body_protected, external_aad, payload]. */
-function sigStructure(protectedBytes: Uint8Array, payload: Uint8Array): Buffer {
-  return Buffer.concat([head(4, 4), tstr("Signature1"), bstr(protectedBytes), bstr(new Uint8Array(0)), bstr(payload)]);
-}
-
-// ---- COSE_Sign1 (RFC 9052) ----
-
-type Sign1 = {
-  protectedBytes: Uint8Array;
-  protectedHeader: Map<unknown, unknown>;
-  unprotected: Map<unknown, unknown>;
-  payload: Uint8Array | null;
-  signature: Uint8Array;
-};
-
-function decodeSign1(bytes: Uint8Array): Sign1 {
-  let value = decodeCbor(bytes);
-  // Tag 18 is COSE_Sign1 (RFC 9052 2); the untagged form is accepted too.
-  if (value instanceof Tagged) {
-    if (value.tag !== 18) throw new Error(`tag ${value.tag} is not COSE_Sign1`);
-    value = value.value;
-  }
-  if (!Array.isArray(value) || value.length !== 4) throw new Error("not a four-element COSE_Sign1 array");
-  const [p, u, payload, signature] = value as [unknown, unknown, unknown, unknown];
-  if (!(p instanceof Uint8Array) || !(u instanceof Map) || !(signature instanceof Uint8Array)) {
-    throw new Error("COSE_Sign1 member types");
-  }
-  if (payload !== null && !(payload instanceof Uint8Array)) throw new Error("payload is neither bstr nor nil");
-  const protectedHeader = p.length === 0 ? new Map() : decodeCbor(p);
-  if (!(protectedHeader instanceof Map)) throw new Error("protected header is not a map");
-  return { protectedBytes: p, protectedHeader, unprotected: u, payload, signature };
-}
-
-/** COSE alg (RFC 9053, RFC 9864) to a Node verify call. */
-function verifyCose(alg: unknown, keyPem: string, data: Buffer, signature: Uint8Array): boolean {
-  const key = createPublicKey(keyPem);
-  if (alg === -8 || alg === -19) {
-    if (key.asymmetricKeyType !== "ed25519") return false;
-    return verifySignature(null, data, key, signature);
-  }
-  if (alg === -7) {
-    if (key.asymmetricKeyType !== "ec" || key.asymmetricKeyDetails?.namedCurve !== "prime256v1") return false;
-    return verifySignature("sha256", data, { key, dsaEncoding: "ieee-p1363" }, signature);
-  }
-  if (alg === -35) {
-    if (key.asymmetricKeyType !== "ec" || key.asymmetricKeyDetails?.namedCurve !== "secp384r1") return false;
-    return verifySignature("sha384", data, { key, dsaEncoding: "ieee-p1363" }, signature);
-  }
-  throw new Error(`alg ${String(alg)} is not supported`);
-}
-
-// ---- RFC 9162 2.1.1 and 2.1.3.2 ----
+import {
+  decodeCborItem as decodeCbor,
+  decodeSign1,
+  rootFromInclusion,
+  sign1Structure as sigStructure,
+  verifyCoseSignature as verifyCose,
+} from "../../packages/proxy/src/transparency-receipt.ts";
 
 const sha256 = (...parts: Uint8Array[]) => createHash("sha256").update(Buffer.concat(parts)).digest();
-
-function rootFromInclusion(leafEntry: Uint8Array, leafIndex: number, treeSize: number, path: Uint8Array[]): Buffer {
-  if (leafIndex >= treeSize) throw new Error("leaf_index is not below tree_size");
-  let fn = leafIndex;
-  let sn = treeSize - 1;
-  let r = sha256(Uint8Array.of(0x00), leafEntry);
-  for (const p of path) {
-    if (p.length !== 32) throw new Error("audit path node is not 32 bytes");
-    if (sn === 0) throw new Error("audit path is longer than the tree");
-    if (fn % 2 === 1 || fn === sn) {
-      r = sha256(Uint8Array.of(0x01), p, r);
-      if (fn % 2 === 0) {
-        while (fn % 2 === 0 && fn !== 0) {
-          fn = Math.floor(fn / 2);
-          sn = Math.floor(sn / 2);
-        }
-      }
-    } else {
-      r = sha256(Uint8Array.of(0x01), r, p);
-    }
-    fn = Math.floor(fn / 2);
-    sn = Math.floor(sn / 2);
-  }
-  if (sn !== 0) throw new Error("audit path is shorter than the tree");
-  return r;
-}
 
 // ---- one vector ----
 

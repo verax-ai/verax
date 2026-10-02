@@ -11,6 +11,7 @@ import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateT
 import { runHalt, runResume } from "./halt.ts";
 import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
+import { runAnchor } from "./anchor-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
 import { runVerify } from "./verify-cli.ts";
 import { runUnlock } from "./unlock.ts";
@@ -50,6 +51,9 @@ Usage: verax <command> [options]
   reconcile <args>     compare the ledger against a statement
   verify <stateDir>    read a ledger back without a body: signatures, chain,
                        effect binding, which key answered, and approval signatures
+  anchor <stateDir> --service <url>
+                       register each checkpoint's hash with a transparency service
+                       someone else runs and keep its receipt for verify --anchor-key
   witness <stateDir>   run the witness alongside a body
   halt <stateDir>      stop the body from allowing anything further
   resume <stateDir>    lift a halt; who and when go to halt-history.jsonl
@@ -278,6 +282,9 @@ async function dispatchCli(
   }
   if (argv[0] === "verify") {
     return runVerify(argv.slice(1), (s) => stdout.write(`${s}\n`));
+  }
+  if (argv[0] === "anchor") {
+    return runAnchor(argv.slice(1), (s) => stdout.write(`${s}\n`));
   }
   if (argv[0] === "desktop") {
     stderr.write("desktop-not-released: the desktop panel is not in this release\n");

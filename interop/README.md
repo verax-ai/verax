@@ -10,9 +10,12 @@ verifiers use no code from the repositories whose vectors they run.
 
 Vectors: [action-state-group/scitt-cose](https://github.com/action-state-group/scitt-cose)
 tag `vectors-ietf126` at `529515ba7445af0f07e5da578ad938e371e8c7a8`.
-Verifier: [`scitt-cose-vectors-ietf126/verify.ts`](scitt-cose-vectors-ietf126/verify.ts),
-written from RFC 8949, RFC 9052, RFC 9162 and the set's README, with a CBOR
-decoder of its own and Node built-ins only.
+Verifier: [`scitt-cose-vectors-ietf126/verify.ts`](scitt-cose-vectors-ietf126/verify.ts).
+Its CBOR, COSE_Sign1 and RFC 9162 inclusion code is
+[`packages/proxy/src/transparency-receipt.ts`](../packages/proxy/src/transparency-receipt.ts),
+written from RFC 8949, RFC 9052 and RFC 9162: the same code `verax verify`
+uses for anchor receipts, so this run is a check of that code. The stages
+around it follow the set's README.
 
 ```bash
 git clone https://github.com/action-state-group/scitt-cose && git -C scitt-cose checkout vectors-ietf126

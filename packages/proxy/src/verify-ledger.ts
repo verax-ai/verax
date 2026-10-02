@@ -66,6 +66,14 @@
  * verified records in its window; a difference is `checkpoint totals do not
  * match`. A checkpoint whose totals are null (redacted) is not compared.
  *
+ * Anchors are the last statement. `checkpoint-anchors.jsonl` holds COSE
+ * Receipts from a Transparency Service for checkpoints `verax anchor`
+ * registered. A receipt names no key, so it is checked only under a key the
+ * reader supplies (`anchorPublicKeyPem`): each row must name a checkpoint that
+ * verified, its leaf entry must be the one the route defines, and the receipt
+ * must verify over the root its inclusion proof rebuilds. Without that key the
+ * receipts are counted and said to be unchecked; that is not a failure.
+ *
  * Control records are a further statement. An allow whose subject is
  * `verax.halt` opens a halt window; an allow whose subject is `verax.resume`
  * closes it. An allow whose subject does not start with `verax.` while a
@@ -87,6 +95,7 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  checkpointHash,
   findCheckpointChainBreak,
   totalsFromDecisionRecords,
   verifyCheckpoint,
@@ -98,8 +107,10 @@ import type { SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-extract";
 
+import { anchorEntryHash, readAnchors } from "./anchors.ts";
 import { checkpointsPath, readCheckpointFile } from "./checkpoints.ts";
 import { sha256Canonical } from "./hash.ts";
+import { verifyReceipt } from "./transparency-receipt.ts";
 import {
   ledgerPiecePathProblem,
   readLedgerManifest,
@@ -148,7 +159,18 @@ export type VerifyResult = {
   control: VerifyControl;
   /** Inputs rows checked against each record's signed `inputsHash`. */
   inputs: VerifyInputs;
+  /** Transparency Service receipts for checkpoints, when the ledger holds any. */
+  anchors: VerifyAnchors;
   problems: string[];
+};
+
+export type VerifyAnchors = {
+  line: string;
+  /** Receipts in `checkpoint-anchors.jsonl`. */
+  receipts: number;
+  /** Receipts that verified under the reader's key. Zero when no key was given. */
+  verified: number;
+  checked: boolean;
 };
 
 export type VerifyInputs = {
@@ -193,6 +215,8 @@ export type VerifyOptions = {
   witnessPublicKeyPem?: string;
   /** Verify every checkpoint row against this key instead of one key taken from the file. */
   checkpointPublicKeyPem?: string;
+  /** The Transparency Service key that receipts in `checkpoint-anchors.jsonl` are checked under. */
+  anchorPublicKeyPem?: string;
 };
 
 /**
@@ -663,7 +687,7 @@ function tailStatement(
   records: readonly SignedDecisionRecord[],
   checkpointPublicKeyPem: string,
   attested: readonly SignedDecisionRecord[] = records,
-): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[] } {
+): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[]; verified: VerifiedCheckpoint[] } {
   const checkpointFile = checkpointsPath(dir);
   const checkpointLink = symbolicLinkProblem(checkpointFile);
   if (checkpointLink !== null) {
@@ -672,6 +696,7 @@ function tailStatement(
       tail: { line: TAIL_NONE, checkpoint: null },
       checkpointTrust: checkpointTrustOf(pinned, null, 0),
       problems: [checkpointLink],
+      verified: [],
     };
   }
   const loaded = readCheckpointFile(dir);
@@ -681,11 +706,18 @@ function tailStatement(
   const key = pinned !== "" ? pinned : taken;
   const checkpointTrust = checkpointTrustOf(pinned, taken, rows.length);
   const problems: string[] = [...loaded.problems];
+  const verified: VerifiedCheckpoint[] = [];
   noteEd25519(key, problems);
   for (let i = 0; i < rows.length; i += 1) {
     if (!checkpointRowVerifies(rows[i]!, key)) {
       problems.push(`checkpoint signature does not verify: checkpoint ${i}`);
       continue;
+    }
+    try {
+      const count = rows[i]!.claims.receiptCount;
+      verified.push({ hash: checkpointHash(rows[i]!), receiptCount: typeof count === "number" ? count : null });
+    } catch {
+      // A row that verified but cannot be hashed cannot be anchored either.
     }
     const totalsProblem = checkpointTotalsProblem(rows[i]!, attested);
     if (totalsProblem) problems.push(`${totalsProblem}: checkpoint ${i}`);
@@ -706,7 +738,7 @@ function tailStatement(
   const covered = brk ? rows.slice(0, brk.index) : rows;
   const newest = covered.length > 0 ? covered[covered.length - 1]! : null;
   if (!newest) {
-    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems };
+    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems, verified };
   }
   const claims = newest.claims;
   const receiptCount = typeof claims.receiptCount === "number" ? claims.receiptCount : null;
@@ -738,6 +770,82 @@ function tailStatement(
     tail: { line, checkpoint: { receiptCount, chainHeadHash, ledgerHoldsRecord } },
     checkpointTrust,
     problems,
+    verified,
+  };
+}
+
+type VerifiedCheckpoint = { hash: string; receiptCount: number | null };
+
+const ANCHORS_NONE: VerifyAnchors = {
+  line: "anchors: none (no checkpoint is registered with a transparency service)",
+  receipts: 0,
+  verified: 0,
+  checked: false,
+};
+
+function anchorStatement(
+  dir: string,
+  checkpoints: readonly VerifiedCheckpoint[],
+  keyPem: string,
+  problems: string[],
+): VerifyAnchors {
+  const read = readAnchors(dir);
+  if (!read.present) return ANCHORS_NONE;
+  problems.push(...read.problems);
+  const receipts = read.rows.length;
+  const services = [...new Set(read.rows.map((r) => r.service))].join(", ");
+  if (keyPem === "") {
+    return {
+      line: `anchors: ${receipts} receipt(s) from ${services || "no service"}, not checked: pin the service key with --anchor-key`,
+      receipts,
+      verified: 0,
+      checked: false,
+    };
+  }
+  const byHash = new Map(checkpoints.map((c) => [c.hash, c]));
+  let verified = 0;
+  let newestCount: number | null = null;
+  for (const row of read.rows) {
+    const short = row.checkpointHash.slice(0, 12);
+    const checkpoint = byHash.get(row.checkpointHash);
+    if (!checkpoint) {
+      problems.push(`anchor names a checkpoint the ledger does not hold: ${short}`);
+      continue;
+    }
+    let entry: string;
+    try {
+      entry = anchorEntryHash(row.checkpointHash, row.route);
+    } catch {
+      problems.push(`anchor route is not one this verifier reads: ${short}`);
+      continue;
+    }
+    if (entry !== row.entryHash) {
+      problems.push(`anchor entry hash is not the checkpoint's: ${short}`);
+      continue;
+    }
+    const check = verifyReceipt(Buffer.from(row.receiptB64, "base64"), Buffer.from(entry, "hex"), keyPem);
+    if (!check.ok) {
+      problems.push(`anchor receipt does not verify: ${short} (${check.stage}: ${check.reason})`);
+      continue;
+    }
+    if (check.treeSize !== row.treeSize || check.leafIndex !== row.leafIndex) {
+      problems.push(`anchor row disagrees with its receipt: ${short}`);
+      continue;
+    }
+    verified += 1;
+    if (checkpoint.receiptCount !== null && (newestCount === null || checkpoint.receiptCount > newestCount)) {
+      newestCount = checkpoint.receiptCount;
+    }
+  }
+  const covers = newestCount === null ? "" : `; the newest anchored checkpoint covers ${newestCount} record(s)`;
+  return {
+    line:
+      verified === receipts
+        ? `anchors: ${receipts} receipt(s) from ${services} verify under the key you supplied${covers}`
+        : `anchors: ${verified} of ${receipts} receipt(s) verify under the key you supplied`,
+    receipts,
+    verified,
+    checked: true,
   };
 }
 
@@ -886,6 +994,7 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     tail: { line: TAIL_NONE, checkpoint: null },
     control: CONTROL_UNCHECKED,
     inputs: INPUTS_UNCHECKED,
+    anchors: ANCHORS_NONE,
     problems: [problem],
   };
 }
@@ -950,6 +1059,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       tail: emptyTail.tail,
       control: emptyControl.control,
       inputs: INPUTS_UNCHECKED,
+      anchors: ANCHORS_NONE,
       problems,
     };
   }
@@ -1150,6 +1260,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   problems.push(...indexed.problems, ...tailed.problems);
   const stated = controlStatement(records);
   problems.push(...stated.violations);
+  const anchors = anchorStatement(dir, tailed.verified, opts.anchorPublicKeyPem?.trim() ?? "", problems);
 
   const ok =
     problems.length === 0 && signaturesInvalid === 0 && chainBreakAt === null && effectsOrphaned === 0;
@@ -1173,6 +1284,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     tail: tailed.tail,
     control: stated.control,
     inputs,
+    anchors,
     problems,
   };
 }

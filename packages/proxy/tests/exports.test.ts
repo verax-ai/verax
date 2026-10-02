@@ -47,6 +47,13 @@ const ALLOWED = new Set([
   // Doctor compares the ref index to the pieces; the count lives next to
   // the manifest reader and must stay this package's.
   "indexCoverage",
+  // verax anchor reads the checkpoints and writes the anchor rows that
+  // verifyLedger checks; the file formats and the receipt reader stay here.
+  "readCheckpointFile",
+  "anchorEntryHash",
+  "appendAnchor",
+  "readAnchors",
+  "verifyReceipt",
 ]);
 
 describe("B1 exports map", () => {
