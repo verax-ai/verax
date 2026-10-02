@@ -179,6 +179,17 @@ describe("anchors in verify", () => {
     assert.equal(check.ok ? null : check.stage, "vds-gate");
   });
 
+  it("a receipt that marks a header critical is refused unless this reader understands it", () => {
+    const understood = resignedReceipt(new Map<unknown, unknown>([[1, -8], [395, 1], [2, [395]]]));
+    assert.equal(verifyReceipt(understood.receipt, understood.entry, understood.keyPem).ok, true);
+    for (const crit of [[999], [], "395"]) {
+      const r = resignedReceipt(new Map<unknown, unknown>([[1, -8], [395, 1], [2, crit]]));
+      const check = verifyReceipt(r.receipt, r.entry, r.keyPem);
+      assert.equal(check.ok, false, `crit ${JSON.stringify(crit)} was accepted`);
+      assert.equal(check.ok ? null : check.stage, "receipt-decode");
+    }
+  });
+
   it("a receipt for a checkpoint the ledger does not hold is named", async () => {
     const dir = copyLedger();
     try {
@@ -274,6 +285,36 @@ describe("verax anchor", () => {
       const code = await runAnchor([dir, "--service", "https://witness.example"], (s) => out.push(s), fakeService({ ...answer, entry_hash: "11".repeat(32) }, []));
       assert.equal(code, 1);
       assert.match(out.join("\n"), /another entry/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an empty --service-key file is a usage error, not a skipped check", async () => {
+    const dir = copyLedger(false);
+    const keyFile = join(dir, "empty.pem");
+    writeFileSync(keyFile, "  \n", "utf8");
+    try {
+      const out: string[] = [];
+      const code = await runAnchor([dir, "--service", "https://witness.example", "--service-key", keyFile], (s) => out.push(s), fakeService(answer, []));
+      assert.equal(code, 64);
+      assert.match((await verifyLedger(dir, pinned())).anchors.line, /^anchors: none/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an answer larger than a receipt can be, without keeping it", async () => {
+    const dir = copyLedger(false);
+    try {
+      const out: string[] = [];
+      // Under the body cap, over what a receipt can be: refused by the receipt length.
+      const long = { ...answer, receipt_b64: "A".repeat(100_000) };
+      assert.equal(await runAnchor([dir, "--service", "https://witness.example"], (s) => out.push(s), fakeService(long, [])), 1);
+      // A short receipt in a body past the cap: refused before the body is parsed.
+      const padded = { ...answer, padding: "A".repeat(300_000) };
+      assert.equal(await runAnchor([dir, "--service", "https://witness.example"], (s) => out.push(s), fakeService(padded, [])), 1);
+      assert.match((await verifyLedger(dir, pinned())).anchors.line, /^anchors: none/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

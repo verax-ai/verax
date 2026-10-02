@@ -203,6 +203,8 @@ export function rootFromInclusion(leafEntry: Uint8Array, leafIndex: number, tree
   return r;
 }
 
+const UNDERSTOOD = new Set<unknown>([1, 395]);
+
 export type ReceiptStage = "receipt-decode" | "vds-gate" | "inclusion" | "receipt-sig";
 
 export type ReceiptCheck =
@@ -220,6 +222,13 @@ export function verifyReceipt(receipt: Uint8Array, leafEntry: Uint8Array, public
   } catch (err) {
     return { ok: false, stage: "receipt-decode", reason: err instanceof Error ? err.message : String(err) };
   }
+  // RFC 9052 3.1: crit lists labels a reader must understand, is non-empty and
+  // sits in the protected header. This reader understands alg and vds only.
+  const crit = sign1.protectedHeader.get(2);
+  if (crit !== undefined && (!Array.isArray(crit) || crit.length === 0 || !crit.every((l) => UNDERSTOOD.has(l)))) {
+    return { ok: false, stage: "receipt-decode", reason: "a critical header this reader does not understand" };
+  }
+  if (sign1.unprotected.has(2)) return { ok: false, stage: "receipt-decode", reason: "crit in the unprotected header" };
   const vds = sign1.protectedHeader.get(395);
   if (vds !== 1) return { ok: false, stage: "vds-gate", reason: `vds ${String(vds)} is not RFC9162_SHA256` };
   const vdp = sign1.unprotected.get(396);

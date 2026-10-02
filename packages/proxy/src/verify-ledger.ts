@@ -719,7 +719,7 @@ function tailStatement(
     } catch {
       // A row that verified but cannot be hashed cannot be anchored either.
     }
-    const totalsProblem = checkpointTotalsProblem(rows[i]!, attested);
+    const totalsProblem = checkpointTotalsProblem(rows[i]!, records, attested);
     if (totalsProblem) problems.push(`${totalsProblem}: checkpoint ${i}`);
   }
   let brk: { index: number; reason: string } | null = null;
@@ -912,14 +912,33 @@ function inputsStatement(
 /**
  * The decision profile's checkpoint totals: allow, deny and defer counts of
  * the attested records whose time falls in `[startMs, endMs)`, the window the
- * witness counted. Null totals were redacted and are not compared.
+ * witness counted, up to and including the head record it signed. A record
+ * appended after the checkpoint can carry a time inside that window (a call
+ * that took its time before an earlier one was written); the witness never
+ * saw it. Null totals were redacted and are not compared.
  */
-function checkpointTotalsProblem(row: SignedCheckpoint, attested: readonly SignedDecisionRecord[]): string | null {
+function checkpointTotalsProblem(
+  row: SignedCheckpoint,
+  records: readonly SignedDecisionRecord[],
+  attested: readonly SignedDecisionRecord[],
+): string | null {
   const claims = row.claims;
   if (claims.totals === null || claims.totals === undefined) return null;
   const { startMs, endMs } = claims;
   if (typeof startMs !== "number" || typeof endMs !== "number") return "checkpoint totals have no window";
-  const inWindow = attested.filter((r) => r.claims.timestampMs >= startMs && r.claims.timestampMs < endMs);
+  let upTo = records.length;
+  if (typeof claims.chainHeadHash === "string") {
+    const head = records.findIndex((r) => {
+      try {
+        return decisionRecordHash(r) === claims.chainHeadHash;
+      } catch {
+        return false;
+      }
+    });
+    if (head >= 0) upTo = head + 1;
+  }
+  const seen = new Set(records.slice(0, upTo));
+  const inWindow = attested.filter((r) => seen.has(r) && r.claims.timestampMs >= startMs && r.claims.timestampMs < endMs);
   try {
     if (canonical(totalsFromDecisionRecords(inWindow)) === canonical(claims.totals)) return null;
   } catch {

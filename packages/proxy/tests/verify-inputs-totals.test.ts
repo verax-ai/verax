@@ -102,8 +102,7 @@ describe("verifyLedger inputs rows", () => {
       const first = { principal: { brain: "brain-1", scopes: ["verax:read"] }, inputs: [], n: 1 };
       const second = { ...first, n: 2 };
       for (const [i, inputs] of [first, second].entries()) {
-        appendFileSync(join(dir, "inputs.jsonl"), `${JSON.stringify({ ref: "shared", inputs })}
-`);
+        appendFileSync(join(dir, "inputs.jsonl"), `${JSON.stringify({ ref: "shared", inputs })}\n`);
         await ledger.appendDecisionChained((prev) =>
           signDecisionRecord(
             {
@@ -138,6 +137,45 @@ ${rows[0]}
       const one = await verifyLedger(dir);
       assert.equal(one.ok, false);
       assert.equal(one.inputs.mismatched, 1);
+    } finally {
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("one row cannot answer for two records that carry the same inputsHash", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-verify-inputs-same-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const inputs = { principal: { brain: "brain-1", scopes: ["verax:read"] }, inputs: [] };
+      appendFileSync(join(dir, "inputs.jsonl"), `${JSON.stringify({ ref: "same", inputs })}\n`);
+      for (const i of [0, 1]) {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.get",
+              requestHash: sha256Canonical({ name: "memory.get", n: i }),
+              policyHash: sha256Canonical({ policy: 1 }),
+              inputsHash: sha256Canonical(inputs),
+              decision: "deny",
+              reasonCode: "no-rule",
+              ref: "same",
+              effectHash: null,
+              effectClass: "memory.get",
+              timestampMs: 10 + i,
+              nonce: `same-${i}`,
+              prevRecordHash: prev,
+            },
+            RECORD_SIGNER.privateKeyPem,
+            RECORD_SIGNER.publicKeyPem,
+          ),
+        );
+      }
+      const result = await verifyLedger(dir);
+      assert.equal(result.ok, false);
+      assert.equal(result.inputs.matched, 1);
+      assert.equal(result.inputs.missing, 1);
     } finally {
       ledger.close();
       rmSync(dir, { recursive: true, force: true });
@@ -219,6 +257,50 @@ describe("verifyLedger checkpoint totals", () => {
         JSON.stringify(result.problems),
       );
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a record appended after the checkpoint with a time inside its window does not change what it counted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-verify-totals-late-"));
+    const ledger = new FileLedger(dir);
+    const append = async (i: number) => {
+      const inputs = { principal: { brain: "brain-1", scopes: ["verax:read"] }, inputs: [], n: i };
+      appendFileSync(join(dir, "inputs.jsonl"), `${JSON.stringify({ ref: `late-${i}`, inputs })}\n`);
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.get",
+            requestHash: sha256Canonical({ name: "memory.get", n: i }),
+            policyHash: sha256Canonical({ policy: 1 }),
+            inputsHash: sha256Canonical(inputs),
+            decision: "deny",
+            reasonCode: "no-rule",
+            ref: `late-${i}`,
+            effectHash: null,
+            effectClass: "memory.get",
+            // Both calls took their time before either was written.
+            timestampMs: 10,
+            nonce: `late-${i}`,
+            prevRecordHash: prev,
+          },
+          RECORD_SIGNER.privateKeyPem,
+          RECORD_SIGNER.publicKeyPem,
+        ),
+      );
+    };
+    try {
+      await append(0);
+      writeCheckpoint(dir, (claims) => claims);
+      await append(1);
+      const result = await verifyLedger(dir, { checkpointPublicKeyPem: WITNESS.publicKeyPem });
+      assert.ok(
+        !result.problems.some((p) => p.startsWith("checkpoint totals")),
+        JSON.stringify(result.problems),
+      );
+    } finally {
+      ledger.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });

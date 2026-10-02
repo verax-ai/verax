@@ -54,6 +54,31 @@ function serviceUrl(raw: string): URL | null {
   return null;
 }
 
+// A receipt is a few hundred bytes; the reader refuses CBOR over 64 KiB.
+const MAX_ANSWER_BYTES = 256 * 1024;
+const MAX_RECEIPT_B64 = Math.ceil((64 * 1024) / 3) * 4;
+
+/** The body as text, refused once it passes MAX_ANSWER_BYTES rather than held in full. */
+async function boundedText(res: Response): Promise<string> {
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (declared > MAX_ANSWER_BYTES) throw new Error("answer too large");
+  if (!res.body) return "";
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.length;
+    if (size > MAX_ANSWER_BYTES) {
+      await reader.cancel();
+      throw new Error("answer too large");
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 type RegisterAnswer = { receipt_b64?: unknown; entry_hash?: unknown; leaf_index?: unknown; tree_size?: unknown };
 
 export async function runAnchor(
@@ -99,6 +124,10 @@ export async function runAnchor(
       out(`anchor: cannot read key file ${keyPath}`);
       return EX_USAGE;
     }
+    if (serviceKey.trim() === "") {
+      out(`anchor: key file ${keyPath} is empty`);
+      return EX_USAGE;
+    }
   }
   const dir = args.find((a) => !a.startsWith("-"));
   if (!dir) {
@@ -135,7 +164,7 @@ export async function runAnchor(
         redirect: "error",
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      answer = (await res.json()) as RegisterAnswer;
+      answer = JSON.parse(await boundedText(res)) as RegisterAnswer;
     } catch (err) {
       failed += 1;
       out(`anchor: ${hash.slice(0, 12)} not registered: ${err instanceof Error ? err.message : String(err)}`);
@@ -144,6 +173,7 @@ export async function runAnchor(
     const { receipt_b64, entry_hash, leaf_index, tree_size } = answer;
     if (
       typeof receipt_b64 !== "string" ||
+      receipt_b64.length > MAX_RECEIPT_B64 ||
       entry_hash !== entryHash ||
       !Number.isSafeInteger(leaf_index) ||
       !Number.isSafeInteger(tree_size)
