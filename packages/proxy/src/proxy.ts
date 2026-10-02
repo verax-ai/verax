@@ -15,6 +15,7 @@ import { diskProbe } from "./disk.ts";
 import { markEnded, markStarted, startedWithoutEnd } from "./in-flight-log.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
+import { controlUnchanged, createControlMemory, syncHaltControl } from "./control-sync.ts";
 import {
   countedWork,
   hasPrimaryEffect,
@@ -23,6 +24,7 @@ import {
   lookupResolvedBy,
   noteResolution,
   noteTenantRef,
+  type LedgerWriter,
 } from "./ledger.ts";
 import { spokenReason } from "./spoken-reason.ts";
 import { tenantKey } from "./tenant.ts";
@@ -214,6 +216,7 @@ export function createProxy(deps: ProxyDeps) {
   const inputsLog = deps.inputsLog ?? inputsLogFor(deps.ledger);
   const approvals = approvalsLogFor(deps.ledger);
   const admission = new SerialQueue();
+  const controlQueue = new SerialQueue();
   const inFlight = new Map<string, Promise<ToolResult>>();
   const budgetGuard = createApprovalBudgetGuard({
     policy: deps.policy,
@@ -224,6 +227,10 @@ export function createProxy(deps: ProxyDeps) {
   (deps.ledger as { effectSigner?: ProxyDeps["effectSigner"] }).effectSigner = deps.effectSigner;
   const ledgerDir = (deps.ledger as unknown as { dir?: unknown }).dir;
   const stateDir = typeof ledgerDir === "string" ? ledgerDir : null;
+  // Single writer: after open, the ledger lock is this process. The first
+  // sync reads control records once; this snapshot is updated in place.
+  const controlMemory = createControlMemory();
+  let controlSyncReported = false;
   if (stateDir === null) {
     process.stderr.write("verax-proxy: halt and disk limits are inactive without a ledger directory\n");
   }
@@ -535,9 +542,51 @@ export function createProxy(deps: ProxyDeps) {
     return denied(verdict.reasonCode, denyRef);
   }
 
+  async function syncControlRecords(): Promise<void> {
+    if (stateDir === null) return;
+    try {
+      if (controlUnchanged(stateDir, controlMemory)) return;
+      const run = (writer: LedgerWriter) =>
+        syncHaltControl({
+          stateDir,
+          now: deps.now,
+          nonce: deps.nonce,
+          policyHash: deps.policy.hash,
+          recordSigner: deps.recordSigner,
+          inputsLog,
+          decisions: () => deps.ledger.decisions(),
+          memory: controlMemory,
+          writer,
+        });
+      const host = deps.ledger as { exclusive?: <T>(fn: (writer: LedgerWriter) => Promise<T>) => Promise<T> };
+      if (typeof host.exclusive === "function") {
+        await host.exclusive((writer) => run(writer));
+      } else {
+        await controlQueue.enqueue(() =>
+          run({
+            appendDecisionChained: (build) => deps.ledger.appendDecisionChained(build),
+            appendEffect: (row, witnessClass, resultHash) => deps.ledger.appendEffect(row, witnessClass, resultHash),
+          }),
+        );
+      }
+      controlSyncReported = false;
+    } catch (err) {
+      // An unreadable ledger used to throw out of the call. Leave the snapshot
+      // unloaded so the next call reads again, and keep going: the halt switch
+      // and the rate limit still fail closed on their own path. One line per
+      // failure streak, so the admission retry in the same call does not repeat it.
+      controlMemory.loaded = false;
+      if (controlSyncReported) return;
+      controlSyncReported = true;
+      const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
+      process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
+    }
+  }
+
   return {
     approvals,
     inputsLog,
+    syncControlRecords,
     async call(call: ToolCall, principal: Principal): Promise<ToolResult> {
       if (stateDir) {
         await drainApprovalCommands(stateDir, async (cmd) => {
@@ -558,6 +607,7 @@ export function createProxy(deps: ProxyDeps) {
             budgetGuard,
           });
         });
+        await syncControlRecords();
       }
       const dispatched = toolCallOf(call);
       const requestHash = sha256Canonical(dispatched);
@@ -594,6 +644,8 @@ export function createProxy(deps: ProxyDeps) {
       const given = readRef(call.arguments);
 
       const plan = await admission.enqueue(async (): Promise<AdmissionPlan> => {
+        // A halt that landed while this call waited must be on the chain before the deny.
+        if (stateDir) await syncControlRecords();
         // A call that waited here behind another admission reads the halt flag again.
         if (stateDir && existsSync(join(stateDir, "halted"))) {
           const ref = deps.nonce();

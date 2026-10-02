@@ -167,13 +167,20 @@ describe("S3 damage limits", () => {
       effectSigner: EFFECT_SIGNER,
       ledger,
       now: tickingNow(),
-      nonce: queuedNonce(["halt-1"]),
+      nonce: queuedNonce(["halt-file", "halt-1"]),
       inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
     });
     try {
       const out = await proxy.call({ name: "memory.get", arguments: { id: "a" } }, reader);
       assert.match(out.content[0]?.text ?? "", /denied:halted:halt-1/);
-      const rec = (await ledger.decisions())[0]!;
+      const recs = await ledger.decisions();
+      assert.equal(recs.length, 2);
+      assert.equal(recs[0]!.claims.decision, "allow");
+      assert.equal(recs[0]!.claims.subject, "verax.halt");
+      assert.equal(recs[0]!.claims.reasonCode, "operator-halt");
+      const haltInputs = await proxy.inputsLog.get(recs[0]!.claims.ref ?? "");
+      assert.equal(haltInputs?.control?.via, "file");
+      const rec = recs[1]!;
       assert.equal(rec.claims.decision, "deny");
       assert.equal(rec.claims.reasonCode, "halted");
       assert.equal(typeof rec.coseHex, "string");
@@ -194,16 +201,22 @@ describe("S3 damage limits", () => {
       effectSigner: EFFECT_SIGNER,
       ledger,
       now: tickingNow(),
-      nonce: queuedNonce(["halt-disk-1"]),
+      nonce: queuedNonce(["halt-disk-file", "halt-disk-1"]),
       inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
     });
     try {
       const out = await proxy.call({ name: "memory.get", arguments: { id: "a" } }, reader);
       assert.match(out.content[0]?.text ?? "", /denied:halted:halt-disk-1/);
       const recs = await ledger.decisions();
-      assert.equal(recs.length, 1);
-      assert.equal(recs[0]!.claims.reasonCode, "halted");
-      assert.equal(typeof recs[0]!.coseHex, "string");
+      assert.equal(recs.length, 2);
+      assert.equal(recs[0]!.claims.decision, "allow");
+      assert.equal(recs[0]!.claims.subject, "verax.halt");
+      assert.equal(recs[0]!.claims.reasonCode, "operator-halt");
+      const haltInputs = await proxy.inputsLog.get(recs[0]!.claims.ref ?? "");
+      assert.equal(haltInputs?.control?.via, "file");
+      assert.equal(recs[1]!.claims.decision, "deny");
+      assert.equal(recs[1]!.claims.reasonCode, "halted");
+      assert.equal(typeof recs[1]!.coseHex, "string");
     } finally {
       diskProbe.freeBytes = orig;
       ledger.close();
@@ -247,7 +260,7 @@ describe("S3 damage limits", () => {
       effectSigner: EFFECT_SIGNER,
       ledger,
       now: tickingNow(),
-      nonce: queuedNonce(["halt-r1", "halt-r2"]),
+      nonce: queuedNonce(["halt-file", "halt-r1", "resume-file", "halt-r2"]),
       inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
     });
     try {
@@ -256,6 +269,21 @@ describe("S3 damage limits", () => {
       unlinkSync(haltPath);
       const resumed = await proxy.call({ name: "memory.get", arguments: { id: "b" } }, reader);
       assert.equal(resumed.isError, false);
+      const recs = await ledger.decisions();
+      assert.deepEqual(
+        recs.map((d) => [d.claims.decision, d.claims.subject, d.claims.reasonCode]),
+        [
+          ["allow", "verax.halt", "operator-halt"],
+          ["deny", "memory.get", "halted"],
+          ["allow", "verax.resume", "operator-resume"],
+          ["allow", "memory.get", "allow"],
+        ],
+      );
+      const resumeInputs = await proxy.inputsLog.get(recs[2]!.claims.ref ?? "");
+      assert.equal(resumeInputs?.control?.action, "resume");
+      assert.equal(resumeInputs?.control?.via, "file");
+      assert.equal(resumeInputs?.control?.by, "unknown");
+      assert.equal(resumeInputs?.control?.line, -1);
     } finally {
       ledger.close();
     }
