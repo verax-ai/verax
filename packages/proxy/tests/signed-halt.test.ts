@@ -12,6 +12,9 @@ import { loadPolicy } from "../src/policy.ts";
 import { createProxy } from "../src/proxy.ts";
 import type { DecisionInputs } from "../src/types.ts";
 import { verifyLedger } from "../src/verify-ledger.ts";
+import { createControlMemory, syncHaltControl } from "../src/control-sync.ts";
+import { inputsLogFor } from "../src/inputs.ts";
+import type { LedgerWriter } from "../src/ledger.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER, tickingNow } from "./helpers.ts";
 
 const policy = loadPolicy({
@@ -436,6 +439,108 @@ describe("signed halt and resume", () => {
       );
     } finally {
       ledger.close();
+    }
+  });
+});
+
+describe("signed halt: a halt that lands during a sync", () => {
+  it("T11 a CLI halt between the switch read and the history read records no resume", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-signed-halt-t11-"));
+    const ledger = new FileLedger(dir);
+    let n = 0;
+    let fired = false;
+    try {
+      const host = ledger as unknown as { exclusive: <T>(fn: (writer: LedgerWriter) => Promise<T>) => Promise<T> };
+      await host.exclusive((writer) =>
+        syncHaltControl({
+          stateDir: dir,
+          now: () => 1_700_000_000_000,
+          nonce: () => `t11-${++n}`,
+          policyHash: policy.hash,
+          recordSigner: RECORD_SIGNER,
+          inputsLog: inputsLogFor(ledger),
+          decisions: () => ledger.decisions(),
+          memory: createControlMemory(),
+          writer,
+          // The CLI halt: switch first, then its history line, as haltBody does.
+          beforeHistoryRead: () => {
+            if (fired) return;
+            fired = true;
+            writeFileSync(join(dir, "halted"), "", "utf8");
+            writeHistory(dir, historyLine("halt", 1_700_000_000_000));
+          },
+        }),
+      );
+      const subjects = (await ledger.decisions()).map((row) => row.claims.subject);
+      assert.deepEqual(subjects, ["verax.halt"]);
+    } finally {
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("signed halt: what verify and the sync accept", () => {
+  it("T12 an allow whose subject starts with verax. inside a halt window is a violation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-signed-halt-t12-"));
+    writeFileSync(join(dir, "halted"), "", "utf8");
+    writeHistory(dir, historyLine("halt", 1000));
+    const opened = await openProxy(dir);
+    try {
+      await opened.proxy.syncControlRecords();
+      const call = { name: "verax.tool", arguments: { id: "x" } };
+      const effectHash = sha256Canonical(effectDescriptor("verax.tool", { id: "x" }));
+      const inputs = { principal: { brain: "brain-1", scopes: ["verax:read"] }, inputs: [] };
+      await opened.ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "verax.tool",
+            requestHash: sha256Canonical(call),
+            policyHash: policy.hash,
+            inputsHash: sha256Canonical(inputs),
+            decision: "allow",
+            reasonCode: "allow",
+            ref: "prefixed-allow",
+            effectHash,
+            effectClass: "verax.tool",
+            timestampMs: 40,
+            nonce: "prefixed-allow",
+            prevRecordHash: prev,
+          },
+          RECORD_SIGNER.privateKeyPem,
+          RECORD_SIGNER.publicKeyPem,
+        ),
+      );
+      const result = await verifyLedger(dir);
+      assert.ok(
+        result.problems.some((p) => p === "allow-while-halted prefixed-allow"),
+        JSON.stringify(result.problems),
+      );
+      assert.equal(result.ok, false);
+    } finally {
+      opened.ledger.close();
+    }
+  });
+
+  it("T13 a history line with a non-finite time or an oversized actor is not copied", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-signed-halt-t13-"));
+    writeHistory(dir, '{"action":"halt","atMs":1e999,"by":"op","via":"cli"}');
+    writeHistory(dir, historyLine("halt", 1000, "x".repeat(257)));
+    // A valid line after them is still copied: the bad ones are skipped, not fatal.
+    // The switch is there too, as after a real halt.
+    writeHistory(dir, historyLine("halt", 2000, "op"));
+    writeFileSync(join(dir, "halted"), "", "utf8");
+    const opened = await openProxy(dir);
+    try {
+      await opened.proxy.syncControlRecords();
+      const control = (await opened.ledger.decisions()).filter((row) => row.claims.effectClass === "verax.control");
+      assert.equal(control.length, 1);
+      const ref = control[0]!.claims.ref as string;
+      assert.equal(inputsFor(dir, ref).control?.by, "op");
+      assert.equal(inputsFor(dir, ref).control?.atMs, 2000);
+    } finally {
+      opened.ledger.close();
     }
   });
 });
