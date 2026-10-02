@@ -40,7 +40,7 @@ const LINES: { pattern: RegExp; stages: readonly Stage[] }[] = [
   { pattern: /^index /, stages: ["index"] },
   { pattern: /^approval signatures: /, stages: ["approval-signature"] },
   { pattern: /^checkpoint (signature does not verify|chain )/, stages: ["checkpoint-signature"] },
-  { pattern: /^(checkpoint covers |newest checkpoint names )/, stages: ["checkpoint-coverage"] },
+  { pattern: /^(checkpoint covers |newest checkpoint names |checkpoint names a head )/, stages: ["checkpoint-coverage"] },
   { pattern: /^checkpoint totals /, stages: ["checkpoint-totals"] },
   { pattern: /^allow-while-halted /, stages: ["control"] },
 ];

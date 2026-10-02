@@ -61,10 +61,12 @@
  * row, and an unbound row could be rewritten from a signed approval into an
  * unsigned one. A row with no record is the crash case and is not named.
  *
- * Checkpoint totals are checked too. Every checkpoint that verified and
- * carries totals is compared with the allow, deny and defer counts of the
- * verified records in its window; a difference is `checkpoint totals do not
- * match`. A checkpoint whose totals are null (redacted) is not compared.
+ * Checkpoint counts are checked too. For every checkpoint that verified, its
+ * head must be a record the ledger holds, the verified records in its window
+ * up to that head must be its `receiptCount` ending at the head, and their
+ * allow, deny and defer counts must be its totals; a record appended later
+ * with a time in the window is not counted. Null totals (redacted) are not
+ * compared; the count still is.
  *
  * Anchors are the last statement. `checkpoint-anchors.jsonl` holds COSE
  * Receipts from a Transparency Service for checkpoints `verax anchor`
@@ -719,8 +721,9 @@ function tailStatement(
     } catch {
       // A row that verified but cannot be hashed cannot be anchored either.
     }
-    const totalsProblem = checkpointTotalsProblem(rows[i]!, records, attested);
-    if (totalsProblem) problems.push(`${totalsProblem}: checkpoint ${i}`);
+    for (const problem of checkpointCountProblems(rows[i]!, records, attested)) {
+      problems.push(`${problem}: checkpoint ${i}`);
+    }
   }
   let brk: { index: number; reason: string } | null = null;
   try {
@@ -910,41 +913,57 @@ function inputsStatement(
 }
 
 /**
- * The decision profile's checkpoint totals: allow, deny and defer counts of
- * the attested records whose time falls in `[startMs, endMs)`, the window the
- * witness counted, up to and including the head record it signed. A record
- * appended after the checkpoint can carry a time inside that window (a call
- * that took its time before an earlier one was written); the witness never
- * saw it. Null totals were redacted and are not compared.
+ * What a checkpoint counted is fixed by its head. The witness counts the
+ * records whose time falls in `[startMs, endMs)` and names the last of them
+ * as the head, so the attested records in that window up to and including
+ * the head must be `receiptCount` records ending at the head, and their
+ * allow, deny and defer counts must be the signed totals (decision profile
+ * 4.4). A record appended later with a time inside the window was never seen
+ * by the witness and is not counted. A head the ledger does not hold is named
+ * for every checkpoint, not only the newest. A null head means the witness
+ * counted nothing. Null totals were redacted; the count is still checked.
  */
-function checkpointTotalsProblem(
+function checkpointCountProblems(
   row: SignedCheckpoint,
   records: readonly SignedDecisionRecord[],
   attested: readonly SignedDecisionRecord[],
-): string | null {
+): string[] {
   const claims = row.claims;
-  if (claims.totals === null || claims.totals === undefined) return null;
-  const { startMs, endMs } = claims;
-  if (typeof startMs !== "number" || typeof endMs !== "number") return "checkpoint totals have no window";
-  let upTo = records.length;
+  const { startMs, endMs, receiptCount } = claims;
+  if (typeof startMs !== "number" || typeof endMs !== "number") return ["checkpoint has no window"];
+  const inWindow = (r: SignedDecisionRecord) => r.claims.timestampMs >= startMs && r.claims.timestampMs < endMs;
+  let counted: SignedDecisionRecord[] = [];
+  let headRecord: SignedDecisionRecord | null = null;
   if (typeof claims.chainHeadHash === "string") {
-    const head = records.findIndex((r) => {
+    const at = records.findIndex((r) => {
       try {
         return decisionRecordHash(r) === claims.chainHeadHash;
       } catch {
         return false;
       }
     });
-    if (head >= 0) upTo = head + 1;
+    if (at < 0) return ["checkpoint names a head the ledger does not hold"];
+    headRecord = records[at]!;
+    const upTo = new Set(records.slice(0, at + 1));
+    counted = attested.filter((r) => upTo.has(r) && inWindow(r));
   }
-  const seen = new Set(records.slice(0, upTo));
-  const inWindow = attested.filter((r) => seen.has(r) && r.claims.timestampMs >= startMs && r.claims.timestampMs < endMs);
-  try {
-    if (canonical(totalsFromDecisionRecords(inWindow)) === canonical(claims.totals)) return null;
-  } catch {
-    // A totals value that does not canonicalise is not the map the profile defines.
+  const problems: string[] = [];
+  const endsAtHead = headRecord === null ? counted.length === 0 : counted[counted.length - 1] === headRecord;
+  if (typeof receiptCount !== "number" || receiptCount !== counted.length || !endsAtHead) {
+    problems.push(
+      `checkpoint covers ${String(receiptCount)} record(s) in its window; the ledger holds ${counted.length} there up to its head`,
+    );
   }
-  return "checkpoint totals do not match the records in its window";
+  if (claims.totals !== null && claims.totals !== undefined) {
+    let same = false;
+    try {
+      same = canonical(totalsFromDecisionRecords(counted)) === canonical(claims.totals);
+    } catch {
+      // A totals value that does not canonicalise is not the map the profile defines.
+    }
+    if (!same) problems.push("checkpoint totals do not match the records in its window");
+  }
+  return problems;
 }
 
 function controlStatement(records: readonly SignedDecisionRecord[]): {

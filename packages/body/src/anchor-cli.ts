@@ -56,7 +56,8 @@ function serviceUrl(raw: string): URL | null {
 
 // A receipt is a few hundred bytes; the reader refuses CBOR over 64 KiB.
 const MAX_ANSWER_BYTES = 256 * 1024;
-const MAX_RECEIPT_B64 = Math.ceil((64 * 1024) / 3) * 4;
+const MAX_RECEIPT_BYTES = 64 * 1024;
+const MAX_RECEIPT_B64 = Math.ceil(MAX_RECEIPT_BYTES / 3) * 4;
 
 /** The body as text, refused once it passes MAX_ANSWER_BYTES rather than held in full. */
 async function boundedText(res: Response): Promise<string> {
@@ -174,6 +175,7 @@ export async function runAnchor(
     if (
       typeof receipt_b64 !== "string" ||
       receipt_b64.length > MAX_RECEIPT_B64 ||
+      Buffer.from(receipt_b64, "base64").length > MAX_RECEIPT_BYTES ||
       entry_hash !== entryHash ||
       !Number.isSafeInteger(leaf_index) ||
       !Number.isSafeInteger(tree_size)

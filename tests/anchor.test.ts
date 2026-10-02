@@ -311,6 +311,9 @@ describe("verax anchor", () => {
       // Under the body cap, over what a receipt can be: refused by the receipt length.
       const long = { ...answer, receipt_b64: "A".repeat(100_000) };
       assert.equal(await runAnchor([dir, "--service", "https://witness.example"], (s) => out.push(s), fakeService(long, [])), 1);
+      // Base64 the length cap allows that decodes past the 64 KiB the reader accepts.
+      const over = { ...answer, receipt_b64: Buffer.alloc(65_537, 1).toString("base64") };
+      assert.equal(await runAnchor([dir, "--service", "https://witness.example"], (s) => out.push(s), fakeService(over, [])), 1);
       // A short receipt in a body past the cap: refused before the body is parsed.
       const padded = { ...answer, padding: "A".repeat(300_000) };
       assert.equal(await runAnchor([dir, "--service", "https://witness.example"], (s) => out.push(s), fakeService(padded, [])), 1);

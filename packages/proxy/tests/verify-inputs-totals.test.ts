@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   buildCheckpointClaims,
+  checkpointHash,
   redactCheckpointTotals,
   signCheckpoint,
   totalsFromDecisionRecords,
@@ -227,6 +228,124 @@ ${rows[0]}
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+/** A deny record at `ts` under ref `ref`, with its inputs row written first, as the body does. */
+async function appendDeny(dir: string, ledger: FileLedger, ref: string, ts: number): Promise<SignedDecisionRecord> {
+  const inputs = { principal: { brain: "brain-1", scopes: ["verax:read"] }, inputs: [], ref };
+  appendFileSync(join(dir, "inputs.jsonl"), `${JSON.stringify({ ref, inputs })}
+`);
+  await ledger.appendDecisionChained((prev) =>
+    signDecisionRecord(
+      {
+        decider: "verax-proxy",
+        subject: "memory.get",
+        requestHash: sha256Canonical({ name: "memory.get", ref }),
+        policyHash: sha256Canonical({ policy: 1 }),
+        inputsHash: sha256Canonical(inputs),
+        decision: "deny",
+        reasonCode: "no-rule",
+        ref,
+        effectHash: null,
+        effectClass: "memory.get",
+        timestampMs: ts,
+        nonce: ref,
+        prevRecordHash: prev,
+      },
+      RECORD_SIGNER.privateKeyPem,
+      RECORD_SIGNER.publicKeyPem,
+    ),
+  );
+  return records(dir).at(-1)!;
+}
+
+function signClaims(claims: SignedCheckpoint["claims"]): SignedCheckpoint {
+  return signCheckpoint(claims, WITNESS.privateKeyPem, WITNESS.publicKeyPem);
+}
+
+function writeCheckpoints(dir: string, rows: SignedCheckpoint[]): void {
+  writeFileSync(join(dir, "checkpoints.jsonl"), rows.map((r) => `${JSON.stringify(r)}
+`).join(""), "utf8");
+}
+
+const ZERO = { allow: "0", deny: "0", defer: "0" };
+
+/**
+ * What a checkpoint counted is fixed by its head: the witness counted the
+ * records in its window up to that record. The count, the head and the
+ * totals must agree with each other and with the ledger up to that head.
+ */
+describe("verifyLedger checkpoint count and head", () => {
+  async function withLedger(fn: (dir: string, ledger: FileLedger) => Promise<void>): Promise<void> {
+    const dir = mkdtempSync(join(tmpdir(), "verax-verify-head-"));
+    const ledger = new FileLedger(dir);
+    try {
+      await fn(dir, ledger);
+    } finally {
+      ledger.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+  const pin = { checkpointPublicKeyPem: WITNESS.publicKeyPem };
+
+  it("a count that is not the records up to the head fails, though the totals agree with the head", async () => {
+    await withLedger(async (dir, ledger) => {
+      const first = await appendDeny(dir, ledger, "h-0", 10);
+      await appendDeny(dir, ledger, "h-1", 11);
+      writeCheckpoints(dir, [
+        signClaims({ epoch: 0, startMs: 0, endMs: 12, receiptCount: 2, chainHeadHash: decisionRecordHash(first), totals: { ...ZERO, deny: "1" }, prevCheckpointHash: null }),
+      ]);
+      const result = await verifyLedger(dir, pin);
+      assert.equal(result.ok, false);
+      assert.ok(result.problems.some((p) => p.startsWith("checkpoint covers 2 record(s) in its window")), JSON.stringify(result.problems));
+    });
+  });
+
+  it("an older checkpoint whose head the ledger does not hold fails, even under a newer one that agrees", async () => {
+    await withLedger(async (dir, ledger) => {
+      await appendDeny(dir, ledger, "g-0", 10);
+      const second = await appendDeny(dir, ledger, "g-1", 11);
+      const old = signClaims({ epoch: 0, startMs: 0, endMs: 12, receiptCount: 2, chainHeadHash: "ab".repeat(32), totals: { ...ZERO, deny: "2" }, prevCheckpointHash: null });
+      const fresh = signClaims({ epoch: 1, startMs: 0, endMs: 12, receiptCount: 2, chainHeadHash: decisionRecordHash(second), totals: { ...ZERO, deny: "2" }, prevCheckpointHash: checkpointHash(old) });
+      writeCheckpoints(dir, [old, fresh]);
+      const result = await verifyLedger(dir, pin);
+      assert.equal(result.ok, false);
+      assert.ok(result.problems.includes("checkpoint names a head the ledger does not hold: checkpoint 0"), JSON.stringify(result.problems));
+    });
+  });
+
+  it("a head outside the window fails, though the count inside the window agrees", async () => {
+    await withLedger(async (dir, ledger) => {
+      await appendDeny(dir, ledger, "w-0", 10);
+      const late = await appendDeny(dir, ledger, "w-1", 30);
+      writeCheckpoints(dir, [
+        signClaims({ epoch: 0, startMs: 0, endMs: 20, receiptCount: 1, chainHeadHash: decisionRecordHash(late), totals: { ...ZERO, deny: "1" }, prevCheckpointHash: null }),
+      ]);
+      const result = await verifyLedger(dir, pin);
+      assert.equal(result.ok, false);
+      assert.ok(result.problems.some((p) => p.startsWith("checkpoint covers 1 record(s) in its window")), JSON.stringify(result.problems));
+    });
+  });
+
+  it("a checkpoint with no head and a count above zero fails", async () => {
+    await withLedger(async (dir, ledger) => {
+      await appendDeny(dir, ledger, "n-0", 10);
+      writeCheckpoints(dir, [signClaims({ epoch: 0, startMs: 0, endMs: 11, receiptCount: 1, chainHeadHash: null, totals: { ...ZERO, deny: "1" }, prevCheckpointHash: null })]);
+      const result = await verifyLedger(dir, pin);
+      assert.equal(result.ok, false);
+      assert.ok(result.problems.some((p) => p.startsWith("checkpoint covers 1 record(s) in its window")), JSON.stringify(result.problems));
+    });
+  });
+
+  it("an empty window stays empty when a later record carries a time inside it", async () => {
+    await withLedger(async (dir, ledger) => {
+      await appendDeny(dir, ledger, "e-0", 50);
+      writeCheckpoints(dir, [signClaims({ epoch: 0, startMs: 10, endMs: 20, receiptCount: 0, chainHeadHash: null, totals: ZERO, prevCheckpointHash: null })]);
+      await appendDeny(dir, ledger, "e-1", 15);
+      const result = await verifyLedger(dir, pin);
+      assert.ok(!result.problems.some((p) => p.startsWith("checkpoint")), JSON.stringify(result.problems));
+    });
   });
 });
 
