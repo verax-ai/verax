@@ -1,5 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, type Stats } from "node:fs";
 import { get } from "node:http";
 import { createConnection, createServer, type Server } from "node:net";
 import { basename, dirname, join, parse, resolve } from "node:path";
@@ -9,6 +9,8 @@ import {
   defaultExec,
   foreignAclPrincipals,
   moduleSearchDirs,
+  posixAclWriterDetail,
+  posixAclWriters,
   posixOthersCanReplace,
   readSddlBatch,
   restrictToOwnerWin32,
@@ -704,7 +706,7 @@ function intermediateLink(dir: string): string | null {
   for (let i = 0; i < segs.length; i += 1) {
     const next = join(cursor, segs[i]!);
     const leaf = i === segs.length - 1;
-    let st: ReturnType<typeof lstatSync>;
+    let st: Stats;
     try {
       st = lstatSync(next);
     } catch (err) {
@@ -741,10 +743,15 @@ function intermediateLink(dir: string): string | null {
   return null;
 }
 
-function refusePosixAncestors(dir: string): void {
+function refusePosixAncestors(
+  dir: string,
+  platform: NodeJS.Platform,
+  pread?: Map<string, string[] | "unreadable">,
+): void {
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
+  const present: { path: string; st: Stats }[] = [];
   for (const ancestor of ancestorPaths(dir)) {
-    let st: ReturnType<typeof lstatSync> | undefined;
+    let st: Stats | undefined;
     try {
       st = lstatSync(ancestor);
     } catch (err) {
@@ -752,15 +759,27 @@ function refusePosixAncestors(dir: string): void {
       refuseDesktopDirectory(dir, `ancestor ${ancestor} could not be read`);
     }
     if (!st) continue;
-    const ownerIsOperator = st.uid === 0 || st.uid === uid;
+    present.push({ path: ancestor, st });
+  }
+  const acls = pread ?? (present.length === 0
+    ? new Map<string, string[] | "unreadable">()
+    : posixAclWriters(present.map((row) => row.path), platform, defaultExec));
+  for (const row of present) {
+    const ownerIsOperator = row.st.uid === 0 || row.st.uid === uid;
     if (
       posixOthersCanReplace(
-        { uid: ownerIsOperator ? 0 : st.uid, mode: st.mode, symlink: st.isSymbolicLink() },
+        { uid: ownerIsOperator ? 0 : row.st.uid, mode: row.st.mode, symlink: row.st.isSymbolicLink() },
         true,
       )
     ) {
-      refuseDesktopDirectory(dir, `ancestor ${ancestor} can be replaced by another user`);
+      refuseDesktopDirectory(dir, `ancestor ${row.path} can be replaced by another user`);
     }
+    const found = acls.has(row.path) ? acls.get(row.path) : "unreadable";
+    if (found === "unreadable") {
+      refuseDesktopDirectory(dir, `ancestor ${row.path} ACL could not be read (install acl or remove the ACL)`);
+    }
+    const detail = posixAclWriterDetail(found);
+    if (detail) refuseDesktopDirectory(dir, `ancestor ${row.path} can be replaced by another user (${detail})`);
   }
 }
 
@@ -845,11 +864,20 @@ function refuseDesktopAncestors(
   platform: NodeJS.Platform,
   opts?: DesktopDirectoryOpts,
   preread?: Map<string, WindowsAcl>,
+  posixAcl?: Map<string, string[] | "unreadable">,
 ): void {
   const link = intermediateLink(dir);
   if (link) refuseDesktopDirectory(dir, `ancestor ${link} is a link`);
   if (platform === "win32") refuseWindowsAncestors(dir, opts, preread);
-  else refusePosixAncestors(dir);
+  else refusePosixAncestors(dir, platform, posixAcl);
+}
+
+function refusePosixLeafAcl(dir: string, found: readonly string[] | "unreadable" | undefined): void {
+  if (found === "unreadable") {
+    refuseDesktopDirectory(dir, "the directory ACL could not be read (install acl or remove the ACL)");
+  }
+  const detail = posixAclWriterDetail(found);
+  if (detail) refuseDesktopDirectory(dir, `${DIRECTORY_WRITABLE_BY_OTHERS} (${detail})`);
 }
 
 /**
@@ -863,7 +891,9 @@ function refuseDesktopAncestors(
  * refused. On Windows an existing directory is refused unless its owner SID
  * is the invoking SID, Administrators, or SYSTEM. An ancestor another user
  * can replace, or an intermediate link, is refused the same way for a new
- * directory and for one that already exists.
+ * directory and for one that already exists. On POSIX an extended ACL that
+ * grants a write right, or an ACL that cannot be read, is refused the same
+ * way once the mode bits themselves are safe. chmod does not remove a macOS ACL.
  */
 function ensureDesktopDirectory(
   dir: string,
@@ -884,9 +914,16 @@ function ensureDesktopDirectory(
     if (link) refuseDesktopDirectory(dir, `ancestor ${link} is a link`);
     preread = readWindowsAcls([...presentAncestors(dir), dir]);
   }
-  refuseDesktopAncestors(dir, platform, opts, preread);
+  // One POSIX ACL read for the ancestors and, when it already exists, the directory.
+  let posixAcl: Map<string, string[] | "unreadable"> | undefined;
+  if (platform !== "win32") {
+    const aclPaths = presentAncestors(dir);
+    if (isExistingRealDirectory(dir)) aclPaths.push(dir);
+    posixAcl = aclPaths.length === 0 ? new Map() : posixAclWriters(aclPaths, platform, defaultExec);
+  }
+  refuseDesktopAncestors(dir, platform, opts, preread, posixAcl);
   trace("dir-ancestors");
-  let existing: ReturnType<typeof lstatSync> | null = null;
+  let existing: Stats | null = null;
   try {
     existing = lstatSync(dir);
   } catch (err) {
@@ -944,6 +981,7 @@ function ensureDesktopDirectory(
     const uid = typeof process.getuid === "function" ? process.getuid() : existing.uid;
     if (existing.uid !== uid) refuseDesktopDirectory(dir);
     if ((existing.mode & 0o022) !== 0) refuseDesktopDirectory(dir, DIRECTORY_WRITABLE_BY_OTHERS);
+    refusePosixLeafAcl(dir, posixAcl && posixAcl.has(dir) ? posixAcl.get(dir) : "unreadable");
     if (devIssuerIsLink(dir)) {
       refuseDesktopDirectory(dir, "dev-issuer in that directory is a symlink or junction; use a new directory");
     }
@@ -952,7 +990,15 @@ function ensureDesktopDirectory(
   }
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   // A missing intermediate directory another user created between the first check and mkdir is theirs now.
-  refuseDesktopAncestors(dir, platform, opts);
+  let createdAcl: readonly string[] | "unreadable" | undefined;
+  if (platform === "win32") {
+    refuseDesktopAncestors(dir, platform, opts);
+  } else {
+    const createdPaths = [...presentAncestors(dir), dir];
+    const again = posixAclWriters(createdPaths, platform, defaultExec);
+    refuseDesktopAncestors(dir, platform, opts, undefined, again);
+    createdAcl = again.has(dir) ? again.get(dir) : "unreadable";
+  }
   trace("dir-ancestors-after-mkdir");
   const created = lstatSync(dir);
   if (created.isSymbolicLink() || !created.isDirectory()) refuseDesktopDirectory(dir);
@@ -963,6 +1009,7 @@ function ensureDesktopDirectory(
   }
   const uid = typeof process.getuid === "function" ? process.getuid() : created.uid;
   if (created.uid !== uid) refuseDesktopDirectory(dir);
+  refusePosixLeafAcl(dir, createdAcl);
   chmodSync(dir, 0o700);
 }
 
@@ -1169,7 +1216,8 @@ function desktopCodeFix(platform: NodeJS.Platform, repoRoot: string): string {
  * `detail` is the second line of the refusal. On Windows one `read` (or
  * `readWindowsAcls`) judges the whole list with `svcSid`: someone other than
  * the operator, Administrators, or SYSTEM. On POSIX the owner is trusted
- * when it is the operator or root, then `posixOthersCanReplace`.
+ * when it is the operator or root, then `posixOthersCanReplace`, then one
+ * `posixAclWriters` read of the whole list.
  */
 export function desktopCodeRefusal(
   paths: readonly string[],
@@ -1180,6 +1228,9 @@ export function desktopCodeRefusal(
   const targets = desktopCodeTargets(paths, codeInstallPlatform(platform));
   const wanted = targets.map((target) => target.path);
   const acls = platform === "win32" ? (read !== undefined ? read(wanted) : readWindowsAcls(wanted)) : null;
+  const posixAcl = platform === "win32"
+    ? null
+    : posixAclWriters(wanted, platform === "darwin" ? "darwin" : "linux", defaultExec);
   const svc = invoking?.trim().toUpperCase() ?? "";
   const uid = typeof process.getuid === "function" ? process.getuid() : 0;
   for (const target of targets) {
@@ -1205,6 +1256,9 @@ export function desktopCodeRefusal(
         detail: ` (owner uid ${inspected.uid}; mode ${(inspected.mode & 0o777).toString(8)})`,
       };
     }
+    const found = posixAcl && posixAcl.has(target.path) ? posixAcl.get(target.path) : "unreadable";
+    const writers = posixAclWriterDetail(found);
+    if (writers) return { path: target.path, detail: ` (${writers})` };
   }
   return null;
 }

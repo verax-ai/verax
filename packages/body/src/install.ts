@@ -308,6 +308,7 @@ function assertAdminWritableTree(root: string, exec: ToolExec): void {
  * Absolute path for a system tool. Windows uses System32 under SystemRoot.
  * Linux walks fixed directories and never consults PATH.
  * macOS uses the fixed table (dscl, launchctl, chown, chmod, id, stat, plutil, lsof).
+ * `ls` is the POSIX ACL reader at `/bin/ls`, not an install-plan tool, so it is not in that table.
  * A missing Linux binary falls back to the first candidate so a plan can name
  * the path; spawning still refuses when that file is absent.
  */
@@ -321,6 +322,7 @@ export function systemToolPath(tool: string, platform: NodeJS.Platform = process
     return path.win32.join(root, "System32", `${name}.exe`);
   }
   if (platform === "darwin") {
+    if (name === "ls") return "/bin/ls";
     const fixed = DARWIN_TOOL_PATHS[name as (typeof DARWIN_TOOLS)[number]];
     if (!fixed) throw new SystemToolError(`refusing: ${name} is not a macOS install tool`);
     return fixed;
@@ -1617,15 +1619,238 @@ export function posixOthersCanReplace(st: { uid: number; mode: number; symlink?:
   return !(ancestor && (st.mode & 0o1000) !== 0);
 }
 
-/** POSIX half of the elevated code check. `read` supplies uid and mode so a test does not lstat the machine. */
+/** macOS ACL rights that let someone replace or rewrite an entry. Deny entries are not rights. */
+const DARWIN_ACL_WRITE = new Set([
+  "write",
+  "append",
+  "add_file",
+  "add_subdirectory",
+  "delete",
+  "delete_child",
+  "writeattr",
+  "writeextattr",
+  "writesecurity",
+  "chown",
+]);
+
+/**
+ * Text for a POSIX ACL refusal, or null when the extended ACL adds no writer.
+ * `"unreadable"` is fail-closed: Linux showed `+` and `getfacl` did not return the entries.
+ * The phrase is what the operator sees: install acl or remove the ACL.
+ */
+export function posixAclWriterDetail(found: readonly string[] | "unreadable" | undefined): string | null {
+  if (found === undefined) return null;
+  if (found === "unreadable") return "install acl or remove the ACL";
+  if (found.length === 0) return null;
+  return found.join(", ");
+}
+
+function aclMap(paths: readonly string[], value: string[] | "unreadable"): Map<string, string[] | "unreadable"> {
+  const map = new Map<string, string[] | "unreadable">();
+  for (const file of paths) map.set(file, value);
+  return map;
+}
+
+/** Longest requested path that is the final field of an `ls` line. */
+function pathOnLsLine(line: string, paths: readonly string[]): string | null {
+  let best: string | null = null;
+  for (const file of paths) {
+    if (file.length === 0 || !line.endsWith(file)) continue;
+    const at = line.length - file.length;
+    if (at > 0 && line[at - 1] !== " ") continue;
+    if (!best || file.length > best.length) best = file;
+  }
+  return best;
+}
+
+function darwinAclSkipped(principal: string, owner: string): boolean {
+  const colon = principal.indexOf(":");
+  const tag = colon < 0 ? principal : principal.slice(0, colon);
+  const name = colon < 0 ? "" : principal.slice(colon + 1);
+  if (tag === "owner") return true;
+  if (tag === "user" && (name === "root" || (owner !== "" && name === owner))) return true;
+  if (tag === "group" && name === "admin") return true;
+  return false;
+}
+
+function darwinRightsAllowWrite(rights: string): boolean {
+  for (const token of rights.split(/[,\s]+/)) {
+    if (DARWIN_ACL_WRITE.has(token)) return true;
+  }
+  return false;
+}
+
+/** One `ls -lde` listing. A failed process is unreadable. A clean listing with no allow-write is empty. */
+function parseDarwinAcl(stdout: string, paths: readonly string[]): Map<string, string[] | "unreadable"> {
+  const map = new Map<string, string[] | "unreadable">();
+  const owners = new Map<string, string>();
+  for (const file of paths) map.set(file, []);
+  let current: string | null = null;
+  for (const raw of stdout.split(/\r?\n/)) {
+    const ace = /^\s*\d+:\s+(\S+)\s+(?:inherited\s+)?(allow|deny)\s+(\S.*)$/.exec(raw);
+    if (ace) {
+      if (!current || ace[2] !== "allow") continue;
+      const list = map.get(current);
+      if (!list || list === "unreadable") continue;
+      if (darwinAclSkipped(ace[1]!, owners.get(current) ?? "")) continue;
+      if (!darwinRightsAllowWrite(ace[3]!)) continue;
+      if (!list.includes(ace[1]!)) list.push(ace[1]!);
+      continue;
+    }
+    // A listing starts with the mode. ACE lines are indented, so they do not.
+    if (!/^[bcdlps-][r-][w-][sStTx-][r-][w-][sStTx-][r-][w-][tTx-][@+]?[\s]/.test(raw)) continue;
+    const hit = pathOnLsLine(raw.trimEnd(), paths);
+    if (!hit) continue;
+    current = hit;
+    const fields = raw.trim().split(/\s+/);
+    owners.set(hit, fields[2] ?? "");
+    if (!map.has(hit)) map.set(hit, []);
+  }
+  return map;
+}
+
+function writersInGetfaclBlock(block: string): string[] {
+  let mask: string | null = null;
+  const named: { who: string; perm: string }[] = [];
+  for (const raw of block.split(/\n/)) {
+    const line = raw.trim();
+    if (line === "" || line.startsWith("#") || line.startsWith("default:")) continue;
+    const maskLine = /^mask::([r-][w-][x-])/.exec(line);
+    if (maskLine) {
+      mask = maskLine[1] ?? null;
+      continue;
+    }
+    const entry = /^(user|group):([^:]+):([r-][w-][x-])/.exec(line);
+    if (!entry) continue;
+    named.push({ who: `${entry[1]}:${entry[2]}`, perm: entry[3] ?? "" });
+  }
+  const writers: string[] = [];
+  for (const entry of named) {
+    if (entry.perm[1] !== "w") continue;
+    if (mask !== null && mask[1] !== "w") continue;
+    writers.push(entry.who);
+  }
+  return writers;
+}
+
+/** `getfacl -cp` blocks, in argument order, or `# file:` groups when a header is still present. */
+function parseGetfacl(stdout: string, paths: readonly string[]): Map<string, string[] | "unreadable"> {
+  const text = stdout.replace(/\r\n/g, "\n");
+  if (/^# file:/m.test(text)) {
+    const map = new Map<string, string[] | "unreadable">();
+    for (const part of text.split(/^# file:\s*/m).slice(1)) {
+      const nl = part.indexOf("\n");
+      const header = (nl < 0 ? part : part.slice(0, nl)).trim();
+      const body = nl < 0 ? "" : part.slice(nl + 1);
+      const file = paths.find((candidate) => candidate === header) ?? pathOnLsLine(header, paths);
+      if (!file) continue;
+      map.set(file, writersInGetfaclBlock(body));
+    }
+    for (const file of paths) if (!map.has(file)) map.set(file, "unreadable");
+    return map;
+  }
+  const blocks = text.split(/\n[ \t]*\n/).map((block) => block.trim()).filter((block) => block !== "");
+  if (blocks.length !== paths.length) return aclMap(paths, "unreadable");
+  const map = new Map<string, string[] | "unreadable">();
+  for (let i = 0; i < paths.length; i += 1) map.set(paths[i]!, writersInGetfaclBlock(blocks[i]!));
+  return map;
+}
+
+function linuxPlusPaths(stdout: string, paths: readonly string[]): string[] {
+  const plus: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of stdout.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (line === "") continue;
+    const mode = line.split(/\s+/)[0] ?? "";
+    if (!/^[bcdlps-]/.test(mode)) continue;
+    const hit = pathOnLsLine(line, paths);
+    if (!hit || seen.has(hit)) continue;
+    seen.add(hit);
+    if (mode.endsWith("+") || mode.includes("+")) plus.push(hit);
+  }
+  return plus;
+}
+
+/**
+ * Extended ACL writers for every path, from one `ls` (and on Linux one `getfacl` for the `+` paths).
+ * macOS: `allow` entries with a write right, except the file owner, `user:root`, and `group:admin`.
+ * `deny` is ignored. `inherited` still counts.
+ * Linux: a named `user:` or `group:` with `w` that the `mask` also allows.
+ * `getfacl` missing while `ls` shows `+` is `"unreadable"` (fail closed).
+ * A non-zero `ls` is `"unreadable"` too: the `+` could not be seen.
+ * Exit 0 with no `+` is an empty list.
+ */
+export function posixAclWriters(
+  paths: readonly string[],
+  platform: NodeJS.Platform,
+  exec: ToolExec,
+): Map<string, string[] | "unreadable"> {
+  const wanted = uniquePaths(paths);
+  if (wanted.length === 0) return new Map();
+  if (platform !== "darwin" && platform !== "linux") return aclMap(wanted, []);
+  if (platform === "darwin") {
+    let argv: string[];
+    try {
+      argv = toolArgv("ls", ["-lde", "--", ...wanted], "darwin");
+    } catch {
+      return aclMap(wanted, "unreadable");
+    }
+    const ran = exec(argv);
+    if ((ran.status ?? 1) !== 0) return aclMap(wanted, "unreadable");
+    return parseDarwinAcl(ran.stdout ?? "", wanted);
+  }
+  let lsArgv: string[];
+  try {
+    lsArgv = toolArgv("ls", ["-ld", "--", ...wanted], "linux");
+  } catch {
+    return aclMap(wanted, "unreadable");
+  }
+  const listed = exec(lsArgv);
+  if ((listed.status ?? 1) !== 0) return aclMap(wanted, "unreadable");
+  const plus = linuxPlusPaths(listed.stdout ?? "", wanted);
+  const map = aclMap(wanted, []);
+  if (plus.length === 0) return map;
+  let getfaclArgv: string[];
+  try {
+    getfaclArgv = toolArgv("getfacl", ["-cp", "--", ...plus], "linux");
+  } catch {
+    for (const file of plus) map.set(file, "unreadable");
+    return map;
+  }
+  const read = exec(getfaclArgv);
+  if ((read.status ?? 1) !== 0) {
+    for (const file of plus) map.set(file, "unreadable");
+    return map;
+  }
+  const parsed = parseGetfacl(read.stdout ?? "", plus);
+  for (const file of plus) map.set(file, parsed.get(file) ?? "unreadable");
+  return map;
+}
+
+/**
+ * POSIX half of the elevated code check. `read` supplies uid and mode so a test does not lstat the machine.
+ * `acls` is the one `posixAclWriters` map for this trust list. When mode says the entry is safe, a writer
+ * or `"unreadable"` is still a refusal. Omit `acls` only when the caller is injecting modes and not ACLs.
+ */
 export function posixCodeDirectoryDetail(
   dir: string,
   platform: InstallPlatform,
   read: (file: string) => { uid: number; mode: number; symlink?: boolean } | null,
+  acls?: ReadonlyMap<string, string[] | "unreadable">,
 ): string | false {
   for (const file of trustTargets(dir, platform)) {
     const st = read(file.path);
     if (st !== null && !posixOthersCanReplace({ uid: st.uid, mode: st.mode, symlink: st.symlink === true }, file.ancestor)) {
+      if (acls) {
+        const found = acls.has(file.path) ? acls.get(file.path) : "unreadable";
+        const detail = posixAclWriterDetail(found);
+        if (detail) {
+          return found === "unreadable"
+            ? `${file.path} ACL could not be read (${detail})`
+            : `${file.path} ACL ${detail}`;
+        }
+      }
       continue;
     }
     if (st === null) return `${file.path} could not be read`;
@@ -2189,6 +2414,7 @@ function installAncestorPlanRefusal(
   unitOrPlist: string,
   read: PlanOpts["ancestorStat"],
 ): InstallPlan | null {
+  const safe: string[] = [];
   for (const dir of posixInstallAncestorDirs(platform, codeDir, stateDir, unitOrPlist)) {
     const st = readInstallAncestor(dir, read);
     if (st === "missing") continue;
@@ -2198,11 +2424,26 @@ function installAncestorPlanRefusal(
         `refusing: ${dir} can be changed by other users (owner uid unknown, mode unknown); the service code under it could be replaced`,
       );
     }
-    if (!posixOthersCanReplace(st, true)) continue;
-    const mode = (st.mode & 0o7777).toString(8);
+    if (posixOthersCanReplace(st, true)) {
+      const mode = (st.mode & 0o7777).toString(8);
+      return fail(
+        EX_CONFIG,
+        `refusing: ${dir} can be changed by other users (owner uid ${st.uid}, mode ${mode}); the service code under it could be replaced`,
+      );
+    }
+    safe.push(dir);
+  }
+  // Injected ancestor stats stand in for the live tree, including its ACLs.
+  // Production lstats, then reads every mode-safe ancestor in one posixAclWriters call.
+  if (read || safe.length === 0) return null;
+  const acls = posixAclWriters(safe, platform, defaultExec);
+  for (const dir of safe) {
+    const found = acls.has(dir) ? acls.get(dir) : "unreadable";
+    const detail = posixAclWriterDetail(found);
+    if (!detail) continue;
     return fail(
       EX_CONFIG,
-      `refusing: ${dir} can be changed by other users (owner uid ${st.uid}, mode ${mode}); the service code under it could be replaced`,
+      `refusing: ${dir} can be changed by other users (${detail}); the service code under it could be replaced`,
     );
   }
   return null;
@@ -5128,6 +5369,8 @@ function collectTarballs(
  */
 function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, exec: ToolExec): (dir: string) => string | false {
   if (platform !== "win32") {
+    const targets = dirs.flatMap((dir) => trustTargets(dir, platform));
+    const acls = posixAclWriters(targets.map((file) => file.path), platform, exec);
     return (dir) => posixCodeDirectoryDetail(dir, platform, (file) => {
       try {
         const st = lstatSync(file);
@@ -5135,7 +5378,7 @@ function codeDirsWritable(dirs: readonly string[], platform: InstallPlatform, ex
       } catch {
         return null;
       }
-    });
+    }, acls);
   }
   const sid = invokingSid(exec);
   const read = readSddlBatch(exec, dirs.flatMap((dir) => trustTargets(dir, "win32").map((file) => file.path)));
@@ -5182,6 +5425,7 @@ function nodeBinaryUntrusted(
 ): string | null {
   const files = trustTargets(execPath, platform);
   let hit: string | null = null;
+  let aclNote: string | null = null;
   if (probe) {
     for (const file of files) {
       if (probe(file.path) && hit === null) hit = file.path;
@@ -5202,14 +5446,23 @@ function nodeBinaryUntrusted(
       }
     }
   } else {
+    const acls = posixAclWriters(files.map((file) => file.path), platform, exec);
     for (const file of files) {
       if (posixEntryUntrusted(file.path, file.ancestor)) {
         hit = file.path;
         break;
       }
+      const detail = posixAclWriterDetail(acls.has(file.path) ? acls.get(file.path) : "unreadable");
+      if (detail) {
+        hit = file.path;
+        aclNote = detail;
+        break;
+      }
     }
   }
-  return hit === null ? null : nodeTrustMessageFor(hit, platform);
+  if (hit === null) return null;
+  const message = nodeTrustMessageFor(hit, platform);
+  return aclNote ? `${message} (${aclNote})` : message;
 }
 
 export function refuseWritableCode(
@@ -5263,7 +5516,7 @@ function posixStateUntrusted(
   return st.uid === invokingUid;
 }
 
-function invokingUserCanChangeState(dir: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean {
+function invokingUserCanChangeState(dir: string, platform: NodeJS.Platform, env: NodeJS.ProcessEnv): boolean | string {
   if (platform !== "win32" && platform !== "linux" && platform !== "darwin") return false;
   try {
     if (lstatSync(dir).isSymbolicLink()) return true;
@@ -5290,7 +5543,9 @@ function invokingUserCanChangeState(dir: string, platform: NodeJS.Platform, env:
   }
   const uidText = env.SUDO_UID?.trim() ?? "";
   const invokingUid = /^\d+$/.test(uidText) ? Number(uidText) : null;
-  for (const file of trustTargets(dir, spec)) {
+  const files = trustTargets(dir, spec);
+  const safe: string[] = [];
+  for (const file of files) {
     let st: ReturnType<typeof lstatSync>;
     try {
       st = lstatSync(file.path);
@@ -5300,6 +5555,13 @@ function invokingUserCanChangeState(dir: string, platform: NodeJS.Platform, env:
     if (posixStateUntrusted({ uid: st.uid, mode: st.mode, symlink: st.isSymbolicLink() }, file.ancestor, invokingUid)) {
       return true;
     }
+    safe.push(file.path);
+  }
+  if (safe.length === 0) return false;
+  const acls = posixAclWriters(safe, spec, defaultExec);
+  for (const file of safe) {
+    const detail = posixAclWriterDetail(acls.has(file) ? acls.get(file) : "unreadable");
+    if (detail) return detail;
   }
   return false;
 }
@@ -5312,8 +5574,9 @@ export function elevatedStateDirRefusal(
   probe?: (dir: string) => boolean,
 ): string | null {
   const writable = probe ? probe(dir) : invokingUserCanChangeState(dir, platform, env);
-  if (!writable) return null;
-  return `refusing: ${dir} can be changed by ${codeTrustAccount(platform, env)}; an elevated approve only opens the installed state directory`;
+  if (writable === false) return null;
+  const extra = typeof writable === "string" ? ` (${writable})` : "";
+  return `refusing: ${dir} can be changed by ${codeTrustAccount(platform, env)}; an elevated approve only opens the installed state directory${extra}`;
 }
 
 /**
@@ -5544,10 +5807,16 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
         }
       }
     } else {
+      const acls = posixAclWriters(trustFiles.map((file) => file.path), trustPlat, exec);
       for (const file of trustFiles) {
+        const said = isModuleSearchDir(file.path) ? moduleDirTrustMessage(file.path, trustPlat) : nodeTrustMessageFor(file.path, trustPlat);
         if (posixEntryUntrusted(file.path, file.ancestor)) {
-          const said = isModuleSearchDir(file.path) ? moduleDirTrustMessage(file.path, trustPlat) : nodeTrustMessageFor(file.path, trustPlat);
           io.stderr.write(`${said}\n`);
+          return EX_CONFIG;
+        }
+        const detail = posixAclWriterDetail(acls.has(file.path) ? acls.get(file.path) : "unreadable");
+        if (detail) {
+          io.stderr.write(`${said} (${detail})\n`);
           return EX_CONFIG;
         }
       }
