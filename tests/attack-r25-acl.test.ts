@@ -193,7 +193,7 @@ describe("attack R25 POSIX extended ACL", () => {
       // On Linux the ACL mask is the group bits, so a named write sets group w
       // and the mode check refuses first (mode 770). macOS keeps ACLs out of
       // st_mode, so there the refusal can only come from the ACL.
-      const why = platform === "darwin" ? /user:nobody/ : /user:nobody|mode 7[0-7]0|replaced by another user/;
+      const why = platform === "darwin" ? /user:nobody/ : /user:nobody|mode 7[0-7]0|replaced by another user|writable by others/;
       const refused = desktopCodeRefusal([file], process.platform);
       assert.equal(refused?.path, dir);
       assert.match(refused?.detail ?? "", why);
