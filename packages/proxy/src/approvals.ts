@@ -26,7 +26,7 @@ import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } 
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { SerialQueue } from "./serial-queue.ts";
-import type { ApprovalChannel, DecisionInputs, InputsLog, Ledger, Policy, RecordSigner } from "./types.ts";
+import type { ApprovalChannel, ApprovalSignature, DecisionInputs, InputsLog, Ledger, Policy, RecordSigner } from "./types.ts";
 
 export type ApprovalRow = {
   ref: string;
@@ -311,6 +311,8 @@ export async function approvePending(opts: {
   policyHash: string;
   approvals: ApprovalsLog;
   inputsLog?: InputsLog;
+  /** Set only for an HTTP approval whose passkey assertion already verified. */
+  signature?: ApprovalSignature;
   budgetGuard?: (
     snap: ApprovalRow,
   ) =>
@@ -319,6 +321,20 @@ export async function approvePending(opts: {
     | Promise<{ ok: true } | { ok: false; reason: "budget-exceeded" | "rule-missing" }>;
 }): Promise<ApproveResult> {
   return approvalLockFor(opts.ledger).enqueue(() => approvePendingUnlocked(opts));
+}
+
+function approverInputs(opts: {
+  approverId: string;
+  via: ApprovalChannel;
+  ref: string;
+  signature?: ApprovalSignature;
+}): NonNullable<DecisionInputs["approver"]> {
+  return {
+    id: opts.approverId,
+    via: opts.via,
+    resolves: opts.ref,
+    ...(opts.signature ? { signature: opts.signature } : {}),
+  };
 }
 
 function ledgerStateDir(ledger: object): string | null {
@@ -343,6 +359,7 @@ async function approvePendingUnlocked(opts: {
   policyHash: string;
   approvals: ApprovalsLog;
   inputsLog?: InputsLog;
+  signature?: ApprovalSignature;
   budgetGuard?: (
     snap: ApprovalRow,
   ) =>
@@ -383,7 +400,7 @@ async function approvePendingUnlocked(opts: {
     const inputs: DecisionInputs = {
       principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
       inputs: prior?.inputs ?? [],
-      approver: { id: opts.approverId, via: opts.via, resolves: opts.ref },
+      approver: approverInputs(opts),
     };
     const inputsHash = sha256Canonical(inputs);
     await inputsLog.append(expireRef, inputs);
@@ -423,7 +440,7 @@ async function approvePendingUnlocked(opts: {
   const inputs: DecisionInputs = {
     principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
     inputs: prior?.inputs ?? [],
-    approver: { id: opts.approverId, via: opts.via, resolves: opts.ref },
+    approver: approverInputs(opts),
   };
   const inputsHash = sha256Canonical(inputs);
   const effectHash = sha256Canonical(effectDescriptor(snap.subject, snap.args));

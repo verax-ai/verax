@@ -49,7 +49,7 @@ Usage: verax <command> [options]
   operator <args>      enrol an operator and manage their passkeys
   reconcile <args>     compare the ledger against a statement
   verify <stateDir>    read a ledger back without a body: signatures, chain,
-                       effect binding, and which key answered
+                       effect binding, which key answered, and approval signatures
   witness <stateDir>   run the witness alongside a body
   halt <stateDir>      stop the body from allowing anything further
   resume <stateDir>    lift a halt; who and when go to halt-history.jsonl
