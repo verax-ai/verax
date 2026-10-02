@@ -16,6 +16,7 @@ import type {
 import type { ReconcileCardReport } from "./ReconcileCard.tsx";
 import { StopSwitch, type HaltState, type SwitchOutcome } from "./StopSwitch.tsx";
 import { panelCopy } from "./copy.ts";
+import { approveWithPasskey } from "./approve-ceremony.ts";
 import { authorizedFetch, beginSession, restartCodeFlow, sessionIssueError, sessionScopes } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
@@ -427,25 +428,13 @@ export function App() {
           if (demo) {
             return { ok: false as const, error: "sample-not-sent" };
           }
-          const res = await authorizedFetch("/api/approve", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ ref, requestHash }),
-          });
-          const body = (await res.json().catch(() => ({}))) as {
-            allowRef?: unknown;
-            error?: unknown;
-          };
-          if (res.ok && typeof body.allowRef === "string") {
+          const outcome = await approveWithPasskey(ref, requestHash);
+          if (outcome.ok) {
             // The approval changed the ledger; the screen reads it again
             // rather than drawing what it assumes happened.
             void load();
-            return { ok: true as const, allowRef: body.allowRef };
           }
-          return {
-            ok: false as const,
-            error: typeof body.error === "string" ? body.error : `http-${res.status}`,
-          };
+          return outcome;
         }}
         stopSwitch={
           <StopSwitch

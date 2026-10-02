@@ -101,6 +101,8 @@
   "approve.refused": "Not approved: {reason}",
   "approve.sending": "Sending…",
   "approve.sample": "Sample scenario — nothing was sent.",
+  "approve.cancelled": "The passkey prompt was closed — nothing was sent.",
+  "approve.passkeyClosed": "Passkey is closed — nothing was sent.",
   "unmeasured": "not measured",
   "summary.empty": "No decision has been produced yet.",
   "summary.line": "{decisions} decisions · {denied} denied · {pending} waiting for approval · {unmatched} not matched to a statement",

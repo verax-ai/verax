@@ -16,6 +16,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@simplewebauthn/browser": "^14.0.0",
     "@verax-ai/inventory": "^0.1.2",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
