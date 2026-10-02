@@ -436,7 +436,13 @@ describe("signed approval", () => {
       const target = inputs.find((row) => row.ref === allowRef);
       const signature = target?.inputs.approver?.signature;
       if (!target || !signature?.signature) throw new Error("missing signature");
-      const flipped = signature.signature.slice(0, -1) + (signature.signature.endsWith("A") ? "B" : "A");
+      // Change a byte inside the signature. Swapping the last base64url character
+      // only touched padding bits for 18 of 200 P-256 signatures, which left the
+      // bytes, and the verdict, unchanged.
+      const bytes = Buffer.from(signature.signature, "base64url");
+      bytes[Math.floor(bytes.length / 2)]! ^= 0x01;
+      const flipped = bytes.toString("base64url");
+      assert.notEqual(flipped, signature.signature);
       signature.signature = flipped;
       writeFileSync(inputsPath, `${inputs.map((row) => JSON.stringify(row)).join("\n")}\n`, "utf8");
       const decisionsPath = join(door.stateDir, "decisions.jsonl");
