@@ -43,7 +43,7 @@ export function guardNames(row: string): string[] {
 }
 
 function guardFile(name: string): string | null {
-  for (const dir of [["tests"], ["packages", "proxy", "tests"]]) {
+  for (const dir of [["tests"], ["packages", "proxy", "tests"], ["packages", "body", "tests"]]) {
     const path = join(root, ...dir, `${name}.test.ts`);
     if (existsSync(path)) return path;
   }
