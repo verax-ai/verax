@@ -1196,11 +1196,17 @@ export function windowsSddlBatchStdin(paths: readonly string[]): string {
  * object: `{ "<path>": "<sddl>" | { "error": "<msg>" } }`.
  * PowerShell 5.1 unwraps a one-element JSON array, so the script re-wraps with
  * `| ForEach-Object { $_ }`.
+ * The JSON cmdlets live in Microsoft.PowerShell.Utility, which is imported by
+ * its System32 path before first use. Left to autoload under systemToolEnv(),
+ * finding ConvertFrom-Json took 23 to 30 s on a GitHub Windows runner and
+ * 0.27 s once the module is loaded first; measured on windows-full 5a75875. The explicit path
+ * also means no other module directory is consulted to resolve the cmdlet.
  */
 export function windowsSddlBatchArgv(paths: readonly string[]): string[] {
   // Intentionally unused. Interpolating `paths` here is the overflow F17b closes.
   void paths;
   const script = `$ErrorActionPreference = 'Stop'
+Import-Module "$env:SystemRoot\\System32\\WindowsPowerShell\\v1.0\\Modules\\Microsoft.PowerShell.Utility\\Microsoft.PowerShell.Utility.psd1"
 $utf8 = New-Object System.Text.UTF8Encoding $false
 [Console]::InputEncoding = $utf8
 [Console]::OutputEncoding = $utf8

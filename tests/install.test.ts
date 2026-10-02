@@ -2766,6 +2766,18 @@ describe("verax uninstall", () => {
     assert.deepEqual(JSON.parse(windowsSddlBatchStdin(paths)), paths);
   });
 
+  it("the batch SDDL script imports Utility by its System32 path before the first JSON cmdlet", () => {
+    // Left to autoload under systemToolEnv(), resolving ConvertFrom-Json took 23 to 30 s on a GitHub runner.
+    const script = windowsSddlBatchArgv(["C:\\x"]).at(-1)!;
+    const lines = script.split("\n");
+    const imported = lines.findIndex((line) =>
+      /^Import-Module "\$env:SystemRoot\\System32\\WindowsPowerShell\\v1\.0\\Modules\\Microsoft\.PowerShell\.Utility\\Microsoft\.PowerShell\.Utility\.psd1"$/.test(line),
+    );
+    const firstJson = lines.findIndex((line) => /ConvertFrom-Json|ConvertTo-Json/.test(line));
+    assert.ok(imported >= 0, script);
+    assert.ok(firstJson > imported, `import at ${imported}, first JSON cmdlet at ${firstJson}`);
+  });
+
   it("the batch SDDL reader runs in the real Windows PowerShell and answers each path by its own key", { skip: process.platform !== "win32" && "runs powershell.exe" }, () => {
     // Mocks cannot see Windows PowerShell 5.1 quirks: an unrolled JSON array once joined every path into one.
     const takeFiles = (dir: string, into: string[], cap: number): void => {
