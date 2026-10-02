@@ -21,6 +21,8 @@
     "apps/panel/src/**/*.tsx",
     "apps/panel/src/**/*.d.ts",
     "scripts/**/*.ts",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    "test-vectors/**/*.ts",
+    "interop/**/*.ts"
   ]
 }
