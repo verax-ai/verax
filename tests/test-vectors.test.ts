@@ -78,6 +78,27 @@ describe("test vectors v1", () => {
     });
     const missed = outcomes.filter((o) => !o.match);
     assert.deepEqual(missed, [], JSON.stringify(missed, null, 2));
-    assert.equal(outcomes.length, 16);
+    assert.equal(outcomes.length, 17);
+  });
+
+  it("valid-anchored is VALID because its receipt verifies, not because anchors were skipped", async () => {
+    const dir = join(vectors, "v1", "valid-anchored");
+    const pins = join(dir, "pins");
+    const out: string[] = [];
+    const status = await runVerify(
+      [
+        join(dir, "ledger"),
+        "--key", join(pins, "record-key.pem"),
+        "--witness-key", join(pins, "witness-key.pem"),
+        "--checkpoint-key", join(pins, "witness-key.pem"),
+        "--operator-credentials", join(pins, "operator-credentials.json"),
+        "--anchor-key", join(pins, "anchor-key.pem"),
+        "--json",
+      ],
+      (line) => out.push(line),
+    );
+    const report = JSON.parse(out.join("\n")) as { anchors: { checked: boolean; verified: number; receipts: number } };
+    assert.equal(status, 0);
+    assert.deepEqual([report.anchors.checked, report.anchors.receipts, report.anchors.verified], [true, 1, 1]);
   });
 });

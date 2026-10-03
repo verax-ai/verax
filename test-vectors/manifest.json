@@ -112,6 +112,12 @@
       "dir": "v1/fail-allow-while-halted",
       "expected_result": "INVALID",
       "first_failing_stage": "control"
+    },
+    {
+      "id": "valid-anchored",
+      "dir": "v1/valid-anchored",
+      "expected_result": "VALID",
+      "first_failing_stage": null
     }
   ]
 }
