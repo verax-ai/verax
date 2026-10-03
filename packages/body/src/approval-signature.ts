@@ -50,7 +50,7 @@ export type ApprovalGate =
       reason?: string;
     };
 
-type PostedAssertion = {
+export type PostedAssertion = {
   id: string;
   rawId: string;
   type: "public-key";
@@ -62,7 +62,7 @@ type PostedAssertion = {
   clientExtensionResults: Record<string, unknown>;
 };
 
-function asAssertion(value: unknown): PostedAssertion | null {
+export function asAssertion(value: unknown): PostedAssertion | null {
   if (!value || typeof value !== "object") return null;
   const row = value as PostedAssertion;
   if (typeof row.id !== "string" || row.id === "" || row.rawId !== row.id) return null;
@@ -145,7 +145,7 @@ const FILE_NOTE =
   "verified against the key carried in operator-credentials.json: this shows the files are internally consistent, not that the key was ever trusted. Pin a key you hold to check that.";
 const NO_KEY_NOTE = "no operator key was found in these files";
 
-function readLines(path: string): string[] {
+export function readLines(path: string): string[] {
   try {
     return readFileSync(path, "utf8")
       .split("\n")
@@ -175,7 +175,7 @@ function signatureOf(value: unknown): ApprovalSignature | null {
   return row;
 }
 
-function originInClientData(clientDataJSON: string): string | null {
+export function originInClientData(clientDataJSON: string): string | null {
   try {
     const parsed: unknown = JSON.parse(Buffer.from(clientDataJSON, "base64url").toString("utf8"));
     if (!parsed || typeof parsed !== "object") return null;
@@ -193,7 +193,11 @@ function originOnSignature(value: unknown): string | null {
   return originInClientData(clientDataJSON);
 }
 
-function assertionMatches(sig: ApprovalSignature, publicKey: string, challenge: string): boolean {
+export function assertionMatches(
+  sig: Pick<ApprovalSignature, "clientDataJSON" | "authenticatorData" | "signature" | "rpId">,
+  publicKey: string,
+  challenge: string,
+): boolean {
   // The origin stays in clientDataJSON and is reported on the verify line.
   // This re-read does not judge it: the allow-list is not in these files, so
   // handing the claimed origin back is not an allow-list decision. rpIdHash
@@ -215,7 +219,7 @@ function assertionMatches(sig: ApprovalSignature, publicKey: string, challenge: 
   }).ok;
 }
 
-function trustOf(pinned: boolean, credentials: StoredCredential[]): Pick<ApprovalSignatureReport, "trustSource" | "trustNote"> {
+export function trustOf(pinned: boolean, credentials: StoredCredential[]): Pick<ApprovalSignatureReport, "trustSource" | "trustNote"> {
   if (pinned) return { trustSource: "pinned", trustNote: PINNED_NOTE };
   if (credentials.length > 0) return { trustSource: "in-ledger", trustNote: FILE_NOTE };
   return { trustSource: "none", trustNote: NO_KEY_NOTE };

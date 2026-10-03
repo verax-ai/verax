@@ -7,7 +7,7 @@ import type { SignedDecisionRecord } from "@cedulon/core";
 
 import { sha256Canonical } from "./hash.ts";
 import type { LedgerWriter } from "./ledger.ts";
-import type { ControlInput, DecisionInputs, InputsLog, RecordSigner } from "./types.ts";
+import type { ControlInput, ControlSignature, DecisionInputs, InputsLog, RecordSigner } from "./types.ts";
 
 /**
  * Same file names as `packages/body/src/halt.ts`. The history file stays plain
@@ -41,7 +41,11 @@ type ParsedLine = {
   by: string;
   via: Via;
   line: number;
+  signature?: ControlSignature;
 };
+
+/** A signature larger than this is not an assertion; the line is copied without it. */
+const MAX_SIGNATURE_JSON = 8192;
 
 /** `null` means `halt-history.jsonl` was absent. Content is not part of the stamp. */
 type HistoryStamp = { size: number; mtimeMs: number } | null;
@@ -275,7 +279,20 @@ function parseHistoryLine(raw: string, line: number): ParsedLine | null {
   if (typeof row.atMs !== "number" || !Number.isFinite(row.atMs)) return null;
   if (typeof row.by !== "string" || row.by.length === 0 || row.by.length > 256) return null;
   const via: Via = row.via === "http" ? "http" : row.via === "file" ? "file" : "cli";
-  return { action: row.action, atMs: row.atMs, by: row.by, via, line };
+  const parsed: ParsedLine = { action: row.action, atMs: row.atMs, by: row.by, via, line };
+  // The signature is copied as the line carries it, not judged here: a body
+  // that dropped a bad one would turn a forged line into a quiet unsigned one.
+  // `verax verify` decides whether it holds.
+  const signature: unknown = row.signature;
+  if (
+    signature !== null &&
+    typeof signature === "object" &&
+    !Array.isArray(signature) &&
+    JSON.stringify(signature).length <= MAX_SIGNATURE_JSON
+  ) {
+    parsed.signature = signature as ControlSignature;
+  }
+  return parsed;
 }
 
 function lastAction(lines: readonly string[]): Action | null {
@@ -398,12 +415,13 @@ async function writeControlAllow(
   event: ParsedLine,
   lineHash: string,
 ): Promise<void> {
-  const body = {
+  const body: Omit<ControlInput, "lineHash"> = {
     action: event.action,
     atMs: event.atMs,
     by: event.by,
     via: event.via,
     line: event.line,
+    ...(event.signature ? { signature: event.signature } : {}),
   };
   const bound = sha256Canonical(body);
   const ref = await writeDecision(opts, {

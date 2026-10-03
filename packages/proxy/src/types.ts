@@ -125,6 +125,41 @@ export type ControlInput = {
   atMs: number;
   line: number;
   lineHash: string;
+  /**
+   * Copied as the history line carries it; `verax verify` judges it. Only an
+   * HTTP halt or resume made with a passkey assertion has one.
+   */
+  signature?: ControlSignature;
+};
+
+/**
+ * The operator's WebAuthn assertion over one halt or resume. The challenge is
+ * rebuilt from `purpose` (`verax.halt` or `verax.resume`, from the record's
+ * subject) and `prev`, the SHA-256 of the history line before this one
+ * (`null` for the first line). A line is appended once, so a signature made
+ * for one tail of the history does not fit any later one.
+ */
+export type ControlSignature = {
+  credentialId: string;
+  sub: string;
+  authenticatorData: string;
+  clientDataJSON: string;
+  signature: string;
+  rpId: string;
+  prev: string | null;
+};
+
+/**
+ * One change to `revoked-jti.jsonl` copied into the ledger. `revoke` is a jti
+ * that appeared in the file; `unrevoke` is one that was in the ledger's list
+ * and is gone from the file, which lets that token in again.
+ */
+export type RevokeInput = {
+  action: "revoke" | "unrevoke";
+  jti: string;
+  by: string;
+  via: "http" | "file";
+  atMs: number;
 };
 
 /**
@@ -155,6 +190,7 @@ export type DecisionInputs = {
     signature?: ApprovalSignature;
   };
   control?: ControlInput;
+  revoke?: RevokeInput;
 };
 
 /** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */

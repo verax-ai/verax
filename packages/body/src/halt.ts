@@ -1,6 +1,10 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
+
+import { canonical } from "@cedulon/core";
+import type { ControlSignature } from "@verax-ai/proxy";
 
 /**
  * The proxy refuses every call while `<stateDir>/halted` exists; that file is
@@ -15,8 +19,17 @@ import { join } from "node:path";
  * and that delay is part of the record rather than something the file hides.
  * Calls refused while halted are signed deny records, and they come after
  * the halt control record in the chain.
+ *
+ * An HTTP halt or resume made with the operator's passkey carries that
+ * assertion on its line, and the control record carries it on from there.
  */
-export type HaltEvent = { action: "halt" | "resume"; atMs: number; by: string; via: "cli" | "http" };
+export type HaltEvent = {
+  action: "halt" | "resume";
+  atMs: number;
+  by: string;
+  via: "cli" | "http";
+  signature?: ControlSignature;
+};
 
 export type HaltState = { halted: boolean; since?: HaltEvent };
 
@@ -33,6 +46,28 @@ function cliUser(): string {
 
 function appendHistory(stateDir: string, event: HaltEvent): void {
   appendFileSync(join(stateDir, HISTORY), `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+/**
+ * SHA-256 of the newest history line, as the control record names that line
+ * (`lineHash`), or `null` when there is none. A signed halt or resume binds
+ * this, so its assertion fits only the line it is appended after.
+ */
+export function historyTail(stateDir: string): string | null {
+  let raw: string;
+  try {
+    raw = readFileSync(join(stateDir, HISTORY), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw err;
+  }
+  const lines = raw
+    .split("\n")
+    .map((line) => line.replace(/\r$/, ""))
+    .filter((line) => line.trim() !== "");
+  const last = lines[lines.length - 1];
+  if (last === undefined) return null;
+  return createHash("sha256").update(canonical(last), "utf8").digest("hex");
 }
 
 function lastHalt(stateDir: string): HaltEvent | undefined {
@@ -64,11 +99,17 @@ export function readHalt(stateDir: string): HaltState {
 }
 
 /** Halting twice is one halt: the first line keeps saying who stopped it. */
-export function haltBody(stateDir: string, by: string, via: HaltEvent["via"], now = Date.now()): HaltState {
+export function haltBody(
+  stateDir: string,
+  by: string,
+  via: HaltEvent["via"],
+  now = Date.now(),
+  signature?: ControlSignature,
+): HaltState {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   if (!existsSync(join(stateDir, SWITCH))) {
     writeFileSync(join(stateDir, SWITCH), "", { encoding: "utf8", mode: 0o600 });
-    appendHistory(stateDir, { action: "halt", atMs: now, by, via });
+    appendHistory(stateDir, { action: "halt", atMs: now, by, via, ...(signature ? { signature } : {}) });
   }
   return readHalt(stateDir);
 }
@@ -79,9 +120,15 @@ export function haltBody(stateDir: string, by: string, via: HaltEvent["via"], no
  * written, the append throws and the body stays halted, rather than running
  * again with no record of who let it.
  */
-export function resumeBody(stateDir: string, by: string, via: HaltEvent["via"], now = Date.now()): HaltState {
+export function resumeBody(
+  stateDir: string,
+  by: string,
+  via: HaltEvent["via"],
+  now = Date.now(),
+  signature?: ControlSignature,
+): HaltState {
   if (existsSync(join(stateDir, SWITCH))) {
-    appendHistory(stateDir, { action: "resume", atMs: now, by, via });
+    appendHistory(stateDir, { action: "resume", atMs: now, by, via, ...(signature ? { signature } : {}) });
     rmSync(join(stateDir, SWITCH), { force: true });
   }
   return readHalt(stateDir);

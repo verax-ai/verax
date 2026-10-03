@@ -17,6 +17,7 @@ import type { ReconcileCardReport } from "./ReconcileCard.tsx";
 import { StopSwitch, type HaltState, type SwitchOutcome } from "./StopSwitch.tsx";
 import { panelCopy } from "./copy.ts";
 import { approveWithPasskey } from "./approve-ceremony.ts";
+import { resumeWithPasskey } from "./resume-ceremony.ts";
 import { authorizedFetch, beginSession, restartCodeFlow, sessionIssueError, sessionScopes } from "./session.ts";
 
 type RailStatus = "loading" | "ok" | "error" | "empty";
@@ -275,6 +276,15 @@ export function App() {
   const pressSwitch = useCallback(
     async (path: "/api/halt" | "/api/resume"): Promise<SwitchOutcome> => {
       if (demo) return { ok: false, error: panelCopy()["stop.sample"] };
+      // A resume is signed with the operator's passkey; a stop is one press.
+      if (path === "/api/resume") {
+        const out = await resumeWithPasskey();
+        if (out.ok) {
+          setHalt(out.state);
+          void load();
+        }
+        return out;
+      }
       const res = await authorizedFetch(path, { method: "POST" });
       const body = (await res.json().catch(() => ({}))) as HaltState & { error?: unknown };
       if (res.ok && typeof body.halted === "boolean") {

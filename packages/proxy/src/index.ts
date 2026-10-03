@@ -25,7 +25,7 @@ export { spokenReason } from "./spoken-reason.ts";
 export type { ApprovalRow, ApproveResult } from "./approvals.ts";
 export type { CardCsvOpts, ChannelRow, ReconcileReport } from "./reconcile.ts";
 export type { FileLedgerOpts, LedgerCounts } from "./ledger.ts";
-export type { ApprovalSignature } from "./types.ts";
+export type { ApprovalSignature, ControlSignature, RevokeInput } from "./types.ts";
 export type {
   EffectSigner,
   ExplainChain,

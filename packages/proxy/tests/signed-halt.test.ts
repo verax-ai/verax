@@ -545,4 +545,24 @@ describe("signed halt: what verify and the sync accept", () => {
       opened.ledger.close();
     }
   });
+
+  it("T14 a line's signature is copied as it is and bound into the record; an oversized one is not", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-signed-halt-t14-"));
+    const signature = { credentialId: "c", sub: "s", authenticatorData: "a", clientDataJSON: "j", signature: "g", rpId: "r", prev: null };
+    writeHistory(dir, JSON.stringify({ action: "halt", atMs: 1000, by: "op", via: "http", signature }));
+    writeHistory(dir, JSON.stringify({ action: "resume", atMs: 2000, by: "op", via: "http", signature: { pad: "x".repeat(9000) } }));
+    const opened = await openProxy(dir);
+    try {
+      await opened.proxy.syncControlRecords();
+      const control = (await opened.ledger.decisions()).filter((row) => row.claims.effectClass === "verax.control");
+      assert.equal(control.length, 2);
+      const halt = inputsFor(dir, control[0]!.claims.ref as string).control;
+      assert.deepEqual(halt?.signature, signature);
+      const { lineHash: _lineHash, ...bound } = halt!;
+      assert.equal(control[0]!.claims.effectHash, sha256Canonical(bound));
+      assert.equal(inputsFor(dir, control[1]!.claims.ref as string).control?.signature, undefined);
+    } finally {
+      opened.ledger.close();
+    }
+  });
 });

@@ -27,6 +27,7 @@ import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
+import { gateControlSignature, nextControlChallenge } from "./control-signature.ts";
 import { haltBody, readHalt, resumeBody } from "./halt.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
@@ -572,6 +573,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
     const apiAgents = req.method === "GET" && url.pathname === "/api/agents";
     const apiHalt = url.pathname === "/api/halt" && (req.method === "GET" || req.method === "POST");
     const apiResume = req.method === "POST" && url.pathname === "/api/resume";
+    const apiControlChallenge =
+      req.method === "GET" && (url.pathname === "/api/halt/challenge" || url.pathname === "/api/resume/challenge");
     if (
       url.pathname !== "/mcp" &&
       !apiLedger &&
@@ -581,7 +584,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
       !apiApproveChallenge &&
       !apiAgents &&
       !apiHalt &&
-      !apiResume
+      !apiResume &&
+      !apiControlChallenge
     ) {
       send(res, 404, { error: "not-found" });
       return;
@@ -623,24 +627,66 @@ export async function listen(config: BodyConfig): Promise<Server> {
       return;
     }
     try {
-      if (apiHalt || apiResume) {
+      if (apiHalt || apiResume || apiControlChallenge) {
         if (await refuseStaleBearer()) return;
         const scopes = verified.principal.scopes;
         const operator = scopes.has("verax:audit") || scopes.has("verax:approve");
+        const resuming = apiResume || url.pathname === "/api/resume/challenge";
         // Stopping is the safe direction, so any operator session may do it.
         // Lifting a halt lets everything through again: that is an approval of
         // everything at once and needs the approve scope. The agent token
         // carries neither, so an agent cannot stop itself being stopped.
-        if (!operator || (apiResume && !scopes.has("verax:approve"))) {
+        if (!operator || (resuming && !scopes.has("verax:approve"))) {
           send(res, 403, { error: "scope-missing" });
+          return;
+        }
+        if (apiControlChallenge) {
+          const rp = readRpConfig(process.env);
+          if (!rp.ok) {
+            send(res, 503, { error: "passkey-closed", reason: rp.reason });
+            return;
+          }
+          send(res, 200, {
+            ...nextControlChallenge(config.stateDir, resuming ? "resume" : "halt"),
+            rpId: rp.config.rpID,
+            allowCredentials: readCredentials(config.stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
+          });
           return;
         }
         if (req.method === "GET") {
           send(res, 200, readHalt(config.stateDir));
           return;
         }
+        const parsed = await readJsonBody(req, MAX_BODY_BYTES);
+        if (await refuseStaleBearer()) return;
+        if (!parsed.ok && apiResume) {
+          send(res, 400, { error: "bad-body" });
+          return;
+        }
+        const asked = parsed.ok && parsed.value && typeof parsed.value === "object" ? parsed.value : {};
+        // The tail is read inside the gate and the line is appended right
+        // after it, with nothing awaited in between.
+        const gated = gateControlSignature({
+          stateDir: config.stateDir,
+          env: process.env,
+          action: apiResume ? "resume" : "halt",
+          assertion: (asked as { assertion?: unknown }).assertion,
+        });
+        // A refused resume writes nothing. A halt is never refused for its
+        // signature: it stops unsigned, and the answer says what was refused.
+        if (!gated.ok && apiResume) {
+          send(res, gated.status, { error: gated.error, ...(gated.reason ? { reason: gated.reason } : {}) });
+          return;
+        }
+        const signature = gated.ok ? gated.signature : undefined;
+        const refused = !parsed.ok ? "bad-body" : gated.ok ? undefined : gated.error;
         const by = verified.principal.brain;
-        const state = apiResume ? resumeBody(config.stateDir, by, "http") : haltBody(config.stateDir, by, "http");
+        const state = apiResume
+          ? resumeBody(config.stateDir, by, "http", Date.now(), signature)
+          : {
+              ...haltBody(config.stateDir, by, "http", Date.now(), signature),
+              ...(refused ? { signatureRefused: refused } : {}),
+            };
         try {
           await services.proxy.syncControlRecords();
         } catch (err) {

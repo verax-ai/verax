@@ -17,6 +17,7 @@ import { readFileSync } from "node:fs";
 
 import { verifyLedger, type VerifyResult } from "@verax-ai/proxy";
 import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
+import { verifyControlSignatures, type ControlSignatureReport } from "./control-signature.ts";
 import { directoryAccess, unreadableSentence } from "./install.ts";
 
 export const EX_VERIFY_FAILED = 1;
@@ -74,7 +75,23 @@ const APPROVAL_NOT_CHECKED: ApprovalSignatureReport = {
   trustNote: "approval signatures were not checked",
 };
 
-export function renderVerify(r: VerifyResult, approval: ApprovalSignatureReport = APPROVAL_NOT_CHECKED): string {
+const CONTROL_NOT_CHECKED: ControlSignatureReport = {
+  ok: true,
+  signedVerified: 0,
+  signedFailed: 0,
+  unsignedHttp: 0,
+  cli: 0,
+  file: 0,
+  line: "control signatures   not checked",
+  trustSource: "none",
+  trustNote: "control signatures were not checked",
+};
+
+export function renderVerify(
+  r: VerifyResult,
+  approval: ApprovalSignatureReport = APPROVAL_NOT_CHECKED,
+  control: ControlSignatureReport = CONTROL_NOT_CHECKED,
+): string {
   const lines: string[] = [];
   lines.push(`ledger        ${r.directory}`);
   lines.push(`decisions     ${r.decisions}`);
@@ -149,6 +166,8 @@ export function renderVerify(r: VerifyResult, approval: ApprovalSignatureReport 
   lines.push(r.anchors.line);
   lines.push(approval.line);
   lines.push(`              ${approval.trustNote}`);
+  // Halt and resume signatures are checked under the same operator key.
+  lines.push(control.line);
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");
@@ -277,8 +296,8 @@ export async function runVerify(
       anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
     };
-    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED };
-    out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED));
+    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED };
+    out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED));
     return EX_VERIFY_FAILED;
   }
   let approval: ApprovalSignatureReport;
@@ -296,7 +315,22 @@ export async function runVerify(
       problems: [...result.problems, `approval signatures: ${approval.signedFailed} did not verify`],
     };
   }
-  const reported = { ...result, approvalSignatures: approval };
-  out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval));
+  let control: ControlSignatureReport;
+  try {
+    control = await verifyControlSignatures(dir, credentialsFile ? { credentialsFile } : {});
+  } catch (err) {
+    const problem = err instanceof Error ? err.message : "control signatures could not be read";
+    control = { ...CONTROL_NOT_CHECKED, ok: false, trustNote: problem };
+    result = { ...result, ok: false, problems: [...result.problems, problem] };
+  }
+  if (control.signedFailed > 0) {
+    result = {
+      ...result,
+      ok: false,
+      problems: [...result.problems, `control signatures: ${control.signedFailed} did not verify`],
+    };
+  }
+  const reported = { ...result, approvalSignatures: approval, controlSignatures: control };
+  out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control));
   return reported.ok ? 0 : EX_VERIFY_FAILED;
 }

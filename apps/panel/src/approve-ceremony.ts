@@ -71,7 +71,7 @@ export async function approveWithPasskey(ref: string, requestHash: string): Prom
   return { ok: false, error: typeof body.error === "string" ? body.error : `http-${res.status}` };
 }
 
-function descriptors(value: unknown): PublicKeyCredentialDescriptorJSON[] | null {
+export function descriptors(value: unknown): PublicKeyCredentialDescriptorJSON[] | null {
   if (!Array.isArray(value)) return null;
   const out: PublicKeyCredentialDescriptorJSON[] = [];
   for (const item of value) {
@@ -89,7 +89,7 @@ function errorName(err: unknown): string {
 }
 
 /** The browser names a dismissed prompt `NotAllowedError` or `AbortError`. */
-function cancelled(err: unknown): boolean {
+export function cancelled(err: unknown): boolean {
   const name = errorName(err);
   if (name === "NotAllowedError" || name === "AbortError") return true;
   if (typeof err === "object" && err !== null && "cause" in err) {
