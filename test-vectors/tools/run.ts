@@ -10,7 +10,7 @@
  * node_modules/@verax-ai/body/dist/cli.js. The default is this checkout.
  */
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -61,6 +61,8 @@ export async function runVectors(verify: Verify): Promise<Outcome[]> {
       join(pins, "witness-key.pem"),
       "--operator-credentials",
       join(pins, "operator-credentials.json"),
+      // A vector whose checkpoint is registered with a Transparency Service pins its key too.
+      ...(existsSync(join(pins, "anchor-key.pem")) ? ["--anchor-key", join(pins, "anchor-key.pem")] : []),
       "--json",
     ]);
     let report: { ok?: boolean; problems?: string[] } = {};

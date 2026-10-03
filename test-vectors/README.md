@@ -91,11 +91,22 @@ A negative vector names the first check that must fail, in this order:
 | `fail-tail-truncated` | INVALID | `checkpoint-coverage` |
 | `fail-checkpoint-totals` | INVALID | `checkpoint-totals` |
 | `fail-allow-while-halted` | INVALID | `control` |
+| `valid-anchored` | VALID | - |
 
 `valid-full` holds eight records: a write deferred for approval, the
 operator's passkey approval, the agent's retry that runs it, an allowed read,
 a refused spend, a halt, a read refused while halted, a resume and an allowed
 read. Each vector's `expected.json` says what was changed.
+
+`valid-anchored` is `valid-full` with its checkpoint registered at the public
+capsule-anchor instance, `https://witness.agentactioncapsule.org`, through
+`POST /register`, which received only the checkpoint hash.
+`ledger/checkpoint-anchors.jsonl` holds the RFC 9162 COSE Receipt (leaf 2542
+of a tree of 2543). `pins/anchor-key.pem` is the service key; it is the key
+published at `/.well-known/did.json` and `/anchor/authority-pubkey`, which
+agreed when the receipt was taken, and you can fetch it yourself. The receipt
+proves the service's log held that hash at that tree size; it does not show
+the service agrees with anything the checkpoint counts.
 
 ## Verify by hand (records and chain)
 
@@ -136,7 +147,8 @@ node --experimental-strip-types test-vectors/tools/run.ts
 ```
 
 The runner calls `verax verify` once per vector with every key pinned
-(`--key`, `--witness-key`, `--checkpoint-key`, `--operator-credentials`) and
+(`--key`, `--witness-key`, `--checkpoint-key`, `--operator-credentials`, and
+`--anchor-key` when the vector has one) and
 compares the verdict and the first problem line with `expected.json`. `--bin`
 runs another build, for example a published one:
 
@@ -149,10 +161,11 @@ node --experimental-strip-types test-vectors/tools/run.ts --bin node_modules/@ve
 ("signature does not verify"), so for those vectors the runner accepts any of
 the three; the by-hand checker tells them apart.
 
-Verax 0.4.2 as published reaches 14 of the 16 expected results. It accepts
-`fail-inputs-approver-downgraded` and `fail-checkpoint-totals`: it did not
-check inputs rows against `inputsHash`, and it did not compare checkpoint
-totals. Both checks were added to `verax verify` with this set.
+Verax 0.4.3 reaches all 17. Verax 0.4.2 reaches 15: it accepts
+`fail-inputs-approver-downgraded` and `fail-checkpoint-totals`, because it did
+not check inputs rows against `inputsHash` or compare checkpoint totals, and it
+passes `valid-anchored` without reading the receipt at all. Those checks and
+`--anchor-key` were added in 0.4.3.
 
 ## What a green run shows
 
