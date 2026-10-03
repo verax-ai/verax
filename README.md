@@ -71,7 +71,7 @@ back without a body, as in [Read the ledger back without us](#read-the-ledger-ba
 
 ### The same rules, animated
 
-Two short episodes show the same gate, with characters in place of a
+Four short episodes show the same gate, with characters in place of a
 terminal. They are sample scenarios: the scenes are drawn in three.js and the
 voices are generated with ElevenLabs.
 
@@ -84,6 +84,17 @@ Episode 2, "No rule, no way through": a call with no rule is refused, the same
 call under a new name is refused again, and both refusals are signed.
 
 https://github.com/user-attachments/assets/4fb86627-3310-4f10-b1a9-059d8fcffb28
+
+Episode 3, "The red lever": an operator halts the body, every later call is
+refused and signed, and a call that was already running is not cut off.
+
+https://github.com/user-attachments/assets/8d19eed9-3359-46b3-bd77-f2b1b1c4dd75
+
+Episode 4, "Who approved?": a held spend waits for `verax approve` on the
+machine, the agent cannot approve it, and the approver's operator id goes into
+the record.
+
+https://github.com/user-attachments/assets/0b8aade4-a970-4b63-835e-4837e2a39cc9
 
 ## Connect your agent
 
