@@ -1,11 +1,12 @@
 import { strict as assert } from "node:assert";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { runVerify } from "../packages/body/src/verify-cli.ts";
+import { runVectors } from "../test-vectors/tools/run.ts";
 import { STAGES } from "../test-vectors/tools/stages.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -66,21 +67,17 @@ describe("test vectors v1", () => {
     }
   });
 
-  it("verax verify reaches every expected verdict and first failing stage", () => {
-    const run = spawnSync(
-      process.execPath,
-      ["--experimental-strip-types", "--no-warnings", join(vectors, "tools", "run.ts"), "--json"],
-      { encoding: "utf8", windowsHide: true },
-    );
-    let report: { vectors?: number; mismatches?: number; outcomes?: { id: string; match: boolean; problems: string[] }[] };
-    try {
-      report = JSON.parse(run.stdout) as typeof report;
-    } catch {
-      assert.fail(`runner output was not JSON (exit ${run.status}): ${run.stderr}`);
-    }
-    const missed = (report.outcomes ?? []).filter((o) => !o.match);
+  it("verax verify reaches every expected verdict and first failing stage", async () => {
+    // In process rather than as a child: on an elevated runner the CLI refuses a
+    // child of this checkout before any command runs (R15-1). The verdicts come
+    // from the same runVerify the CLI calls.
+    const outcomes = await runVectors(async (args) => {
+      const out: string[] = [];
+      const status = await runVerify(args, (line) => out.push(line));
+      return { status, stdout: out.join("\n"), stderr: "" };
+    });
+    const missed = outcomes.filter((o) => !o.match);
     assert.deepEqual(missed, [], JSON.stringify(missed, null, 2));
-    assert.equal(report.mismatches, 0);
-    assert.equal(run.status, 0);
+    assert.equal(outcomes.length, 16);
   });
 });
