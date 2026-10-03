@@ -235,7 +235,10 @@ export async function verifyApprovalSignatures(
   const credentials = readCredentialsAt(pinned ? opts.credentialsFile! : credentialsPath(stateDir));
   const trust = trustOf(pinned, credentials);
   const decisions: SignedDecisionRecord[] = [];
-  const approverByAllow = new Map<string, ApproverOnDisk>();
+  // Every inputs row under a ref, by the hash of its inputs document. A ref can
+  // hold rows with no record (a crash, a retry, or a row appended by hand);
+  // only the row the allow's signed inputsHash names speaks for that allow.
+  const inputsByRef = new Map<string, Map<string, ApproverOnDisk | null>>();
   for (const piece of listPieceFiles(stateDir)) {
     for (const line of readLines(piece.decisions)) {
       try {
@@ -247,8 +250,11 @@ export async function verifyApprovalSignatures(
     for (const line of readLines(piece.inputs)) {
       try {
         const row = JSON.parse(line) as { ref?: unknown; inputs?: { approver?: ApproverOnDisk } };
-        if (typeof row.ref !== "string" || !row.inputs?.approver) continue;
-        approverByAllow.set(row.ref, row.inputs.approver);
+        if (typeof row.ref !== "string" || row.inputs === undefined) continue;
+        const hash = createHash("sha256").update(canonical(row.inputs), "utf8").digest("hex");
+        const byHash = inputsByRef.get(row.ref) ?? new Map<string, ApproverOnDisk | null>();
+        byHash.set(hash, row.inputs?.approver ?? null);
+        inputsByRef.set(row.ref, byHash);
       } catch {
         // Same as a decision line: skip, do not invent a failure from a torn line.
       }
@@ -268,7 +274,10 @@ export async function verifyApprovalSignatures(
     // A parsed line that is not a decision record is the ledger statement's problem, not a crash here.
     if (!row || typeof row !== "object" || !row.claims || typeof row.claims !== "object") continue;
     if (row.claims.decision !== "allow" || typeof row.claims.ref !== "string") continue;
-    const approver = approverByAllow.get(row.claims.ref);
+    // No row hashes to the signed inputsHash: the ledger statement names that
+    // record, and no other row is read in its place.
+    const signedInputs = typeof row.claims.inputsHash === "string" ? row.claims.inputsHash : null;
+    const approver = signedInputs === null ? null : inputsByRef.get(row.claims.ref)?.get(signedInputs);
     if (!approver) continue;
     if (approver.signature === undefined) {
       if (approver.via === "http") unsignedHttp += 1;

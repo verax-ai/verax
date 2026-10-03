@@ -1,0 +1,15 @@
+{
+  "id": "valid-deny-only",
+  "description": "The smallest ledger: one refused call, one record, no effect. A first verifier needs only record and chain checks to pass it.",
+  "spec": [
+    "decision-profile-03 4.1-4.2"
+  ],
+  "expected_result": "VALID",
+  "first_failing_stage": null,
+  "records": 1,
+  "effects": 0,
+  "checkpoints": 1,
+  "record_hashes": [
+    "63c064c1180a7aad4e99dc42e65931779674665cc555a0b2715f033bc951651a"
+  ]
+}

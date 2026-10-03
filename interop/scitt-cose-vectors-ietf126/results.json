@@ -1,0 +1,65 @@
+{
+  "sha256sums_mismatches": [],
+  "results": [
+    {
+      "id": "valid-eddsa",
+      "expected": "VALID",
+      "failure_code": null,
+      "got": "VALID",
+      "stage": null,
+      "detail": "all stages pass",
+      "reconstructed_root_agrees": true,
+      "outcome": "PASS"
+    },
+    {
+      "id": "valid-es256",
+      "expected": "VALID",
+      "failure_code": null,
+      "got": "VALID",
+      "stage": null,
+      "detail": "all stages pass",
+      "reconstructed_root_agrees": true,
+      "outcome": "PASS"
+    },
+    {
+      "id": "fail-tampered-path",
+      "expected": "INVALID",
+      "failure_code": "TAMPERED_INCLUSION_PATH",
+      "got": "INVALID",
+      "stage": "receipt-sig",
+      "detail": "receipt signature (alg -8) does not verify over the reconstructed root",
+      "reconstructed_root_agrees": null,
+      "outcome": "PASS"
+    },
+    {
+      "id": "fail-unsupported-vds",
+      "expected": "INVALID",
+      "failure_code": "UNSUPPORTED_VDS",
+      "got": "INVALID",
+      "stage": "vds-gate",
+      "detail": "vds 2 is not RFC9162_SHA256 (1)",
+      "reconstructed_root_agrees": null,
+      "outcome": "PASS"
+    },
+    {
+      "id": "fail-bad-statement-sig",
+      "expected": "INVALID",
+      "failure_code": "BAD_STATEMENT_SIGNATURE",
+      "got": "INVALID",
+      "stage": "statement-sig",
+      "detail": "statement signature (alg -8) does not verify",
+      "reconstructed_root_agrees": null,
+      "outcome": "PASS"
+    },
+    {
+      "id": "valid-ccf-vds2",
+      "expected": "VALID",
+      "failure_code": null,
+      "got": "INVALID",
+      "stage": "vds-gate",
+      "detail": "vds 2 is not RFC9162_SHA256 (1)",
+      "reconstructed_root_agrees": null,
+      "outcome": "SCOPE-OUT"
+    }
+  ]
+}

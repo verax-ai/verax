@@ -1,0 +1,197 @@
+{
+  "results": [
+    {
+      "name": "allow-executed-settled",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [],
+      "outcome": "PASS"
+    },
+    {
+      "name": "deny-no-settlement",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [],
+      "outcome": "PASS"
+    },
+    {
+      "name": "halt",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [],
+      "outcome": "PASS"
+    },
+    {
+      "name": "detached-payload",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "skipped",
+        "SIGNATURE": "pass"
+      },
+      "notes": [
+        "DIGEST: payload-unverified (action not inline)"
+      ],
+      "outcome": "PASS"
+    },
+    {
+      "name": "negative-tampered-payload",
+      "expected_verification": false,
+      "expected_stage": "DIGEST",
+      "verified": false,
+      "first_failing_stage": "DIGEST",
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "fail",
+        "SIGNATURE": "pass"
+      },
+      "notes": [
+        "DIGEST: sha256(JCS(action)) differs from action_digest.sha256"
+      ],
+      "outcome": "PASS"
+    },
+    {
+      "name": "negative-wrong-key",
+      "expected_verification": false,
+      "expected_stage": "SIGNATURE",
+      "verified": false,
+      "first_failing_stage": "SIGNATURE",
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "fail"
+      },
+      "notes": [
+        "SIGNATURE: Ed25519 over the signing input does not verify under keypair.publicKeyHex"
+      ],
+      "outcome": "PASS"
+    },
+    {
+      "name": "negative-schema-decision",
+      "expected_verification": false,
+      "expected_stage": "SCHEMA",
+      "verified": false,
+      "first_failing_stage": "SCHEMA",
+      "stages": {
+        "SCHEMA": "fail",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [
+        "SCHEMA: decision \"permit\" is not in the enum"
+      ],
+      "outcome": "PASS"
+    },
+    {
+      "name": "negative-type-relabel",
+      "expected_verification": false,
+      "expected_stage": "SIGNATURE",
+      "verified": false,
+      "first_failing_stage": "SCHEMA",
+      "stages": {
+        "SCHEMA": "fail",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "fail"
+      },
+      "notes": [
+        "SCHEMA: record_type is not accountability_record",
+        "SIGNATURE: Ed25519 over the signing input does not verify under keypair.publicKeyHex"
+      ],
+      "outcome": "PASS"
+    },
+    {
+      "name": "positive-deny-executed",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [],
+      "outcome": "PASS"
+    },
+    {
+      "name": "positive-collision-same-second-a",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [],
+      "outcome": "PASS"
+    },
+    {
+      "name": "positive-collision-same-second-b",
+      "expected_verification": true,
+      "expected_stage": null,
+      "verified": true,
+      "first_failing_stage": null,
+      "stages": {
+        "SCHEMA": "pass",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [],
+      "outcome": "PASS"
+    },
+    {
+      "name": "negative-sig-alg-lowercase",
+      "expected_verification": false,
+      "expected_stage": "SCHEMA",
+      "verified": false,
+      "first_failing_stage": "SCHEMA",
+      "stages": {
+        "SCHEMA": "fail",
+        "CANONICAL": "pass",
+        "DIGEST": "pass",
+        "SIGNATURE": "pass"
+      },
+      "notes": [
+        "SCHEMA: sig_alg \"ed25519\" is not the const Ed25519"
+      ],
+      "outcome": "PASS"
+    }
+  ]
+}

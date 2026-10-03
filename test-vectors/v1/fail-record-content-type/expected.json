@@ -1,0 +1,22 @@
+{
+  "id": "fail-record-content-type",
+  "description": "The refused spend record re-signed with the Decision Token content type. The signature is valid; a record presented under the token type is refused before any claim is read.",
+  "spec": [
+    "decision-profile-03 4.3 (MUST-DP-4)"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "record-header",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "dd92c6de94f5e5fcae5a97a6a4b661b95168b41a769f0d52d16ccc5c46c68601",
+    "dad778ccba9bdd825f79d33d95cfe19511e997a53e528c91a119a5b8bf838a29",
+    "010ebd6d05faa509b953f8a16eece0d0eb9d295dff5f9b3d94dc90f6e4e48980",
+    "96072ddad077950153e08908f03e82262db689564e2962acd23461ec33a73d8b",
+    "1ab97943a1abb134a4b0c403034bb634890795973851b94e88d9b2287085cbbd",
+    "10a8bc067bc4fc7647727ff5433be313751a5afeedcec2f881c82a75c0dd7c27",
+    "4ddda11281f1c74f0ca1eeb28a86301bc54da82273ddcd1fb09fda44c774c292"
+  ]
+}

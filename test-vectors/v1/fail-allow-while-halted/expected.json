@@ -1,0 +1,22 @@
+{
+  "id": "fail-allow-while-halted",
+  "description": "The read refused while halted is re-signed as an allow by the record key, chain and checkpoint restored. Every signature verifies; the allow sits inside the halt window.",
+  "spec": [
+    "Verax control records (STATUS v0.4.2)"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "control",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "dd92c6de94f5e5fcae5a97a6a4b661b95168b41a769f0d52d16ccc5c46c68601",
+    "dad778ccba9bdd825f79d33d95cfe19511e997a53e528c91a119a5b8bf838a29",
+    "ca479361187b415fff864f8034c39c82f46b211f6f8ce878a8e1d2bf51f9c533",
+    "6ffebcf57db69cad402f3aaec547cf882171dead3b8ce4792fd0541002ff6a18",
+    "0eebc6632ff0e262afa777827cfcfe969952c9fa19830c48749d8da5ff5504b5",
+    "43687fecaaaed412944dffe81711cfa6706ec8de13e1182b1c855f2193138174",
+    "cb7d055bcb8b855dfb9a1d9572934e4c8de2363ba7a5f020e2dad59086583ef6"
+  ]
+}

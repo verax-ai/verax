@@ -51,6 +51,31 @@
  * that verified. A key taken from the file shows the checkpoints agree
  * with each other, not that the key was ever trusted.
  *
+ * Inputs are a further statement. The writer appends a call's inputs row
+ * before the record whose `inputsHash` commits to it, so a crash leaves at
+ * most an inputs row with no record, never the reverse. Each record that
+ * carries an `inputsHash` must find an inputs row under its ref whose
+ * canonical SHA-256 is that hash. A missing row is `inputs row missing`, a
+ * row under that ref with another hash is `inputs row does not match`, and
+ * either makes `ok` false: the approver block of an approval lives in that
+ * row, and an unbound row could be rewritten from a signed approval into an
+ * unsigned one. A row with no record is the crash case and is not named.
+ *
+ * Checkpoint counts are checked too. For every checkpoint that verified, its
+ * head must be a record the ledger holds, the verified records in its window
+ * up to that head must be its `receiptCount` ending at the head, and their
+ * allow, deny and defer counts must be its totals; a record appended later
+ * with a time in the window is not counted. Null totals (redacted) are not
+ * compared; the count still is.
+ *
+ * Anchors are the last statement. `checkpoint-anchors.jsonl` holds COSE
+ * Receipts from a Transparency Service for checkpoints `verax anchor`
+ * registered. A receipt names no key, so it is checked only under a key the
+ * reader supplies (`anchorPublicKeyPem`): each row must name a checkpoint that
+ * verified, its leaf entry must be the one the route defines, and the receipt
+ * must verify over the root its inclusion proof rebuilds. Without that key the
+ * receipts are counted and said to be unchecked; that is not a failure.
+ *
  * Control records are a further statement. An allow whose subject is
  * `verax.halt` opens a halt window; an allow whose subject is `verax.resume`
  * closes it. An allow whose subject does not start with `verax.` while a
@@ -72,7 +97,9 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  checkpointHash,
   findCheckpointChainBreak,
+  totalsFromDecisionRecords,
   verifyCheckpoint,
   verifyCheckpointUnderPin,
   type SignedCheckpoint,
@@ -82,8 +109,10 @@ import type { SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-extract";
 
+import { anchorEntryHash, readAnchors } from "./anchors.ts";
 import { checkpointsPath, readCheckpointFile } from "./checkpoints.ts";
 import { sha256Canonical } from "./hash.ts";
+import { verifyReceipt } from "./transparency-receipt.ts";
 import {
   ledgerPiecePathProblem,
   readLedgerManifest,
@@ -130,7 +159,28 @@ export type VerifyResult = {
   tail: VerifyTail;
   /** Halt windows. A ledger with none says so; that sentence is not a violation. */
   control: VerifyControl;
+  /** Inputs rows checked against each record's signed `inputsHash`. */
+  inputs: VerifyInputs;
+  /** Transparency Service receipts for checkpoints, when the ledger holds any. */
+  anchors: VerifyAnchors;
   problems: string[];
+};
+
+export type VerifyAnchors = {
+  line: string;
+  /** Receipts in `checkpoint-anchors.jsonl`. */
+  receipts: number;
+  /** Receipts that verified under the reader's key. Zero when no key was given. */
+  verified: number;
+  checked: boolean;
+};
+
+export type VerifyInputs = {
+  line: string;
+  /** Records whose inputs row was found and hashes to their `inputsHash`. */
+  matched: number;
+  missing: number;
+  mismatched: number;
 };
 
 export type VerifyIndex = {
@@ -167,6 +217,8 @@ export type VerifyOptions = {
   witnessPublicKeyPem?: string;
   /** Verify every checkpoint row against this key instead of one key taken from the file. */
   checkpointPublicKeyPem?: string;
+  /** The Transparency Service key that receipts in `checkpoint-anchors.jsonl` are checked under. */
+  anchorPublicKeyPem?: string;
 };
 
 /**
@@ -211,13 +263,19 @@ function takePieceFile(dir: string, rel: string, problems: string[], read: boole
   return path;
 }
 
-/** Decision and effect files this directory holds, oldest piece first. Inputs are confined and not read. */
-function ledgerFiles(dir: string, problems: string[]): { decisions: string[]; effects: string[] } {
+type LedgerFiles = { decisions: string[]; effects: string[]; inputs: string[] };
+
+/**
+ * Decision, effect and inputs files this directory holds, oldest piece first.
+ * An inputs file the disk lacks is not named here: a record that needed a row
+ * from it is named when inputs are checked.
+ */
+function ledgerFiles(dir: string, problems: string[]): LedgerFiles {
   const manifestFile = manifestPath(dir);
   const manifestLink = symbolicLinkProblem(manifestFile);
   if (manifestLink !== null) {
     problems.push(manifestLink);
-    return { decisions: [], effects: [] };
+    return { decisions: [], effects: [], inputs: [] };
   }
   if (existsSync(manifestFile)) {
     try {
@@ -227,18 +285,20 @@ function ledgerFiles(dir: string, problems: string[]): { decisions: string[]; ef
       }
     } catch (err) {
       problems.push(err instanceof Error ? err.message : "ledger-manifest-unreadable");
-      return { decisions: [], effects: [] };
+      return { decisions: [], effects: [], inputs: [] };
     }
   }
   return legacyFiles(dir);
 }
 
-function legacyFiles(dir: string): { decisions: string[]; effects: string[] } {
+function legacyFiles(dir: string): LedgerFiles {
   const decisionsPath = join(dir, "decisions.jsonl");
   const effectsPath = join(dir, "effects.jsonl");
+  const inputsPath = join(dir, "inputs.jsonl");
   return {
     decisions: existsSync(decisionsPath) ? [decisionsPath] : [],
     effects: existsSync(effectsPath) ? [effectsPath] : [],
+    inputs: existsSync(inputsPath) ? [inputsPath] : [],
   };
 }
 
@@ -246,17 +306,23 @@ function pieceFiles(
   dir: string,
   pieces: { decisions: string; effects: string; inputs: string }[],
   problems: string[],
-): { decisions: string[]; effects: string[] } {
+): LedgerFiles {
   const decisions: string[] = [];
   const effects: string[] = [];
+  const inputs: string[] = [];
   for (const p of pieces) {
     const decision = takePieceFile(dir, p.decisions, problems, true);
     if (decision) decisions.push(decision);
     const effect = takePieceFile(dir, p.effects, problems, true);
     if (effect) effects.push(effect);
+    const before = problems.length;
     takePieceFile(dir, p.inputs, problems, false);
+    if (problems.length === before) {
+      const path = requireLedgerPiecePath(dir, p.inputs);
+      if (existsSync(path)) inputs.push(path);
+    }
   }
-  return { decisions, effects };
+  return { decisions, effects, inputs };
 }
 
 /** Parses JSONL, reporting the line a bad row sits on rather than throwing. */
@@ -622,7 +688,8 @@ function tailStatement(
   dir: string,
   records: readonly SignedDecisionRecord[],
   checkpointPublicKeyPem: string,
-): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[] } {
+  attested: readonly SignedDecisionRecord[] = records,
+): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[]; verified: VerifiedCheckpoint[] } {
   const checkpointFile = checkpointsPath(dir);
   const checkpointLink = symbolicLinkProblem(checkpointFile);
   if (checkpointLink !== null) {
@@ -631,6 +698,7 @@ function tailStatement(
       tail: { line: TAIL_NONE, checkpoint: null },
       checkpointTrust: checkpointTrustOf(pinned, null, 0),
       problems: [checkpointLink],
+      verified: [],
     };
   }
   const loaded = readCheckpointFile(dir);
@@ -640,10 +708,21 @@ function tailStatement(
   const key = pinned !== "" ? pinned : taken;
   const checkpointTrust = checkpointTrustOf(pinned, taken, rows.length);
   const problems: string[] = [...loaded.problems];
+  const verified: VerifiedCheckpoint[] = [];
   noteEd25519(key, problems);
   for (let i = 0; i < rows.length; i += 1) {
     if (!checkpointRowVerifies(rows[i]!, key)) {
       problems.push(`checkpoint signature does not verify: checkpoint ${i}`);
+      continue;
+    }
+    try {
+      const count = rows[i]!.claims.receiptCount;
+      verified.push({ hash: checkpointHash(rows[i]!), receiptCount: typeof count === "number" ? count : null });
+    } catch {
+      // A row that verified but cannot be hashed cannot be anchored either.
+    }
+    for (const problem of checkpointCountProblems(rows[i]!, records, attested)) {
+      problems.push(`${problem}: checkpoint ${i}`);
     }
   }
   let brk: { index: number; reason: string } | null = null;
@@ -662,7 +741,7 @@ function tailStatement(
   const covered = brk ? rows.slice(0, brk.index) : rows;
   const newest = covered.length > 0 ? covered[covered.length - 1]! : null;
   if (!newest) {
-    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems };
+    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems, verified };
   }
   const claims = newest.claims;
   const receiptCount = typeof claims.receiptCount === "number" ? claims.receiptCount : null;
@@ -694,7 +773,197 @@ function tailStatement(
     tail: { line, checkpoint: { receiptCount, chainHeadHash, ledgerHoldsRecord } },
     checkpointTrust,
     problems,
+    verified,
   };
+}
+
+type VerifiedCheckpoint = { hash: string; receiptCount: number | null };
+
+const ANCHORS_NONE: VerifyAnchors = {
+  line: "anchors: none (no checkpoint is registered with a transparency service)",
+  receipts: 0,
+  verified: 0,
+  checked: false,
+};
+
+function anchorStatement(
+  dir: string,
+  checkpoints: readonly VerifiedCheckpoint[],
+  keyPem: string,
+  problems: string[],
+): VerifyAnchors {
+  const read = readAnchors(dir);
+  if (!read.present) return ANCHORS_NONE;
+  problems.push(...read.problems);
+  const receipts = read.rows.length;
+  const services = [...new Set(read.rows.map((r) => r.service))].join(", ");
+  if (keyPem === "") {
+    return {
+      line: `anchors: ${receipts} receipt(s) from ${services || "no service"}, not checked: pin the service key with --anchor-key`,
+      receipts,
+      verified: 0,
+      checked: false,
+    };
+  }
+  const byHash = new Map(checkpoints.map((c) => [c.hash, c]));
+  let verified = 0;
+  let newestCount: number | null = null;
+  for (const row of read.rows) {
+    const short = row.checkpointHash.slice(0, 12);
+    const checkpoint = byHash.get(row.checkpointHash);
+    if (!checkpoint) {
+      problems.push(`anchor names a checkpoint the ledger does not hold: ${short}`);
+      continue;
+    }
+    let entry: string;
+    try {
+      entry = anchorEntryHash(row.checkpointHash, row.route);
+    } catch {
+      problems.push(`anchor route is not one this verifier reads: ${short}`);
+      continue;
+    }
+    if (entry !== row.entryHash) {
+      problems.push(`anchor entry hash is not the checkpoint's: ${short}`);
+      continue;
+    }
+    const check = verifyReceipt(Buffer.from(row.receiptB64, "base64"), Buffer.from(entry, "hex"), keyPem);
+    if (!check.ok) {
+      problems.push(`anchor receipt does not verify: ${short} (${check.stage}: ${check.reason})`);
+      continue;
+    }
+    if (check.treeSize !== row.treeSize || check.leafIndex !== row.leafIndex) {
+      problems.push(`anchor row disagrees with its receipt: ${short}`);
+      continue;
+    }
+    verified += 1;
+    if (checkpoint.receiptCount !== null && (newestCount === null || checkpoint.receiptCount > newestCount)) {
+      newestCount = checkpoint.receiptCount;
+    }
+  }
+  const covers = newestCount === null ? "" : `; the newest anchored checkpoint covers ${newestCount} record(s)`;
+  return {
+    line:
+      verified === receipts
+        ? `anchors: ${receipts} receipt(s) from ${services} verify under the key you supplied${covers}`
+        : `anchors: ${verified} of ${receipts} receipt(s) verify under the key you supplied`,
+    receipts,
+    verified,
+    checked: true,
+  };
+}
+
+const INPUTS_UNCHECKED: VerifyInputs = { line: "inputs: not checked", matched: 0, missing: 0, mismatched: 0 };
+
+/**
+ * Pairs each record that carries an `inputsHash` with an inputs row under its
+ * ref that hashes to it. Rows are used once. A ref can hold more rows than
+ * records (a crash after the row, a retry), so a record is matched against
+ * any unused row under its ref, not the k-th.
+ */
+function inputsStatement(
+  paths: readonly string[],
+  records: readonly SignedDecisionRecord[],
+  problems: string[],
+): VerifyInputs {
+  const rowsByRef = new Map<string, string[]>();
+  for (const path of paths) {
+    for (const row of readJsonl(path, problems)) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const { ref, inputs } = row as { ref?: unknown; inputs?: unknown };
+      if (typeof ref !== "string" || inputs === undefined) continue;
+      let hash: string;
+      try {
+        hash = sha256Canonical(inputs);
+      } catch {
+        continue;
+      }
+      const list = rowsByRef.get(ref) ?? [];
+      list.push(hash);
+      rowsByRef.set(ref, list);
+    }
+  }
+  let matched = 0;
+  let missing = 0;
+  let mismatched = 0;
+  for (let i = 0; i < records.length; i += 1) {
+    const claims = records[i]!.claims;
+    const expected = claims?.inputsHash;
+    if (typeof expected !== "string") continue;
+    const ref = typeof claims.ref === "string" ? claims.ref : null;
+    const rows = ref === null ? undefined : rowsByRef.get(ref);
+    if (!rows || rows.length === 0) {
+      missing += 1;
+      problems.push(`inputs row missing: record ${i} (ref ${ref ?? "?"})`);
+      continue;
+    }
+    const at = rows.indexOf(expected);
+    if (at < 0) {
+      mismatched += 1;
+      problems.push(`inputs row does not match its record's inputsHash: record ${i} (ref ${ref})`);
+      continue;
+    }
+    rows.splice(at, 1);
+    matched += 1;
+  }
+  const line =
+    missing === 0 && mismatched === 0
+      ? `inputs: ${matched} record(s), each with its inputs row`
+      : `inputs: ${matched} match, ${missing} missing, ${mismatched} do not match their record`;
+  return { line, matched, missing, mismatched };
+}
+
+/**
+ * What a checkpoint counted is fixed by its head. The witness counts the
+ * records whose time falls in `[startMs, endMs)` and names the last of them
+ * as the head, so the attested records in that window up to and including
+ * the head must be `receiptCount` records ending at the head, and their
+ * allow, deny and defer counts must be the signed totals (decision profile
+ * 4.4). A record appended later with a time inside the window was never seen
+ * by the witness and is not counted. A head the ledger does not hold is named
+ * for every checkpoint, not only the newest. A null head means the witness
+ * counted nothing. Null totals were redacted; the count is still checked.
+ */
+function checkpointCountProblems(
+  row: SignedCheckpoint,
+  records: readonly SignedDecisionRecord[],
+  attested: readonly SignedDecisionRecord[],
+): string[] {
+  const claims = row.claims;
+  const { startMs, endMs, receiptCount } = claims;
+  if (typeof startMs !== "number" || typeof endMs !== "number") return ["checkpoint has no window"];
+  const inWindow = (r: SignedDecisionRecord) => r.claims.timestampMs >= startMs && r.claims.timestampMs < endMs;
+  let counted: SignedDecisionRecord[] = [];
+  let headRecord: SignedDecisionRecord | null = null;
+  if (typeof claims.chainHeadHash === "string") {
+    const at = records.findIndex((r) => {
+      try {
+        return decisionRecordHash(r) === claims.chainHeadHash;
+      } catch {
+        return false;
+      }
+    });
+    if (at < 0) return ["checkpoint names a head the ledger does not hold"];
+    headRecord = records[at]!;
+    const upTo = new Set(records.slice(0, at + 1));
+    counted = attested.filter((r) => upTo.has(r) && inWindow(r));
+  }
+  const problems: string[] = [];
+  const endsAtHead = headRecord === null ? counted.length === 0 : counted[counted.length - 1] === headRecord;
+  if (typeof receiptCount !== "number" || receiptCount !== counted.length || !endsAtHead) {
+    problems.push(
+      `checkpoint covers ${String(receiptCount)} record(s) in its window; the ledger holds ${counted.length} there up to its head`,
+    );
+  }
+  if (claims.totals !== null && claims.totals !== undefined) {
+    let same = false;
+    try {
+      same = canonical(totalsFromDecisionRecords(counted)) === canonical(claims.totals);
+    } catch {
+      // A totals value that does not canonicalise is not the map the profile defines.
+    }
+    if (!same) problems.push("checkpoint totals do not match the records in its window");
+  }
+  return problems;
 }
 
 function controlStatement(records: readonly SignedDecisionRecord[]): {
@@ -762,6 +1031,8 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     effectCompleteness: EFFECT_COMPLETENESS_UNCHECKED,
     tail: { line: TAIL_NONE, checkpoint: null },
     control: CONTROL_UNCHECKED,
+    inputs: INPUTS_UNCHECKED,
+    anchors: ANCHORS_NONE,
     problems: [problem],
   };
 }
@@ -825,6 +1096,8 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       effectCompleteness,
       tail: emptyTail.tail,
       control: emptyControl.control,
+      inputs: INPUTS_UNCHECKED,
+      anchors: ANCHORS_NONE,
       problems,
     };
   }
@@ -849,6 +1122,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
 
   let signaturesValid = 0;
   let signaturesInvalid = 0;
+  const attested: SignedDecisionRecord[] = [];
   const recordRefused = ed25519Refusal(anahtar);
   if (recordRefused) problems.push(recordRefused);
   for (let i = 0; i < records.length; i += 1) {
@@ -861,6 +1135,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     }
     if (gecerli) {
       signaturesValid += 1;
+      attested.push(rec);
     } else {
       signaturesInvalid += 1;
       const ref = typeof rec.claims?.ref === "string" ? rec.claims.ref : "?";
@@ -1018,10 +1293,12 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
 
   const indexed = indexStatement(dir, refler);
   const effectCompleteness = noteEffectCompleteness(indexed.effectRefs, boundPrimaryRefs, problems);
-  const tailed = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "");
+  const inputs = inputsStatement(files.inputs, records, problems);
+  const tailed = tailStatement(dir, records, opts.checkpointPublicKeyPem ?? "", attested);
   problems.push(...indexed.problems, ...tailed.problems);
   const stated = controlStatement(records);
   problems.push(...stated.violations);
+  const anchors = anchorStatement(dir, tailed.verified, opts.anchorPublicKeyPem?.trim() ?? "", problems);
 
   const ok =
     problems.length === 0 && signaturesInvalid === 0 && chainBreakAt === null && effectsOrphaned === 0;
@@ -1044,6 +1321,8 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     effectCompleteness,
     tail: tailed.tail,
     control: stated.control,
+    inputs,
+    anchors,
     problems,
   };
 }

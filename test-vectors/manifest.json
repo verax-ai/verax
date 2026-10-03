@@ -1,0 +1,117 @@
+{
+  "version": "v1",
+  "stability": "append-only",
+  "producer": "Verax body (packages/body) over HTTP, with a witness process; see tools/capture.ts",
+  "stages": [
+    "record-header",
+    "record-signature",
+    "record-claims",
+    "chain",
+    "inputs-binding",
+    "effect-binding",
+    "index",
+    "approval-signature",
+    "checkpoint-signature",
+    "checkpoint-coverage",
+    "checkpoint-totals",
+    "control"
+  ],
+  "vectors": [
+    {
+      "id": "valid-full",
+      "dir": "v1/valid-full",
+      "expected_result": "VALID",
+      "first_failing_stage": null
+    },
+    {
+      "id": "valid-deny-only",
+      "dir": "v1/valid-deny-only",
+      "expected_result": "VALID",
+      "first_failing_stage": null
+    },
+    {
+      "id": "fail-record-signature",
+      "dir": "v1/fail-record-signature",
+      "expected_result": "INVALID",
+      "first_failing_stage": "record-signature"
+    },
+    {
+      "id": "fail-record-alg-8",
+      "dir": "v1/fail-record-alg-8",
+      "expected_result": "INVALID",
+      "first_failing_stage": "record-header"
+    },
+    {
+      "id": "fail-record-content-type",
+      "dir": "v1/fail-record-content-type",
+      "expected_result": "INVALID",
+      "first_failing_stage": "record-header"
+    },
+    {
+      "id": "fail-record-key-not-pinned",
+      "dir": "v1/fail-record-key-not-pinned",
+      "expected_result": "INVALID",
+      "first_failing_stage": "record-header"
+    },
+    {
+      "id": "fail-record-claims-mismatch",
+      "dir": "v1/fail-record-claims-mismatch",
+      "expected_result": "INVALID",
+      "first_failing_stage": "record-claims"
+    },
+    {
+      "id": "fail-record-claim-rule",
+      "dir": "v1/fail-record-claim-rule",
+      "expected_result": "INVALID",
+      "first_failing_stage": "record-claims"
+    },
+    {
+      "id": "fail-chain-removed",
+      "dir": "v1/fail-chain-removed",
+      "expected_result": "INVALID",
+      "first_failing_stage": "chain"
+    },
+    {
+      "id": "fail-inputs-approver-downgraded",
+      "dir": "v1/fail-inputs-approver-downgraded",
+      "expected_result": "INVALID",
+      "first_failing_stage": "inputs-binding"
+    },
+    {
+      "id": "fail-approval-signature",
+      "dir": "v1/fail-approval-signature",
+      "expected_result": "INVALID",
+      "first_failing_stage": "approval-signature"
+    },
+    {
+      "id": "fail-effect-hash",
+      "dir": "v1/fail-effect-hash",
+      "expected_result": "INVALID",
+      "first_failing_stage": "effect-binding"
+    },
+    {
+      "id": "fail-checkpoint-signature",
+      "dir": "v1/fail-checkpoint-signature",
+      "expected_result": "INVALID",
+      "first_failing_stage": "checkpoint-signature"
+    },
+    {
+      "id": "fail-tail-truncated",
+      "dir": "v1/fail-tail-truncated",
+      "expected_result": "INVALID",
+      "first_failing_stage": "checkpoint-coverage"
+    },
+    {
+      "id": "fail-checkpoint-totals",
+      "dir": "v1/fail-checkpoint-totals",
+      "expected_result": "INVALID",
+      "first_failing_stage": "checkpoint-totals"
+    },
+    {
+      "id": "fail-allow-while-halted",
+      "dir": "v1/fail-allow-while-halted",
+      "expected_result": "INVALID",
+      "first_failing_stage": "control"
+    }
+  ]
+}

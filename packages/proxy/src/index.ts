@@ -19,7 +19,7 @@ export { tenantKey } from "./tenant.ts";
 // through this package must be able to inject a full disk into the very
 // instance the proxy uses. Deep imports are not in the exports map.
 export { diskProbe } from "./disk.ts";
-export { checkpointsPath } from "./checkpoints.ts";
+export { checkpointsPath, readCheckpointFile } from "./checkpoints.ts";
 export { signEffectAttestation } from "./ledger.ts";
 export { spokenReason } from "./spoken-reason.ts";
 export type { ApprovalRow, ApproveResult } from "./approvals.ts";
@@ -49,4 +49,15 @@ export type {
 } from "./types.ts";
 
 export { verifyLedger } from "./verify-ledger.ts";
-export type { VerifyResult, VerifyOptions, VerifyTrust, VerifyControl } from "./verify-ledger.ts";
+export type {
+  VerifyResult,
+  VerifyOptions,
+  VerifyTrust,
+  VerifyControl,
+  VerifyInputs,
+  VerifyAnchors,
+} from "./verify-ledger.ts";
+export { anchorEntryHash, appendAnchor, readAnchors } from "./anchors.ts";
+export type { AnchorRoute, AnchorRow } from "./anchors.ts";
+export { verifyReceipt } from "./transparency-receipt.ts";
+export type { ReceiptCheck, ReceiptStage } from "./transparency-receipt.ts";

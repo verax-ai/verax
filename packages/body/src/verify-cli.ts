@@ -23,7 +23,7 @@ export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--operator-credentials <file>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--anchor-key <public.pem>] [--operator-credentials <file>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
     "  --key <file>      verify decision records against a public key you hold,",
@@ -46,6 +46,11 @@ function usage(): string {
     "                    verify every checkpoint row against a public key you",
     "                    hold, instead of one key taken from the checkpoint",
     "                    file. Same distinction as --key, for the witness.",
+    "  --anchor-key <file>",
+    "                    check the transparency-service receipts in",
+    "                    checkpoint-anchors.jsonl under this service key. A",
+    "                    receipt names no key of its own, so without this flag",
+    "                    the receipts are counted and not checked.",
     "  --operator-credentials <file>",
     "                    verify HTTP approval signatures against this operator",
     "                    credential file, instead of operator-credentials.json",
@@ -123,6 +128,7 @@ export function renderVerify(r: VerifyResult, approval: ApprovalSignatureReport 
   lines.push(`              ${r.checkpointTrust.note}`);
   lines.push(r.index.line);
   lines.push(r.effectCompleteness);
+  lines.push(r.inputs.line);
   if (r.tail.checkpoint) {
     const head = r.tail.checkpoint.chainHeadHash ?? "(no head hash)";
     const holds =
@@ -140,6 +146,7 @@ export function renderVerify(r: VerifyResult, approval: ApprovalSignatureReport 
   lines.push(r.tail.line);
   lines.push(r.control.line);
   for (const warning of r.control.warnings) lines.push(`warning       ${warning}`);
+  lines.push(r.anchors.line);
   lines.push(approval.line);
   lines.push(`              ${approval.trustNote}`);
   if (r.problems.length > 0) {
@@ -200,6 +207,9 @@ export async function runVerify(
   const checkpointKey = readKeyFlag("--checkpoint-key");
   if (!checkpointKey.ok) return EX_VERIFY_FAILED;
   checkpointPublicKeyPem = checkpointKey.pem;
+  const anchorKey = readKeyFlag("--anchor-key");
+  if (!anchorKey.ok) return EX_VERIFY_FAILED;
+  const anchorPublicKeyPem = anchorKey.pem;
   let credentialsFile: string | undefined;
   const credentialsAt = args.indexOf("--operator-credentials");
   if (credentialsAt !== -1) {
@@ -238,6 +248,7 @@ export async function runVerify(
       ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
       ...(witnessPublicKeyPem ? { witnessPublicKeyPem } : {}),
       ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
+      ...(anchorPublicKeyPem ? { anchorPublicKeyPem } : {}),
     });
   } catch (err) {
     const problem = err instanceof Error ? err.message : "ledger could not be read";
@@ -262,6 +273,8 @@ export async function runVerify(
         checkpoint: null,
       },
       control: { line: "control: not checked", windows: 0, warnings: [] },
+      inputs: { line: "inputs: not checked", matched: 0, missing: 0, mismatched: 0 },
+      anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
     };
     const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED };

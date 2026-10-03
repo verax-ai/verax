@@ -185,6 +185,7 @@ describe("attack R10", () => {
       const built = await deniedMemoryLedger("inside-ref");
       try {
         cpSync(join(built, "decisions.jsonl"), join(real, "decisions.jsonl"));
+        cpSync(join(built, "inputs.jsonl"), join(real, "inputs.jsonl"));
       } finally {
         rmSync(built, { recursive: true, force: true });
       }

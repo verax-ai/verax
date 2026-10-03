@@ -1,0 +1,22 @@
+{
+  "id": "fail-effect-hash",
+  "description": "The first read's effect row claims a different effectHash than the allow that admitted it. The records and checkpoint are untouched.",
+  "spec": [
+    "decision-profile-03 6 (binding)"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "effect-binding",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "dd92c6de94f5e5fcae5a97a6a4b661b95168b41a769f0d52d16ccc5c46c68601",
+    "dad778ccba9bdd825f79d33d95cfe19511e997a53e528c91a119a5b8bf838a29",
+    "ca479361187b415fff864f8034c39c82f46b211f6f8ce878a8e1d2bf51f9c533",
+    "6ffebcf57db69cad402f3aaec547cf882171dead3b8ce4792fd0541002ff6a18",
+    "364c7eb81248e3fac0babdc24f1941484c5e8e1ed85474e11b18c8511c7bf321",
+    "e141bcbe2c6236dd2129e5c6eff3fa9612873b42460de3dbbaa32acc5aec16cf",
+    "dd025216ff33d6d9785687ba82d486a8c3ac3e0c0cf3e5b65810259a7bc6a4d4"
+  ]
+}

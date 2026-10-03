@@ -1,0 +1,23 @@
+{
+  "id": "fail-approval-signature",
+  "description": "One byte of the operator's passkey (WebAuthn) signature on the approval is flipped. The approve record is re-signed over the changed inputs and the chain and checkpoint are restored, so only the assertion fails.",
+  "spec": [
+    "Verax approval binding (STATUS v0.4.2)",
+    "WebAuthn Level 3 7.2"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "approval-signature",
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "aed0c657427552d1ba389ad62da63a5084f151223161a195dbe077fa33b64012",
+    "8377c411085f71c61b5b64f1ffb8d49d27ed4c045934ce274841be7ef73816f7",
+    "fa9db8d83615a1d0a9f06f2f840dae953b97d02c844377213d1d02ebbc871a08",
+    "2b3f7bd4a267e67c0a55d5bb940b689188359d04fd90051e3196596892db54ca",
+    "04ec43ca305d222d50543f1b59f761932481feb925eea6f7a7447c181e70526e",
+    "e053796890a7e85ff2f8fd1113d1573827f2846b5c6f69cacbe3c8b4d1bb4986",
+    "e5a18931492527c618b151d2747981610a0b71ec69fdb5a95d67e2c258d466d9",
+    "b978742884c4b9f562afe51674b1ab9ea5ba2082ef3704fd84bc352cfd62b8d7"
+  ]
+}
