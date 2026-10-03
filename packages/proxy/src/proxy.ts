@@ -16,6 +16,7 @@ import { markEnded, markStarted, startedWithoutEnd } from "./in-flight-log.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { controlUnchanged, createControlMemory, syncHaltControl } from "./control-sync.ts";
+import { createRevokeMemory, revokeUnchanged, syncRevokeControl } from "./revoke-sync.ts";
 import {
   countedWork,
   hasPrimaryEffect,
@@ -230,6 +231,7 @@ export function createProxy(deps: ProxyDeps) {
   // Single writer: after open, the ledger lock is this process. The first
   // sync reads control records once; this snapshot is updated in place.
   const controlMemory = createControlMemory();
+  const revokeMemory = createRevokeMemory();
   let controlSyncReported = false;
   if (stateDir === null) {
     process.stderr.write("verax-proxy: halt and disk limits are inactive without a ledger directory\n");
@@ -544,20 +546,29 @@ export function createProxy(deps: ProxyDeps) {
 
   async function syncControlRecords(): Promise<void> {
     if (stateDir === null) return;
+    // A revocation list that cannot be read must not throw away the halt
+    // snapshot too, or every call would read the whole ledger again.
+    let haltSynced = false;
     try {
-      if (controlUnchanged(stateDir, controlMemory)) return;
-      const run = (writer: LedgerWriter) =>
-        syncHaltControl({
+      if (controlUnchanged(stateDir, controlMemory) && revokeUnchanged(stateDir, revokeMemory)) return;
+      const run = async (writer: LedgerWriter) => {
+        // Both snapshots load from one read. The halt sync writes only halt
+        // and resume records, which the revoke replay does not read.
+        let read: Promise<Awaited<ReturnType<typeof deps.ledger.decisions>>> | null = null;
+        const shared = {
           stateDir,
           now: deps.now,
           nonce: deps.nonce,
           policyHash: deps.policy.hash,
           recordSigner: deps.recordSigner,
           inputsLog,
-          decisions: () => deps.ledger.decisions(),
-          memory: controlMemory,
+          decisions: () => (read ??= deps.ledger.decisions()),
           writer,
-        });
+        };
+        await syncHaltControl({ ...shared, memory: controlMemory });
+        haltSynced = true;
+        await syncRevokeControl({ ...shared, memory: revokeMemory });
+      };
       const host = deps.ledger as { exclusive?: <T>(fn: (writer: LedgerWriter) => Promise<T>) => Promise<T> };
       if (typeof host.exclusive === "function") {
         await host.exclusive((writer) => run(writer));
@@ -575,7 +586,8 @@ export function createProxy(deps: ProxyDeps) {
       // unloaded so the next call reads again, and keep going: the halt switch
       // and the rate limit still fail closed on their own path. One line per
       // failure streak, so the admission retry in the same call does not repeat it.
-      controlMemory.loaded = false;
+      if (!haltSynced) controlMemory.loaded = false;
+      revokeMemory.loaded = false;
       if (controlSyncReported) return;
       controlSyncReported = true;
       const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");

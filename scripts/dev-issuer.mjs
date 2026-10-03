@@ -358,19 +358,24 @@ function bearerJtiRevoked(jti) {
 }
 
 /** `operator` carries `verax:approve`. `agent` is a valid issuer token without it. `none` did not verify. */
+/**
+ * The caller's role and subject. The subject goes on the revocation line, so
+ * the body's ledger record names who revoked, not only what.
+ */
 async function bearerRevokeRole(req) {
   const raw = req.headers.authorization;
   const header = Array.isArray(raw) ? raw[0] : raw;
-  if (typeof header !== "string" || !header.startsWith("Bearer ")) return "none";
+  if (typeof header !== "string" || !header.startsWith("Bearer ")) return { role: "none", sub: "" };
   try {
     const { payload } = await jwtVerify(header.slice("Bearer ".length), verifyKey, { issuer, audience });
     const jti = typeof payload.jti === "string" ? payload.jti : "";
-    if (bearerJtiRevoked(jti)) return "none";
+    if (bearerJtiRevoked(jti)) return { role: "none", sub: "" };
     const scope = typeof payload.scope === "string" ? payload.scope : "";
     const parts = scope.split(/\s+/).filter((part) => part !== "");
-    return parts.includes("verax:approve") ? "operator" : "agent";
+    const sub = typeof payload.sub === "string" && payload.sub !== "" ? payload.sub : "unknown";
+    return { role: parts.includes("verax:approve") ? "operator" : "agent", sub };
   } catch {
-    return "none";
+    return { role: "none", sub: "" };
   }
 }
 
@@ -800,7 +805,7 @@ const server = createServer((req, res) => {
       return;
     }
     if (req.method === "POST" && url.pathname === "/revoke") {
-      const role = await bearerRevokeRole(req);
+      const { role, sub } = await bearerRevokeRole(req);
       if (role === "none") {
         sendJson(res, 401, { error: "unauthorized" });
         return;
@@ -825,7 +830,7 @@ const server = createServer((req, res) => {
         sendJson(res, 400, { error: "jti-missing" });
         return;
       }
-      appendFileSync(join(stateDir, "revoked-jti.jsonl"), `${JSON.stringify({ jti })}\n`, {
+      appendFileSync(join(stateDir, "revoked-jti.jsonl"), `${JSON.stringify({ jti, by: sub, atMs: Date.now() })}\n`, {
         encoding: "utf8",
         mode: 0o600,
       });
