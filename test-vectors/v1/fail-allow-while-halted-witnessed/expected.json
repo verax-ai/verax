@@ -1,0 +1,22 @@
+{
+  "id": "fail-allow-while-halted-witnessed",
+  "description": "As fail-allow-while-halted, and the forged allow is also given an effect row the witness key signs, bound to its effectHash. Every signature verifies and every allow has its row; the allow sits inside the halt window, so only control fails.",
+  "spec": [
+    "Verax control records (STATUS v0.4.2)"
+  ],
+  "expected_result": "INVALID",
+  "first_failing_stage": "control",
+  "records": 8,
+  "effects": 6,
+  "checkpoints": 1,
+  "record_hashes": [
+    "72c021b221e1c9633883fed27e6cdb9a65d01ef50cec8581e96cc225fa47c3a8",
+    "b8ce5efd5b8df2d35d58961a4800695c5e2e7729227349b802a1b0d2774d21ba",
+    "5c92791e41b8868a2c5595aab200dc929453ebe86ee1721e497c1d5b001b87a2",
+    "8398f6c7b8795c95f71cd4e28c50136b616c93708bad74d12953292df5fb314f",
+    "236b0d5914a2de55e1916535fc151b936790f0caba2bd04ca046683c5164c085",
+    "42a469c7a8db03c828cabf1b1c20150ab099f1a6a077f41f7cc6d85cd45ebef1",
+    "5979e092a644016445855c7311fcc9172d01b0e0bf30577ad5fbe874484bd9ec",
+    "c74847e7a2fa18886287b222abd8926b71e70dc3babdd0095286918b02b54fe6"
+  ]
+}

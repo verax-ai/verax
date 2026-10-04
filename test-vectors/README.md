@@ -98,6 +98,9 @@ A negative vector names the first check that must fail, in this order:
 | `fail-checkpoint-totals` | INVALID | `checkpoint-totals` |
 | `fail-allow-while-halted` | INVALID | `control` |
 | `valid-anchored` | VALID | - |
+| `valid-full-2` | VALID | - |
+| `fail-effect-extract-body` | INVALID | `effect-binding` |
+| `fail-allow-while-halted-witnessed` | INVALID | `control` |
 
 `valid-full` holds eight records: a write deferred for approval, the
 operator's passkey approval, the agent's retry that runs it, an allowed read,
@@ -113,6 +116,16 @@ published at `/.well-known/did.json` and `/anchor/authority-pubkey`, which
 agreed when the receipt was taken, and you can fetch it yourself. The receipt
 proves the service's log held that hash at that tree size; it does not show
 the service agrees with anything the checkpoint counts.
+
+The first capture's private keys were discarded, so a vector that re-signs an
+effect extract cannot be cut from `valid-full`. `valid-full-2` is the same
+scenario captured again under new keys, by a body that also signs the resume
+with the operator's passkey; the two vectors after it each change one thing in
+a copy of it and carry its pins. `fail-effect-extract-body` re-signs the first
+read's extract over a row with a different `effectHash` and leaves the
+presented row as it was. `fail-allow-while-halted-witnessed` is
+`fail-allow-while-halted` with a witness-signed effect row for the forged
+allow, so every allow has its row.
 
 ### Where a reading of the drafts decides the stage
 
@@ -130,10 +143,13 @@ the service agrees with anything the checkpoint counts.
   `control`. Which applies turns on whether the next per-row extract counts as
   the following window's extract, which the profile does not yet say.
   `expected.json` names `control`; `manifest.json` notes both.
+  `fail-allow-while-halted-witnessed` fails at `control` under either reading.
 - **`fail-effect-hash`.** The vector changes the presented effect row, not the
   extract that signs it. A verifier can fail it at `effect-binding` because the
   presented row no longer matches its allow, or because it no longer matches
   the row the extract signs; the vector does not tell those two checks apart.
+  `fail-effect-extract-body` does: its presented row still matches its allow,
+  and only the signed row differs.
 
 ## Verify by hand (records and chain)
 
@@ -188,7 +204,7 @@ node --experimental-strip-types test-vectors/tools/run.ts --bin node_modules/@ve
 ("signature does not verify"), so for those vectors the runner accepts any of
 the three; the by-hand checker tells them apart.
 
-Verax 0.4.3 reaches all 17. Verax 0.4.2 reaches 15: it accepts
+Verax 0.4.3 reaches all 20. Verax 0.4.2 reaches 15 of the first 17: it accepts
 `fail-inputs-approver-downgraded` and `fail-checkpoint-totals`, because it did
 not check inputs rows against `inputsHash` or compare checkpoint totals, and it
 passes `valid-anchored` without reading the receipt at all. Those checks and

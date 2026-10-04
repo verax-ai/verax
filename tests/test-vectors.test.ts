@@ -78,7 +78,11 @@ describe("test vectors v1", () => {
     });
     const missed = outcomes.filter((o) => !o.match);
     assert.deepEqual(missed, [], JSON.stringify(missed, null, 2));
-    assert.equal(outcomes.length, 17);
+    // Every vector the manifest names was run, and v1 is append-only, so the
+    // count never falls below the 17 published before the first append.
+    const manifest = JSON.parse(readFileSync(join(vectors, "manifest.json"), "utf8")) as Manifest;
+    assert.equal(outcomes.length, manifest.vectors.length);
+    assert.ok(outcomes.length >= 17, `only ${outcomes.length} vectors`);
   });
 
   it("valid-anchored is VALID because its receipt verifies, not because anchors were skipped", async () => {

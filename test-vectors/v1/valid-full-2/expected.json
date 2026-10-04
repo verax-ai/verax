@@ -1,0 +1,23 @@
+{
+  "id": "valid-full-2",
+  "description": "The scenario of valid-full captured again under new keys, by a body that signs the resume with the operator's passkey: a write deferred for approval, the operator's passkey approval, the retry that runs it, an allowed read, a refused spend, a halt, a read refused while halted, a resume and an allowed read. The vectors appended with it change one thing in a copy of this ledger.",
+  "spec": [
+    "decision-profile-03 4.1-4.4",
+    "cedulon-08 6.2"
+  ],
+  "expected_result": "VALID",
+  "first_failing_stage": null,
+  "records": 8,
+  "effects": 5,
+  "checkpoints": 1,
+  "record_hashes": [
+    "72c021b221e1c9633883fed27e6cdb9a65d01ef50cec8581e96cc225fa47c3a8",
+    "b8ce5efd5b8df2d35d58961a4800695c5e2e7729227349b802a1b0d2774d21ba",
+    "5c92791e41b8868a2c5595aab200dc929453ebe86ee1721e497c1d5b001b87a2",
+    "8398f6c7b8795c95f71cd4e28c50136b616c93708bad74d12953292df5fb314f",
+    "236b0d5914a2de55e1916535fc151b936790f0caba2bd04ca046683c5164c085",
+    "b807572435c8dc12e61045734749e5a261a11cc0ea988703e018f87b72b10278",
+    "daec114290485b2192d592b076cd6bd9edc3ceb2752a9c2dfca22b875f8094f5",
+    "ea24d2cad15e0427453db011b7eb506fff9049a52b00ddd3bc76406372adaa52"
+  ]
+}
