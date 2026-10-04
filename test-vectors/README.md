@@ -28,13 +28,16 @@ cd test-vectors && sha256sum -c SHA256SUMS
 
 ## Where the bytes come from
 
-The two `valid-*` vectors were written by a running Verax body over HTTP, with
-a witness process beside it signing effects and the checkpoint
-([`tools/capture.ts`](tools/capture.ts)). Each `fail-*` vector changes one
-thing in a copy of `valid-full` ([`tools/generate.ts`](tools/generate.ts)).
-Where the change alters a record's octets, every later record is re-linked and
-re-signed and the checkpoint is re-signed, so the only check that can fail is
-the one the vector names. The keys are test keys generated for this set; the
+`valid-full`, `valid-deny-only` and `valid-full-2` were written by a running
+Verax body over HTTP, with a witness process beside it signing effects and the
+checkpoint ([`tools/capture.ts`](tools/capture.ts)); `valid-anchored` is
+`valid-full` with a receipt added. Each `fail-*` vector changes one thing in a
+copy of `valid-full` ([`tools/generate.ts`](tools/generate.ts)), or of
+`valid-full-2` for the two appended with it
+([`tools/append.ts`](tools/append.ts)). Where the change alters a record's
+octets, every later record is re-linked and re-signed and the checkpoint is
+re-signed, so the only check that should fail is the one the vector names;
+`fail-allow-while-halted` is the exception noted below. The keys are test keys generated for this set; the
 private halves were discarded.
 
 ## Layout
@@ -69,7 +72,7 @@ A negative vector names the first check that must fail, in this order:
 | `record-claims` | the decoded payload breaks a claim rule (decision profile 4.2), or differs from the claims presented beside it |
 | `chain` | `prevRecordHash` is not SHA-256 of the previous record's COSE_Sign1 octets |
 | `inputs-binding` | a record's signed `inputsHash` does not match its inputs row, or the row is missing |
-| `effect-binding` | an effect row does not bind to the allow that admitted it, or an allow has no effect row (`decision-without-effect`) |
+| `effect-binding` | an effect row does not bind to the allow that admitted it, or an allow outside the boundary allowance has no effect row (`decision-without-effect`) |
 | `index` | the index names a record the ledger no longer holds |
 | `approval-signature` | the operator's WebAuthn assertion on an approval does not verify against the challenge rebuilt from the held record |
 | `checkpoint-signature` | the witness signature on a checkpoint |
@@ -123,27 +126,29 @@ scenario captured again under new keys, by a body that also signs the resume
 with the operator's passkey; the two vectors after it each change one thing in
 a copy of it and carry its pins. `fail-effect-extract-body` re-signs the first
 read's extract over a row with a different `effectHash` and leaves the
-presented row as it was. `fail-allow-while-halted-witnessed` is
-`fail-allow-while-halted` with a witness-signed effect row for the forged
-allow, so every allow has its row.
+presented row as it was. `fail-allow-while-halted-witnessed` is cut from
+`valid-full-2` the way `fail-allow-while-halted` is cut from `valid-full`, and
+its one change also gives the forged allow a witness-signed effect row, so
+every allow has its row.
 
-### Where a reading of the drafts decides the stage
+### Where the drafts decide the stage
 
 - **Which key signs a checkpoint.** In these ledgers a witness process signs
   the checkpoint under its own key (`pins/witness-key.pem`), separate from the
   record key and under the same operator. Decision profile -03 says the
-  Decider signs checkpoints; read that way, both valid vectors fail at
-  `checkpoint-signature`. The next profile revision is to let a deployment pin
+  Decider signs checkpoints; read that way, every valid vector that carries a
+  checkpoint fails at `checkpoint-signature`. The next profile revision is to let a deployment pin
   a separate checkpoint key and require it to state which key it uses.
 - **`fail-allow-while-halted`.** The forged allow has no effect row and sits
   30 ms after the halt's extract window, inside the core's five-minute
-  clock-skew allowance. A verifier that holds every allow to a row with no
-  allowance fails it first at `effect-binding`. One that applies the
-  allowance reports it as `boundary-deferred`, a warning, and fails it at
-  `control`. Which applies turns on whether the next per-row extract counts as
-  the following window's extract, which the profile does not yet say.
-  `expected.json` names `control`; `manifest.json` notes both.
-  `fail-allow-while-halted-witnessed` fails at `control` under either reading.
+  clock-skew allowance. A verifier that applies no allowance, departing from
+  the profile's boundary rule, fails it first at `effect-binding`. One that
+  applies the allowance reports it as `boundary-deferred`, a warning, and
+  fails it at `control`; whether that deferral would harden turns on whether
+  the next per-row extract counts as the following window's extract, which
+  the profile does not yet say. `expected.json` names `control`;
+  `manifest.json` notes both. In `fail-allow-while-halted-witnessed` every
+  allow has its row, and Verax fails it at `control`.
 - **`fail-effect-hash`.** The vector changes the presented effect row, not the
   extract that signs it. A verifier can fail it at `effect-binding` because the
   presented row no longer matches its allow, or because it no longer matches
@@ -210,12 +215,12 @@ not check inputs rows against `inputsHash` or compare checkpoint totals, and it
 passes `valid-anchored` without reading the receipt at all. Those checks and
 `--anchor-key` were added in 0.4.3.
 
-A build newer than 0.4.3 also holds every allow to an effect row, without
-reading the unsigned `index.jsonl`: an allow with no row is
-`decision-without-effect`, and one within five minutes of the newest record is
-reported as `boundary-deferred`, a warning, since its row may not be written
-yet. It reports the forged allow in `fail-allow-while-halted` that way and
-still fails the vector at `control`.
+Builds after 0.4.3, unreleased as of this change, also hold every allow to an
+effect row, without reading the unsigned `index.jsonl`: an allow with no row
+is `decision-without-effect`, and one within five minutes of the newest record
+is reported as `boundary-deferred`, a warning, since its row may not be
+written yet. They report the forged allow in `fail-allow-while-halted` that
+way and still fail the vector at `control`.
 
 ## Independent runs
 
@@ -229,7 +234,9 @@ Their questions led to the notes above.
   ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5972115527)).
 - Roberto Locatelli (cryptovalid-opencore), with clean-room checkers written
   from the drafts, the RFCs, this README and, for two file layouts, the vector
-  files: 16 of 16 verdicts and 15 of 16 first failing stages at `vectors-v1`
+  files: with the checkpoint verified under the witness key, 16 of 16 verdicts
+  and 15 of 16 first failing stages at `vectors-v1`. One of those matches
+  came from a rule added after reading the vector, as the run itself states
   ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5979503944)).
 
 ## What a green run shows
