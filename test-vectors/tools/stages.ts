@@ -34,7 +34,7 @@ const LINES: { pattern: RegExp; stages: readonly Stage[] }[] = [
   { pattern: /^inputs (row|hash)/, stages: ["inputs-binding"] },
   {
     pattern:
-      /^(effect |thrown effect|duplicate-effect|ref .* has more than one effect row|same-org rows need|self rows need)/,
+      /^(effect |thrown effect|duplicate-effect|decision-without-effect |ref .* has more than one effect row|same-org rows need|self rows need)/,
     stages: ["effect-binding"],
   },
   { pattern: /^index /, stages: ["index"] },

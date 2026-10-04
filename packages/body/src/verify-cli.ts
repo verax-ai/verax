@@ -96,6 +96,11 @@ export function renderVerify(
   lines.push(`ledger        ${r.directory}`);
   lines.push(`decisions     ${r.decisions}`);
   lines.push(`effects       ${r.effects} (${r.effectsBound} bound to a decision, ${r.effectsOrphaned} with none)`);
+  if (r.effectsDeferred.length > 0) {
+    lines.push(
+      `deferred      ${r.effectsDeferred.length} allow(s) with no effect row yet, within the boundary allowance of the newest record (boundary-deferred, a warning): ${r.effectsDeferred.join(", ")}`,
+    );
+  }
   lines.push(`signatures    ${r.signaturesValid} verify, ${r.signaturesInvalid} do not`);
   lines.push(`chain         ${r.chainBreakAt === null ? "unbroken" : `breaks at record ${r.chainBreakAt}`}`);
   lines.push(
@@ -281,6 +286,7 @@ export async function runVerify(
       chainBreakAt: null,
       effectsBound: 0,
       effectsOrphaned: 0,
+      effectsDeferred: [],
       trust: { source: "none", publicKeyPem: null, note: problem },
       effectTrust: { source: "none", publicKeyPem: null, note: problem },
       witnessTrust: { source: "none", publicKeyPem: null, note: problem },
