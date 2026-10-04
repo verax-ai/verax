@@ -10,8 +10,9 @@ verifier's output.
 The record format is the Decision Record of
 [draft-dogru-cedulon-decision-profile-03](https://datatracker.ietf.org/doc/draft-dogru-cedulon-decision-profile/03/):
 an untagged COSE_Sign1 with Ed25519 under algorithm -19 ([RFC 9864](https://www.rfc-editor.org/rfc/rfc9864)),
-headers as in Section 7.2 of
-[draft-dogru-cedulon-core-03](https://datatracker.ietf.org/doc/draft-dogru-cedulon-core/03/).
+headers as in Section 6.2 of
+[draft-dogru-cedulon-08](https://datatracker.ietf.org/doc/html/draft-dogru-cedulon-08), which the
+decision profile references normatively.
 
 ## Stability
 
@@ -52,6 +53,11 @@ v1/<vector-id>/
 tools/                 capture, generate, run, and the by-hand checker
 ```
 
+Each line of `inputs.jsonl` is `{ref, inputs}`. A record's `inputsHash` is
+SHA-256 over the RFC 8785 form of the row's `inputs` member, not of the whole
+row; `ref` joins the row to its record. The decision profile does not define
+this layout; it is Verax's.
+
 ## Stages
 
 A negative vector names the first check that must fail, in this order:
@@ -63,7 +69,7 @@ A negative vector names the first check that must fail, in this order:
 | `record-claims` | the decoded payload breaks a claim rule (decision profile 4.2), or differs from the claims presented beside it |
 | `chain` | `prevRecordHash` is not SHA-256 of the previous record's COSE_Sign1 octets |
 | `inputs-binding` | a record's signed `inputsHash` does not match its inputs row, or the row is missing |
-| `effect-binding` | an effect row does not bind to the allow that admitted it |
+| `effect-binding` | an effect row does not bind to the allow that admitted it, or an allow has no effect row (`decision-without-effect`) |
 | `index` | the index names a record the ledger no longer holds |
 | `approval-signature` | the operator's WebAuthn assertion on an approval does not verify against the challenge rebuilt from the held record |
 | `checkpoint-signature` | the witness signature on a checkpoint |
@@ -107,6 +113,27 @@ published at `/.well-known/did.json` and `/anchor/authority-pubkey`, which
 agreed when the receipt was taken, and you can fetch it yourself. The receipt
 proves the service's log held that hash at that tree size; it does not show
 the service agrees with anything the checkpoint counts.
+
+### Where a reading of the drafts decides the stage
+
+- **Which key signs a checkpoint.** In these ledgers a witness process signs
+  the checkpoint under its own key (`pins/witness-key.pem`), separate from the
+  record key and under the same operator. Decision profile -03 says the
+  Decider signs checkpoints; read that way, both valid vectors fail at
+  `checkpoint-signature`. The next profile revision is to let a deployment pin
+  a separate checkpoint key and require it to state which key it uses.
+- **`fail-allow-while-halted`.** The forged allow has no effect row and sits
+  30 ms after the halt's extract window, inside the core's five-minute
+  clock-skew allowance. A verifier that holds every allow to a row with no
+  allowance fails it first at `effect-binding`. One that applies the
+  allowance reports it as `boundary-deferred`, a warning, and fails it at
+  `control`. Which applies turns on whether the next per-row extract counts as
+  the following window's extract, which the profile does not yet say.
+  `expected.json` names `control`; `manifest.json` notes both.
+- **`fail-effect-hash`.** The vector changes the presented effect row, not the
+  extract that signs it. A verifier can fail it at `effect-binding` because the
+  presented row no longer matches its allow, or because it no longer matches
+  the row the extract signs; the vector does not tell those two checks apart.
 
 ## Verify by hand (records and chain)
 
@@ -166,6 +193,27 @@ Verax 0.4.3 reaches all 17. Verax 0.4.2 reaches 15: it accepts
 not check inputs rows against `inputsHash` or compare checkpoint totals, and it
 passes `valid-anchored` without reading the receipt at all. Those checks and
 `--anchor-key` were added in 0.4.3.
+
+A build newer than 0.4.3 also holds every allow to an effect row, without
+reading the unsigned `index.jsonl`: an allow with no row is
+`decision-without-effect`, and one within five minutes of the newest record is
+reported as `boundary-deferred`, a warning, since its row may not be written
+yet. It reports the forged allow in `fail-allow-while-halted` that way and
+still fails the vector at `control`.
+
+## Independent runs
+
+These ran the set with verifiers of their own and posted the results in
+[mirjak/audit-bof-preparation#9](https://github.com/mirjak/audit-bof-preparation/issues/9).
+Their questions led to the notes above.
+
+- Tymofii Pidlisnyi (Agent Passport System), with the APS conformance runner,
+  stage by stage across all 16 vectors at `vectors-v1`
+  ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5972115527)).
+- Roberto Locatelli (cryptovalid-opencore), with clean-room checkers written
+  from the drafts: 16 of 16 verdicts and 15 of 16 first failing stages at
+  `vectors-v1`
+  ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5979503944)).
 
 ## What a green run shows
 

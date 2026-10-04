@@ -111,7 +111,8 @@
       "id": "fail-allow-while-halted",
       "dir": "v1/fail-allow-while-halted",
       "expected_result": "INVALID",
-      "first_failing_stage": "control"
+      "first_failing_stage": "control",
+      "note": "The forged allow also has no effect row and sits inside the clock-skew allowance of a window edge. A verifier that holds every allow to a row with no allowance fails it first at effect-binding; one that applies the allowance reports it as boundary-deferred and fails it at control. See README."
     },
     {
       "id": "valid-anchored",
