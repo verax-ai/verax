@@ -223,8 +223,9 @@ Two readers ran the set with verifiers of their own and posted the results in
 [mirjak/audit-bof-preparation#9](https://github.com/mirjak/audit-bof-preparation/issues/9).
 Their questions led to the notes above.
 
-- Tymofii Pidlisnyi (Agent Passport System), with the APS conformance runner,
-  stage by stage across all 16 vectors at `vectors-v1`
+- Tymofii Pidlisnyi (Agent Passport System), with a runner in the APS
+  conformance suite: a partial, stage-by-stage comparison across all 16
+  vectors at `vectors-v1`, not a whole-ledger verdict
   ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5972115527)).
 - Roberto Locatelli (cryptovalid-opencore), with clean-room checkers written
   from the drafts, the RFCs, this README and, for two file layouts, the vector
