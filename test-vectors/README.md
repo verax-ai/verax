@@ -219,7 +219,7 @@ still fails the vector at `control`.
 
 ## Independent runs
 
-These ran the set with verifiers of their own and posted the results in
+Two readers ran the set with verifiers of their own and posted the results in
 [mirjak/audit-bof-preparation#9](https://github.com/mirjak/audit-bof-preparation/issues/9).
 Their questions led to the notes above.
 
@@ -227,8 +227,8 @@ Their questions led to the notes above.
   stage by stage across all 16 vectors at `vectors-v1`
   ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5972115527)).
 - Roberto Locatelli (cryptovalid-opencore), with clean-room checkers written
-  from the drafts: 16 of 16 verdicts and 15 of 16 first failing stages at
-  `vectors-v1`
+  from the drafts, the RFCs, this README and, for two file layouts, the vector
+  files: 16 of 16 verdicts and 15 of 16 first failing stages at `vectors-v1`
   ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5979503944)).
 
 ## What a green run shows
