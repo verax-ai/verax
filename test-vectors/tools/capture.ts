@@ -16,6 +16,7 @@ import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 
 import { approvalChallenge } from "../../packages/body/src/approval-signature.ts";
+import { nextControlChallenge } from "../../packages/body/src/control-signature.ts";
 import { saveCredential } from "../../packages/body/src/operator-credentials.ts";
 import { listen } from "../../packages/body/src/server.ts";
 import { requestWitnessCheckpoint } from "../../packages/body/src/witness.ts";
@@ -182,7 +183,14 @@ export async function capture(opts: { denyOnly?: boolean } = {}): Promise<Captur
         // 5. halt; 6. a call while halted is denied; 7. resume; 8. allowed again
         if ((await asOperator("/api/halt")).status !== 200) throw new Error("halt");
         await tool("memory.get", { id: "note-1" });
-        if ((await asOperator("/api/resume")).status !== 200) throw new Error("resume");
+        // Since #133 a resume needs the operator's passkey over the halt-history tail.
+        const resumeAssertion = assertWithSoftwarePasskey(passkey, {
+          challenge: nextControlChallenge(stateDir, "resume").challenge,
+          rpID: RP_ID,
+          origin: ORIGIN,
+        });
+        const resumed = await asOperator("/api/resume", { assertion: resumeAssertion });
+        if (resumed.status !== 200) throw new Error(`resume-${resumed.status}:${await resumed.text()}`);
         await tool("memory.get", { id: "note-1" });
       }
 

@@ -10,8 +10,9 @@ verifier's output.
 The record format is the Decision Record of
 [draft-dogru-cedulon-decision-profile-03](https://datatracker.ietf.org/doc/draft-dogru-cedulon-decision-profile/03/):
 an untagged COSE_Sign1 with Ed25519 under algorithm -19 ([RFC 9864](https://www.rfc-editor.org/rfc/rfc9864)),
-headers as in Section 7.2 of
-[draft-dogru-cedulon-core-03](https://datatracker.ietf.org/doc/draft-dogru-cedulon-core/03/).
+headers as in Section 6.2 of
+[draft-dogru-cedulon-08](https://datatracker.ietf.org/doc/html/draft-dogru-cedulon-08), which the
+decision profile references normatively.
 
 ## Stability
 
@@ -27,13 +28,16 @@ cd test-vectors && sha256sum -c SHA256SUMS
 
 ## Where the bytes come from
 
-The two `valid-*` vectors were written by a running Verax body over HTTP, with
-a witness process beside it signing effects and the checkpoint
-([`tools/capture.ts`](tools/capture.ts)). Each `fail-*` vector changes one
-thing in a copy of `valid-full` ([`tools/generate.ts`](tools/generate.ts)).
-Where the change alters a record's octets, every later record is re-linked and
-re-signed and the checkpoint is re-signed, so the only check that can fail is
-the one the vector names. The keys are test keys generated for this set; the
+`valid-full`, `valid-deny-only` and `valid-full-2` were written by a running
+Verax body over HTTP, with a witness process beside it signing effects and the
+checkpoint ([`tools/capture.ts`](tools/capture.ts)); `valid-anchored` is
+`valid-full` with a receipt added. Each `fail-*` vector changes one thing in a
+copy of `valid-full` ([`tools/generate.ts`](tools/generate.ts)), or of
+`valid-full-2` for the two appended with it
+([`tools/append.ts`](tools/append.ts)). Where the change alters a record's
+octets, every later record is re-linked and re-signed and the checkpoint is
+re-signed, so the only check that should fail is the one the vector names;
+`fail-allow-while-halted` is the exception noted below. The keys are test keys generated for this set; the
 private halves were discarded.
 
 ## Layout
@@ -52,6 +56,11 @@ v1/<vector-id>/
 tools/                 capture, generate, run, and the by-hand checker
 ```
 
+Each line of `inputs.jsonl` is `{ref, inputs}`. A record's `inputsHash` is
+SHA-256 over the RFC 8785 form of the row's `inputs` member, not of the whole
+row; `ref` joins the row to its record. The decision profile does not define
+this layout; it is Verax's.
+
 ## Stages
 
 A negative vector names the first check that must fail, in this order:
@@ -63,7 +72,7 @@ A negative vector names the first check that must fail, in this order:
 | `record-claims` | the decoded payload breaks a claim rule (decision profile 4.2), or differs from the claims presented beside it |
 | `chain` | `prevRecordHash` is not SHA-256 of the previous record's COSE_Sign1 octets |
 | `inputs-binding` | a record's signed `inputsHash` does not match its inputs row, or the row is missing |
-| `effect-binding` | an effect row does not bind to the allow that admitted it |
+| `effect-binding` | an effect row does not bind to the allow that admitted it, or an allow outside the boundary allowance has no effect row (`decision-without-effect`) |
 | `index` | the index names a record the ledger no longer holds |
 | `approval-signature` | the operator's WebAuthn assertion on an approval does not verify against the challenge rebuilt from the held record |
 | `checkpoint-signature` | the witness signature on a checkpoint |
@@ -92,6 +101,9 @@ A negative vector names the first check that must fail, in this order:
 | `fail-checkpoint-totals` | INVALID | `checkpoint-totals` |
 | `fail-allow-while-halted` | INVALID | `control` |
 | `valid-anchored` | VALID | - |
+| `valid-full-2` | VALID | - |
+| `fail-effect-extract-body` | INVALID | `effect-binding` |
+| `fail-allow-while-halted-witnessed` | INVALID | `control` |
 
 `valid-full` holds eight records: a write deferred for approval, the
 operator's passkey approval, the agent's retry that runs it, an allowed read,
@@ -107,6 +119,42 @@ published at `/.well-known/did.json` and `/anchor/authority-pubkey`, which
 agreed when the receipt was taken, and you can fetch it yourself. The receipt
 proves the service's log held that hash at that tree size; it does not show
 the service agrees with anything the checkpoint counts.
+
+The first capture's private keys were discarded, so a vector that re-signs an
+effect extract cannot be cut from `valid-full`. `valid-full-2` is the same
+scenario captured again under new keys, by a body that also signs the resume
+with the operator's passkey; the two vectors after it each change one thing in
+a copy of it and carry its pins. `fail-effect-extract-body` re-signs the first
+read's extract over a row with a different `effectHash` and leaves the
+presented row as it was. `fail-allow-while-halted-witnessed` is cut from
+`valid-full-2` the way `fail-allow-while-halted` is cut from `valid-full`, and
+its one change also gives the forged allow a witness-signed effect row, so
+every allow has its row.
+
+### Where the drafts decide the stage
+
+- **Which key signs a checkpoint.** In these ledgers a witness process signs
+  the checkpoint under its own key (`pins/witness-key.pem`), separate from the
+  record key and under the same operator. Decision profile -03 says the
+  Decider signs checkpoints; read that way, every valid vector that carries a
+  checkpoint fails at `checkpoint-signature`. The next profile revision is to let a deployment pin
+  a separate checkpoint key and require it to state which key it uses.
+- **`fail-allow-while-halted`.** The forged allow has no effect row and sits
+  30 ms after the halt's extract window, inside the core's five-minute
+  clock-skew allowance. A verifier that applies no allowance, departing from
+  the profile's boundary rule, fails it first at `effect-binding`. One that
+  applies the allowance reports it as `boundary-deferred`, a warning, and
+  fails it at `control`; whether that deferral would harden turns on whether
+  the next per-row extract counts as the following window's extract, which
+  the profile does not yet say. `expected.json` names `control`;
+  `manifest.json` notes both. In `fail-allow-while-halted-witnessed` every
+  allow has its row, and Verax fails it at `control`.
+- **`fail-effect-hash`.** The vector changes the presented effect row, not the
+  extract that signs it. A verifier can fail it at `effect-binding` because the
+  presented row no longer matches its allow, or because it no longer matches
+  the row the extract signs; the vector does not tell those two checks apart.
+  `fail-effect-extract-body` does: its presented row still matches its allow,
+  and only the signed row differs.
 
 ## Verify by hand (records and chain)
 
@@ -161,11 +209,35 @@ node --experimental-strip-types test-vectors/tools/run.ts --bin node_modules/@ve
 ("signature does not verify"), so for those vectors the runner accepts any of
 the three; the by-hand checker tells them apart.
 
-Verax 0.4.3 reaches all 17. Verax 0.4.2 reaches 15: it accepts
+Verax 0.4.3 reaches all 20. Verax 0.4.2 reaches 15 of the first 17: it accepts
 `fail-inputs-approver-downgraded` and `fail-checkpoint-totals`, because it did
 not check inputs rows against `inputsHash` or compare checkpoint totals, and it
 passes `valid-anchored` without reading the receipt at all. Those checks and
 `--anchor-key` were added in 0.4.3.
+
+Builds after 0.4.3, unreleased as of this change, also hold every allow to an
+effect row, without reading the unsigned `index.jsonl`: an allow with no row
+is `decision-without-effect`, and one within five minutes of the newest record
+is reported as `boundary-deferred`, a warning, since its row may not be
+written yet. They report the forged allow in `fail-allow-while-halted` that
+way and still fail the vector at `control`.
+
+## Independent runs
+
+Two readers ran the set with verifiers of their own and posted the results in
+[mirjak/audit-bof-preparation#9](https://github.com/mirjak/audit-bof-preparation/issues/9).
+Their questions led to the notes above.
+
+- Tymofii Pidlisnyi (Agent Passport System), with a runner in the APS
+  conformance suite: a partial, stage-by-stage comparison across all 16
+  vectors at `vectors-v1`, not a whole-ledger verdict
+  ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5972115527)).
+- Roberto Locatelli (cryptovalid-opencore), with clean-room checkers written
+  from the drafts, the RFCs, this README and, for two file layouts, the vector
+  files: with the checkpoint verified under the witness key, 16 of 16 verdicts
+  and 15 of 16 first failing stages at `vectors-v1`. One of those matches
+  came from a rule added after reading the vector, as the run itself states
+  ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5979503944)).
 
 ## What a green run shows
 

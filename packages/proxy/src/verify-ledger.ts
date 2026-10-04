@@ -140,6 +140,12 @@ export type VerifyResult = {
   chainBreakAt: number | null;
   effectsBound: number;
   effectsOrphaned: number;
+  /**
+   * Refs of attested allows with no effect row that sit within the boundary
+   * allowance of the newest record: `boundary-deferred`, a warning. An older
+   * allow with no row is the problem `decision-without-effect <ref>`.
+   */
+  effectsDeferred: string[];
   trust: VerifyTrust;
   /** Which key answered for `self` effect rows. Same honesty rules as `trust`. */
   effectTrust: VerifyTrust;
@@ -219,6 +225,8 @@ export type VerifyOptions = {
   checkpointPublicKeyPem?: string;
   /** The Transparency Service key that receipts in `checkpoint-anchors.jsonl` are checked under. */
   anchorPublicKeyPem?: string;
+  /** How close to the newest record an allow with no effect row is deferred rather than named. */
+  boundaryAllowanceMs?: number;
 };
 
 /**
@@ -684,6 +692,43 @@ function noteEffectCompleteness(
   return EFFECT_COMPLETENESS_CHECKED;
 }
 
+/** The core's default clock-skew allowance, which decision profile 6.1 applies unchanged. */
+export const DEFAULT_BOUNDARY_ALLOWANCE_MS = 300_000;
+
+/**
+ * Every attested allow expects an effect row under its ref (decision profile
+ * 6.1). This reads the signed records and the rows, never `index.jsonl`,
+ * which is unsigned. A ref with a primary row, bound or not, is not this
+ * finding: a row that fails to bind is already named for what is wrong with
+ * it. The writer appends the row after the call returns, so an allow within
+ * the allowance of the newest attested record may still be in flight; that
+ * one is `boundary-deferred` and does not change `ok`. An older allow with no
+ * row is `decision-without-effect`.
+ */
+function allowsWithoutEffect(
+  attested: readonly SignedDecisionRecord[],
+  rowRefs: ReadonlySet<string>,
+  allowanceMs: number,
+): { findings: string[]; deferred: string[] } {
+  let newest = -Infinity;
+  for (const r of attested) {
+    if (typeof r.claims.timestampMs === "number" && r.claims.timestampMs > newest) newest = r.claims.timestampMs;
+  }
+  const findings: string[] = [];
+  const deferred: string[] = [];
+  const seen = new Set<string>();
+  for (const r of attested) {
+    const ref = r.claims.ref;
+    if (r.claims.decision !== "allow" || typeof ref !== "string" || seen.has(ref)) continue;
+    seen.add(ref);
+    if (rowRefs.has(ref)) continue;
+    const t = r.claims.timestampMs;
+    if (typeof t === "number" && newest - t <= allowanceMs) deferred.push(ref);
+    else findings.push(ref);
+  }
+  return { findings, deferred };
+}
+
 function tailStatement(
   dir: string,
   records: readonly SignedDecisionRecord[],
@@ -1023,6 +1068,7 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     chainBreakAt: null,
     effectsBound: 0,
     effectsOrphaned: 0,
+    effectsDeferred: [],
     trust,
     effectTrust: trust,
     witnessTrust: trust,
@@ -1088,6 +1134,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       chainBreakAt: null,
       effectsBound: 0,
       effectsOrphaned: 0,
+      effectsDeferred: [],
       trust: { source: "none", publicKeyPem: null, note: "no records, so no key was used" },
       effectTrust: effectTrustOf(opts.effectPublicKeyPem?.trim() ?? "", null, 0),
       witnessTrust: witnessTrustOf(opts.witnessPublicKeyPem?.trim() ?? "", null, 0),
@@ -1291,6 +1338,13 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (ref !== null) boundPrimaryRefs.add(ref);
   }
 
+  const unbound = allowsWithoutEffect(
+    attested,
+    primarySeen,
+    opts.boundaryAllowanceMs ?? DEFAULT_BOUNDARY_ALLOWANCE_MS,
+  );
+  problems.push(...unbound.findings.map((ref) => `decision-without-effect ${ref}`));
+
   const indexed = indexStatement(dir, refler);
   const effectCompleteness = noteEffectCompleteness(indexed.effectRefs, boundPrimaryRefs, problems);
   const inputs = inputsStatement(files.inputs, records, problems);
@@ -1313,6 +1367,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     chainBreakAt,
     effectsBound,
     effectsOrphaned,
+    effectsDeferred: unbound.deferred,
     trust,
     effectTrust,
     witnessTrust,
