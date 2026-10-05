@@ -1,9 +1,24 @@
 {
-  "sha": "11268e24b44578bce70df8e8c2d9f7e16d790ea5",
-  "date": "2026-10-03",
-  "statement": "This table is generated from CI for commit 11268e24b44578bce70df8e8c2d9f7e16d790ea5 on 2026-10-03, and only these platforms are claimed.",
+  "sha": "0ced11f08c8eeb15fe64a97929fa9cc99c9a26e6",
+  "date": "2026-10-05",
+  "statement": "This table is generated from CI for commit 0ced11f08c8eeb15fe64a97929fa9cc99c9a26e6 on 2026-10-05, and only these platforms are claimed.",
   "osNote": "Where the jobs API did not include a step summary, the platform and architecture come from the job name and runner label.",
   "rows": [
+    {
+      "platform": "macOS (macos-15)",
+      "architecture": "arm64",
+      "checked": [
+        "installs as a separate service account and starts the service",
+        "a non-admin user cannot read the signing key",
+        "a non-admin user cannot write the approval queue",
+        "a non-admin user cannot change the installed code",
+        "the agent token works through the service"
+      ],
+      "result": "success",
+      "conclusion": "success",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212349",
+      "job": "macos (macos-15)"
+    },
     {
       "platform": "Linux (ubuntu-24.04)",
       "architecture": "x64",
@@ -16,7 +31,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979446",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212635",
       "job": "linux (ubuntu-24.04)"
     },
     {
@@ -33,12 +48,12 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979453",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212699",
       "job": "windows (localized)"
     },
     {
-      "platform": "macOS (macos-15)",
-      "architecture": "arm64",
+      "platform": "Linux (ubuntu-22.04)",
+      "architecture": "x64",
       "checked": [
         "installs as a separate service account and starts the service",
         "a non-admin user cannot read the signing key",
@@ -48,8 +63,8 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979479",
-      "job": "macos (macos-15)"
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212742",
+      "job": "linux (ubuntu-22.04)"
     },
     {
       "platform": "Windows (windows-latest)",
@@ -65,7 +80,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979481",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212749",
       "job": "windows (default)"
     },
     {
@@ -80,23 +95,8 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979510",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212756",
       "job": "linux (ubuntu-24.04-arm)"
-    },
-    {
-      "platform": "Linux (ubuntu-22.04)",
-      "architecture": "x64",
-      "checked": [
-        "installs as a separate service account and starts the service",
-        "a non-admin user cannot read the signing key",
-        "a non-admin user cannot write the approval queue",
-        "a non-admin user cannot change the installed code",
-        "the agent token works through the service"
-      ],
-      "result": "success",
-      "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979557",
-      "job": "linux (ubuntu-22.04)"
     },
     {
       "platform": "macOS (macos-15-intel)",
@@ -110,7 +110,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109671193/job/111164979566",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378860534/job/111995212795",
       "job": "macos (macos-15-intel)"
     },
     {
@@ -121,7 +121,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109673170/job/111164984792",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378864622/job/111995224748",
       "job": "installed (windows-latest)"
     },
     {
@@ -132,7 +132,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109673170/job/111164984871",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378864622/job/111995225094",
       "job": "installed (ubuntu-latest)"
     },
     {
@@ -143,7 +143,7 @@
       ],
       "result": "success",
       "conclusion": "success",
-      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37109673170/job/111164984912",
+      "runUrl": "https://github.com/verax-ai/verax/actions/runs/37378864622/job/111995225173",
       "job": "installed (macos-latest)"
     }
   ]
