@@ -1,4 +1,7 @@
 import { Readable } from "node:stream";
+import { createPublicKey } from "node:crypto";
+import type { SignedEffectExtract } from "@cedulon/effect-extract";
+import { effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptRejection } from "@verax-ai/proxy";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -19,6 +22,8 @@ export type DownstreamToolFn = (
  */
 export type DownstreamSpec = {
   prefix: string;
+  /** Operator-pinned downstream Ed25519 SPKI public key. */
+  effectKeyPem?: string;
   /** stdio: the process to start. */
   command?: string;
   args?: string[];
@@ -61,6 +66,13 @@ const EXTRA_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63
 const MAX_CHILD_TOOLS = 256;
 const MAX_TOOL_BYTES = 64 * 1024;
 
+function assertEffectKey(pem: unknown): asserts pem is string {
+  try {
+    if (typeof pem !== "string" || !pem.trim().startsWith("-----BEGIN PUBLIC KEY-----") ||
+        createPublicKey(pem).asymmetricKeyType !== "ed25519") throw new Error();
+  } catch { throw new Error("downstream-effect-key-invalid"); }
+}
+
 export class DownstreamCallError extends Error {
   readonly prefix: string;
   readonly tool: string;
@@ -95,7 +107,7 @@ function assertStdioTrusted(spec: DownstreamSpec): void {
   }
 }
 
-export function parseDownstreamJson(raw: string): DownstreamSpec {
+export function parseDownstreamJson(raw: string, bodyPublicKeyPems: readonly string[] = []): DownstreamSpec {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -114,6 +126,13 @@ export function parseDownstreamJson(raw: string): DownstreamSpec {
   if (cmdVar && urlVar) throw new Error("downstream-transport-ambiguous");
   if (!cmdVar && !urlVar) throw new Error("downstream-transport-missing");
   const spec: DownstreamSpec = { prefix: rec.prefix };
+  if (rec.effectKeyPem !== undefined) {
+    assertEffectKey(rec.effectKeyPem);
+    if (bodyPublicKeyPems.some(key => samePublicKey(key, rec.effectKeyPem as string))) {
+      throw new Error(`downstream-effect-key-not-independent:${spec.prefix}`);
+    }
+    spec.effectKeyPem = rec.effectKeyPem;
+  }
   if (cmdVar) {
     if (typeof rec.command !== "string" || rec.command.trim() === "") {
       throw new Error("downstream-command-invalid");
@@ -194,7 +213,7 @@ export function parseDownstreamJson(raw: string): DownstreamSpec {
  * array is a document that attaches nothing, which is not the same as no
  * document at all — the operator wrote it, so it is honoured.
  */
-export function parseDownstreamDocument(raw: string): DownstreamSpec[] {
+export function parseDownstreamDocument(raw: string, bodyPublicKeyPems: readonly string[] = []): DownstreamSpec[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -205,7 +224,7 @@ export function parseDownstreamDocument(raw: string): DownstreamSpec[] {
   const specs: DownstreamSpec[] = [];
   const prefixes = new Set<string>();
   for (const item of items) {
-    const spec = parseDownstreamJson(JSON.stringify(item));
+    const spec = parseDownstreamJson(JSON.stringify(item), bodyPublicKeyPems);
     if (prefixes.has(spec.prefix)) {
       throw new Error(`downstream-prefix-duplicate:${spec.prefix}`);
     }
@@ -326,6 +345,7 @@ function attachTimeoutError(err: unknown, prefix: string): Error {
 }
 
 export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSession> {
+  if (spec.effectKeyPem !== undefined) assertEffectKey(spec.effectKeyPem);
   if (!PREFIX_RE.test(spec.prefix)) {
     throw new Error("downstream-prefix-invalid");
   }
@@ -377,13 +397,15 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
       name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
-      fn: async (call) => {
+      fn: async (call, _principal, ref) => {
         let raw: Awaited<ReturnType<Client["callTool"]>>;
         try {
           // Mutation check: stub this call and the allow test expecting
           // "pong":true from the child goes red.
           raw = await client.callTool(
-            { name: childName, arguments: call.arguments },
+            { name: childName, arguments: call.arguments,
+              ...(spec.effectKeyPem ? { _meta: { "io.cedulon/decision": { ref, deciderId: "verax-proxy", prefix: spec.prefix } } } : {}),
+            },
             undefined,
             { timeout: timeoutMs },
           );
@@ -393,6 +415,13 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
         const result = asTextResult(raw);
         if (result.isError) {
           throw new DownstreamCallError(spec.prefix, childName, textOf(result) || "isError");
+        }
+        if (spec.effectKeyPem) {
+          const receipt = raw._meta?.["io.cedulon/effect-extract"];
+          const reason = thirdPartyReceiptRejection(receipt, spec.effectKeyPem, ref, name,
+            sha256Canonical(effectDescriptor(name, call.arguments)));
+          if (reason) process.stderr.write(`verax-body: third-party receipt rejected: ${reason}\n`);
+          else result.effectReceipt = receipt as SignedEffectExtract;
         }
         return result;
       },

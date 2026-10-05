@@ -369,8 +369,13 @@ export function createProxy(deps: ProxyDeps) {
       timestampMs: deps.now(),
       actor: principal.brain,
     };
+    const { effectReceipt, ...normalResult } = result;
+    const signedRow = effectReceipt?.body?.effects?.[0];
+    const external = effectReceipt?.body?.effects?.length === 1 && signedRow?.ref === ref &&
+      signedRow.effectHash === dispatchedHash && signedRow.effectClass === dispatchedName;
     try {
-      await deps.ledger.appendEffect(row, "self", sha256Canonical(result));
+      if (external) await deps.ledger.appendEffect(signedRow!, "third-party", sha256Canonical(normalResult), effectReceipt);
+      else await deps.ledger.appendEffect(row, "self", sha256Canonical(normalResult));
       effectRecorded.ok = true;
     } catch {
       // The tool already returned. A failed effect write is not a throw of the
@@ -378,7 +383,7 @@ export function createProxy(deps: ProxyDeps) {
       // stays false) and a restart answers outcome-unknown instead of running again.
       return effectUnrecorded(ref);
     }
-    return result;
+    return normalResult;
   }
 
   async function resolveInputs(
@@ -576,7 +581,7 @@ export function createProxy(deps: ProxyDeps) {
         await controlQueue.enqueue(() =>
           run({
             appendDecisionChained: (build) => deps.ledger.appendDecisionChained(build),
-            appendEffect: (row, witnessClass, resultHash) => deps.ledger.appendEffect(row, witnessClass, resultHash),
+            appendEffect: (row, witnessClass, resultHash, externalReceipt) => deps.ledger.appendEffect(row, witnessClass, resultHash, externalReceipt),
           }),
         );
       }

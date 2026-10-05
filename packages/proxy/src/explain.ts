@@ -6,6 +6,7 @@ import { sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { lookupResolvedBy } from "./ledger.ts";
 import { loadCheckpoints } from "./checkpoints.ts";
+import { samePublicKey, thirdPartyReceiptCoversRow } from "./third-party.ts";
 import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger } from "./types.ts";
 
 async function pairFor(
@@ -67,25 +68,37 @@ function conditionName(f: Finding, extractPresented: boolean): string | null {
     // Name from whether an extract was handed to audit, not Cedulon detail text.
     return extractPresented ? "extract unpinned" : "extract unsigned";
   }
+  // A one-row extract does not state the period or the path it covers, so it cannot show completeness.
+  if (f.code === "unstated-audit-window") return "audit window unstated";
+  if (f.code === "unstated-audit-scope") return "audit scope unstated";
   return null;
 }
 
-function balancedSummary(
+export function balancedSummary(
   guarantee: "unconditional" | "conditional",
   conditions: readonly string[],
   cedulonSummary: string,
 ): string {
   if (conditions.length > 0) {
-    return `audit: balanced (${guarantee}: ${conditions.join("; ")})`;
+    return `audit: balanced (conditional: ${conditions.join("; ")})`;
   }
   if (guarantee === "unconditional") {
     return "audit: balanced (unconditional)";
   }
+  // Cedulon's summary counts findings this wrapper may have dropped (window-coverage with no checkpoint),
+  // so a failing summary is never echoed inside a balanced one.
   const why = cedulonSummary.replace(/^audit:\s*/i, "").trim();
-  if (why !== "" && why !== "balanced" && why !== "conditional") {
+  if (why !== "" && why !== "balanced" && why !== "conditional" && !/FAIL|finding\(s\)/.test(why)) {
     return `audit: balanced (${guarantee}: ${why})`;
   }
   return `audit: balanced (${guarantee})`;
+}
+
+/** Local deployment conditions can only narrow the audit's guarantee. */
+export function guaranteeWithConditions(
+  guarantee: ExplainResult["guarantee"], conditions: readonly string[],
+): ExplainResult["guarantee"] {
+  return conditions.length > 0 ? "conditional" : guarantee;
 }
 
 /**
@@ -113,6 +126,13 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const issuerTrust = resolvedTrust.pin;
   const pinSource = resolvedTrust.source;
   const pinned = issuerTrust !== undefined;
+  const thirdPartyTrust = opts?.thirdPartyTrust;
+  const thirdPartyVerified = effect?.witnessClass === "third-party" && thirdPartyTrust !== undefined &&
+    thirdPartyReceiptCoversRow(effect.receipt, effect.row, thirdPartyTrust.publicKeyPem);
+  const issuerKeys = issuerTrust ? (typeof issuerTrust.publicKeyPem === "string"
+    ? [issuerTrust.publicKeyPem] : issuerTrust.publicKeyPem) : [];
+  const sameParty = thirdPartyTrust !== undefined && [record.publicKeyPem, ...issuerKeys]
+    .some(key => samePublicKey(thirdPartyTrust.publicKeyPem, key));
   const dir = (ledger as { dir?: unknown }).dir;
   const checkpoints = typeof dir === "string" ? loadCheckpoints(dir) : [];
   const report = audit({
@@ -122,6 +142,9 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     profile: DECISION_PROFILE,
     ...(issuerTrust ? { issuerTrust } : {}),
     ...(presentedExtract ? { extract: presentedExtract } : {}),
+    // On DECISION_PROFILE RailTrustPin pins the effect-extract signer.
+    ...(thirdPartyVerified && presentedExtract === effect?.receipt
+      ? { trust: { publicKeyPem: thirdPartyTrust!.publicKeyPem } } : {}),
   });
   const dropWindow = checkpoints.length === 0;
   const dropped = dropWindow
@@ -158,6 +181,13 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const chainBreak = !chain.intact;
   const conditions: string[] = [];
   if (self) conditions.push("self witness");
+  if (witnessClass === "same-org") conditions.push("same-party witness");
+  if (witnessClass === "third-party") {
+    if (!thirdPartyTrust) conditions.push("third-party witness unpinned");
+    else if (sameParty) conditions.push("same-party witness");
+    else if (thirdPartyTrust.independent !== true || typeof thirdPartyTrust.party !== "string" || !thirdPartyTrust.party.trim()) conditions.push("witness independence unstated");
+    else if (!thirdPartyVerified) conditions.push("third-party witness unpinned");
+  }
   if (pinSource === "own-key") conditions.push("issuer pinned to own key");
   for (const w of applicableWarnings) {
     const name = conditionName(w, extractPresented);
@@ -198,10 +228,10 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
       (issuerMismatch && pinned ? 1 : 0) +
       (inputsMismatch ? 1 : 0) +
       (inputsMissing ? 1 : 0);
-  const guarantee = report.guarantee;
+  const guarantee = guaranteeWithConditions(report.guarantee, conditions);
   const summary = balanced
     ? balancedSummary(guarantee, conditions, report.summary)
-    : `audit: ${Math.max(findingCount, 1)} finding(s) → FAIL`;
+    : `audit: ${Math.max(findingCount, 1)} finding(s) → FAIL${witnessClass === "third-party" && conditions.length > 0 ? ` (conditional: ${conditions.join("; ")})` : ""}`;
   const warnings = applicableWarnings.filter((f) => f.id === "issuer" || f.id === "extract").map(asWarning);
   if (inputsMissing) {
     warnings.push({

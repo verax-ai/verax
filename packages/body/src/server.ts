@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -380,9 +381,10 @@ function downstreamPublic(
  */
 async function attachDownstream(
   file: string | null,
+  bodyPublicKeyPems: readonly string[],
 ): Promise<{ sessions: DownstreamSession[]; specs: DownstreamSpec[] }> {
   if (file === null || file.trim() === "") return { sessions: [], specs: [] };
-  const specs = parseDownstreamDocument(readFileSync(file, "utf8"));
+  const specs = parseDownstreamDocument(readFileSync(file, "utf8"), bodyPublicKeyPems);
   const sessions: DownstreamSession[] = [];
   for (const spec of specs) {
     try {
@@ -398,10 +400,18 @@ async function attachDownstream(
 
 export async function listen(config: BodyConfig): Promise<Server> {
   const signers = loadOrCreateSigners(config.stateDir);
+  const bodyPublicKeyPems = [signers.recordSigner.publicKeyPem, signers.effectSigner.publicKeyPem];
+  if (config.downstreamFile) {
+    try {
+      bodyPublicKeyPems.push(readFileSync(join(config.stateDir, "keys", "witness.public.pem"), "utf8"));
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
   // The children are attached before the door opens. A named document the body
   // cannot honour stops the start: a body that serves six tools while its
   // operator wrote seven is answering for a gate it does not have.
-  const { sessions, specs: downstreamSpecs } = await attachDownstream(config.downstreamFile ?? null);
+  const { sessions, specs: downstreamSpecs } = await attachDownstream(config.downstreamFile ?? null, bodyPublicKeyPems);
   const extraTools = sessions.flatMap((session) => session.tools);
   let services: ReturnType<typeof createBodyServices>;
   try {

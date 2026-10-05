@@ -17,6 +17,13 @@
  *               `{ ref, effectHash, witnessClass, resultHash }`, compared after
  *               decode, and the receipt's effect (`body.effects[0]`, every
  *               field the writer put there) must be that same row. A
+ *               `third-party` row instead needs a one-row receipt verified
+ *               under `thirdPartyPublicKeyPems` supplied by the reader, equal
+ *               to the stored row and bound by ref and effectHash. No body
+ *               attestation is required; its resultHash is unattested. Keys
+ *               shared with record/effect/witness signers are refused. Without
+ *               a third-party pin the row is named unchecked and is not bound.
+ *               For self/same-org rows, a
  *               thrown call relaxes only the hash, and only for the tool that
  *               was allowed: some decision on that ref has `decision: "allow"`
  *               and this row's class is exactly that decision's `effectClass`
@@ -93,6 +100,7 @@
  * copy they hold themselves.
  */
 import { createPublicKey } from "node:crypto";
+import { samePublicKey, thirdPartyReceiptCoversRow } from "./third-party.ts";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -219,6 +227,8 @@ export type VerifyOptions = {
   publicKeyPem?: string;
   /** Verify `self` effect rows against this key instead of the one those rows carry. */
   effectPublicKeyPem?: string;
+  /** Out-of-band pins only. Third-party resultHash is never attested by the extract. */
+  thirdPartyPublicKeyPems?: string[];
   /** Verify `same-org` effect rows against this key instead of the one those rows carry. */
   witnessPublicKeyPem?: string;
   /** Verify every checkpoint row against this key instead of one key taken from the file. */
@@ -467,7 +477,7 @@ function effectProblem(effect: EffectOnDisk, ref: string | null): string {
 
 function firstReceiptKey(rows: readonly EffectOnDisk[], sameOrg: boolean): string | null {
   for (const row of rows) {
-    if ((row.witnessClass === "same-org") !== sameOrg) continue;
+    if (row.witnessClass !== (sameOrg ? "same-org" : "self")) continue;
     const pem = row.receipt?.publicKeyPem;
     if (isPublicKeyPem(pem)) return pem;
   }
@@ -1247,8 +1257,24 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   const sameKeyTaken = firstReceiptKey(effectRows, true);
   const effectKey = pinnedEffect !== "" ? pinnedEffect : selfKeyTaken;
   const witnessKey = pinnedWitness !== "" ? pinnedWitness : sameKeyTaken;
-  const selfCount = effectRows.filter((row) => row.witnessClass !== "same-org").length;
-  const sameCount = effectRows.length - selfCount;
+  const selfCount = effectRows.filter((row) => row.witnessClass === "self").length;
+  const sameCount = effectRows.filter((row) => row.witnessClass === "same-org").length;
+  const thirdPartyKeys = (opts.thirdPartyPublicKeyPems ?? []).filter((key) => {
+    const roles = [
+      ["record", [anahtar, ...records.map(r => r.publicKeyPem)]],
+      ["effect", [effectKey, ...effectRows.filter(e => e.witnessClass === "self").map(e => e.receipt?.publicKeyPem)]],
+      ["witness", [witnessKey, ...effectRows.filter(e => e.witnessClass === "same-org").map(e => e.receipt?.publicKeyPem)]],
+    ] as const;
+    for (const [role, known] of roles) {
+      if (known.some(pem => samePublicKey(key, pem))) {
+        problems.push(`third-party key equals ${role} key; not accepted for third-party rows`);
+        return false;
+      }
+    }
+    const refusal = ed25519Refusal(key);
+    if (refusal) { problems.push(`third-party key rejected: ${refusal}`); return false; }
+    return true;
+  });
   const effectTrust = effectTrustOf(pinnedEffect, selfKeyTaken, selfCount);
   const witnessTrust = witnessTrustOf(pinnedWitness, sameKeyTaken, sameCount);
   if (pinnedEffect !== "" && pinnedWitness === "" && sameCount > 0) {
@@ -1270,6 +1296,12 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     const effectHash = typeof e.row?.effectHash === "string" ? e.row.effectHash : null;
     const effectClass = typeof e.row?.effectClass === "string" ? e.row.effectClass : "";
     if (effectClass === "duplicate-effect") {
+      // Duplicate refusals are body observations, never downstream receipts.
+      if (e.witnessClass === "third-party") {
+        effectsOrphaned += 1;
+        problems.push(`third-party row ${ref ?? "(missing)"} cannot be a duplicate-effect refusal`);
+        continue;
+      }
       const sig = typeof e.attestation?.coseHex === "string" ? e.attestation.coseHex : "";
       const dupKey = `${ref ?? ""}\0${sig}`;
       if (sig !== "" && duplicateSeen.has(dupKey)) {
@@ -1304,7 +1336,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (ref !== null) primarySeen.add(ref);
     const hashes = ref === null ? undefined : hashesByRef.get(ref);
     const hashMatch = effectHash !== null && hashes?.has(effectHash) === true;
-    if (effectClass.endsWith(":threw")) {
+    if (e.witnessClass !== "third-party" && effectClass.endsWith(":threw")) {
       const allowed = ref === null ? undefined : allowedClassesByRef.get(ref);
       let thrownOk = false;
       if (allowed) {
@@ -1329,7 +1361,16 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       );
       continue;
     }
-    if (!effectSignatureCoversRow(e, e.witnessClass === "same-org" ? witnessKey : effectKey)) {
+    if (e.witnessClass === "third-party") {
+      if (!thirdPartyKeys.some(key => thirdPartyReceiptCoversRow(e.receipt, e.row, key))) {
+        effectsOrphaned += 1;
+        problems.push((opts.thirdPartyPublicKeyPems?.length ?? 0) === 0
+          ? `third-party row ${ref ?? "(missing)"} unchecked: no pinned third-party key`
+          : `third-party row ${ref ?? "(missing)"} receipt does not cover the row under an accepted pinned third-party key`);
+        continue;
+      }
+      // Only the effect row is signed; resultHash has no third-party attestation.
+    } else if (!effectSignatureCoversRow(e, e.witnessClass === "same-org" ? witnessKey : effectKey)) {
       effectsOrphaned += 1;
       problems.push(effectProblem(e, ref));
       continue;
