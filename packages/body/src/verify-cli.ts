@@ -12,6 +12,9 @@
  * the most — **which key** answered. Verifying against the key lying in the
  * same directory proves the files agree with each other and nothing else;
  * that line is printed every time, not buried in a flag.
+ * Third-party extracts require reader-held --third-party-key <file> pins
+ * (repeatable). Their signed row binds to its decision, but resultHash is
+ * unattested. A record, effect or witness key cannot be a third-party pin.
  */
 import { readFileSync } from "node:fs";
 
@@ -43,6 +46,10 @@ function usage(): string {
     "                    row. Agreement is not trust, the same as --key. When",
     "                    this is set and the ledger has a self row, --effect-key",
     "                    is required too.",
+    "  --third-party-key <file>",
+    "                    pin a downstream effect-extract signer (repeatable).",
+    "                    No key is taken from a third-party row. Its resultHash",
+    "                    is not attested. Body record/effect/witness keys refuse.",
     "  --checkpoint-key <file>",
     "                    verify every checkpoint row against a public key you",
     "                    hold, instead of one key taken from the checkpoint",
@@ -228,6 +235,12 @@ export async function runVerify(
   const witnessKey = readKeyFlag("--witness-key");
   if (!witnessKey.ok) return EX_VERIFY_FAILED;
   witnessPublicKeyPem = witnessKey.pem;
+  const thirdPartyPublicKeyPems: string[] = [];
+  while (args.includes("--third-party-key")) {
+    const key = readKeyFlag("--third-party-key");
+    if (!key.ok) return EX_VERIFY_FAILED;
+    if (key.pem) thirdPartyPublicKeyPems.push(key.pem);
+  }
   const checkpointKey = readKeyFlag("--checkpoint-key");
   if (!checkpointKey.ok) return EX_VERIFY_FAILED;
   checkpointPublicKeyPem = checkpointKey.pem;
@@ -268,6 +281,7 @@ export async function runVerify(
   let result: VerifyResult;
   try {
     result = await verifyLedger(dir, {
+      thirdPartyPublicKeyPems,
       ...(publicKeyPem ? { publicKeyPem } : {}),
       ...(effectPublicKeyPem ? { effectPublicKeyPem } : {}),
       ...(witnessPublicKeyPem ? { witnessPublicKeyPem } : {}),

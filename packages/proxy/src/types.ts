@@ -24,6 +24,8 @@ export type ToolResult = {
   content: { type: "text"; text: string }[];
   isError: boolean;
   claimedHash?: string;
+  /** Adapter-verified downstream extract. Side field: excluded from resultHash and the agent response. */
+  effectReceipt?: SignedEffectExtract;
 };
 
 export type PolicyDecision = {
@@ -63,7 +65,7 @@ export type EffectAttestation = {
 export type LedgerEffect = {
   row: EffectRow;
   witnessClass: WitnessClass;
-  /** Hash of the ToolResult (or thrown payload). Not an EffectRow field. */
+  /** Hash of the normal ToolResult (or thrown payload). Unattested on third-party rows. */
   resultHash?: string;
   /** One-row extract signed at call time. */
   receipt?: SignedEffectExtract;
@@ -93,7 +95,7 @@ export type ExtractWindow = {
 export type Ledger = {
   appendDecision(signed: SignedDecisionRecord): Promise<void>;
   appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void>;
-  appendEffect(row: EffectRow, witnessClass?: WitnessClass, resultHash?: string): Promise<void>;
+  appendEffect(row: EffectRow, witnessClass?: WitnessClass, resultHash?: string, externalReceipt?: SignedEffectExtract): Promise<void>;
   decisions(): Promise<SignedDecisionRecord[]>;
   effects(): Promise<LedgerEffect[]>;
   lastDecisionHash(): Promise<string | null>;
@@ -241,6 +243,7 @@ export type ExplainWarning = {
 };
 
 export type ExplainOpts = {
+  thirdPartyTrust?: { publicKeyPem: string; party: string; independent: boolean };
   issuerTrust?: { publicKeyPem: string | readonly string[]; source?: "env" | "own-key" };
   extract?: import("@cedulon/effect-extract").SignedEffectExtract | import("@cedulon/x402-adapter").SignedRailExtract;
   inputsLog?: InputsLog;

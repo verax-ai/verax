@@ -63,7 +63,7 @@ export type PermissionCheck = "owner-only" | "not checked on this platform";
 /** Appends that already hold the ledger queue. Calling the public methods from here deadlocks. */
 export type LedgerWriter = {
   appendDecisionChained(build: (prevRecordHash: string | null) => SignedDecisionRecord): Promise<void>;
-  appendEffect(row: EffectRow, witnessClass: WitnessClass, resultHash?: string): Promise<void>;
+  appendEffect(row: EffectRow, witnessClass: WitnessClass, resultHash?: string, externalReceipt?: SignedEffectExtract): Promise<void>;
 };
 
 const DEFAULT_WITNESS: WitnessClass = "self";
@@ -248,7 +248,13 @@ function asStoredEffect(
   witnessClass: WitnessClass,
   resultHash: string | undefined,
   signer: EffectSigner | undefined,
+  externalReceipt?: SignedEffectExtract,
 ): LedgerEffect {
+  if (witnessClass === "third-party") {
+    // The downstream signed only the extract: resultHash is stored but unattested.
+    return { row: structuredClone(row), witnessClass, ...(externalReceipt ? { receipt: externalReceipt } : {}),
+      ...(resultHash !== undefined ? { resultHash } : {}) };
+  }
   const stored: LedgerEffect = {
     row: asEffectRow(row),
     witnessClass,
@@ -377,19 +383,20 @@ export class MemoryLedger implements Ledger {
     return this.q.enqueue(() =>
       fn({
         appendDecisionChained: (build) => this.appendDecisionChainedUnlocked(build),
-        appendEffect: (row, witnessClass, resultHash) => this.appendEffectUnlocked(row, witnessClass, resultHash),
+        appendEffect: (row, witnessClass, resultHash, externalReceipt) => this.appendEffectUnlocked(row, witnessClass, resultHash, externalReceipt),
       }),
     );
   }
 
-  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
-    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass, resultHash));
+  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string, externalReceipt?: SignedEffectExtract): Promise<void> {
+    return this.q.enqueue(async () => this.appendEffectUnlocked(row, witnessClass, resultHash, externalReceipt));
   }
 
   private async appendEffectUnlocked(
     row: EffectRow,
     witnessClass: WitnessClass,
     resultHash?: string,
+    externalReceipt?: SignedEffectExtract,
   ): Promise<void> {
     const existing = this._effects.find((e) => e.row.ref === row.ref && e.row.effectClass !== "duplicate-effect");
     if (existing && row.effectClass !== "duplicate-effect") {
@@ -409,7 +416,7 @@ export class MemoryLedger implements Ledger {
       );
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    this._effects.push(asStoredEffect(row, witnessClass, resultHash, this.effectSigner));
+    this._effects.push(asStoredEffect(row, witnessClass, resultHash, this.effectSigner, externalReceipt));
   }
 
   async decisions(): Promise<SignedDecisionRecord[]> {
@@ -999,7 +1006,7 @@ export class FileLedger implements Ledger {
     return this.q.enqueue(() =>
       fn({
         appendDecisionChained: (build) => this.appendDecisionChainedUnlocked(build),
-        appendEffect: (row, witnessClass, resultHash) => this.appendEffectUnlocked(row, witnessClass, resultHash),
+        appendEffect: (row, witnessClass, resultHash, externalReceipt) => this.appendEffectUnlocked(row, witnessClass, resultHash, externalReceipt),
       }),
     );
   }
@@ -1110,10 +1117,10 @@ export class FileLedger implements Ledger {
     return collected;
   }
 
-  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string): Promise<void> {
+  async appendEffect(row: EffectRow, witnessClass: WitnessClass = DEFAULT_WITNESS, resultHash?: string, externalReceipt?: SignedEffectExtract): Promise<void> {
     return this.q.enqueue(async () => {
       this.assertOwned();
-      return this.appendEffectUnlocked(row, witnessClass, resultHash);
+      return this.appendEffectUnlocked(row, witnessClass, resultHash, externalReceipt);
     });
   }
 
@@ -1121,6 +1128,7 @@ export class FileLedger implements Ledger {
     row: EffectRow,
     witnessClass: WitnessClass = DEFAULT_WITNESS,
     resultHash?: string,
+    externalReceipt?: SignedEffectExtract,
   ): Promise<void> {
     this.assertOwned();
     if (row.effectClass !== "duplicate-effect" && this.effectRefs.has(row.ref)) {
@@ -1143,7 +1151,7 @@ export class FileLedger implements Ledger {
       this.activeEffectN += 1;
       throw new Error(`duplicate-effect:${row.ref}`);
     }
-    const line = lineOf(await this.storeEffect(row, witnessClass, resultHash));
+    const line = lineOf(await this.storeEffect(row, witnessClass, resultHash, externalReceipt));
     await appendDurable(this.effectsPath, line);
     await this.pulse("effects.jsonl", line, "effect");
     this.activeEffectN += 1;
@@ -1236,7 +1244,10 @@ export class FileLedger implements Ledger {
     row: EffectRow,
     witnessClass: WitnessClass,
     resultHash: string | undefined,
+    externalReceipt?: SignedEffectExtract,
   ): Promise<LedgerEffect> {
+    // Never ask the body or its same-org witness to sign an external receipt.
+    if (witnessClass === "third-party") return asStoredEffect(row, witnessClass, resultHash, undefined, externalReceipt);
     if (this.remoteWitness && row.effectClass !== "duplicate-effect") {
       const remote = await this.remoteWitness(row, resultHash);
       if (remote?.attestation && remote.receipt && remote.witnessClass && remote.witnessClass !== "self") {

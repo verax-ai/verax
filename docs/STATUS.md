@@ -101,6 +101,11 @@ Known gaps:
   throws.
 - record and effect keys live in the same process; independence is a
   declaration, not a separate witness
+- downstream third-party effect rows bind by a reader-pinned signature and
+  matching decision ref/effectHash; the receipt covers the exact effect row,
+  not resultHash. Party independence remains an explicit deployment statement.
+  A one-row receipt states no audit window or path, so it cannot show that
+  no call is missing; `explain` stays conditional and names both.
 - duplicate-effect retry and late-event semantics are not designed
 - reconciliation has no time limit: `verax reconcile` takes the window it is given, and nothing marks a decision as overdue when no effect row has arrived
 - no-bypass: export map only in this commit; CI scan + runtime

@@ -11,6 +11,11 @@ const repoRoot = join(pkgRoot, "..", "..");
 const ALLOWED = new Set([
   "verifyLedger",
   "createProxy",
+  // The downstream adapter validates the same dispatch descriptor as the proxy.
+  "effectDescriptor",
+  "sha256Canonical",
+  "thirdPartyReceiptRejection",
+  "samePublicKey",
   "LedgerDenyUnrecorded",
   "loadPolicy",
   // approve-cli escapes the same marks the spend gate refuses. The class
