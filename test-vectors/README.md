@@ -73,7 +73,7 @@ A negative vector names the first check that must fail, in this order:
 | `chain` | `prevRecordHash` is not SHA-256 of the previous record's COSE_Sign1 octets |
 | `inputs-binding` | a record's signed `inputsHash` does not match its inputs row, or the row is missing |
 | `effect-binding` | an effect row does not bind to the allow that admitted it, or an allow outside the boundary allowance has no effect row (`decision-without-effect`) |
-| `index` | the index names a record the ledger no longer holds |
+| `index` | the index names a ref the ledger no longer holds; refs only, since `index.jsonl` is unsigned and its other fields (such as a row's decision kind) are not checked here |
 | `approval-signature` | the operator's WebAuthn assertion on an approval does not verify against the challenge rebuilt from the held record |
 | `checkpoint-signature` | the witness signature on a checkpoint |
 | `checkpoint-coverage` | the checkpoint counts records, or names a head, the ledger no longer holds |
