@@ -73,7 +73,7 @@ A negative vector names the first check that must fail, in this order:
 | `chain` | `prevRecordHash` is not SHA-256 of the previous record's COSE_Sign1 octets |
 | `inputs-binding` | a record's signed `inputsHash` does not match its inputs row, or the row is missing |
 | `effect-binding` | an effect row does not bind to the allow that admitted it, or an allow outside the boundary allowance has no effect row (`decision-without-effect`) |
-| `index` | the unsigned `index.jsonl` cannot be read; it names a ref the ledger no longer holds as a decision; it marks a ref as having an effect (`kind` `effect` or `hasEffect` true) with no bound effect row; or a non-empty line is not JSON, unless it is the last line and an earlier line parsed. A row whose `ref` or `piece` is not a string is skipped, so its ref is not compared; no other field of a row is checked. A line that is JSON `null` ends the run with an exception that no stage claims, a known defect |
+| `index` | the unsigned `index.jsonl` cannot be read; it names a ref the ledger no longer holds as a decision; it marks a ref as having an effect (`kind` `effect` or `hasEffect` true) with no bound effect row; a non-empty line is not JSON, unless it is the last line and an earlier line parsed; or a line is JSON but not an object, such as `null`. A row whose `ref` or `piece` is not a string is skipped, so its ref is not compared; no other field of a row is checked |
 | `approval-signature` | the operator's WebAuthn assertion on an approval does not verify against the challenge rebuilt from the held record |
 | `checkpoint-signature` | the witness signature on a checkpoint |
 | `checkpoint-coverage` | the checkpoint counts records, or names a head, the ledger no longer holds |

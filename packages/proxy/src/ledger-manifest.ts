@@ -260,12 +260,15 @@ export function parseIndexText(text: string): LedgerIndexLine[] {
     // The index is appended without fsync, so a crash can leave its last
     // line half written. Such a line is skipped; the ref count below then
     // falls short of the ledger's and the index is rebuilt from the pieces.
-    let raw: Partial<LedgerIndexLine>;
+    let parsed: unknown;
     try {
-      raw = JSON.parse(line) as Partial<LedgerIndexLine>;
+      parsed = JSON.parse(line);
     } catch {
       continue;
     }
+    // JSON that is not an object (null, an array, a number, a string) is not a row.
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const raw = parsed as Partial<LedgerIndexLine>;
     if (typeof raw.ref !== "string" || typeof raw.piece !== "string") continue;
     rows.push({
       ref: raw.ref,
