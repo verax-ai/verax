@@ -626,11 +626,16 @@ function indexLineProblems(text: string): string[] {
   let parsedOk = 0;
   for (let i = 0; i < filled.length; i += 1) {
     const last = i === filled.length - 1;
+    let parsed: unknown;
     try {
-      JSON.parse(filled[i]!.line);
-      parsedOk += 1;
+      parsed = JSON.parse(filled[i]!.line);
     } catch {
       if (!last || parsedOk === 0) problems.push(`index line ${filled[i]!.n} is not JSON`);
+      continue;
+    }
+    parsedOk += 1;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      problems.push(`index line ${filled[i]!.n} is not a JSON object`);
     }
   }
   return problems;
