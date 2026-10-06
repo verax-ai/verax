@@ -100,7 +100,9 @@ export type CardCsvOpts = {
   tzOffsetMinutes?: number;
 };
 
-const VERAX_REF = /verax:([A-Za-z0-9][A-Za-z0-9._-]{0,63})/;
+// A raw ref (REF_RE in proxy.ts), or the scoped form `<tenantKey>:<raw>` the proxy writes
+// when the principal carries an issuer, tenant or org; tenantKey is a SHA-256 hex digest.
+const VERAX_REF = /verax:((?:[0-9a-f]{64}:)?[A-Za-z0-9][A-Za-z0-9._-]{0,63})/;
 const CARD_MINUTE_TOLERANCE_MS = 120_000;
 
 function parseCardDate(
