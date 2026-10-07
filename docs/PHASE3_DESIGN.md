@@ -111,7 +111,11 @@ escape, delimiter inside quotes); a bad data row is skipped
 download must not be treated as a complete statement. Match: amount +
 currency (minor-unit tolerance ±1) + time window. A `verax:` ref
 still requires amount and currency; a mismatch is ghost
-`amount-mismatch` and leaves the effect in `authorizedUnpaid`.
+`amount-mismatch` and leaves the effect in `authorizedUnpaid`. The
+brain is answered with its own `_ref`, so a statement may carry the
+raw ref of a tenant-scoped defer (`<tenantKey>:<raw>`). It reaches that
+defer only when one tenant holds the raw ref with an authorization;
+two or more are ghost `ref-ambiguous`.
 Report buckets: `matched` · `ghost` (statement row, no
 authorization) · `authorizedUnpaid` (approved `spend` effect, no
 statement row). `unsent` remains for other classes. If a rail later

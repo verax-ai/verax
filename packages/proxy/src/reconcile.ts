@@ -443,13 +443,31 @@ export function reconcile(
     const rowTol = rowToleranceMs(row, toleranceMs);
     const marked = { ...row, toleranceMs: rowTol };
     if (typeof row.ref === "string" && row.ref !== "") {
-      const idx = effects.findIndex(
-        (e, i) =>
-          !used.has(i) &&
-          decided(e) &&
-          (e.row.ref === row.ref ||
-            opts?.approvals?.some((a) => a.ref === row.ref && a.allowRef === e.row.ref)),
-      );
+      const findFor = (ref: string): number =>
+        effects.findIndex(
+          (e, i) =>
+            !used.has(i) &&
+            decided(e) &&
+            (e.row.ref === ref || opts?.approvals?.some((a) => a.ref === ref && a.allowRef === e.row.ref)),
+        );
+      let idx = findFor(row.ref);
+      if (idx === -1) {
+        // The brain is answered with its own `_ref`, so the statement may carry the raw
+        // ref of a scoped defer `<tenantKey>:<raw>`. Taken only when one tenant has it.
+        const scoped = [
+          ...new Set(
+            (opts?.approvals ?? [])
+              .filter((a) => a.ref.endsWith(`:${row.ref}`))
+              .map((a) => a.ref)
+              .filter((ref) => findFor(ref) !== -1),
+          ),
+        ];
+        if (scoped.length > 1) {
+          ghost.push(asGhost(marked, effects, "ref-ambiguous"));
+          continue;
+        }
+        if (scoped.length === 1) idx = findFor(scoped[0]!);
+      }
       if (idx === -1) {
         ghost.push(asGhost(marked, effects));
         continue;
