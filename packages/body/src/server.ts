@@ -203,7 +203,7 @@ export const TOOL_META = [
         reference: {
           type: "string",
           description:
-            "Your own reference for this payment, such as an invoice or order id. Recorded with the authorization and used by verax reconcile to match the card statement.",
+            "Your own reference for this payment, such as an invoice or order id. Recorded with the authorization; verax reconcile does not read it, and matches a card statement row by a verax:<ref> in its description, amount, currency and time.",
         },
         _ref: REF_PARAM,
       },
