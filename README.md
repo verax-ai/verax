@@ -243,6 +243,26 @@ in [go-cose#224](https://github.com/veraison/go-cose/issues/224) and
 [pycose#126](https://github.com/TimothyClaeys/pycose/issues/126).
 `verax verify` does not depend on either library.
 
+### Verifiers other than ours
+
+[`test-vectors/`](test-vectors/README.md) is a frozen set of ledgers, each with
+the verdict and the stage a verifier should report. Two people have run the set
+at `vectors-v1` with verifiers of their own and posted the results:
+
+- Tymofii Pidlisnyi (Agent Passport System), with a runner in the APS
+  conformance suite: a partial, stage-by-stage comparison across all 16
+  vectors, not a whole-ledger verdict
+  ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5972115527)).
+- Roberto Locatelli (cryptovalid-opencore), with clean-room checkers written
+  from the drafts, the RFCs and the vector README: with the checkpoint verified
+  under the witness key, 16 of 16 verdicts and 15 of 16 first failing stages.
+  One of those matches came from a rule added after reading the vector, as the
+  run itself states
+  ([run](https://github.com/mirjak/audit-bof-preparation/issues/9#issuecomment-5979503944)).
+
+A matching run shows that another verifier reads these encodings and reaches
+the same verdict at the same stage. It is not an independent audit of the body.
+
 ## Install
 
 ```sh
