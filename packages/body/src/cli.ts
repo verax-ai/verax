@@ -16,6 +16,7 @@ import { runReconcile } from "./reconcile-cli.ts";
 import { runVerify } from "./verify-cli.ts";
 import { runUnlock } from "./unlock.ts";
 import { runWitness } from "./witness.ts";
+import { runWatch } from "./watch.ts";
 
 const HELP = `verax - the body an agent asks before it acts, and the ledger it answers from.
 
@@ -55,6 +56,9 @@ Usage: verax <command> [options]
                        register each checkpoint's hash with a transparency service
                        someone else runs and keep its receipt for verify --anchor-key
   witness <stateDir>   run the witness alongside a body
+  watch <stateDir> [--max-silence 30s] [--once] [--on-silence halt|exec] [--exec <command>]
+                       halt on silence; --url <https://host/healthz> --token-file <path>
+                       reports remotely (remote halt is out of scope)
   halt <stateDir>      stop the body from allowing anything further
   resume <stateDir>    lift a halt; who and when go to halt-history.jsonl
   unlock [--force] <stateDir>   clear a stale ledger lock
@@ -186,6 +190,18 @@ async function dispatchCli(
       return 78;
     }
     return runHalt(stateDir, (s) => stderr.write(s));
+  }
+  if (argv[0] === "watch") {
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    try {
+      return await runWatch(argv.slice(1), { stdout, stderr, env, signal: controller.signal });
+    } finally {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    }
   }
   if (argv[0] === "resume") {
     const stateDir = argv[1];

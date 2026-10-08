@@ -60,15 +60,22 @@ auditor they do not have yet.
 ## the ledger can be silenced
 
 An operator can skip the publisher, stop the witness process, or delete
-the directory. Coverage proof and a heartbeat belong in a later phase.
-Until then this is a known gap: silence is indistinguishable from "nothing
-happened" if the only copy lives on the same host.
+the directory. A running body now pulses even while idle; unsigned start
+rows record the gap from the previous beat. `verax watch` can persist a
+halt on silence on the same host, or report silence over audit `/healthz`.
+The watcher runs wherever the operator puts it and shares that host's
+trust. A remote watcher cannot halt the body. Silence is indistinguishable
+from "nothing happened" if the only copy and watcher live on the same host
+and that host stops or removes both. These local observations are not
+independent evidence of uptime or of what happened during a gap.
 
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
 Exception: `src/install.ts` may import `node:child_process` to install and remove the body under another account. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
+
+Exception: `src/watch.ts` may import `node:child_process` to run an operator-configured isolation command once per silence episode. It passes a parsed executable and argv with `shell: false`; heartbeat content is never command input. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
 The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
 

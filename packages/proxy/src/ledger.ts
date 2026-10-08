@@ -507,6 +507,7 @@ export class FileLedger implements Ledger {
   private readonly countedAt: number[] = [];
   countsReadable = true;
   private readonly heartbeatPath: string;
+  readonly startedAtMs = Date.now();
   private decisionCount = 0;
   private effectCount = 0;
   private lastDecisionMs: number | null = null;
@@ -1228,15 +1229,22 @@ export class FileLedger implements Ledger {
     appendFileSync(dest, line, { encoding: "utf8" });
     if (kind === "decision") this.decisionCount += 1;
     else this.effectCount += 1;
-    writeFileSync(
+    this.pulseHeartbeat("row");
+  }
+
+  /** A running body pulses even when no decision or effect is appended. */
+  pulseHeartbeat(beat: "timer" | "row"): void {
+    this.assertOwned();
+    writeFileAtomic(
       this.heartbeatPath,
       `${JSON.stringify({
         atMs: Date.now(),
         pid: process.pid,
+        startedAtMs: this.startedAtMs,
+        beat,
         lastDecisionN: this.decisionCount,
         lastEffectN: this.effectCount,
       })}\n`,
-      { encoding: "utf8", mode: 0o600 },
     );
   }
 

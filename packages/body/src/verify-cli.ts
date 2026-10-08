@@ -22,6 +22,7 @@ import { verifyLedger, type VerifyResult } from "@verax-ai/proxy";
 import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
 import { verifyControlSignatures, type ControlSignatureReport } from "./control-signature.ts";
 import { directoryAccess, unreadableSentence } from "./install.ts";
+import { readStartSummary, renderStarts, type StartSummary } from "./heartbeat.ts";
 
 export const EX_VERIFY_FAILED = 1;
 
@@ -98,6 +99,7 @@ export function renderVerify(
   r: VerifyResult,
   approval: ApprovalSignatureReport = APPROVAL_NOT_CHECKED,
   control: ControlSignatureReport = CONTROL_NOT_CHECKED,
+  starts?: StartSummary,
 ): string {
   const lines: string[] = [];
   lines.push(`ledger        ${r.directory}`);
@@ -180,6 +182,7 @@ export function renderVerify(
   lines.push(`              ${approval.trustNote}`);
   // Halt and resume signatures are checked under the same operator key.
   lines.push(control.line);
+  if (starts) lines.push(renderStarts(starts));
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");
@@ -316,8 +319,9 @@ export async function runVerify(
       anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
     };
-    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED };
-    out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED));
+    const starts = readStartSummary(dir);
+    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
+    out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
     return EX_VERIFY_FAILED;
   }
   let approval: ApprovalSignatureReport;
@@ -350,7 +354,7 @@ export async function runVerify(
       problems: [...result.problems, `control signatures: ${control.signedFailed} did not verify`],
     };
   }
-  const reported = { ...result, approvalSignatures: approval, controlSignatures: control };
-  out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control));
+  const reported = { ...result, approvalSignatures: approval, controlSignatures: control, starts: readStartSummary(dir) };
+  out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control, reported.starts));
   return reported.ok ? 0 : EX_VERIFY_FAILED;
 }
