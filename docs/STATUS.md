@@ -3,8 +3,8 @@
 This file states what the tree carries and what stays unproven. A
 paragraph here is not a release.
 
-It has two parts. The capability matrix below is the current statement,
-and it names a released version. Everything under
+The capability matrix below names a released version; unreleased additions
+are stated separately before the historical record. Everything under
 [Historical record](#historical-record) is dated: an entry describes the
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
@@ -45,6 +45,61 @@ what that test covers, not a wider claim.
 What stays unproven for every row above: none of it has run against a
 paying customer's production traffic. The pilot drills in
 `tests/pilot-drills.test.ts` are tests, not a live body.
+
+## Heartbeat and watch — unreleased tree
+
+The running body atomically rewrites `heartbeat.json` every 10 seconds,
+including while idle. `VERAX_HEARTBEAT_EVERY_MS` sets the interval (minimum
+1,000 ms). Rows also pulse it; `atMs`, `pid`, `lastDecisionN` and
+`lastEffectN` remain, with `startedAtMs` and `beat: "timer" | "row"` added.
+The timer is unref'd, stops on shutdown, and writes no ledger rows.
+`verax doctor` treats a stale pulse as a stopped body or an unavailable
+pulse, rather than an idle ledger.
+
+Before startup control records or the first pulse overwrite the previous
+beat, the body appends one `action: "start"` row to `starts.jsonl`, naming
+`atMs`, `prevBeatAtMs`, `gapMs` and `pid`. With no readable previous beat,
+both previous-beat and gap are null. `verax verify <stateDir>` reads these
+rows with no body running and reports their count, largest gap and each
+start with a missing previous beat (`starts` in `--json`). These rows are
+unsigned in v1, separate from the signed halt control history; the summary
+does not verify their authenticity. A gap is time since the last observed
+beat, not a measured outage, and wall-clock changes can affect it.
+
+`verax watch <stateDir> [--max-silence 30s] [--once]` checks the heartbeat.
+An absent or unreadable beat, a beat older than the threshold, or one more
+than 60 seconds in the future is silence. The default `--on-silence halt`
+uses the existing halt switch and history (`by: "verax-watch"`, `via: "cli"`),
+so subsequent calls are signed denies and a restart stays halted. Recovery
+reports do not resume the body; the existing operator resume path applies,
+including the required passkey assertion for HTTP resume when registered.
+CLI resume retains its existing unsigned OS-user semantics.
+
+`verax watch --url https://host/healthz --token-file <path> [...]` reads
+`heartbeat.atMs` with an audit token from a file, never from argv. HTTPS
+is required except on loopback; redirects are refused. A remote watcher
+cannot halt the body: default silence handling reports it and exits
+non-zero. Remote halt is out of scope.
+
+`--on-silence exec --exec "<command>"` instead runs an operator-configured
+command once per silence episode, with the reason in `VERAX_WATCH_REASON`.
+It splits quoted executable/arguments and spawns with `shell: false`;
+there is no shell expansion, pipe or redirect interpretation. Use an
+executable script runner (for example `powershell.exe -File ...` on Windows)
+for a site's own network isolation script. Command stdout is discarded so
+watch stdout remains JSON lines. Failed commands are reported, and are not
+retried until a recovery and a new silence episode.
+
+`--once` exits 0 live, 3 silent and 2 on usage errors. Otherwise it polls
+every `max-silence/3`, printing one JSON line for each silence episode and
+each recovery. The watcher runs where the operator puts it; on the same
+host it shares the operator's trust. It is not an installed external service.
+Silence on a single-host ledger still cannot be told from nothing happened
+if that host removes or stops both the only copy and its watcher. Start
+rows are unsigned in v1; a remote watcher cannot halt. No uptime or gap
+activity is attested by these observations.
+
+Guards: `heartbeat-watch`, `watch-exec`; this capability is not published.
 
 ## Historical record
 

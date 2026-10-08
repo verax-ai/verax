@@ -30,6 +30,7 @@ import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./healt
 import { agentsWindow } from "./agents.ts";
 import { gateControlSignature, nextControlChallenge } from "./control-signature.ts";
 import { haltBody, readHalt, resumeBody } from "./halt.ts";
+import { recordBodyStart, startHeartbeat } from "./heartbeat.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
 import {
@@ -423,6 +424,14 @@ export async function listen(config: BodyConfig): Promise<Server> {
       ...(extraTools.length > 0 ? { extraTools } : {}),
     });
   } catch (err) {
+    await closeAll(sessions);
+    throw err;
+  }
+  try {
+    // This must precede syncControlRecords: those records pulse too.
+    recordBodyStart(config.stateDir, services.ledger.startedAtMs);
+  } catch (err) {
+    services.ledger.close();
     await closeAll(sessions);
     throw err;
   }
@@ -1016,14 +1025,20 @@ export async function listen(config: BodyConfig): Promise<Server> {
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = HEADERS_TIMEOUT_MS;
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(config.bindPort, config.bindHost, () => resolve());
-  });
   server.on("close", () => {
     services.ledger.close();
     void closeAll(sessions);
   });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(config.bindPort, config.bindHost, () => resolve());
+    });
+  } catch (err) {
+    services.ledger.close();
+    await closeAll(sessions);
+    throw err;
+  }
   const bound = server.address();
   if (!bound || typeof bound === "string") {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -1031,6 +1046,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
   }
   try {
     services.ledger.recordListenPort(bound.port);
+    const stopHeartbeat = startHeartbeat(services.ledger);
+    server.once("close", stopHeartbeat);
   } catch (err) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     throw err;

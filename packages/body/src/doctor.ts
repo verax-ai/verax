@@ -461,12 +461,12 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       hb = null;
     }
   }
-  if (srcLines > 0 || hb) {
+  if (srcLines > 0 || hb || existsSync(hbPath)) {
     if (!hb || typeof hb.atMs !== "number") {
       checks.push({
         id: "heartbeat",
         level: "fail",
-        detail: "ledger has rows but no readable heartbeat; the evidence service looks silent",
+        detail: "no readable heartbeat; the body looks stopped or its pulse cannot be written",
       });
     } else if (!Number.isFinite(hb.atMs) || hb.atMs > Date.now() + HEARTBEAT_FUTURE_SKEW_MS) {
       checks.push({
@@ -478,7 +478,7 @@ function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[]
       checks.push({
         id: "heartbeat",
         level: "fail",
-        detail: `heartbeat is silent; last pulse ${hb.atMs} lastDecisionN ${String(hb.lastDecisionN ?? "?")}`,
+        detail: `heartbeat is silent; body stopped or pulse unavailable; last pulse ${hb.atMs} lastDecisionN ${String(hb.lastDecisionN ?? "?")}`,
       });
     } else {
       checks.push({

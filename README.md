@@ -300,6 +300,31 @@ true.
 - Doctor and heartbeat: `verax doctor` names what is missing or stale before
   the first call finds out.
 
+### Watch for silence (unreleased tree)
+
+The running body pulses even while idle (10 s by default;
+`VERAX_HEARTBEAT_EVERY_MS`, minimum 1,000 ms). Start rows in `starts.jsonl`
+record gaps from the previous beat; `verax verify <stateDir>` summarizes
+them offline. Start rows are unsigned in v1.
+
+```sh
+verax watch ./verax-state --max-silence 30s
+verax watch ./verax-state --once
+verax watch --url https://host/healthz --token-file ./audit.token --once
+verax watch ./verax-state --on-silence exec --exec "node isolate.mjs"
+```
+
+An unreadable, stale or far-future beat is silence. A local watch halts by
+default; recovery never resumes it. An operator must use the existing
+resume path. Remote watch reports silence and cannot halt remotely. Tokens
+are read only from files; HTTPS is required except on loopback. An exec
+command runs once per silence episode with `VERAX_WATCH_REASON` in its
+environment, without a shell. Quote executable/arguments containing spaces.
+`--once` exits 0 live, 3 silent or 2 on usage errors. Continuous watch prints
+one JSON line per silence episode and recovery, polling at `max-silence/3`.
+Run it where the operator chooses; a same-host watcher shares that host's
+trust and is not independent evidence if both ledger and watcher vanish.
+
 ## Connect a client
 
 The body listens on `http://127.0.0.1:8787/mcp` by default. A client

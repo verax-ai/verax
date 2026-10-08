@@ -17,6 +17,9 @@ export function readInstallHealthNonce(stateDir: string): string | null {
 
 export type HealthHeartbeat = {
   atMs: number;
+  pid?: number;
+  startedAtMs?: number;
+  beat?: "timer" | "row";
   lastDecisionN: number;
   lastEffectN: number;
 };
@@ -32,12 +35,18 @@ export function readHeartbeat(stateDir: string): HealthHeartbeat | null {
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as {
       atMs?: unknown;
+      pid?: unknown;
+      startedAtMs?: unknown;
+      beat?: unknown;
       lastDecisionN?: unknown;
       lastEffectN?: unknown;
     };
     if (typeof raw.atMs !== "number" || !Number.isFinite(raw.atMs)) return null;
     return {
       atMs: raw.atMs,
+      ...(typeof raw.pid === "number" ? { pid: raw.pid } : {}),
+      ...(typeof raw.startedAtMs === "number" ? { startedAtMs: raw.startedAtMs } : {}),
+      ...(raw.beat === "timer" || raw.beat === "row" ? { beat: raw.beat } : {}),
       lastDecisionN: typeof raw.lastDecisionN === "number" ? raw.lastDecisionN : 0,
       lastEffectN: typeof raw.lastEffectN === "number" ? raw.lastEffectN : 0,
     };

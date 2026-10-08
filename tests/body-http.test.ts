@@ -175,7 +175,12 @@ describe("healthz counts", () => {
         witness?: { class: string; atMs: number } | null;
       };
       assert.equal(body.ok, true);
-      assert.deepEqual(body.heartbeat, { atMs: 1_700_000_000_000, lastDecisionN: 4, lastEffectN: 3 });
+      const current = JSON.parse(readFileSync(join(stateDir, "heartbeat.json"), "utf8"));
+      assert.deepEqual(body.heartbeat, current);
+      assert.equal(current.beat, "timer");
+      assert.ok(current.atMs > 1_700_000_000_000);
+      assert.equal(current.lastDecisionN, 0);
+      assert.equal(current.lastEffectN, 0);
       assert.deepEqual(body.witness, { class: "same-org", atMs: 1_700_000_000_100 });
     } finally {
       await new Promise<void>((resolve, reject) => {
