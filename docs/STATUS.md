@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.4.6
+## Capability matrix — 0.4.7
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.4.6, and in the MCP registry as
+`@verax-ai/inventory` 0.4.7, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -41,12 +41,13 @@ what that test covers, not a wider claim.
 | Local issuer | 0.3.0 | `VERAX_JWKS_FILE` points at a JWKS file the body reads once at start, and only on a loopback bind. `verax init --local` writes one ES256 key, one agent token that can read and write memory, and `verax.env`, and `verax serve --env-file` loads that file before the body listens. | Be an authorization server: one key, one agent token, one machine, no refresh, no login. A leaked token file is a working credential until it expires or is revoked with the existing jti revoke. Hold against an agent that has a shell as the same OS user; see THREAT_MODEL, a brain with a shell. | `init-local`, `jwks-file` |
 | Demo | 0.2.1; with Conarium 0.2.2 | `verax demo` starts a loopback body with a temporary ledger, records an allow, a signed refuse and a held spend through the real `/mcp` path, and can leave the directory for `verax verify`. `--with-conarium` (0.2.2) has `npx` download `@conarium-ai/core` and run it as a child: the gate allows `conarium.query`, Conarium masks the customer rows or refuses `public.secrets`, and a downstream tool with no rule is refused before the child sees the call. | Show a real database: the rows are Conarium's samples. Run `--with-conarium` with no network. Verify Conarium's own audit chain. Reconcile a card statement (needs a real statement). | `demo`, `demo-conarium` |
 | Isolated install | 0.4.0 | `verax install` (elevated) refuses a Node that a standard user can change (on macOS the remedy extracts the official tarball as root into `/opt/verax-node`, root:wheel and not group- or other-writable; on Linux the same place, root:root, which SELinux labels `usr_t`), installs `@verax-ai/body` from the npm registry into an administrator-owned directory after `npm audit signatures`, writes `MANIFEST.sha256` from those bytes, puts the state directory under the dedicated local user `verax-svc` on Windows, the `verax` system user on Linux, or the hidden `_verax` user on macOS, writes the agent token only in the invoking user's profile, and registers an autostart task, systemd unit, or launch daemon that runs that Node. `verax doctor` reports the code directory, a `MANIFEST.sha256` mismatch by file name, a state ACL or mode that is wider than that account, an owner other than Administrators or SYSTEM on Windows or other than the service account on Linux and macOS, and whether autostart is present. `verax approve` with no state directory uses that installed state when it exists. A state directory the process cannot read exits 77 instead of a stack trace. After a crash the ledger lock is stale and is never taken over automatically (THREAT_MODEL, directory lock). The service's restart attempts fail with `ledger-locked-stale` until an administrator runs `verax unlock <stateDir>`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix; the service then runs in `unconfined_service_t`; isolation is the service account and file permissions. Since 0.4.1 every `node_modules` directory on a module search path of npm or the installed body (each ancestor up to the drive root, for example a user-made `C:\node_modules`) is judged as an object when it exists, and so is `Program Files\WindowsPowerShell\Modules`, which PowerShell 5.1 puts in front of the pinned `PSModulePath`; the elevated CLI's code list carries the same ancestors, and an elevated command refuses a set `NODE_PATH`. `scripts/optional-require-guard.mjs` fails when a production package try-requires a name the shipped tree does not contain, outside a reviewed list whose packages the body is checked not to load. Since 0.4.2, on macOS and Linux, a path these checks judge is also refused when an extended ACL lets a user other than its owner, root or (macOS) the admin group write it: one `ls -lde` on macOS, and on Linux `ls -ld` then `getfacl` for paths that show `+`; the refusal names the writer. On Linux a path that shows `+` when `getfacl` cannot be run is refused (install acl or remove the ACL). The same check runs for the desktop directory and the code it launches. | Protect against an administrator or root. Read a macOS deny entry as a reason to refuse; deny entries are ignored. Stop the operator's own elevated terminal from being driven by the agent if the operator leaves an elevated shell open to it. Close the gap between the check and the load: a user can create `C:\node_modules` after the check; what keeps a planted module from loading is the guard, not the check. | `install`, `install-e2e`, `module-search-trust`, `optional-require-guard`, `attack-r25-acl` |
+| Heartbeat and watch | 0.4.7 | The running body rewrites `heartbeat.json` every 10 seconds, idle included, and appends an unsigned `start` row naming the gap since the last beat. `verax watch <stateDir>` treats an absent, stale or future beat as silence and by default halts the body through the existing halt switch. | Attest uptime or a measured outage; tell silence from nothing happened when one host stops both the only copy and its watcher; sign start rows; halt from a remote watcher. | `heartbeat-watch`, `watch-exec` |
 
 What stays unproven for every row above: none of it has run against a
 paying customer's production traffic. The pilot drills in
 `tests/pilot-drills.test.ts` are tests, not a live body.
 
-## Heartbeat and watch — unreleased tree
+## Heartbeat and watch — since 0.4.7
 
 The running body atomically rewrites `heartbeat.json` every 10 seconds,
 including while idle. `VERAX_HEARTBEAT_EVERY_MS` sets the interval (minimum
@@ -99,7 +100,7 @@ if that host removes or stops both the only copy and its watcher. Start
 rows are unsigned in v1; a remote watcher cannot halt. No uptime or gap
 activity is attested by these observations.
 
-Guards: `heartbeat-watch`, `watch-exec`; this capability is not published.
+Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
 ## Historical record
 
