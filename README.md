@@ -2,6 +2,8 @@
 
 The body an agent asks before it acts.
 
+Listed on: [npm](https://www.npmjs.com/package/@verax-ai/body) · [Glama](https://glama.ai/mcp/servers/verax-ai/verax) · [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.verax-ai/verax) · [Zenodo](https://doi.org/10.5281/zenodo.22811593)
+
 Verax is an MCP server that sits between an agent and its tools. Every tool
 call passes a policy gate and leaves a signed decision record before anything
 runs; every call that ran leaves an effect row that is reconciled against its
