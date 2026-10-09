@@ -1,0 +1,58 @@
+name: docker
+# Builds the container image from the body version on npm and checks two
+# things about it: it refuses to start without its OIDC configuration (exit 78,
+# the message names the missing variables), and it does not run as root.
+# confirm=publish then pushes veraxai/verax:<version> and :latest to Docker Hub
+# with the DOCKERHUB_TOKEN repository secret. Nothing is pushed on a pull request.
+on:
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - ".github/workflows/docker.yml"
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "publish" to push the image to Docker Hub, or "check" to build and test only'
+        required: true
+        default: "check"
+
+permissions:
+  contents: read
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Version from the body package
+        id: v
+        run: echo "version=$(node -p "require('./packages/body/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: docker build --build-arg "VERAX_VERSION=${{ steps.v.outputs.version }}" -t "veraxai/verax:${{ steps.v.outputs.version }}" .
+
+      - name: Refuses to start without OIDC configuration
+        run: |
+          set +e
+          out=$(docker run --rm "veraxai/verax:${{ steps.v.outputs.version }}" 2>&1)
+          code=$?
+          set -e
+          echo "$out"
+          test "$code" = 78
+          echo "$out" | grep -q "missing VERAX_ISSUER, VERAX_JWKS_URL, or VERAX_AUDIENCE"
+
+      - name: Does not run as root
+        run: test "$(docker run --rm --entrypoint id "veraxai/verax:${{ steps.v.outputs.version }}" -u)" != "0"
+
+      - name: Push to Docker Hub
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'publish' }}
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          test -n "$DOCKERHUB_TOKEN" || { echo "the DOCKERHUB_TOKEN secret is not set"; exit 1; }
+          echo "$DOCKERHUB_TOKEN" | docker login -u veraxai --password-stdin
+          docker tag "veraxai/verax:$VERSION" veraxai/verax:latest
+          docker push "veraxai/verax:$VERSION"
+          docker push veraxai/verax:latest
