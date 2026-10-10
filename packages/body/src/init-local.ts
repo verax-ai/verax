@@ -1,7 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, lstatSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import { beginWinOwnerRun, endWinOwnerRun, ensureTokenParent, mkdirLeaf, restrictToOwnerWin32, SystemToolError } from "./install.ts";
 import {
   calculateJwkThumbprint,
@@ -12,6 +11,7 @@ import {
   SignJWT,
 } from "jose";
 import { EX_CONFIG } from "./config.ts";
+import { shippedPolicyPath } from "./shipped-policy.ts";
 
 const ISSUER = "verax-local";
 const SUBJECT = "local-agent";
@@ -77,24 +77,6 @@ export function envFileJwksMissing(env: NodeJS.ProcessEnv): string | null {
   return null;
 }
 
-function shippedPolicyPath(): string | null {
-  const here = dirname(fileURLToPath(import.meta.url));
-  let resolved: string | null = null;
-  try {
-    resolved = join(dirname(fileURLToPath(import.meta.resolve("@verax-ai/proxy/package.json"))), "policy", "default.json");
-  } catch {
-    resolved = null;
-  }
-  const candidates = [
-    resolved,
-    join(here, "..", "..", "proxy", "policy", "default.json"),
-    join(here, "..", "..", "@verax-ai", "proxy", "policy", "default.json"),
-  ];
-  for (const path of candidates) {
-    if (path && existsSync(path)) return path;
-  }
-  return null;
-}
 
 /** POSIX keeps owner-only mode. Windows grants the current user only outside install mode. */
 function ownerOnly(path: string, grantOwner: boolean): void {
