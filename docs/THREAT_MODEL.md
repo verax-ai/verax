@@ -7,8 +7,10 @@ A sketch of who is assumed hostile. Nothing here is measured.
 The MCP client is an untrusted program. It may send any tool name, any
 arguments, any replay, and any social prompt. A grant is a signed
 decision, not a mood. A refusal is recorded the same way. Prompt
-injection through tool results is not filtered by policy; policy sees
-tool name and scopes only.
+injection through tool results is not filtered by policy. Policy reads
+arguments in two places, `spend` (currency, cap per call, payee list,
+daily limit) and the recipient host of `message.send` (egress
+allow-list); otherwise it sees tool name and scopes only.
 
 ## a brain with a shell
 
