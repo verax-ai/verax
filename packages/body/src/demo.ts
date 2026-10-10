@@ -1,15 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { verifyLedger } from "@verax-ai/proxy";
 import { runApprove } from "./approve-cli.ts";
 import { listen } from "./server.ts";
+import { shippedPolicyPath } from "./shipped-policy.ts";
 
 const NOT_SHOWN =
   "Not shown here: data masking arrives with a downstream server such as Conarium; statement reconciliation needs a real statement (verax reconcile).";
@@ -68,28 +68,15 @@ function redact(text: string, token: string): string {
   return text.split(token).join("[token]");
 }
 
-function shippedPolicyPath(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  let resolved: string | null = null;
-  try {
-    resolved = join(dirname(fileURLToPath(import.meta.resolve("@verax-ai/proxy/package.json"))), "policy", "default.json");
-  } catch {
-    resolved = null;
-  }
-  const candidates = [
-    resolved,
-    join(here, "..", "..", "proxy", "policy", "default.json"),
-    join(here, "..", "..", "@verax-ai", "proxy", "policy", "default.json"),
-  ];
-  for (const path of candidates) {
-    if (path && existsSync(path)) return path;
-  }
-  throw new Error("demo: shipped policy file not found");
+function demoPolicyPath(): string {
+  const path = shippedPolicyPath();
+  if (path === null) throw new Error("demo: shipped policy file not found");
+  return path;
 }
 
 /** Shipped default plus message.send egress and a spend rule, written under the temp dir. */
 function writeDemoPolicy(stateDir: string, withConarium: boolean): string {
-  const shipped = JSON.parse(readFileSync(shippedPolicyPath(), "utf8")) as PolicyDoc;
+  const shipped = JSON.parse(readFileSync(demoPolicyPath(), "utf8")) as PolicyDoc;
   const document: PolicyDoc = {
     ...shipped,
     egress: [EGRESS_HOST],

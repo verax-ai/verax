@@ -7,7 +7,7 @@
 // Run: node --experimental-strip-types scripts/pack-smoke.ts
 
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -285,6 +285,25 @@ try {
   verdict = verified.out.slice(0, 300);
 }
 check(verified.status === 0 && ok && decisions >= 2, "verax verify --json ok with at least 2 decisions", verdict);
+
+// npm install -g does not hoist: the proxy and the inventory land under the
+// body's own node_modules, so neither is a sibling of the body. The README
+// installs that way. Move both there and ask the same bin again.
+const nested = join(consumer, "node_modules", "@verax-ai", "body", "node_modules", "@verax-ai");
+mkdirSync(nested, { recursive: true });
+for (const dep of ["proxy", "inventory"]) {
+  renameSync(join(consumer, "node_modules", "@verax-ai", dep), join(nested, dep));
+}
+const nestedBin = join(consumer, "node_modules", "@verax-ai", "body", "dist", "cli.js");
+const nestedDemo = run(process.execPath, [nestedBin, "demo"], consumer);
+check(nestedDemo.status === 0, "verax demo with the proxy nested under the body (npm install -g layout)", nestedDemo.out.slice(0, 400));
+const initDir = join(consumer, "init-local-state");
+const nestedInit = run(process.execPath, [nestedBin, "init", "--local", initDir], consumer);
+check(
+  nestedInit.status === 0 && existsSync(join(initDir, "policy.json")),
+  "verax init --local with the nested layout writes policy.json",
+  nestedInit.out.slice(0, 400),
+);
 
 // Windows releases file handles a moment after a process exits.
 const cleanup = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 } as const;
