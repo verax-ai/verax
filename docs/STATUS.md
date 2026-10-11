@@ -259,8 +259,16 @@ records carry, and says which. A signature that does not verify, a
 signed one is a problem, and the ledger does not verify. So is a row that
 carries `v`, `sig` or `prevStartHash` and is not a well-formed v2 row,
 a line that no longer parses included: it is named `signed start row is
-malformed`, not skipped. A line that carries none of those names and
-cannot be read is a warning, as a removed file is nothing. Unsigned rows
+malformed`. Any other line that is not a start row is a problem as well
+(`starts.jsonl line N is not a start row`): every line of the file is a row
+the body wrote, and telling a tampered signed row from other damage by the
+fields it still shows is a guess the writer of the file can defeat. Up to
+0.4.8 such a line was a warning and the ledger verified. A line of spaces
+is such a line. A signed row is accepted in one spelling, the one the body
+writes: a line that parses to the same row through a second copy of a key,
+padding or an escape is a problem, and so is a signature spelled with
+characters base64 skips. A `starts.jsonl` that is there and cannot be read
+is a problem; only a file that is not there is nothing. Unsigned rows
 before the first signed one, written by an earlier version, are counted
 and named as unsigned. With no records and no `--key`, signed rows are
 counted and not checked. `starts` in `--json` gains `signed`,
@@ -271,8 +279,8 @@ To chain a start the body needs the line before it. It read the whole of
 `starts.jsonl` for that on every start: measured, a 300 MiB file took 874 ms
 and grew the process from 64 to 608 MiB, and at 700 MiB the read threw and
 the body did not start. Only the end of the file is read now, and both
-sizes take 2 ms. `verax verify` still reads the file whole; one it cannot
-read is a warning by default and a problem under `--require-signed-starts`.
+sizes take 2 ms. `verax verify` still reads the file whole, and one it
+cannot read does not verify.
 
 A signed row with `v`, `prevStartHash` and `sig` taken off reads as one
 written before signing, and a reader cannot tell the two apart (R26). The

@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -209,6 +209,101 @@ describe("R26-7 start rows with their signatures taken off", () => {
       const got = await verify(dir, keyFile);
       assert.match(got.text, /signed start row is malformed: starts\.jsonl line 1/, got.text);
       assert.match(got.text, /signed start row is malformed: starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Second pass of the pre-release review. Naming a tampered signed row by the
+  // fields it still shows is a guess the writer of the file can always defeat.
+  // What holds is the other way round: every line of starts.jsonl is a start
+  // row, and one that is not is a problem.
+  for (const [label, alter] of [
+    ["wrapped in an array", (r: Row) => JSON.stringify([r])],
+    [
+      "with its field names escaped and its last character cut",
+      (r: Row) =>
+        JSON.stringify(r)
+          .replace('"v"', '"\\u0076"')
+          .replace('"sig"', '"s\\u0069g"')
+          .replace('"prevStartHash"', '"prevStart\\u0048ash"')
+          .slice(0, -1),
+    ],
+    ["replaced by a line of text", () => "restarted by hand, nothing to see"],
+    ["replaced by a JSON string", () => JSON.stringify("start")],
+  ] as const) {
+    it(`every row ${label} is a problem, with no flag`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+      try {
+        const keyFile = await ledgerWithAThreeDayGap(dir);
+        writeFileSync(join(dir, "starts.jsonl"), `${rows(dir).map(alter).join("\n")}\n`, "utf8");
+        const got = await verify(dir, keyFile);
+        assert.match(got.text, /starts\.jsonl line 1/, got.text);
+        assert.match(got.text, /NOT VERIFIED/, got.text);
+        assert.equal(got.code, 1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  // Third, narrow pass. What verify accepts as a signed row is now exactly what
+  // the body writes: one line, no other spelling of the same JSON, no other
+  // spelling of the same signature. A file that is there and cannot be read
+  // is a problem, not a warning.
+  it("the last signed row replaced by a line of spaces is a problem", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      const kept = rows(dir).map((r) => JSON.stringify(r));
+      writeFileSync(join(dir, "starts.jsonl"), `${kept[0]}\n   \n`, "utf8");
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a starts.jsonl that is there and cannot be read is a problem", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      rmSync(join(dir, "starts.jsonl"));
+      mkdirSync(join(dir, "starts.jsonl"));
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /starts\.jsonl could not be read/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a signed row with a second, earlier copy of one key is a problem", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      const lines = rows(dir).map((r) => JSON.stringify(r));
+      lines[1] = lines[1]!.replace("{", '{"atMs":999999,');
+      writeFileSync(join(dir, "starts.jsonl"), `${lines.join("\n")}\n`, "utf8");
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a signature spelled with a character base64 ignores is a problem", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      const list = rows(dir);
+      list[1] = { ...list[1]!, sig: `${list[1]!.sig}!` };
+      writeRows(dir, list);
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /starts\.jsonl line 2/, got.text);
       assert.equal(got.code, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });

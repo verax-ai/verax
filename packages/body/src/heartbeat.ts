@@ -191,14 +191,18 @@ export function readStartSummary(
   try {
     raw = readFileSync(join(stateDir, "starts.jsonl"), "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") result.warnings.push("starts.jsonl could not be read");
+    // A file that is there and cannot be read has not been checked: that is a
+    // problem, not a warning. Only a file that is not there is nothing.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") result.problems.push("starts.jsonl could not be read");
     if (opts.requireSigned) result.problems.push("start-rows-missing: no start row could be read");
     return result;
   }
   let prevLine: string | null = null;
   let seenSigned = false;
   for (const [i, line] of raw.split("\n").entries()) {
-    if (line.trim() === "") continue;
+    // The empty piece after the last newline. A line of spaces is not empty:
+    // the body does not write one, and it is read like any other line.
+    if (line === "") continue;
     const n = i + 1;
     let row: StartRow | SignedStartRow;
     let parsed: unknown;
@@ -207,19 +211,21 @@ export function readStartSummary(
       row = parsed as StartRow | SignedStartRow;
       if (!isStartRow(row)) throw new Error("start row shape");
     } catch {
-      // A line that carries what only a signed row carries, and no longer reads
-      // as a start row, is a signed row someone altered: it is not skipped.
+      // Every line of this file is a start row the body wrote, so a line that
+      // does not read as one is a problem, whatever it still looks like.
+      // Naming a tampered signed row by the fields it shows is only a better
+      // message: the writer of the file can always make a row show none.
       if (claimsSigned(parsed, line)) {
         seenSigned = true;
         result.signed += 1;
         result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
-        prevLine = line;
-        continue;
+      } else if (seenSigned) {
+        result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
+      } else if (opts.requireSigned) {
+        result.problems.push(`start-row-unreadable: starts.jsonl line ${n}`);
+      } else {
+        result.problems.push(`starts.jsonl line ${n} is not a start row`);
       }
-      result.warnings.push(`starts.jsonl line ${n} is unreadable`);
-      if (seenSigned) result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
-      // A line nothing can read is not a signed row either.
-      else if (opts.requireSigned) result.problems.push(`start-row-unreadable: starts.jsonl line ${n}`);
       prevLine = line;
       continue;
     }
@@ -236,8 +242,19 @@ export function readStartSummary(
       if (signed.prevStartHash !== expected) {
         result.problems.push(`start chain breaks at starts.jsonl line ${n}: the row before it is not the one it names`);
       }
+      // A signed row is accepted in one spelling, the one the body writes. A
+      // second copy of a key, padding, or an escape leaves the parsed row and
+      // its signature as they were and makes the line say something else to
+      // another reader.
+      if (JSON.stringify(parsed) !== line) {
+        result.problems.push(`signed start row is not written as the body writes it: starts.jsonl line ${n}`);
+      }
       if (typeof signed.sig !== "string" || signed.sig === "") {
         result.problems.push(`start row at starts.jsonl line ${n} is v2 with no signature`);
+      } else if (Buffer.from(signed.sig, "base64").toString("base64") !== signed.sig) {
+        // Base64 decoding skips characters outside its alphabet, so the same
+        // signature has many spellings; only the one the body writes is read.
+        result.problems.push(`start signature is not canonical base64: starts.jsonl line ${n}`);
       } else if (publicKeyPem) {
         if (signedVerifies(signed, publicKeyPem)) result.signedVerified += 1;
         else result.problems.push(`start signature does not verify: starts.jsonl line ${n}`);
