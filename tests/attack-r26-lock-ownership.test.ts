@@ -40,6 +40,14 @@ process.stdout.write("held\\n");
 setInterval(() => ledger.lockStatus(), 1000);
 `;
 
+// A body that is alive and not beating: its event loop is held, as by a long synchronous call.
+const FROZEN = `
+const { FileLedger } = await import(process.env.R26_PROXY_URL);
+new FileLedger(process.env.R26_DIR, { lockBeatMs: Number(process.env.R26_BEAT_MS) });
+process.stdout.write("held\\n");
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);
+`;
+
 // The second container: another process whose pid reads the same as the holder's.
 const JUDGE = `
 Object.defineProperty(process, "pid", { value: Number(process.env.R26_HOLDER_PID), configurable: true });
@@ -215,6 +223,25 @@ describe("R26 a held lock beats", { timeout: 120_000 }, () => {
       assert.match(openError(dir), /^ledger-locked:\d+$/);
     } finally {
       holder.kill();
+      await ended(holder);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a live holder that has stopped beating keeps its lock: stillness alone does not make it stale", async () => {
+    const dir = temp();
+    const holder = run(FROZEN, { R26_PROXY_URL: proxyUrl, R26_DIR: dir, R26_BEAT_MS: "100" });
+    try {
+      assert.equal(await firstLine(holder, 30_000), "held");
+      const err: string[] = [];
+      const code = runUnlock(dir, (s) => err.push(s));
+      assert.equal(holder.exitCode, null, "the holder exited before the check; the run proves nothing");
+      assert.equal(existsSync(join(dir, "ledger.lock")), true, "unlock removed the lock of a live process that had only stopped beating");
+      assert.equal(code, 1);
+      assert.equal(err.join("").trim(), `still-running:${holder.pid}`);
+      assert.match(openError(dir), /^ledger-locked:\d+$/);
+    } finally {
+      holder.kill("SIGKILL");
       await ended(holder);
       rmSync(dir, { recursive: true, force: true });
     }

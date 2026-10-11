@@ -498,15 +498,19 @@ export function watchLock(lockPath: string, beatMs: number, sleep: (ms: number) 
 }
 
 /**
- * Whether the lock on disk still has a holder. A lock that records a beat is
- * judged by watching it move. A lock from a version that did not beat is
- * judged as before, by its pid and start time.
+ * Whether the lock on disk still has a holder. A lock that records a beat
+ * and is seen to move is held, whatever pid it names. Stillness alone proves
+ * nothing: a live body can miss its beats while a long synchronous call holds
+ * it. So a lock that does not move, like one from a version that did not
+ * beat, is then judged by its pid and start time, and is stale only when
+ * that says so too.
  */
 export function lockState(lockPath: string, lock: LockHolder): "held" | "stale" | "gone" {
   if (lock.token !== undefined && ownLockTokens.has(lock.token)) return "held";
   if (lock.beatMs !== undefined) {
     const seen = watchLock(lockPath, lock.beatMs);
-    return seen === "moving" ? "held" : seen === "gone" ? "gone" : "stale";
+    if (seen === "moving") return "held";
+    if (seen === "gone") return "gone";
   }
   return lockHolderAlive(lock) ? "held" : "stale";
 }

@@ -151,16 +151,23 @@ two containers on one volume, both running the body as PID 1, each read
 the other's lock as its own leftover, so `verax unlock` in the second
 removed the lock of the running first. A held lock is now touched every
 2 seconds and records that beat (`beatMs`) in the lock file. The body,
-`verax unlock` and `verax doctor` judge such a lock by watching it for
-five beats: a lock that moves is held, whatever pid it names; one that
-does not is stale. No time is compared, only a change. Deciding that a
-lock is stale therefore takes about 10 seconds; a live one is seen
-within a beat. A lock from 0.4.8 or earlier records no beat and is judged
-by its pid as before, with one addition: a lock that names this process
-with a start time that has not come yet is stale. Does not: protect a body
-whose process is frozen for longer than five beats while an operator
-runs `verax unlock`; that body loses the lock and its next append stops
-with `ledger-lost-lock`. The witness's listen file does not beat.
+`verax unlock` and `verax doctor` watch such a lock for five beats: a
+lock that moves is held, whatever pid it names. No time is compared,
+only a change. Stillness alone does not make a lock stale, because a
+live body can miss its beats while a long synchronous call holds it: a
+lock that does not move is then judged by its pid and start time as
+before, and is stale only when that says so too. Deciding that a lock is
+stale therefore takes about 10 seconds; a live one is seen within a
+beat. A lock from 0.4.8 or earlier records no beat and is judged by its
+pid alone. In both cases a start time that has not come yet, or one that
+is not a finite number, no longer counts as a live holder. Does not:
+protect a body in another container that is frozen for longer than five
+beats while an operator there runs `verax unlock` under a pid that reads
+as dead or as the caller's own; that body loses the lock and its next
+append stops with `ledger-lost-lock`. Does not: free a still lock whose
+pid was handed to another live process; that is refused as
+`still-running`, as before. The witness's listen file and the unreleased
+desktop launcher do not use the beat.
 
 Guard: `stale-lock-pid-reuse`. Not released.
 
