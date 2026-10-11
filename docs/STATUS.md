@@ -144,6 +144,34 @@ lock; measured in a container built from this tree. The same rule judges
 the witness's listen file and the doctor and desktop checks. A lock is
 still never taken over automatically.
 
+That rule read a pid and a wall clock, and two states defeated it (R26):
+a lock naming this pid with a start time in the future, left behind when
+the clock stepped back between runs, was read as this process's own; and
+two containers on one volume, both running the body as PID 1, each read
+the other's lock as its own leftover, so `verax unlock` in the second
+removed the lock of the running first. A held lock is now touched every
+2 seconds and records that beat (`beatMs`) in the lock file. The body,
+`verax unlock` and `verax doctor` watch such a lock for five beats: a
+lock that moves is held, whatever pid it names. No time is compared,
+only a change. Stillness alone does not make a lock stale, because a
+live body can miss its beats while a long synchronous call holds it: a
+lock that does not move is then judged by its pid and start time as
+before, and is stale only when that says so too. Deciding that a lock is
+stale therefore takes about 10 seconds; a live one is seen within a
+beat. A lock from 0.4.8 or earlier records no beat and is judged by its
+pid alone. In both cases a start time that has not come yet, or one that
+is not a finite number, no longer counts as a live holder. Does not:
+protect a body in another container that is frozen for longer than five
+beats while an operator there runs `verax unlock` under a pid that reads
+as dead or as the caller's own; that body loses the lock and its next
+append stops with `ledger-lost-lock`. Does not: tell a frozen body from
+a dead one whose pid another live process now has. Such a lock is still
+under a live pid; `verax unlock` refuses it as `still-running` and names
+it `lock-not-beating`, `verax doctor` warns, and `verax unlock --force`
+removes it with `reason: "not-beating"` in `unlocks.jsonl`. `--force`
+does not remove a lock that moves. The witness's listen file and the
+unreleased desktop launcher do not use the beat.
+
 Guard: `stale-lock-pid-reuse`. Not released.
 
 ## Automatic anchoring — unreleased

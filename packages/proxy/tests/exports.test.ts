@@ -60,6 +60,8 @@ const ALLOWED = new Set([
   "appendAnchor",
   "readAnchors",
   "verifyReceipt",
+  "lockState",
+  "lockBeatOf",
 ]);
 
 describe("B1 exports map", () => {

@@ -7,6 +7,7 @@ import {
   readFileSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 
@@ -458,7 +459,66 @@ export function currentBootId(): string | null {
   }
 }
 
-export type LockHolder = { pid: number; startedAt: number; bootId?: string };
+export type LockHolder = { pid: number; startedAt: number; bootId?: string; token?: string; beatMs?: number };
+
+/** How often a held lock is touched. A reader watches for five beats before it calls a lock still. */
+export const LOCK_BEAT_MS = 2000;
+const LOCK_WATCH_BEATS = 5;
+
+/** Tokens of the locks this process wrote: the only way it knows a lock naming its pid is its own. */
+const ownLockTokens = new Set<string>();
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Watches a lock file for five of its beats and says whether its holder
+ * touched it. Only a change is read, never a time, so a clock that stepped
+ * and a pid from another container cannot mislead it.
+ */
+export function watchLock(lockPath: string, beatMs: number, sleep: (ms: number) => void = sleepSync): "moving" | "still" | "gone" {
+  const mtime = (): number | null => {
+    try {
+      return statSync(lockPath).mtimeMs;
+    } catch {
+      return null;
+    }
+  };
+  const first = mtime();
+  if (first === null) return "gone";
+  const step = Math.max(10, Math.min(250, Math.floor(beatMs / 2)));
+  for (let waited = 0; waited < beatMs * LOCK_WATCH_BEATS; waited += step) {
+    sleep(step);
+    const now = mtime();
+    if (now === null) return "gone";
+    if (now !== first) return "moving";
+  }
+  return "still";
+}
+
+/**
+ * Whether the lock on disk still has a holder. A lock that records a beat
+ * and is seen to move is held, whatever pid it names. Stillness alone proves
+ * nothing: a live body can miss its beats while a long synchronous call holds
+ * it. So a lock that does not move, like one from a version that did not
+ * beat, is then judged by its pid and start time, and is stale only when
+ * that says so too. "quiet" is the case in between: a beating lock that did
+ * not move while its pid is alive. That is a frozen body, or a dead one whose
+ * pid another process now has, and nothing on disk tells the two apart.
+ */
+export function lockState(lockPath: string, lock: LockHolder): "held" | "quiet" | "stale" | "gone" {
+  if (lock.token !== undefined && ownLockTokens.has(lock.token)) return "held";
+  let still = false;
+  if (lock.beatMs !== undefined) {
+    const seen = watchLock(lockPath, lock.beatMs);
+    if (seen === "moving") return "held";
+    if (seen === "gone") return "gone";
+    still = true;
+  }
+  if (!lockHolderAlive(lock)) return "stale";
+  return still ? "quiet" : "held";
+}
 
 /**
  * Whether the process a lock names can still be the one that wrote it. A
@@ -469,25 +529,35 @@ export type LockHolder = { pid: number; startedAt: number; bootId?: string };
  * this one. Nothing here takes a lock over; it only says it is stale.
  */
 export function lockHolderAlive(lock: LockHolder, bootId: string | null = currentBootId()): boolean {
+  if (!Number.isFinite(lock.startedAt)) return false;
   if (typeof lock.bootId === "string" && bootId !== null && lock.bootId !== bootId) return false;
-  if (lock.pid === process.pid && lock.startedAt < performance.timeOrigin) return false;
+  // Written before this process started, or stamped with a time that has not come yet.
+  if (lock.pid === process.pid && (lock.startedAt < performance.timeOrigin || lock.startedAt > Date.now())) return false;
   return pidAlive(lock.pid);
 }
 
-function readLock(path: string): { pid: number; startedAt: number; token?: string; bootId?: string } | null {
+/** A beat a lock file may record: a whole number of milliseconds a reader can afford to watch. */
+export function lockBeatOf(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isInteger(raw) && raw >= 20 && raw <= 60_000 ? raw : undefined;
+}
+
+function readLock(path: string): { pid: number; startedAt: number; token?: string; bootId?: string; beatMs?: number } | null {
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as {
       pid?: unknown;
       startedAt?: unknown;
       token?: unknown;
       bootId?: unknown;
+      beatMs?: unknown;
     };
-    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
+    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number" || !Number.isFinite(raw.startedAt)) return null;
+    const beatMs = lockBeatOf(raw.beatMs);
     return {
       pid: raw.pid,
       startedAt: raw.startedAt,
       ...(typeof raw.token === "string" ? { token: raw.token } : {}),
       ...(typeof raw.bootId === "string" && raw.bootId !== "" ? { bootId: raw.bootId } : {}),
+      ...(beatMs !== undefined ? { beatMs } : {}),
     };
   } catch {
     return null;
@@ -498,6 +568,8 @@ export type FileLedgerOpts = {
   pieceMaxRows?: number;
   pieceMaxBytes?: number;
   onPieceClose?: (window: { startMs: number; endMs: number; pieceId: string }) => Promise<void>;
+  /** How often the held lock is touched; tests shorten it. */
+  lockBeatMs?: number;
 };
 
 export type LedgerCounts = {
@@ -526,6 +598,8 @@ export class FileLedger implements Ledger {
   private readonly lockPath: string;
   private readonly q = new SerialQueue();
   private readonly token = randomBytes(16).toString("hex");
+  private readonly lockBeatMs: number;
+  private lockBeat: NodeJS.Timeout | undefined;
   private closed = false;
   private lost = false;
   private tailHash: string | null = null;
@@ -553,6 +627,7 @@ export class FileLedger implements Ledger {
     this.pieceMaxRows = opts?.pieceMaxRows ?? DEFAULT_PIECE_MAX_ROWS;
     this.pieceMaxBytes = opts?.pieceMaxBytes ?? DEFAULT_PIECE_MAX_BYTES;
     this.onPieceClose = opts?.onPieceClose;
+    this.lockBeatMs = lockBeatOf(opts?.lockBeatMs) ?? LOCK_BEAT_MS;
     this.decisionsPath = join(dir, "decisions.jsonl");
     this.effectsPath = join(dir, "effects.jsonl");
     this.inputsPath = join(dir, "inputs.jsonl");
@@ -901,7 +976,7 @@ export class FileLedger implements Ledger {
 
   private lockBody(): string {
     const bootId = currentBootId();
-    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.token, ...(bootId ? { bootId } : {}) })}\n`;
+    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.token, ...(bootId ? { bootId } : {}), beatMs: this.lockBeatMs })}\n`;
   }
 
   private ownsLock(): boolean {
@@ -934,6 +1009,7 @@ export class FileLedger implements Ledger {
       startedAt: existing.startedAt,
       token: this.token,
       ...(existing.bootId ? { bootId: existing.bootId } : {}),
+      ...(existing.beatMs !== undefined ? { beatMs: existing.beatMs } : {}),
       port,
     })}\n`;
     writeFileAtomic(this.lockPath, body);
@@ -953,10 +1029,31 @@ export class FileLedger implements Ledger {
   private lockedError(): Error {
     const existing = readLock(this.lockPath);
     const pid = existing?.pid ?? "unknown";
-    if (existing && !lockHolderAlive(existing)) {
+    if (existing && lockState(this.lockPath, existing) === "stale") {
       return new Error(`ledger-locked-stale:${pid}\nrun: verax unlock ${this.dir}`);
     }
     return new Error(`ledger-locked:${pid}`);
+  }
+
+  /** Touch the held lock so a reader that watches it sees a holder. Never touches a lock that is not ours. */
+  private startLockBeat(): void {
+    ownLockTokens.add(this.token);
+    this.lockBeat = setInterval(() => {
+      try {
+        if (!this.ownsLock()) return;
+        const now = new Date();
+        utimesSync(this.lockPath, now, now);
+      } catch {
+        // A missed beat is read as a still lock; the next one corrects it.
+      }
+    }, this.lockBeatMs);
+    this.lockBeat.unref();
+  }
+
+  private stopLockBeat(): void {
+    if (this.lockBeat) clearInterval(this.lockBeat);
+    this.lockBeat = undefined;
+    ownLockTokens.delete(this.token);
   }
 
   private acquireLock(): void {
@@ -967,11 +1064,13 @@ export class FileLedger implements Ledger {
       if ((err as NodeJS.ErrnoException).code === "EEXIST") throw this.lockedError();
       throw err;
     }
+    this.startLockBeat();
   }
 
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    this.stopLockBeat();
     if (!this.ownsLock()) {
       this.lost = true;
       return;
