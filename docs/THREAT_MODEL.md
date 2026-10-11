@@ -71,6 +71,19 @@ from "nothing happened" if the only copy and watcher live on the same host
 and that host stops or removes both. These local observations are not
 independent evidence of uptime or of what happened during a gap.
 
+Unreleased: with `VERAX_ANCHOR_SERVICE` set, `verax witness` registers each
+checkpoint it signs with a SCITT Transparency Service someone else runs and
+keeps the receipt, and `verax verify --anchor-key <pem> --require-anchored`
+names every checkpoint older than the grace that has no receipt verifying
+under that key. This detects; it does not prevent. Whoever can write the
+state directory can still stop the witness, roll the ledger back or delete
+it. What changes is that a deleted receipt is named instead of passing, and
+the service's log keeps the checkpoint hash after the local copy is gone.
+Removing the newest checkpoint together with its receipt leaves nothing in
+the directory to compare; only asking the service shows it, and `verify`
+does not ask it yet. A witness that cannot reach the service writes
+`anchor-failed` and keeps signing; the gap shows as unanchored checkpoints.
+
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.

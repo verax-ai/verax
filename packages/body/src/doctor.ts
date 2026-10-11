@@ -8,6 +8,8 @@ import { loadConfig, isLoopbackHost } from "./config.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
 import { lockHolderAlive } from "@verax-ai/proxy";
 import { readLockFile } from "./unlock.ts";
+import { pendingAnchors } from "./anchor-cli.ts";
+import { readWitnessListen } from "./witness.ts";
 
 export type DoctorLevel = "ok" | "warn" | "fail";
 
@@ -117,6 +119,7 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
       }
     }
     checks.push(...evidenceChecks(stateDir, env));
+    checks.push(...anchorChecks(stateDir, env));
   }
 
   const secretNames = Object.entries(env)
@@ -394,6 +397,72 @@ function heartbeatMaxMs(env: NodeJS.ProcessEnv): number {
 
 /** A pulse this far ahead of the clock is still treated as now. */
 const HEARTBEAT_FUTURE_SKEW_MS = 60_000;
+
+/**
+ * What the running witness was started with, read from its listen file rather
+ * than from this shell's environment, which can differ. Checkpoints held only
+ * on this host can be removed with the ledger; that is what anchoring is for.
+ */
+function anchorChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[] {
+  const listen = readWitnessListen(stateDir);
+  const running = listen !== null && lockHolderAlive({ pid: listen.pid, startedAt: listen.startedAt });
+  const service = running ? listen.anchorService : undefined;
+  if (!running) {
+    if (env.VERAX_ANCHOR_SERVICE?.trim()) {
+      return [
+        {
+          id: "anchor",
+          level: "warn",
+          detail: "VERAX_ANCHOR_SERVICE is set here but no witness is running; only verax witness anchors checkpoints",
+        },
+      ];
+    }
+    return [];
+  }
+  if (!service) {
+    return [
+      {
+        id: "anchor",
+        level: "warn",
+        detail:
+          "the witness runs without VERAX_ANCHOR_SERVICE; checkpoints stay on this host and can be removed with the ledger",
+      },
+    ];
+  }
+  const { pending, problems } = pendingAnchors(stateDir, service);
+  if (problems.length > 0) {
+    return [{ id: "anchor", level: "fail", detail: `anchors at ${service} cannot be read: ${problems[0]}` }];
+  }
+  if (pending.length > 0) {
+    return [
+      {
+        id: "anchor",
+        level: "warn",
+        detail: `${pending.length} checkpoint(s) not yet anchored at ${service}${lastAnchorFailure(stateDir)}`,
+      },
+    ];
+  }
+  return [{ id: "anchor", level: "ok", detail: `the witness anchors each checkpoint at ${service}` }];
+}
+
+function lastAnchorFailure(stateDir: string): string {
+  try {
+    const lines = readFileSync(join(stateDir, "witness-status.jsonl"), "utf8").split("\n");
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      if (lines[i]!.trim() === "") continue;
+      try {
+        const row = JSON.parse(lines[i]!) as { result?: unknown; reason?: unknown };
+        if (row.result === "anchored") return "";
+        if (row.result === "anchor-failed") return `; last attempt failed: ${String(row.reason ?? "unknown")}`;
+      } catch {
+        // A torn line names nothing.
+      }
+    }
+  } catch {
+    // No status file: no attempt yet.
+  }
+  return "";
+}
 
 function evidenceChecks(stateDir: string, env: NodeJS.ProcessEnv): DoctorCheck[] {
   const checks: DoctorCheck[] = [];

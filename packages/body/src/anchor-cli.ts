@@ -40,7 +40,8 @@ function usage(): string {
   ].join("\n");
 }
 
-function serviceUrl(raw: string): URL | null {
+/** https only; http is accepted for a loopback address. No credentials, query or fragment. */
+export function serviceUrl(raw: string): URL | null {
   let url: URL;
   try {
     url = new URL(raw);
@@ -81,6 +82,90 @@ async function boundedText(res: Response): Promise<string> {
 }
 
 type RegisterAnswer = { receipt_b64?: unknown; entry_hash?: unknown; leaf_index?: unknown; tree_size?: unknown };
+
+/** The name a service's rows are kept under: origin and path, no trailing slash. */
+export function serviceNameOf(service: URL): string {
+  return service.origin + service.pathname.replace(/\/+$/, "");
+}
+
+export type Registered =
+  | { ok: true; row: AnchorRow; checked: boolean }
+  | { ok: false; reason: "unreachable" | "wrong-receipt" | "receipt-unverified"; message: string };
+
+/**
+ * Registers one checkpoint hash at `serviceName` and returns the row to keep.
+ * Nothing is written here; the caller appends the row. With `serviceKey` the
+ * receipt must verify under it, at the tree size and leaf the service named.
+ */
+export async function registerCheckpoint(
+  serviceName: string,
+  hash: string,
+  serviceKey: string | null,
+  fetchImpl: typeof fetch = fetch,
+  now: () => number = Date.now,
+): Promise<Registered> {
+  const entryHash = anchorEntryHash(hash, "register");
+  let answer: RegisterAnswer;
+  try {
+    const res = await fetchImpl(`${serviceName}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/json" },
+      body: JSON.stringify({ capsule_id: hash }),
+      signal: AbortSignal.timeout(15_000),
+      redirect: "error",
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    answer = JSON.parse(await boundedText(res)) as RegisterAnswer;
+  } catch (err) {
+    return { ok: false, reason: "unreachable", message: err instanceof Error ? err.message : String(err) };
+  }
+  const { receipt_b64, entry_hash, leaf_index, tree_size } = answer;
+  if (
+    typeof receipt_b64 !== "string" ||
+    receipt_b64.length > MAX_RECEIPT_B64 ||
+    Buffer.from(receipt_b64, "base64").length > MAX_RECEIPT_BYTES ||
+    entry_hash !== entryHash ||
+    !Number.isSafeInteger(leaf_index) ||
+    !Number.isSafeInteger(tree_size)
+  ) {
+    return {
+      ok: false,
+      reason: "wrong-receipt",
+      message: "the service answered with a receipt for another entry, or no receipt",
+    };
+  }
+  if (serviceKey) {
+    const check = verifyReceipt(Buffer.from(receipt_b64, "base64"), Buffer.from(entryHash, "hex"), serviceKey);
+    if (!check.ok || check.treeSize !== tree_size || check.leafIndex !== leaf_index) {
+      return { ok: false, reason: "receipt-unverified", message: "receipt does not verify under the service key" };
+    }
+  }
+  return {
+    ok: true,
+    checked: serviceKey !== null,
+    row: {
+      v: 1,
+      checkpointHash: hash,
+      service: serviceName,
+      route: "register",
+      entryHash,
+      leafIndex: leaf_index as number,
+      treeSize: tree_size as number,
+      receiptB64: receipt_b64,
+      atMs: now(),
+    },
+  };
+}
+
+/** Checkpoint hashes in this directory with no row at `serviceName`, in file order. */
+export function pendingAnchors(dir: string, serviceName: string): { pending: string[]; problems: string[] } {
+  const loaded = readCheckpointFile(dir);
+  if (loaded.problems.length > 0) return { pending: [], problems: loaded.problems };
+  const existing = readAnchors(dir);
+  if (existing.problems.length > 0) return { pending: [], problems: existing.problems };
+  const done = new Set(existing.rows.filter((r) => r.service === serviceName).map((r) => r.checkpointHash));
+  return { pending: loaded.rows.map((row) => checkpointHash(row)).filter((hash) => !done.has(hash)), problems: [] };
+}
 
 export async function runAnchor(
   argv: readonly string[],
@@ -135,79 +220,37 @@ export async function runAnchor(
     out(usage());
     return EX_USAGE;
   }
-  const serviceName = service.origin + service.pathname.replace(/\/+$/, "");
-  const loaded = readCheckpointFile(dir);
-  if (loaded.problems.length > 0) {
-    for (const p of loaded.problems) out(`anchor: ${p}`);
+  const serviceName = serviceNameOf(service);
+  const { pending, problems } = pendingAnchors(dir, serviceName);
+  if (problems.length > 0) {
+    for (const p of problems) out(`anchor: ${p}`);
     return EX_ANCHOR_FAILED;
   }
-  const existing = readAnchors(dir);
-  if (existing.problems.length > 0) {
-    for (const p of existing.problems) out(`anchor: ${p}`);
-    return EX_ANCHOR_FAILED;
-  }
-  const done = new Set(existing.rows.filter((r) => r.service === serviceName).map((r) => r.checkpointHash));
-  const pending = loaded.rows.map((row) => checkpointHash(row)).filter((hash) => !done.has(hash));
   if (pending.length === 0) {
     out(json ? JSON.stringify({ anchored: 0, service: serviceName }) : `nothing to anchor at ${serviceName}`);
     return 0;
   }
   let failed = 0;
   for (const hash of pending) {
-    const entryHash = anchorEntryHash(hash, "register");
-    let answer: RegisterAnswer;
-    try {
-      const res = await fetchImpl(`${serviceName}/register`, {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify({ capsule_id: hash }),
-        signal: AbortSignal.timeout(15_000),
-        redirect: "error",
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      answer = JSON.parse(await boundedText(res)) as RegisterAnswer;
-    } catch (err) {
+    const got = await registerCheckpoint(serviceName, hash, serviceKey, fetchImpl, now);
+    if (!got.ok) {
       failed += 1;
-      out(`anchor: ${hash.slice(0, 12)} not registered: ${err instanceof Error ? err.message : String(err)}`);
+      const short = hash.slice(0, 12);
+      out(
+        got.reason === "unreachable"
+          ? `anchor: ${short} not registered: ${got.message}`
+          : got.reason === "wrong-receipt"
+            ? `anchor: ${short} ${got.message}`
+            : `anchor: ${short} receipt does not verify under --service-key; not kept`,
+      );
       continue;
     }
-    const { receipt_b64, entry_hash, leaf_index, tree_size } = answer;
-    if (
-      typeof receipt_b64 !== "string" ||
-      receipt_b64.length > MAX_RECEIPT_B64 ||
-      Buffer.from(receipt_b64, "base64").length > MAX_RECEIPT_BYTES ||
-      entry_hash !== entryHash ||
-      !Number.isSafeInteger(leaf_index) ||
-      !Number.isSafeInteger(tree_size)
-    ) {
-      failed += 1;
-      out(`anchor: ${hash.slice(0, 12)} the service answered with a receipt for another entry, or no receipt`);
-      continue;
-    }
-    if (serviceKey) {
-      const check = verifyReceipt(Buffer.from(receipt_b64, "base64"), Buffer.from(entryHash, "hex"), serviceKey);
-      if (!check.ok || check.treeSize !== tree_size || check.leafIndex !== leaf_index) {
-        failed += 1;
-        out(`anchor: ${hash.slice(0, 12)} receipt does not verify under --service-key; not kept`);
-        continue;
-      }
-    }
-    const row: AnchorRow = {
-      v: 1,
-      checkpointHash: hash,
-      service: serviceName,
-      route: "register",
-      entryHash,
-      leafIndex: leaf_index as number,
-      treeSize: tree_size as number,
-      receiptB64: receipt_b64,
-      atMs: now(),
-    };
+    const row = got.row;
     appendAnchor(dir, row);
     out(
       json
         ? JSON.stringify(row)
-        : `anchored ${hash.slice(0, 12)} at ${serviceName}: leaf ${row.leafIndex} of ${row.treeSize}${serviceKey ? ", receipt verified" : ", receipt not yet checked"}`,
+        : `anchored ${hash.slice(0, 12)} at ${serviceName}: leaf ${row.leafIndex} of ${row.treeSize}${got.checked ? ", receipt verified" : ", receipt not yet checked"}`,
     );
   }
   return failed === 0 ? 0 : EX_ANCHOR_FAILED;

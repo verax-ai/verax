@@ -146,6 +146,40 @@ still never taken over automatically.
 
 Guard: `stale-lock-pid-reuse`. Not released.
 
+## Automatic anchoring — unreleased
+
+`verax witness` reads `VERAX_ANCHOR_SERVICE` (https; http only on a
+loopback address) and, optionally, `VERAX_ANCHOR_SERVICE_KEY` (a file
+holding the service's public key) once at start. A value that is set but
+unusable stops the witness with exit 64 rather than letting it run without
+anchoring. After it answers a checkpoint request, the witness registers every
+checkpoint in the directory not yet anchored at that service, the same
+`POST /register` with the checkpoint hash and nothing else that `verax
+anchor` sends, and appends the receipt to `checkpoint-anchors.jsonl`. With
+the key, a receipt that does not verify is not kept. Registrations run one at
+a time and never before the answer, so a slow or absent service does not
+delay the body. A failure is an `anchor-failed` row in `witness-status.jsonl`
+and is retried with the next checkpoint. `witness.listen.json` names the
+service, and `verax doctor` reports what the running witness was started
+with: anchoring, not anchoring, or checkpoints still pending with the last
+failure. `/healthz` reads the witness class from the last signed or fallback
+row, past checkpoint and anchor rows.
+
+`verax verify --anchor-key <pem> --require-anchored [--anchor-grace-ms N]`
+names `checkpoint-not-anchored <hash>` for every verified checkpoint whose
+window ended more than the grace ago (default ten minutes) and has no
+receipt verifying under that key, so a receipt deleted from the directory no
+longer passes quietly. `--require-anchored` without `--anchor-key` does not
+verify.
+
+This detects; it does not prevent. Someone who can write the directory can
+still stop the witness or remove the newest checkpoint together with its
+receipt; that leaves nothing local to compare, and `verify` does not ask the
+service. The witness is started by the operator, so the variable comes from
+wherever the operator starts it; `verax install` does not start a witness.
+
+Guard: `auto-anchor`. Not released.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a
