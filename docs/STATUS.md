@@ -261,6 +261,15 @@ written, under the hash of the document without the extra keys; they are
 still read, so the cleaned policy starts on the same state directory and the
 panel and `verax approve` still find the historical policy.
 
+A `spend` block is read on the `spend` tool only. On any other rule it set
+no cap and stayed out of the policy hash, so two files that read differently
+shared one hash (R26). The parser now refuses it
+(`policy-rule-spend-not-spend-tool:<id>`); a snapshot already on disk is
+still read. `verax reconcile --channel card` took statement descriptors from
+the stored document, where such a block on another rule could add a
+descriptor the hash did not cover; it now takes them from the parsed spend
+rule only.
+
 Guards: `policy-unknown-keys`, `policy-snapshot-unknown-keys`. Not released.
 
 ## Historical record

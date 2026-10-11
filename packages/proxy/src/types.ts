@@ -53,6 +53,8 @@ export type Policy = {
   evaluate(call: ToolCall, principal: Principal, ctx?: PolicyEvalCtx): PolicyDecision;
   /** Spend-rule day bucket. Absent means UTC, the same as `dayOffsetMinutes: 0`. */
   dayOffsetMinutes?: number;
+  /** Statement descriptors the spend rule names for each payee, as parsed: what the hash covers. */
+  descriptorsByPayee?: Readonly<Record<string, readonly string[]>>;
   rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number; dayOffsetMinutes?: number } } | null;
 };
 

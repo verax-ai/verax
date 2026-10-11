@@ -13,20 +13,11 @@ import {
 
 const SNAPSHOT_NAME = /^[0-9a-f]{64}\.json$/;
 
-function descriptorsFromDoc(doc: {
-  rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
-}): Record<string, string[]> {
+// The descriptors come from the parsed policy, never from the stored document: a snapshot is
+// read with unknown keys ignored, and a block the hash does not cover must not decide a match.
+function descriptorsOf(policy: { descriptorsByPayee?: Readonly<Record<string, readonly string[]>> }): Record<string, string[]> {
   const out: Record<string, string[]> = {};
-  if (!Array.isArray(doc.rules)) return out;
-  for (const rule of doc.rules) {
-    const spend = rule.spend;
-    if (!spend || !Array.isArray(spend.payees) || !Array.isArray(spend.descriptors)) continue;
-    const stamps = spend.descriptors.filter((d): d is string => typeof d === "string" && d !== "");
-    if (stamps.length === 0) continue;
-    for (const payee of spend.payees) {
-      if (typeof payee === "string" && payee !== "") out[payee] = stamps;
-    }
-  }
+  for (const [payee, stamps] of Object.entries(policy.descriptorsByPayee ?? {})) out[payee] = [...stamps];
   return out;
 }
 
@@ -56,11 +47,9 @@ function loadDescriptorsFromDir(stateDir: string): {
   const chosen = candidates[candidates.length - 1]!;
   const hash = chosen.name.slice(0, 64);
   try {
-    const doc = JSON.parse(readFileSync(join(dir, chosen.name), "utf8")) as {
-      rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
-    };
-    if (loadPolicy(doc, { unknownKeys: "ignore" }).hash !== hash) return { descriptorsByPayee: {}, policyHash: null };
-    return { descriptorsByPayee: descriptorsFromDoc(doc), policyHash: hash };
+    const policy = loadPolicy(JSON.parse(readFileSync(join(dir, chosen.name), "utf8")), { unknownKeys: "ignore" });
+    if (policy.hash !== hash) return { descriptorsByPayee: {}, policyHash: null };
+    return { descriptorsByPayee: descriptorsOf(policy), policyHash: hash };
   } catch {
     return { descriptorsByPayee: {}, policyHash: null };
   }
