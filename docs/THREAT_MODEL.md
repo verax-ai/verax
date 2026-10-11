@@ -43,6 +43,25 @@ administrator). An administrator, or root, is outside this model: they can chang
 the task, the unit, or the launch daemon. An elevated terminal the operator
 leaves open for the agent is also outside it.
 
+Outside the model means Verax does not prevent what they do. They can read
+the keys, stop the body and the witness, and rewrite or delete the state
+directory, and nothing on that host stops them. Because they can read the
+keys, signatures do not help against them either: a rewritten ledger can be
+signed again and verify. What can detect a rewrite is a copy they do not
+control. `verax anchor` (0.4.3) registers each checkpoint's hash with a
+Transparency Service someone else runs, and `verax verify --anchor-key`
+checks the receipts: a history rewritten before the last anchored checkpoint
+no longer matches the hash in that service's log, provided the reader asks
+the service or holds a receipt from outside the directory. A rewrite after
+the last anchor, and a body that was simply stopped, are not detected that
+way. Unreleased: the witness anchors each checkpoint automatically, and
+`verify --require-anchored` names a checkpoint with no receipt. Signed start
+rows (also unreleased) are for someone who cannot read the record key; they
+do not stop an administrator. Moving the key out of a file
+(`docs/design/key-custody.md`, not built) would leave an administrator able
+to use the key while on the host but not to copy it, and a KMS keeps its own
+log of each signature.
+
 `verax init --local` still writes a state directory the same user can
 read. That is a way to try the body, not a boundary.
 
@@ -84,6 +103,15 @@ the directory to compare; only asking the service shows it, and `verify`
 does not ask it yet. A witness that cannot reach the service writes
 `anchor-failed` and keeps signing; the gap shows as unanchored checkpoints.
 
+Unreleased: start rows are signed by the record key and each names the
+SHA-256 of the row before it. `verax verify` names a changed gap, a row
+removed from the middle, or an unsigned row after a signed one. Rows removed
+from the end leave nothing to compare, and anyone holding the record key can
+write a valid row; the signature binds the row to the key, not to the truth
+of the gap. An operator session can already stop the body with `POST
+/api/halt`; `verax watch --url` does not call it, and a signed halt from a
+remote watcher is designed in `docs/design/remote-halt.md`, not built.
+
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
@@ -103,8 +131,9 @@ Exception: `src/downstream.ts` may import the SDK stdio client transport (`clien
 Append-only records conflict with a right to erase. Phase 1 payloads are
 plaintext. A ledger-piece split lives in the tree. keep/move/drop of
 closed pieces and their copies is designed in
-`docs/design/ledger-rotation.md` and not applied. Payload encryption
-and a right-to-erase path are still not designed.
+`docs/design/ledger-rotation.md` and not applied. Payload sealing and
+erasure by destroying a per-subject key are designed in
+`docs/design/erasure.md` and not built.
 
 ## out of scope: OS compromise
 

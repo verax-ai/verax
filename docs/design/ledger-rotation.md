@@ -297,7 +297,9 @@ piece id, same line bytes. Doctor compares piece to piece.
 **Rejected.** Auto-delete after N days. THREAT_MODEL already says
 silence and "nothing happened" collapse when files vanish.
 
-**Still not designed.** Payload encryption. A right-to-erase path that
+**Designed elsewhere since.** Payload sealing and erasure by key
+destruction: `docs/design/erasure.md` (not built). **Still not designed
+here.** Payload encryption. A right-to-erase path that
 can honour a deletion request without leaving a hole that looks like
 tamper. Append-only and erasure still conflict (THREAT_MODEL
 "retention and erasure"; STATUS Phase 1 gaps, now split: encryption
