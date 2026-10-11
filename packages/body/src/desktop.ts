@@ -25,7 +25,8 @@ import {
   type InstallPlatform,
 } from "./install.ts";
 import { hasRegisteredOperator } from "./operator-credentials.ts";
-import { pidAlive, readLockFile } from "./unlock.ts";
+import { lockHolderAlive } from "@verax-ai/proxy";
+import { readLockFile } from "./unlock.ts";
 
 // With VERAX_DESKTOP_TRACE=1 each startup step writes one stderr line with the
 // milliseconds since this module loaded. Windows CI has waited ~87 s before the
@@ -443,7 +444,7 @@ export async function desktopMode(
   const lockPath = join(stateDir, "ledger.lock");
   if (!existsSync(lockPath)) return { mode: "spawn" };
   const lock = readLockFile(lockPath);
-  if (!lock || !pidAlive(lock.pid)) return { mode: "spawn" };
+  if (!lock || !lockHolderAlive(lock)) return { mode: "spawn" };
   const lockPort = lock.port ?? null;
   if (lockPort === null || lockPort !== bodyPort) {
     return { error: "desktop-body-locked", pid: lock.pid, lockPort };

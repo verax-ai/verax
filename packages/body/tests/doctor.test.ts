@@ -32,7 +32,7 @@ describe("doctor", () => {
     const ours = mkdtempSync(join(tmpdir(), "verax-doc-ours-"));
     writeFileSync(
       join(ours, "ledger.lock"),
-      `${JSON.stringify({ pid: process.pid, startedAt: 1 })}\n`,
+      `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`,
       { encoding: "utf8" },
     );
     const oursCheck = runDoctor({ ...env, VERAX_STATE_DIR: ours }, ["node", "cli.ts", "doctor"]).find(

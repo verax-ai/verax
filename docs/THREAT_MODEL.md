@@ -92,7 +92,7 @@ Exception: `src/install.ts` may import `node:child_process` to install and remov
 
 Exception: `src/watch.ts` may import `node:child_process` to run an operator-configured isolation command once per silence episode. It passes a parsed executable and argv with `shell: false`; heartbeat content is never command input. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
-The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
+The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process. A live pid alone does not make a lock held (unreleased): a lock that names this process but was written before it started, or that records another Linux boot id, is stale. That is the case of a container restarted on the same volume, where the body is PID 1 again.
 
 A spike stdio attach lives in `packages/body/src/downstream.ts` and starts a child through the SDK stdio transport. That source does not write the `child_process` name, so the scan names the transport itself. `listen()` does not open the attach. A tool that enters through `extraTools` still goes through `createProxy`.
 
