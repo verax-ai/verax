@@ -1,6 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
+import { lockHolderAlive } from "@verax-ai/proxy";
 
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -12,7 +13,7 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-export type LockRecord = { pid: number; startedAt: number; port?: number };
+export type LockRecord = { pid: number; startedAt: number; port?: number; bootId?: string };
 
 /** A lock from before the body recorded its port has no `port`. That is still a lock. */
 export function readLockFile(path: string): LockRecord | null {
@@ -21,12 +22,14 @@ export function readLockFile(path: string): LockRecord | null {
       pid?: unknown;
       startedAt?: unknown;
       port?: unknown;
+      bootId?: unknown;
     };
     if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
     const record: LockRecord = { pid: raw.pid, startedAt: raw.startedAt };
     if (typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) {
       record.port = raw.port;
     }
+    if (typeof raw.bootId === "string" && raw.bootId !== "") record.bootId = raw.bootId;
     return record;
   } catch {
     return null;
@@ -68,7 +71,7 @@ export function runUnlock(
       writeErr("lock-unreadable\n");
       return 1;
     }
-  } else if (pidAlive(existing.pid)) {
+  } else if (lockHolderAlive(existing)) {
     writeErr(`still-running:${existing.pid}\n`);
     return 1;
   }

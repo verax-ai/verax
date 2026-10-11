@@ -71,6 +71,28 @@ from "nothing happened" if the only copy and watcher live on the same host
 and that host stops or removes both. These local observations are not
 independent evidence of uptime or of what happened during a gap.
 
+Unreleased: with `VERAX_ANCHOR_SERVICE` set, `verax witness` registers each
+checkpoint it signs with a SCITT Transparency Service someone else runs and
+keeps the receipt, and `verax verify --anchor-key <pem> --require-anchored`
+names every checkpoint older than the grace that has no receipt verifying
+under that key. This detects; it does not prevent. Whoever can write the
+state directory can still stop the witness, roll the ledger back or delete
+it. What changes is that a deleted receipt is named instead of passing, and
+the service's log keeps the checkpoint hash after the local copy is gone.
+Removing the newest checkpoint together with its receipt leaves nothing in
+the directory to compare; only asking the service shows it, and `verify`
+does not ask it yet. A witness that cannot reach the service writes
+`anchor-failed` and keeps signing; the gap shows as unanchored checkpoints.
+
+Unreleased: start rows are signed by the record key and each names the
+SHA-256 of the row before it. `verax verify` names a changed gap, a row
+removed from the middle, or an unsigned row after a signed one. Rows removed
+from the end leave nothing to compare, and anyone holding the record key can
+write a valid row; the signature binds the row to the key, not to the truth
+of the gap. An operator session can already stop the body with `POST
+/api/halt`; `verax watch --url` does not call it, and a signed halt from a
+remote watcher is designed in `docs/design/remote-halt.md`, not built.
+
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
@@ -79,7 +101,7 @@ Exception: `src/install.ts` may import `node:child_process` to install and remov
 
 Exception: `src/watch.ts` may import `node:child_process` to run an operator-configured isolation command once per silence episode. It passes a parsed executable and argv with `shell: false`; heartbeat content is never command input. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
-The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process.
+The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process. A live pid alone does not make a lock held (unreleased): a lock that names this process but was written before it started, or that records another Linux boot id, is stale. That is the case of a container restarted on the same volume, where the body is PID 1 again.
 
 A spike stdio attach lives in `packages/body/src/downstream.ts` and starts a child through the SDK stdio transport. That source does not write the `child_process` name, so the scan names the transport itself. `listen()` does not open the attach. A tool that enters through `extraTools` still goes through `createProxy`.
 

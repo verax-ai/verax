@@ -55,6 +55,8 @@ export function readHeartbeat(stateDir: string): HealthHeartbeat | null {
   }
 }
 
+const NOT_A_CLASS = new Set(["checkpoint", "checkpoint-refused", "anchored", "anchor-failed"]);
+
 export function readWitnessPulse(stateDir: string): HealthWitness | null {
   const path = join(stateDir, "witness-status.jsonl");
   if (!existsSync(path)) return null;
@@ -63,15 +65,19 @@ export function readWitnessPulse(stateDir: string): HealthWitness | null {
       .split("\n")
       .map((l) => l.trim())
       .filter((l) => l !== "");
-    const last = lines[lines.length - 1];
-    if (!last) return null;
-    const row = JSON.parse(last) as { atMs?: unknown; result?: unknown; class?: unknown };
-    if (typeof row.atMs !== "number" || !Number.isFinite(row.atMs)) return null;
-    if (row.result === "signed" || row.class === "same-org") {
-      return { class: "same-org", atMs: row.atMs };
-    }
-    if (row.result === "self-fallback" || row.class === "self") {
-      return { class: "self", atMs: row.atMs };
+    // Checkpoint and anchor rows say nothing about the class of the last
+    // effect; the row before them does.
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const row = JSON.parse(lines[i]!) as { atMs?: unknown; result?: unknown; class?: unknown };
+      if (typeof row.result === "string" && NOT_A_CLASS.has(row.result) && row.class === undefined) continue;
+      if (typeof row.atMs !== "number" || !Number.isFinite(row.atMs)) return null;
+      if (row.result === "signed" || row.class === "same-org") {
+        return { class: "same-org", atMs: row.atMs };
+      }
+      if (row.result === "self-fallback" || row.class === "self") {
+        return { class: "self", atMs: row.atMs };
+      }
+      return null;
     }
     return null;
   } catch {

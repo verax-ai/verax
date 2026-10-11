@@ -2,7 +2,7 @@ export { createProxy, LedgerDenyUnrecorded } from "./proxy.ts";
 export { effectDescriptor, sha256Canonical } from "./hash.ts";
 export { samePublicKey, thirdPartyReceiptRejection } from "./third-party.ts";
 export { loadPolicy, TERMINAL_CONTROL_CLASS } from "./policy.ts";
-export { FileLedger, MemoryLedger, readLedgerTail } from "./ledger.ts";
+export { FileLedger, MemoryLedger, readLedgerTail, lockHolderAlive } from "./ledger.ts";
 export { indexCoverage, listPieceFiles } from "./ledger-manifest.ts";
 export { explain } from "./explain.ts";
 export {
@@ -26,7 +26,7 @@ export { signEffectAttestation } from "./ledger.ts";
 export { spokenReason } from "./spoken-reason.ts";
 export type { ApprovalRow, ApproveResult } from "./approvals.ts";
 export type { CardCsvOpts, ChannelRow, ReconcileReport } from "./reconcile.ts";
-export type { FileLedgerOpts, LedgerCounts } from "./ledger.ts";
+export type { FileLedgerOpts, LedgerCounts, LockHolder } from "./ledger.ts";
 export type { ApprovalSignature, ControlSignature, RevokeInput } from "./types.ts";
 export type {
   EffectSigner,

@@ -102,6 +102,108 @@ activity is attested by these observations.
 
 Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
+## Downstream tools list — unreleased tree
+
+A downstream entry may carry `tools`, a list of the child's own tool names.
+Only those are attached: they enter the registry, appear on `tools/list` as
+`prefix.childName` and are held to the 64 KiB bound. The rest of the child's
+list is read for names and nothing else. A name the child does not offer
+stops the attach with `downstream-tool-missing:<prefix>.<name>`, as any
+half-attach does. A list that is empty, longer than 256, repeats a name or
+holds a name outside the child-name pattern is `downstream-tools-invalid`.
+Without `tools` the attach is unchanged.
+
+The list is how an operator puts a large child behind the gate for the few
+tools it writes rules for. Driven against REA (`rea-agents` 6.3.0, 139 tools,
+one advertising 87 KB) on 11 October 2026: without a list the attach stopped
+at `downstream-tool-too-large:rea.compare_web_captures`. With
+`["analyze_javascript_application", "capture_process_scenario"]` and one
+rule for the first, `tools/list` showed those two. The static analysis ran
+and left an allow and an effect row. The process capture, which asked to run
+`/bin/sh`, was refused `denied:no-rule` and REA never saw it. `verax verify`
+reported every signature valid.
+
+Not done: the list is not a rule. A listed tool still needs a policy rule
+to run, and the list does not narrow a tool's arguments.
+
+Guards: `downstream-tools`; not published.
+
+## Stale lock after a container restart — unreleased
+
+A container restarted on the same volume runs the body as PID 1 again,
+and the lock its last run left names PID 1. Up to 0.4.8 that pid counted
+as alive, so the body refused with `ledger-locked:1` rather than
+`ledger-locked-stale`, and `verax unlock` run in a new container (also PID
+1) answered `still-running:1`; the lock could only be deleted by hand.
+Measured on `veraxai/verax:0.4.7`. A lock is now held only when its pid is
+alive, it does not name this process with a start time before this
+process started, and, on Linux, it does not record a different boot id
+(written into the lock from `/proc/sys/kernel/random/boot_id`). The body
+then refuses with `ledger-locked-stale:1` and `verax unlock` removes the
+lock; measured in a container built from this tree. The same rule judges
+the witness's listen file and the doctor and desktop checks. A lock is
+still never taken over automatically.
+
+Guard: `stale-lock-pid-reuse`. Not released.
+
+## Automatic anchoring — unreleased
+
+`verax witness` reads `VERAX_ANCHOR_SERVICE` (https; http only on a
+loopback address) and, optionally, `VERAX_ANCHOR_SERVICE_KEY` (a file
+holding the service's public key) once at start. A value that is set but
+unusable stops the witness with exit 64 rather than letting it run without
+anchoring. After it answers a checkpoint request, the witness registers every
+checkpoint in the directory not yet anchored at that service, the same
+`POST /register` with the checkpoint hash and nothing else that `verax
+anchor` sends, and appends the receipt to `checkpoint-anchors.jsonl`. With
+the key, a receipt that does not verify is not kept. Registrations run one at
+a time and never before the answer, so a slow or absent service does not
+delay the body. A failure is an `anchor-failed` row in `witness-status.jsonl`
+and is retried with the next checkpoint. `witness.listen.json` names the
+service, and `verax doctor` reports what the running witness was started
+with: anchoring, not anchoring, or checkpoints still pending with the last
+failure. `/healthz` reads the witness class from the last signed or fallback
+row, past checkpoint and anchor rows.
+
+`verax verify --anchor-key <pem> --require-anchored [--anchor-grace-ms N]`
+names `checkpoint-not-anchored <hash>` for every verified checkpoint whose
+window ended more than the grace ago (default ten minutes) and has no
+receipt verifying under that key, so a receipt deleted from the directory no
+longer passes quietly. `--require-anchored` without `--anchor-key` does not
+verify.
+
+This detects; it does not prevent. Someone who can write the directory can
+still stop the witness or remove the newest checkpoint together with its
+receipt; that leaves nothing local to compare, and `verify` does not ask the
+service. The witness is started by the operator, so the variable comes from
+wherever the operator starts it; `verax install` does not start a witness.
+
+Guard: `auto-anchor`. Not released.
+
+## Signed start rows — unreleased
+
+A body started by `verax serve` writes v2 start rows: the v1 fields plus
+`v: 2`, `prevStartHash` (SHA-256 of the previous line in `starts.jsonl`, or
+null) and `sig`, an Ed25519 signature by the record key over
+`verax-start-v2` and a newline followed by the canonical row without `sig`.
+`verax verify` checks them under the pinned `--key`, else the key the
+records carry, and says which. A signature that does not verify, a
+`prevStartHash` that is not the line before, or an unsigned row after a
+signed one is a problem, and the ledger does not verify. Unsigned rows
+before the first signed one, written by an earlier version, are counted
+and named as unsigned. With no records and no `--key`, signed rows are
+counted and not checked. `starts` in `--json` gains `signed`,
+`signedVerified`, `startKey` and `problems`; `unsigned` is now true only
+when some row is unsigned.
+
+Rows removed from the end leave nothing to compare. Whoever holds the
+record key can write a valid row: the signature says the body's key wrote
+it, not that the gap is true. A signed halt from a remote watcher is
+designed in `docs/design/remote-halt.md` and not built.
+
+Guards: `signed-starts`; `heartbeat-watch` reads a real body's signed rows
+back. Not released.
+
 ## Key custody check — unreleased
 
 `verax doctor` opens `<stateDir>/keys/record.private.pem` as the user who

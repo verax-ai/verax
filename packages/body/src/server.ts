@@ -7,6 +7,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
+import { bodyVersion } from "./body-version.ts";
 import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import { approvalChallenge, gateApprovalSignature } from "./approval-signature.ts";
 import { readCredentials } from "./operator-credentials.ts";
@@ -429,7 +430,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
   }
   try {
     // This must precede syncControlRecords: those records pulse too.
-    recordBodyStart(config.stateDir, services.ledger.startedAtMs);
+    recordBodyStart(config.stateDir, services.ledger.startedAtMs, signers.recordSigner);
   } catch (err) {
     services.ledger.close();
     await closeAll(sessions);
@@ -933,7 +934,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         res.end(JSON.stringify({ error: "method-not-allowed" }));
         return;
       }
-      const mcp = new McpServer({ name: "verax-body", version: "0.0.0" }, { capabilities: { tools: {} } });
+      const mcp = new McpServer({ name: "verax-body", version: bodyVersion() }, { capabilities: { tools: {} } });
       attachHandlers(mcp);
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,

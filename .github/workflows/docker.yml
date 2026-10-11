@@ -1,7 +1,8 @@
 name: docker
-# Builds the container image from the body version on npm and checks two
+# Builds the container image from the body version on npm and checks three
 # things about it: it refuses to start without its OIDC configuration (exit 78,
-# the message names the missing variables), and it does not run as root.
+# the message names the missing variables), it opens its ledger on a fresh
+# volume once configured, and it does not run as root.
 # confirm=publish then pushes veraxai/verax:<version> and :latest to Docker Hub
 # with the DOCKERHUB_TOKEN repository secret. Nothing is pushed on a pull request.
 on:
@@ -41,6 +42,28 @@ jobs:
           echo "$out"
           test "$code" = 78
           echo "$out" | grep -q "missing VERAX_ISSUER, VERAX_JWKS_URL, or VERAX_AUDIENCE"
+
+      # The image declares VOLUME /var/lib/verax; a fresh named volume takes the
+      # directory's mode from the image, and the ledger refuses one wider than 0700.
+      - name: Opens its ledger on a fresh volume
+        env:
+          IMAGE: veraxai/verax:${{ steps.v.outputs.version }}
+        run: |
+          docker volume create verax-ci-state
+          policy=$(docker run --rm --entrypoint sh "$IMAGE" -c 'find /usr/local/lib/node_modules -path "*proxy/policy/default.json" | head -1')
+          docker run -d --name verax-ci-body -v verax-ci-state:/var/lib/verax \
+            -e VERAX_ISSUER=https://issuer.invalid -e VERAX_JWKS_URL=https://issuer.invalid/jwks \
+            -e VERAX_AUDIENCE=https://verax.invalid/mcp -e VERAX_TLS_TERMINATED=1 \
+            -e VERAX_POLICY_FILE="$policy" "$IMAGE" serve
+          ok=1
+          for _ in $(seq 1 30); do
+            if docker logs verax-ci-body 2>&1 | grep -q "^listening "; then ok=0; break; fi
+            if [ "$(docker inspect -f '{{.State.Running}}' verax-ci-body)" != "true" ]; then break; fi
+            sleep 1
+          done
+          docker logs verax-ci-body 2>&1 | tail -5
+          docker rm -f verax-ci-body
+          exit "$ok"
 
       - name: Does not run as root
         run: test "$(docker run --rm --entrypoint id "veraxai/verax:${{ steps.v.outputs.version }}" -u)" != "0"

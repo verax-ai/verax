@@ -15,8 +15,10 @@ import {
 import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract } from "@cedulon/effect-extract";
-import { checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
+import { appendAnchor, checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
+import { pendingAnchors, registerCheckpoint, serviceNameOf, serviceUrl } from "./anchor-cli.ts";
 import { assertEd25519PublicKey } from "./keys.ts";
+import { lockHolderAlive } from "@verax-ai/proxy";
 import { pidAlive } from "./unlock.ts";
 
 const WITNESS_CLASS = "same-org" as const;
@@ -27,7 +29,90 @@ export type WitnessListen = {
   token: string;
   publicKeyPem: string;
   startedAt: number;
+  /** The Transparency Service this witness registers each checkpoint with, or absent. */
+  anchorService?: string;
 };
+
+/** Where `verax witness` sends each checkpoint it signs, read once at start. */
+export type WitnessAnchor = { serviceName: string; serviceKey: string | null };
+
+/**
+ * `VERAX_ANCHOR_SERVICE` names the service (https; http only on loopback) and
+ * `VERAX_ANCHOR_SERVICE_KEY` a file holding its public key. Neither set is no
+ * anchoring. A value that is set but unusable is an error, so a witness the
+ * operator meant to anchor does not start without anchoring.
+ */
+export function witnessAnchorFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): { ok: true; anchor: WitnessAnchor | null } | { ok: false; reason: string } {
+  const raw = env.VERAX_ANCHOR_SERVICE?.trim() ?? "";
+  const keyPath = env.VERAX_ANCHOR_SERVICE_KEY?.trim() ?? "";
+  if (raw === "") {
+    if (keyPath !== "") return { ok: false, reason: "VERAX_ANCHOR_SERVICE_KEY is set without VERAX_ANCHOR_SERVICE" };
+    return { ok: true, anchor: null };
+  }
+  const url = serviceUrl(raw);
+  if (!url) {
+    return {
+      ok: false,
+      reason: "VERAX_ANCHOR_SERVICE must be an https URL with no credentials, query or fragment (http only on loopback)",
+    };
+  }
+  let serviceKey: string | null = null;
+  if (keyPath !== "") {
+    try {
+      serviceKey = readFileSync(keyPath, "utf8");
+    } catch {
+      return { ok: false, reason: `cannot read VERAX_ANCHOR_SERVICE_KEY file ${keyPath}` };
+    }
+    if (serviceKey.trim() === "") return { ok: false, reason: `VERAX_ANCHOR_SERVICE_KEY file ${keyPath} is empty` };
+  }
+  return { ok: true, anchor: { serviceName: serviceNameOf(url), serviceKey } };
+}
+
+/**
+ * Registers every checkpoint in `stateDir` not yet anchored at the service,
+ * so a failure is retried with the next checkpoint. A failure is a
+ * `witness-status.jsonl` row and nothing else: the checkpoint is already
+ * written and the body is not waiting for this.
+ */
+export async function anchorPendingCheckpoints(
+  stateDir: string,
+  anchor: WitnessAnchor,
+  fetchImpl: typeof fetch = fetch,
+): Promise<void> {
+  const { pending, problems } = pendingAnchors(stateDir, anchor.serviceName);
+  if (problems.length > 0) {
+    appendStatus(stateDir, {
+      atMs: Date.now(),
+      result: "anchor-failed",
+      service: anchor.serviceName,
+      reason: "unreadable",
+    });
+    return;
+  }
+  for (const hash of pending) {
+    const got = await registerCheckpoint(anchor.serviceName, hash, anchor.serviceKey, fetchImpl);
+    if (!got.ok) {
+      appendStatus(stateDir, {
+        atMs: Date.now(),
+        result: "anchor-failed",
+        service: anchor.serviceName,
+        checkpointHash: hash,
+        reason: got.reason,
+      });
+      continue;
+    }
+    appendAnchor(stateDir, got.row);
+    appendStatus(stateDir, {
+      atMs: Date.now(),
+      result: "anchored",
+      service: anchor.serviceName,
+      checkpointHash: hash,
+      receipt: got.checked ? "verified" : "unchecked",
+    });
+  }
+}
 
 type EffectRowWire = {
   ref: string;
@@ -93,6 +178,7 @@ export function readWitnessListen(stateDir: string): WitnessListen | null {
       token: raw.token,
       publicKeyPem: raw.publicKeyPem,
       startedAt: typeof raw.startedAt === "number" ? raw.startedAt : 0,
+      ...(typeof raw.anchorService === "string" && raw.anchorService !== "" ? { anchorService: raw.anchorService } : {}),
     };
   } catch {
     return null;
@@ -414,10 +500,34 @@ export async function requestWitnessSign(
 export async function runWitness(stateDir: string): Promise<void> {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const existing = readWitnessListen(stateDir);
-  if (existing && pidAlive(existing.pid)) {
+  // A restarted container runs the witness under the same pid; a listen file
+  // written before this process started is not a running witness.
+  if (existing && lockHolderAlive({ pid: existing.pid, startedAt: existing.startedAt })) {
     process.stderr.write(`witness-already-running:${existing.pid}\n`);
     process.exit(1);
   }
+  const anchorConfig = witnessAnchorFromEnv();
+  if (!anchorConfig.ok) {
+    process.stderr.write(`witness-anchor-config: ${anchorConfig.reason}\n`);
+    process.exit(64);
+  }
+  const anchor = anchorConfig.anchor;
+  // One registration run at a time: two checkpoints in quick succession must
+  // not send the same pending hash twice.
+  let anchoring: Promise<void> = Promise.resolve();
+  const anchorAfterCheckpoint = (): void => {
+    if (!anchor) return;
+    anchoring = anchoring
+      .then(() => anchorPendingCheckpoints(stateDir, anchor))
+      .catch(() => {
+        appendStatus(stateDir, {
+          atMs: Date.now(),
+          result: "anchor-failed",
+          service: anchor.serviceName,
+          reason: "exception",
+        });
+      });
+  };
   const keys = loadOrCreateWitnessKeys(stateDir);
   const token = randomBytes(16).toString("hex");
   const server = createServer((req, res) => {
@@ -471,6 +581,8 @@ export async function runWitness(stateDir: string): Promise<void> {
             keys,
           );
           send(res, 200, signed);
+          // After the answer: the body waits 800 ms for it, a service up to 15 s.
+          anchorAfterCheckpoint();
           return;
         }
         send(res, 404, { error: "not-found" });
@@ -500,10 +612,12 @@ export async function runWitness(stateDir: string): Promise<void> {
     token,
     publicKeyPem: keys.publicKeyPem,
     startedAt: Date.now(),
+    ...(anchor ? { anchorService: anchor.serviceName } : {}),
   };
   writeFileAtomic(listenPath(stateDir), `${JSON.stringify(listen)}\n`);
   process.stderr.write(`witness-pid:${process.pid}\n`);
   process.stderr.write(`witness-port:${addr.port}\n`);
+  if (anchor) process.stderr.write(`witness-anchor:${anchor.serviceName}\n`);
   await new Promise<void>((resolve) => {
     const shutdown = () => {
       try {
