@@ -265,6 +265,7 @@ describe("attack R14", () => {
           version: 1,
           default: "deny",
           approvalTtlMs: 86_400_000,
+          egress: ["b.c"],
           rules: [
             {
               id: "send",
@@ -272,6 +273,7 @@ describe("attack R14", () => {
               requires: ["verax:memory"],
               mode: "approve",
               text: "Sending needs operator approval.",
+              egress: true,
             },
           ],
         }),

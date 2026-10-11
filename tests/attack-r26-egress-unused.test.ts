@@ -132,3 +132,51 @@ describe("R26 an egress list that no rule reads", () => {
     assert.notEqual(got.policy.hash, withoutList.policy.hash, "the list left the hash of a stored snapshot");
   });
 });
+
+/**
+ * The description the agent reads says `message.send` reaches a host only
+ * when the policy lists it. A rule without the mark, in a document with no
+ * list, made that false: nothing read the host. The mark is now required on
+ * a rule for a tool whose host the gate reads.
+ */
+describe("a message.send rule without the mark", () => {
+  it("does not load, list or no list", () => {
+    const got = load({ version: 1, default: "deny", rules: [UNMARKED_SEND] });
+    if (got.ok) {
+      const decision = got.policy.evaluate(
+        { name: "message.send", arguments: { to: "alice@evil.example", text: "hi" } },
+        sender,
+      );
+      assert.notEqual(decision.decision, "allow", "no host is listed and the gate allowed evil.example");
+    }
+    assert.equal(got.ok, false);
+    if (!got.ok) assert.equal(got.reason, "policy-rule-egress-unmarked:message-send");
+  });
+
+  it("an approve rule is held to the same mark", () => {
+    const got = load({
+      version: 1,
+      default: "deny",
+      rules: [{ ...UNMARKED_SEND, mode: "approve" }],
+    });
+    assert.equal(got.ok, false, "an operator would be asked to approve a send to a host nothing checked");
+    if (!got.ok) assert.equal(got.reason, "policy-rule-egress-unmarked:message-send");
+  });
+
+  it("a marked rule with no list loads and reaches no host", () => {
+    const got = load({ version: 1, default: "deny", rules: [{ ...UNMARKED_SEND, egress: true }] });
+    assert.equal(got.ok, true);
+    if (!got.ok) return;
+    const decision = got.policy.evaluate(
+      { name: "message.send", arguments: { to: "alice@mail.example", text: "hi" } },
+      sender,
+    );
+    assert.equal(decision.decision, "deny");
+    assert.equal(decision.reasonCode, "egress-blocked");
+  });
+
+  it("a snapshot already on disk with an unmarked rule still opens", () => {
+    const got = load({ version: 1, default: "deny", rules: [UNMARKED_SEND] }, { unknownKeys: "ignore" });
+    assert.equal(got.ok, true, "a state directory written by 0.4.8 would not open");
+  });
+});

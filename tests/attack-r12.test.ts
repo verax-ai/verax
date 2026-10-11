@@ -396,6 +396,7 @@ describe("attack R12", () => {
       version: 1,
       default: "deny",
       approvalTtlMs: 86_400_000,
+      egress: ["b.co"],
       rules: [
         {
           id: "send-approve",
@@ -403,6 +404,7 @@ describe("attack R12", () => {
           requires: ["verax:memory"],
           mode: "approve",
           text: "Sending needs operator approval.",
+          egress: true,
         },
       ],
     });
@@ -484,6 +486,7 @@ describe("attack R12", () => {
       version: 1,
       default: "deny",
       approvalTtlMs: 86_400_000,
+      egress: ["b.co"],
       rules: [
         {
           id: "send-approve",
@@ -491,6 +494,7 @@ describe("attack R12", () => {
           requires: ["verax:memory"],
           mode: "approve",
           text: "Sending needs operator approval.",
+          egress: true,
         },
       ],
     });
