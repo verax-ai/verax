@@ -18,7 +18,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 
 ## Fixes
 
-- R26-1, R26-2: a held lock is touched every 2 seconds and records that beat (`beatMs`) in the lock file. The body, `verax unlock` and `verax doctor` watch such a lock for five beats. One that moves is held, whatever pid it names; only a change is read, never a time. One that does not move is then judged by its pid and start time as before, and is stale only when that says so too. A start time that has not come yet, or one that is not a finite number, no longer counts as a live holder. A lock from 0.4.8 or earlier records no beat and is judged by its pid alone.
+- R26-1, R26-2: a held lock is touched every 2 seconds and records that beat (`beatMs`) in the lock file. The body, `verax unlock` and `verax doctor` watch such a lock for five beats. One that moves is held, whatever pid it names; only a change is read, never a time. One that does not move is then judged by its pid and start time as before, and is stale only when that says so too. A start time that is not a finite number no longer counts as a live holder, and neither does a lock that names the reader's own pid with a start time that has not come yet; a lock that names another live pid is held whatever time it states. A lock from 0.4.8 or earlier records no beat and is judged by its pid alone.
 - R26-3: the parser refuses the block with `policy-rule-spend-not-spend-tool:<id>`. A snapshot already on disk is still read.
 - R26-4: descriptors come from the parsed spend rule (`Policy.descriptorsByPayee`), so what decides a match is what the hash covers.
 - R26-5: a window that ends more than a minute after the reader's clock is named `checkpoint-window-in-future <hash>`.
