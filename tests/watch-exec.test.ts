@@ -130,7 +130,12 @@ describe("heartbeat boundaries", () => {
     writeFileSync(join(dir, "starts.jsonl"), 'null\n{"action":"start"}\n');
     const summary = readStartSummary(dir);
     assert.equal(summary.count, 0);
-    assert.equal(summary.warnings.length, 2);
+    // Up to 0.4.8 these were warnings and the ledger still verified. A line of
+    // this file that is not a start row is a problem since 0.5.0.
+    assert.deepEqual(summary.problems, [
+      "starts.jsonl line 1 is not a start row",
+      "starts.jsonl line 2 is not a start row",
+    ]);
   });
   it("preserves Windows paths and rejects unmatched quotes", () => {
     assert.deepEqual(commandArgv('"C:\\Program Files\\node.exe" script.mjs "" "hello world"'), ["C:\\Program Files\\node.exe", "script.mjs", "", "hello world"]);

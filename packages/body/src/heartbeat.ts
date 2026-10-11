@@ -207,19 +207,21 @@ export function readStartSummary(
       row = parsed as StartRow | SignedStartRow;
       if (!isStartRow(row)) throw new Error("start row shape");
     } catch {
-      // A line that carries what only a signed row carries, and no longer reads
-      // as a start row, is a signed row someone altered: it is not skipped.
+      // Every line of this file is a start row the body wrote, so a line that
+      // does not read as one is a problem, whatever it still looks like.
+      // Naming a tampered signed row by the fields it shows is only a better
+      // message: the writer of the file can always make a row show none.
       if (claimsSigned(parsed, line)) {
         seenSigned = true;
         result.signed += 1;
         result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
-        prevLine = line;
-        continue;
+      } else if (seenSigned) {
+        result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
+      } else if (opts.requireSigned) {
+        result.problems.push(`start-row-unreadable: starts.jsonl line ${n}`);
+      } else {
+        result.problems.push(`starts.jsonl line ${n} is not a start row`);
       }
-      result.warnings.push(`starts.jsonl line ${n} is unreadable`);
-      if (seenSigned) result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
-      // A line nothing can read is not a signed row either.
-      else if (opts.requireSigned) result.problems.push(`start-row-unreadable: starts.jsonl line ${n}`);
       prevLine = line;
       continue;
     }

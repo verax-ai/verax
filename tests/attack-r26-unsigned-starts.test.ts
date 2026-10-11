@@ -215,6 +215,39 @@ describe("R26-7 start rows with their signatures taken off", () => {
     }
   });
 
+  // Second pass of the pre-release review. Naming a tampered signed row by the
+  // fields it still shows is a guess the writer of the file can always defeat.
+  // What holds is the other way round: every line of starts.jsonl is a start
+  // row, and one that is not is a problem.
+  for (const [label, alter] of [
+    ["wrapped in an array", (r: Row) => JSON.stringify([r])],
+    [
+      "with its field names escaped and its last character cut",
+      (r: Row) =>
+        JSON.stringify(r)
+          .replace('"v"', '"\\u0076"')
+          .replace('"sig"', '"s\\u0069g"')
+          .replace('"prevStartHash"', '"prevStart\\u0048ash"')
+          .slice(0, -1),
+    ],
+    ["replaced by a line of text", () => "restarted by hand, nothing to see"],
+    ["replaced by a JSON string", () => JSON.stringify("start")],
+  ] as const) {
+    it(`every row ${label} is a problem, with no flag`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+      try {
+        const keyFile = await ledgerWithAThreeDayGap(dir);
+        writeFileSync(join(dir, "starts.jsonl"), `${rows(dir).map(alter).join("\n")}\n`, "utf8");
+        const got = await verify(dir, keyFile);
+        assert.match(got.text, /starts\.jsonl line 1/, got.text);
+        assert.match(got.text, /NOT VERIFIED/, got.text);
+        assert.equal(got.code, 1);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
   it("the same for one altered row in a ledger that has only that row", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
     try {

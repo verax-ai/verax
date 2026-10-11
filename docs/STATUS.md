@@ -259,8 +259,11 @@ records carry, and says which. A signature that does not verify, a
 signed one is a problem, and the ledger does not verify. So is a row that
 carries `v`, `sig` or `prevStartHash` and is not a well-formed v2 row,
 a line that no longer parses included: it is named `signed start row is
-malformed`, not skipped. A line that carries none of those names and
-cannot be read is a warning, as a removed file is nothing. Unsigned rows
+malformed`. Any other line that is not a start row is a problem as well
+(`starts.jsonl line N is not a start row`): every line of the file is a row
+the body wrote, and telling a tampered signed row from other damage by the
+fields it still shows is a guess the writer of the file can defeat. Up to
+0.4.8 such a line was a warning and the ledger verified. Unsigned rows
 before the first signed one, written by an earlier version, are counted
 and named as unsigned. With no records and no `--key`, signed rows are
 counted and not checked. `starts` in `--json` gains `signed`,
