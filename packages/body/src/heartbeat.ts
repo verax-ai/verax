@@ -167,6 +167,8 @@ export function readStartSummary(
     } catch {
       result.warnings.push(`starts.jsonl line ${n} is unreadable`);
       if (seenSigned) result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
+      // A line nothing can read is not a signed row either.
+      else if (opts.requireSigned) result.problems.push(`start-row-unreadable: starts.jsonl line ${n}`);
       prevLine = line;
       continue;
     }

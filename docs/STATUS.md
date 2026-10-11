@@ -239,11 +239,13 @@ written before signing, and a reader cannot tell the two apart (R26). The
 default therefore stays: such a file is counted, named `unsigned (not
 verified)`, and verifies. `verax verify --require-signed-starts` is for a
 reader who knows the ledger was written by a body that signs its starts:
-every unsigned row is `start-row-unsigned: starts.jsonl line N`, a ledger
-with no start row is `start-rows-missing`, signed rows with no record key to
-check them under are `start-rows-not-checked`, and the ledger does not
-verify. A ledger that began under 0.4.8 or earlier keeps its unsigned rows
-and does not pass under this flag.
+every unsigned row is `start-row-unsigned: starts.jsonl line N`, a line that
+cannot be read is `start-row-unreadable`, a ledger with no start row is
+`start-rows-missing`, signed rows with no record key to check them under are
+`start-rows-not-checked`, and the ledger does not verify. A ledger that
+began under 0.4.8 or earlier keeps its unsigned rows and does not pass under
+this flag. A file emptied before the body's next start begins a new chain
+that passes: like rows removed from the end, that leaves nothing to compare.
 
 Rows removed from the end leave nothing to compare. Whoever holds the
 record key can write a valid row: the signature says the body's key wrote

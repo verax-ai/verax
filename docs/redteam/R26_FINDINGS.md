@@ -38,6 +38,7 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - The R26-9 test required a timer tick during the call. A call that now answers in 2 ms leaves no tick to count; the tick is still required when the call lasts.
 - The first version of the `egress` fix asked only that some rule be marked. A list beside a marked `memory.get` rule and an unmarked `message.send` rule still loaded, and `message.send` still reached any host. The unmarked rule is now named and refused.
 - Three existing tests wrote a lock naming their own pid by hand and expected it to be held. A first rule that called every such lock stale broke them; the rule was dropped, and the future start time is what decides.
+- The first version of `--require-signed-starts` left a line that cannot be read as a warning. History replaced by one such line, with the body's next signed start chained on it, passed under the flag. The line is now `start-row-unreadable` and the ledger does not verify.
 
 ## Open
 

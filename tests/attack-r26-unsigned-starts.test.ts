@@ -62,6 +62,9 @@ async function verify(dir: string, keyFile: string, ...flags: string[]): Promise
   return { code, text: out.join("\n") };
 }
 
+/** The record key each test ledger was written with, for a later start by the same body. */
+const recordKeys = new Map<string, ReturnType<typeof keys>>();
+
 /** One decision at t=5000, a start before it and a start three days after its last beat. */
 async function ledgerWithAThreeDayGap(dir: string): Promise<string> {
   const record = keys();
@@ -89,6 +92,7 @@ async function ledgerWithAThreeDayGap(dir: string): Promise<string> {
   }
   const beat = JSON.parse(readFileSync(join(dir, "heartbeat.json"), "utf8")) as { atMs: number };
   recordBodyStart(dir, beat.atMs + THREE_DAYS, record);
+  recordKeys.set(dir, record);
   const keyFile = join(dir, "record-pin.pem");
   writeFileSync(keyFile, record.publicKeyPem, "utf8");
   return keyFile;
@@ -139,6 +143,23 @@ describe("R26-7 start rows with their signatures taken off", () => {
       rmSync(join(dir, "starts.jsonl"));
       const got = await verify(dir, keyFile, "--require-signed-starts");
       assert.match(got.text, /start-rows-missing/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("history replaced by a line that cannot be read does not pass under the flag", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      // The rows that carried the gap are replaced by one line nothing can read.
+      // The body's next start then chains on that line and signs.
+      writeFileSync(join(dir, "starts.jsonl"), "{\"action\":\"start\",\"atMs\":\"then\"}\n", "utf8");
+      const beat = JSON.parse(readFileSync(join(dir, "heartbeat.json"), "utf8")) as { atMs: number };
+      recordBodyStart(dir, beat.atMs + 1_000, recordKeys.get(dir)!);
+      const got = await verify(dir, keyFile, "--require-signed-starts");
+      assert.match(got.text, /start-row-unreadable: starts\.jsonl line 1/, got.text);
       assert.equal(got.code, 1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
