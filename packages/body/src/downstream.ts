@@ -40,6 +40,12 @@ export type DownstreamSpec = {
    * forbidden on HTTP.
    */
   trust?: "same-user";
+  /**
+   * Child tool names to attach, unprefixed. Only these enter the registry
+   * and only these are held to the bounds; a name the child does not offer
+   * stops the attach. Absent means every tool the child lists.
+   */
+  tools?: string[];
 };
 
 export type DownstreamTool = {
@@ -203,6 +209,19 @@ export function parseDownstreamJson(raw: string, bodyPublicKeyPems: readonly str
       throw new Error("downstream-trust-invalid");
     }
     spec.trust = "same-user";
+  }
+  if (rec.tools !== undefined) {
+    const names = rec.tools;
+    if (
+      !Array.isArray(names) ||
+      names.length === 0 ||
+      names.length > MAX_CHILD_TOOLS ||
+      !names.every((n) => typeof n === "string" && CHILD_TOOL_RE.test(n)) ||
+      new Set(names).size !== names.length
+    ) {
+      throw new Error("downstream-tools-invalid");
+    }
+    spec.tools = [...(names as string[])];
   }
   assertStdioTrusted(spec);
   return spec;
@@ -370,9 +389,21 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
     await shut(client, transport);
     throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.tools.length}`);
   }
+  // With a `tools` list the rest of the child's list is never read past its
+  // name: no size check, no registry entry, nothing republished.
+  const wanted = spec.tools === undefined ? null : new Set(spec.tools);
+  const offered = wanted === null ? listed.tools : listed.tools.filter((t) => wanted.has(t.name));
+  if (wanted !== null) {
+    for (const name of wanted) {
+      if (!offered.some((t) => t.name === name)) {
+        await shut(client, transport);
+        throw new Error(`downstream-tool-missing:${spec.prefix}.${name}`);
+      }
+    }
+  }
   const tools: DownstreamTool[] = [];
   const seen = new Set<string>();
-  for (const tool of listed.tools) {
+  for (const tool of offered) {
     if (!CHILD_TOOL_RE.test(tool.name)) {
       await shut(client, transport);
       throw new Error(`downstream-child-name-invalid:${tool.name}`);
