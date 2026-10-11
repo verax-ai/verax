@@ -6,7 +6,7 @@ import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
-import { lockHolderAlive } from "@verax-ai/proxy";
+import { lockHolderAlive, lockState } from "@verax-ai/proxy";
 import { readLockFile } from "./unlock.ts";
 import { pendingAnchors } from "./anchor-cli.ts";
 import { readWitnessListen } from "./witness.ts";
@@ -111,10 +111,13 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
       const existing = readLockFile(lockPath);
       if (!existing) {
         checks.push({ id: "ledger-lock", level: "fail", detail: "ledger.lock is unreadable" });
-      } else if (existing.pid === process.pid && lockHolderAlive(existing)) {
-        checks.push({ id: "ledger-lock", level: "ok", detail: `ledger.lock is this process (${existing.pid})` });
-      } else if (lockHolderAlive(existing)) {
-        checks.push({ id: "ledger-lock", level: "warn", detail: `ledger.lock is held by live pid ${existing.pid}` });
+      } else if (lockState(lockPath, existing) !== "stale") {
+        const own = existing.pid === process.pid;
+        checks.push(
+          own
+            ? { id: "ledger-lock", level: "ok", detail: `ledger.lock is this process (${existing.pid})` }
+            : { id: "ledger-lock", level: "warn", detail: `ledger.lock is held by live pid ${existing.pid}` },
+        );
       } else {
         checks.push({
           id: "ledger-lock",

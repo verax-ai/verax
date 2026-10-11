@@ -144,6 +144,24 @@ lock; measured in a container built from this tree. The same rule judges
 the witness's listen file and the doctor and desktop checks. A lock is
 still never taken over automatically.
 
+That rule read a pid and a wall clock, and two states defeated it (R26):
+a lock naming this pid with a start time in the future, left behind when
+the clock stepped back between runs, was read as this process's own; and
+two containers on one volume, both running the body as PID 1, each read
+the other's lock as its own leftover, so `verax unlock` in the second
+removed the lock of the running first. A held lock is now touched every
+2 seconds and records that beat (`beatMs`) in the lock file. The body,
+`verax unlock` and `verax doctor` judge such a lock by watching it for
+five beats: a lock that moves is held, whatever pid it names; one that
+does not is stale. No time is compared, only a change. Deciding that a
+lock is stale therefore takes about 10 seconds; a live one is seen
+within a beat. A lock from 0.4.8 or earlier records no beat and is judged
+by its pid as before, with one addition: a lock that names this process
+with a start time that has not come yet is stale. Does not: protect a body
+whose process is frozen for longer than five beats while an operator
+runs `verax unlock`; that body loses the lock and its next append stops
+with `ledger-lost-lock`. The witness's listen file does not beat.
+
 Guard: `stale-lock-pid-reuse`. Not released.
 
 ## Automatic anchoring — unreleased

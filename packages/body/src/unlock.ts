@@ -1,7 +1,7 @@
 import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
-import { lockHolderAlive } from "@verax-ai/proxy";
+import { lockBeatOf, lockState } from "@verax-ai/proxy";
 
 export function pidAlive(pid: number): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -13,7 +13,7 @@ export function pidAlive(pid: number): boolean {
   }
 }
 
-export type LockRecord = { pid: number; startedAt: number; port?: number; bootId?: string };
+export type LockRecord = { pid: number; startedAt: number; port?: number; bootId?: string; token?: string; beatMs?: number };
 
 /** A lock from before the body recorded its port has no `port`. That is still a lock. */
 export function readLockFile(path: string): LockRecord | null {
@@ -23,13 +23,18 @@ export function readLockFile(path: string): LockRecord | null {
       startedAt?: unknown;
       port?: unknown;
       bootId?: unknown;
+      token?: unknown;
+      beatMs?: unknown;
     };
-    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
+    if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number" || !Number.isFinite(raw.startedAt)) return null;
     const record: LockRecord = { pid: raw.pid, startedAt: raw.startedAt };
     if (typeof raw.port === "number" && Number.isInteger(raw.port) && raw.port > 0 && raw.port < 65536) {
       record.port = raw.port;
     }
     if (typeof raw.bootId === "string" && raw.bootId !== "") record.bootId = raw.bootId;
+    if (typeof raw.token === "string") record.token = raw.token;
+    const beatMs = lockBeatOf(raw.beatMs);
+    if (beatMs !== undefined) record.beatMs = beatMs;
     return record;
   } catch {
     return null;
@@ -71,9 +76,17 @@ export function runUnlock(
       writeErr("lock-unreadable\n");
       return 1;
     }
-  } else if (lockHolderAlive(existing)) {
-    writeErr(`still-running:${existing.pid}\n`);
-    return 1;
+  } else {
+    // A lock that beats is watched, so a body in another container that shares this pid is seen.
+    const state = lockState(lockPath, existing);
+    if (state === "held") {
+      writeErr(`still-running:${existing.pid}\n`);
+      return 1;
+    }
+    if (state === "gone") {
+      writeErr("no-lock\n");
+      return 1;
+    }
   }
   const operator = operatorName();
   const base = existing
