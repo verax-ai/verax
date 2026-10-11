@@ -38,6 +38,12 @@ Bearer token the configured issuer did not sign.
 | `VERAX_INVENTORY_FILE` | no | Roster document the body serves. The format is `@verax-ai/inventory`. |
 | `VERAX_DOWNSTREAM` | no | Path to a JSON document naming MCP servers to put behind this gate: one `{ prefix, command?, args?, cwd?, env?, url?, headers?, timeoutMs?, trust? }` or an array of them. Each child names exactly one way in — `command` to spawn it over stdio, or `url` to reach one already running over Streamable HTTP, with `headers` for its own bearer. A stdio child requires `"trust": "same-user"` (it runs as the same user as the body and can read the signing keys); an HTTP child does not ask for that field and must not carry it. This is a breaking change: existing stdio documents do not open until the field is added. A path and not the JSON itself, because the document may name a key in `env` or `headers`. Their tools are served as `prefix.childName` and need an exact policy rule under that name; a named child that cannot be opened stops the body. |
 
+The agent's token is a JWT signed with ES256 or EdDSA by a key in that JWKS.
+It must carry `iss` (`VERAX_ISSUER`), `aud` (`VERAX_AUDIENCE`), `sub`, `iat`,
+`exp` and `jti`; `scope` is a space-separated list the policy reads. A token
+without `jti` is refused with 401, because a revocation names a token by its
+`jti`. Check that your issuer sets it on the tokens it gives agents.
+
 `verax doctor` names what is missing. A misconfigured body exits with code 78
 before it listens.
 
