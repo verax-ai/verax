@@ -403,7 +403,8 @@ export type KeyOwner = "self" | "other" | "unknown";
 function defaultKeyOwner(path: string): KeyOwner {
   if (process.platform === "win32") return windowsFileOwner(path);
   try {
-    const uid = process.getuid?.();
+    // The effective uid is the one the refused open ran under, and the one a chmod would.
+    const uid = process.geteuid?.();
     if (uid === undefined) return "unknown";
     return statSync(path).uid === uid ? "self" : "other";
   } catch {

@@ -41,6 +41,7 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - With the list case closed, a `message.send` rule without the mark in a document with no list still reached any host, against the description the tool publishes. The mark is now required on that rule (`policy-rule-egress-unmarked:<id>`); a marked rule with no list reaches no host.
 - Three existing tests wrote a lock naming their own pid by hand and expected it to be held. A first rule that called every such lock stale broke them; the rule was dropped, and the future start time is what decides.
 - The first version of `--require-signed-starts` left a line that cannot be read as a warning. History replaced by one such line, with the body's next signed start chained on it, passed under the flag. The line is now `start-row-unreadable` and the ledger does not verify.
+- The first version of the R26-10 fix compared the Windows owner with the user's own SID only. A key owned by a group the user's token holds enabled read as someone else's, and `key-custody` stayed `ok`. The owner is now held against the user and those groups, and output that names no owner or no user is unknown rather than someone else's.
 
 ## Open
 

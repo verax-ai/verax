@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import { runDoctor } from "../packages/body/src/doctor.ts";
+import { windowsFileOwner } from "../packages/body/src/install.ts";
 
 /**
  * R26-10. `key-custody` was `ok` when one `open()` of the record key failed
@@ -45,6 +46,57 @@ function custodyOf(dir: string, keyOwner?: (path: string) => "self" | "other" | 
   assert.ok(custody, "no key-custody line");
   return custody;
 }
+
+/**
+ * On Windows a file may be owned by a group. A user whose token holds that
+ * group enabled has the owner's rights over the file, the same as an owning
+ * user. The first version compared the owner with the user's own SID only and
+ * read such a key as someone else's.
+ */
+describe("R26-10 the Windows owner reader", () => {
+  const USER = "S-1-5-21-1-2-3-1001";
+  const GROUP = "S-1-5-21-1-2-3-2002";
+  const STRANGER = "S-1-5-21-9-9-9-500";
+
+  function reader(lines: string[], status = 0) {
+    return (argv: string[]) =>
+      argv.some((a) => /whoami/i.test(a))
+        ? { status: 0, stdout: `user name sid\n${USER}\n` }
+        : { status, stdout: `${lines.join("\r\n")}\r\n` };
+  }
+
+  it("a key owned by a group this user holds is the user's own", () => {
+    const got = windowsFileOwner("C:\\state\\keys\\record.private.pem", reader([`owner ${GROUP}`, `user ${USER}`, `group S-1-5-32-545`, `group ${GROUP}`]));
+    assert.equal(got, "self");
+  });
+
+  it("a key owned by the user is the user's own", () => {
+    const got = windowsFileOwner("C:\\k.pem", reader([`owner ${USER}`, `user ${USER}`, `group S-1-5-32-545`]));
+    assert.equal(got, "self");
+  });
+
+  it("a key owned by an account or group this user does not hold is someone else's", () => {
+    const got = windowsFileOwner("C:\\k.pem", reader([`owner ${STRANGER}`, `user ${USER}`, `group S-1-5-32-545`]));
+    assert.equal(got, "other");
+  });
+
+  it("a refused security descriptor means the caller is not the owner", () => {
+    assert.equal(windowsFileOwner("C:\\k.pem", reader(["VERAX-OWNER-DENIED"])), "other");
+  });
+
+  it("anything else is unknown, never someone else's", () => {
+    assert.equal(windowsFileOwner("C:\\k.pem", reader([`owner ${STRANGER}`], 1)), "unknown");
+    assert.equal(windowsFileOwner("C:\\k.pem", reader([`owner ${STRANGER}`])), "unknown", "no user line");
+    assert.equal(windowsFileOwner("C:\\k.pem", reader([`user ${USER}`, `group ${GROUP}`])), "unknown", "no owner line");
+    assert.equal(windowsFileOwner("C:\\k.pem", reader([])), "unknown", "empty output");
+    assert.equal(
+      windowsFileOwner("C:\\k.pem", () => {
+        throw new Error("powershell is not there");
+      }),
+      "unknown",
+    );
+  });
+});
 
 describe("R26-10 key-custody and a key file this user owns", () => {
   it("is not ok while the user can give itself read again", (t) => {
