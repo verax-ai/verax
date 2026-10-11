@@ -408,11 +408,9 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
       await shut(client, transport);
       throw new Error(`downstream-child-name-invalid:${tool.name}`);
     }
-    const toolBytes = JSON.stringify({
-      name: tool.name,
-      description: tool.description,
-      inputSchema: tool.inputSchema,
-    }).length;
+    // The whole entry as the child sent it, in bytes: a description in three-byte
+    // characters, or megabytes in outputSchema or title, count against the bound too.
+    const toolBytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
     if (toolBytes > MAX_TOOL_BYTES) {
       await shut(client, transport);
       throw new Error(`downstream-tool-too-large:${spec.prefix}.${tool.name}:${toolBytes}`);
