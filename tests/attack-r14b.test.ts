@@ -37,7 +37,8 @@ function modeOf(dir: string): number {
 function writeLock(dir: string, pid: number, port?: number): void {
   const body: { pid: number; startedAt: number; token: string; port?: number } = {
     pid,
-    startedAt: 1,
+    // A live holder writes its lock after it started.
+    startedAt: Date.now(),
     token: "t",
   };
   if (port !== undefined) body.port = port;

@@ -235,6 +235,17 @@ export type VerifyOptions = {
   checkpointPublicKeyPem?: string;
   /** The Transparency Service key that receipts in `checkpoint-anchors.jsonl` are checked under. */
   anchorPublicKeyPem?: string;
+  /**
+   * Every verified checkpoint whose window ended more than `anchorGraceMs`
+   * before `nowMs` must have a receipt that verifies under
+   * `anchorPublicKeyPem`; one without is `checkpoint-not-anchored <hash>`.
+   * A receipt deleted from the directory is then named instead of passing.
+   */
+  requireAnchored?: boolean;
+  /** Default `DEFAULT_ANCHOR_GRACE_MS`. */
+  anchorGraceMs?: number;
+  /** The clock `requireAnchored` reads. Default `Date.now()`. */
+  nowMs?: number;
   /** How close to the newest record an allow with no effect row is deferred rather than named. */
   boundaryAllowanceMs?: number;
 };
@@ -777,7 +788,12 @@ function tailStatement(
     }
     try {
       const count = rows[i]!.claims.receiptCount;
-      verified.push({ hash: checkpointHash(rows[i]!), receiptCount: typeof count === "number" ? count : null });
+      const endMs = rows[i]!.claims.endMs;
+      verified.push({
+        hash: checkpointHash(rows[i]!),
+        receiptCount: typeof count === "number" ? count : null,
+        endMs: typeof endMs === "number" ? endMs : null,
+      });
     } catch {
       // A row that verified but cannot be hashed cannot be anchored either.
     }
@@ -837,7 +853,17 @@ function tailStatement(
   };
 }
 
-type VerifiedCheckpoint = { hash: string; receiptCount: number | null };
+type VerifiedCheckpoint = { hash: string; receiptCount: number | null; endMs: number | null };
+
+/**
+ * How long after its window ends a checkpoint may be unanchored. The witness
+ * signs when the body asks, after the window closes, and registers after it
+ * answers; one registration may take up to 15 s and a failure is retried with
+ * the next checkpoint. Ten minutes covers that with room.
+ */
+export const DEFAULT_ANCHOR_GRACE_MS = 10 * 60 * 1000;
+
+type AnchorRequirement = { graceMs: number; nowMs: number } | null;
 
 const ANCHORS_NONE: VerifyAnchors = {
   line: "anchors: none (no checkpoint is registered with a transparency service)",
@@ -846,14 +872,35 @@ const ANCHORS_NONE: VerifyAnchors = {
   checked: false,
 };
 
+/** Checkpoints past the grace with no receipt that verified are named. */
+function requireAnchoredProblems(
+  checkpoints: readonly VerifiedCheckpoint[],
+  anchoredHashes: ReadonlySet<string>,
+  required: AnchorRequirement,
+): string[] {
+  if (!required) return [];
+  const out: string[] = [];
+  for (const c of checkpoints) {
+    if (anchoredHashes.has(c.hash)) continue;
+    // A checkpoint with no window end cannot be aged; it is held to the rule.
+    if (c.endMs !== null && c.endMs + required.graceMs >= required.nowMs) continue;
+    out.push(`checkpoint-not-anchored ${c.hash.slice(0, 12)}`);
+  }
+  return out;
+}
+
 function anchorStatement(
   dir: string,
   checkpoints: readonly VerifiedCheckpoint[],
   keyPem: string,
   problems: string[],
+  required: AnchorRequirement = null,
 ): VerifyAnchors {
   const read = readAnchors(dir);
-  if (!read.present) return ANCHORS_NONE;
+  if (!read.present) {
+    problems.push(...requireAnchoredProblems(checkpoints, new Set(), required));
+    return ANCHORS_NONE;
+  }
   problems.push(...read.problems);
   const receipts = read.rows.length;
   const services = [...new Set(read.rows.map((r) => r.service))].join(", ");
@@ -866,6 +913,7 @@ function anchorStatement(
     };
   }
   const byHash = new Map(checkpoints.map((c) => [c.hash, c]));
+  const anchoredHashes = new Set<string>();
   let verified = 0;
   let newestCount: number | null = null;
   for (const row of read.rows) {
@@ -896,10 +944,12 @@ function anchorStatement(
       continue;
     }
     verified += 1;
+    anchoredHashes.add(row.checkpointHash);
     if (checkpoint.receiptCount !== null && (newestCount === null || checkpoint.receiptCount > newestCount)) {
       newestCount = checkpoint.receiptCount;
     }
   }
+  problems.push(...requireAnchoredProblems(checkpoints, anchoredHashes, required));
   const covers = newestCount === null ? "" : `; the newest anchored checkpoint covers ${newestCount} record(s)`;
   return {
     line:
@@ -1398,7 +1448,19 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   problems.push(...indexed.problems, ...tailed.problems);
   const stated = controlStatement(records);
   problems.push(...stated.violations);
-  const anchors = anchorStatement(dir, tailed.verified, opts.anchorPublicKeyPem?.trim() ?? "", problems);
+  const anchorKeyPem = opts.anchorPublicKeyPem?.trim() ?? "";
+  if (opts.requireAnchored && anchorKeyPem === "") {
+    problems.push("require-anchored needs the service key: receipts are checked only under a key the reader supplies");
+  }
+  const anchors = anchorStatement(
+    dir,
+    tailed.verified,
+    anchorKeyPem,
+    problems,
+    opts.requireAnchored
+      ? { graceMs: opts.anchorGraceMs ?? DEFAULT_ANCHOR_GRACE_MS, nowMs: opts.nowMs ?? Date.now() }
+      : null,
+  );
 
   const ok =
     problems.length === 0 && signaturesInvalid === 0 && chainBreakAt === null && effectsOrphaned === 0;

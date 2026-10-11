@@ -90,7 +90,7 @@ describe("attack R22", () => {
     const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
       join(dir, "ledger.lock"),
-      `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
+      `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: "t", port: bodyPort })}\n`,
       "utf8",
     );
     const err: string[] = [];
@@ -126,7 +126,7 @@ describe("attack R22", () => {
     const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
       join(dir, "ledger.lock"),
-      `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
+      `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: "t", port: bodyPort })}\n`,
       "utf8",
     );
     const err: string[] = [];
@@ -166,7 +166,7 @@ describe("attack R22", () => {
     const [issuerPort, bodyPort, panelPort] = await Promise.all([takePort(), takePort(), takePort()]);
     writeFileSync(
       join(dir, "ledger.lock"),
-      `${JSON.stringify({ pid: process.pid, startedAt: 1, token: "t", port: bodyPort })}\n`,
+      `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: "t", port: bodyPort })}\n`,
       "utf8",
     );
     const err: string[] = [];

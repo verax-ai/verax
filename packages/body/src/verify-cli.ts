@@ -28,7 +28,7 @@ export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--anchor-key <public.pem>] [--operator-credentials <file>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--anchor-key <public.pem> [--require-anchored [--anchor-grace-ms <n>]]] [--operator-credentials <file>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
     "  --key <file>      verify decision records against a public key you hold,",
@@ -60,6 +60,15 @@ function usage(): string {
     "                    checkpoint-anchors.jsonl under this service key. A",
     "                    receipt names no key of its own, so without this flag",
     "                    the receipts are counted and not checked.",
+    "  --require-anchored",
+    "                    every checkpoint whose window ended more than the",
+    "                    grace ago must have a receipt that verifies under",
+    "                    --anchor-key; one without is checkpoint-not-anchored.",
+    "                    A receipt deleted from the directory is named instead",
+    "                    of passing. Needs --anchor-key.",
+    "  --anchor-grace-ms <n>",
+    "                    the grace for --require-anchored, in milliseconds",
+    "                    (default 600000, ten minutes).",
     "  --operator-credentials <file>",
     "                    verify HTTP approval signatures against this operator",
     "                    credential file, instead of operator-credentials.json",
@@ -250,6 +259,28 @@ export async function runVerify(
   const anchorKey = readKeyFlag("--anchor-key");
   if (!anchorKey.ok) return EX_VERIFY_FAILED;
   const anchorPublicKeyPem = anchorKey.pem;
+  const requireAt = args.indexOf("--require-anchored");
+  const requireAnchored = requireAt !== -1;
+  if (requireAnchored) args.splice(requireAt, 1);
+  let anchorGraceMs: number | undefined;
+  const graceAt = args.indexOf("--anchor-grace-ms");
+  if (graceAt !== -1) {
+    const raw = args[graceAt + 1] ?? "";
+    if (!/^[0-9]+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+      out("verify: --anchor-grace-ms needs a whole number of milliseconds");
+      return EX_VERIFY_FAILED;
+    }
+    anchorGraceMs = Number(raw);
+    args.splice(graceAt, 2);
+    if (!requireAnchored) {
+      out("verify: --anchor-grace-ms is read only with --require-anchored");
+      return EX_VERIFY_FAILED;
+    }
+  }
+  if (requireAnchored && !anchorPublicKeyPem) {
+    out("verify: --require-anchored needs --anchor-key: a receipt is checked only under a key you supply");
+    return EX_VERIFY_FAILED;
+  }
   let credentialsFile: string | undefined;
   const credentialsAt = args.indexOf("--operator-credentials");
   if (credentialsAt !== -1) {
@@ -290,6 +321,8 @@ export async function runVerify(
       ...(witnessPublicKeyPem ? { witnessPublicKeyPem } : {}),
       ...(checkpointPublicKeyPem ? { checkpointPublicKeyPem } : {}),
       ...(anchorPublicKeyPem ? { anchorPublicKeyPem } : {}),
+      ...(requireAnchored ? { requireAnchored } : {}),
+      ...(anchorGraceMs !== undefined ? { anchorGraceMs } : {}),
     });
   } catch (err) {
     const problem = err instanceof Error ? err.message : "ledger could not be read";

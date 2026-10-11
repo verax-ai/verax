@@ -4,6 +4,7 @@ import path, { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
 import { attachBodyLog } from "./body-log.ts";
+import { bodyVersion } from "./body-version.ts";
 import { runDemo } from "./demo.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
@@ -71,19 +72,7 @@ VERAX_STATE_DIR and VERAX_POLICY_FILE; \`verax doctor\` names what is missing.
 Records stay on this machine, under VERAX_STATE_DIR.
 `;
 
-function version(): string {
-  // The published package answers with its own version, not a copy of it.
-  const here = dirname(fileURLToPath(import.meta.url));
-  for (const path of [join(here, "..", "package.json"), join(here, "..", "..", "package.json")]) {
-    try {
-      const raw = JSON.parse(readFileSync(path, "utf8")) as { name?: string; version?: string };
-      if (raw.name === "@verax-ai/body" && typeof raw.version === "string") return raw.version;
-    } catch {
-      // try the next candidate: the file layout differs between src and dist.
-    }
-  }
-  return "unknown";
-}
+const version = bodyVersion;
 
 export type CliHooks = {
   elevated?: () => boolean;

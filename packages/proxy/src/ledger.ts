@@ -447,18 +447,47 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function readLock(path: string): { pid: number; startedAt: number; token?: string } | null {
+/** The kernel's id for this boot on Linux; null elsewhere or when unreadable. */
+export function currentBootId(): string | null {
+  if (process.platform !== "linux") return null;
+  try {
+    const id = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+    return id === "" ? null : id;
+  } catch {
+    return null;
+  }
+}
+
+export type LockHolder = { pid: number; startedAt: number; bootId?: string };
+
+/**
+ * Whether the process a lock names can still be the one that wrote it. A
+ * live pid is not enough: a container restarted on the same volume runs the
+ * body as PID 1 again, and a host that rebooted hands pids out again. So a
+ * lock is not held when its pid is dead, when it names this process but was
+ * written before this process started, or when it records a boot other than
+ * this one. Nothing here takes a lock over; it only says it is stale.
+ */
+export function lockHolderAlive(lock: LockHolder, bootId: string | null = currentBootId()): boolean {
+  if (typeof lock.bootId === "string" && bootId !== null && lock.bootId !== bootId) return false;
+  if (lock.pid === process.pid && lock.startedAt < performance.timeOrigin) return false;
+  return pidAlive(lock.pid);
+}
+
+function readLock(path: string): { pid: number; startedAt: number; token?: string; bootId?: string } | null {
   try {
     const raw = JSON.parse(readFileSync(path, "utf8")) as {
       pid?: unknown;
       startedAt?: unknown;
       token?: unknown;
+      bootId?: unknown;
     };
     if (typeof raw.pid !== "number" || typeof raw.startedAt !== "number") return null;
     return {
       pid: raw.pid,
       startedAt: raw.startedAt,
       ...(typeof raw.token === "string" ? { token: raw.token } : {}),
+      ...(typeof raw.bootId === "string" && raw.bootId !== "" ? { bootId: raw.bootId } : {}),
     };
   } catch {
     return null;
@@ -871,7 +900,8 @@ export class FileLedger implements Ledger {
   }
 
   private lockBody(): string {
-    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.token })}\n`;
+    const bootId = currentBootId();
+    return `${JSON.stringify({ pid: process.pid, startedAt: Date.now(), token: this.token, ...(bootId ? { bootId } : {}) })}\n`;
   }
 
   private ownsLock(): boolean {
@@ -903,6 +933,7 @@ export class FileLedger implements Ledger {
       pid: existing.pid,
       startedAt: existing.startedAt,
       token: this.token,
+      ...(existing.bootId ? { bootId: existing.bootId } : {}),
       port,
     })}\n`;
     writeFileAtomic(this.lockPath, body);
@@ -922,7 +953,7 @@ export class FileLedger implements Ledger {
   private lockedError(): Error {
     const existing = readLock(this.lockPath);
     const pid = existing?.pid ?? "unknown";
-    if (typeof existing?.pid === "number" && !pidAlive(existing.pid)) {
+    if (existing && !lockHolderAlive(existing)) {
       return new Error(`ledger-locked-stale:${pid}\nrun: verax unlock ${this.dir}`);
     }
     return new Error(`ledger-locked:${pid}`);
