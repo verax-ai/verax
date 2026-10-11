@@ -262,11 +262,16 @@ runs it. When that works and the session is not elevated, `key-custody`
 fails: an agent running as that user can sign records as the body. Local
 mode (`VERAX_JWKS_FILE` set) is named in the line. An elevated session that
 can open it is a warning, since an administrator is outside the model. A
-key the user cannot open is `ok`. Moving the key out of a file is designed
+key the user cannot open and does not own is `ok`. A key the user cannot
+open but owns fails too (R26): an owner that has shut itself out gives
+itself read again with one `chmod` or `icacls`. The owner is the file's uid
+on POSIX and the owner SID on Windows, compared with the user's own SID; a
+group that owns the file is not counted as the user. When the owner cannot
+be read the line is a warning. Moving the key out of a file is designed
 in `docs/design/key-custody.md` and not built; Windows CNG on 26H2 has no
 Ed25519 (measured), AWS KMS does.
 
-Guard: `key-custody-doctor`. Not released.
+Guards: `key-custody-doctor`, `attack-r26-key-custody-owner`. Not released.
 
 ## Unrecorded disk deny answered once — unreleased
 

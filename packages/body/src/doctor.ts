@@ -1,7 +1,7 @@
 import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { defaultElevated, readWindowsMachineRoots, SystemToolError, windowsAgentTokenPath } from "./install.ts";
+import { defaultElevated, readWindowsMachineRoots, SystemToolError, windowsAgentTokenPath, windowsFileOwner } from "./install.ts";
 import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
@@ -25,6 +25,8 @@ const SECRET_NAME = /^(VERAX_DEV_TOKEN|.*_(TOKEN|SECRET|KEY))$/;
 export type DoctorOptions = {
   /** Whether this process is elevated. Asked only when the record key is readable. */
   elevated?: () => boolean;
+  /** Whether this user owns the record key. Asked only when the key cannot be opened. */
+  keyOwner?: (path: string) => "self" | "other" | "unknown";
 };
 
 export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts: DoctorOptions = {}): DoctorCheck[] {
@@ -136,7 +138,12 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
     }
     checks.push(...evidenceChecks(stateDir, env));
     checks.push(...anchorChecks(stateDir, env));
-    const custody = keyCustodyCheck(stateDir, env, opts.elevated ?? (() => defaultElevated()));
+    const custody = keyCustodyCheck(
+      stateDir,
+      env,
+      opts.elevated ?? (() => defaultElevated()),
+      opts.keyOwner ?? defaultKeyOwner,
+    );
     if (custody) checks.push(custody);
   }
 
@@ -390,7 +397,26 @@ export function doctorBodyLog(stateDir: string): string {
  * never made. Opening the file is the test, because on Windows only an open
  * reads the ACL. An elevated session is outside the model either way.
  */
-function keyCustodyCheck(stateDir: string, env: NodeJS.ProcessEnv, elevated: () => boolean): DoctorCheck | null {
+export type KeyOwner = "self" | "other" | "unknown";
+
+/** Whether the user running doctor owns the key file. */
+function defaultKeyOwner(path: string): KeyOwner {
+  if (process.platform === "win32") return windowsFileOwner(path);
+  try {
+    const uid = process.getuid?.();
+    if (uid === undefined) return "unknown";
+    return statSync(path).uid === uid ? "self" : "other";
+  } catch {
+    return "unknown";
+  }
+}
+
+function keyCustodyCheck(
+  stateDir: string,
+  env: NodeJS.ProcessEnv,
+  elevated: () => boolean,
+  keyOwner: (path: string) => KeyOwner,
+): DoctorCheck | null {
   const path = join(stateDir, "keys", "record.private.pem");
   if (!existsSync(path)) return null;
   try {
@@ -398,6 +424,24 @@ function keyCustodyCheck(stateDir: string, env: NodeJS.ProcessEnv, elevated: () 
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "EACCES" || code === "EPERM") {
+      // An owner that has shut itself out rewrites the mode or the ACL with one command.
+      const owner = keyOwner(path);
+      if (owner === "self") {
+        return {
+          id: "key-custody",
+          level: "fail",
+          detail:
+            "this user cannot read keys/record.private.pem now but owns it, so an agent running as this user can give itself read again and sign records as the body. " +
+            "verax install runs the body under its own account.",
+        };
+      }
+      if (owner === "unknown") {
+        return {
+          id: "key-custody",
+          level: "warn",
+          detail: "this user cannot read the body's record key; who owns the file could not be read",
+        };
+      }
       return { id: "key-custody", level: "ok", detail: "this user cannot read the body's record key" };
     }
     return { id: "key-custody", level: "warn", detail: `record key could not be checked: ${code ?? "error"}` };

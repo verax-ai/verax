@@ -5277,6 +5277,47 @@ function invokingSid(exec: (argv: string[]) => ExecResult): string | undefined {
   return sid;
 }
 
+const OWNER_DENIED = "VERAX-OWNER-DENIED";
+
+function fileOwnerSidCommand(file: string): string {
+  const literal = file.replaceAll("'", "''");
+  return psPrefixed(
+    ["Microsoft.PowerShell.Security"],
+    `try { (Get-Acl -LiteralPath '${literal}' -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value } ` +
+      `catch [System.UnauthorizedAccessException] { '${OWNER_DENIED}' }`,
+  );
+}
+
+/**
+ * Whether this process's user owns `file`. An owner reads the security
+ * descriptor even under an entry that denies it the file, so a caller who is
+ * refused the descriptor is not the owner. A group that owns the file is
+ * "other": only the user's own SID is compared.
+ */
+export function windowsFileOwner(
+  file: string,
+  exec: (argv: string[]) => ExecResult = defaultExec,
+): "self" | "other" | "unknown" {
+  let ran: ExecResult;
+  try {
+    ran = exec(toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", fileOwnerSidCommand(file)], "win32"));
+  } catch {
+    return "unknown";
+  }
+  if ((ran.status ?? 1) !== 0) return "unknown";
+  const out = `${ran.stdout ?? ""}`;
+  if (out.includes(OWNER_DENIED)) return "other";
+  const owner = out.match(/S-1-[0-9-]+/i)?.[0]?.toUpperCase();
+  let self: string | undefined;
+  try {
+    self = invokingSid(exec)?.toUpperCase();
+  } catch {
+    return "unknown";
+  }
+  if (!owner || !self) return "unknown";
+  return owner === self ? "self" : "other";
+}
+
 /** The SID `whoami /user` names for this process. */
 export function windowsInvokingSid(exec: (argv: string[]) => ExecResult = defaultExec): string | undefined {
   return invokingSid(exec);

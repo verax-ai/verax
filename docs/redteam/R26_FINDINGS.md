@@ -1,6 +1,6 @@
 # R26 findings
 
-Round R26 read the five areas merged to main after 0.4.8 and not yet released: the key custody check and the stale lock rule (#160, #164), the downstream `tools` list (#157), the unknown policy key refusal (#169), automatic anchoring with `--require-anchored` (#158), and signed start rows (#159). Each area was attacked at least four ways on a Windows host. Eleven findings, none high: six medium, five low. Thirty-eight other attacks held. Nine findings are fixed on main, one is answered by an option, and one is open.
+Round R26 read the five areas merged to main after 0.4.8 and not yet released: the key custody check and the stale lock rule (#160, #164), the downstream `tools` list (#157), the unknown policy key refusal (#169), automatic anchoring with `--require-anchored` (#158), and signed start rows (#159). Each area was attacked at least four ways on a Windows host. Eleven findings, none high: six medium, five low. Thirty-eight other attacks held. Ten findings are fixed on main and one is answered by an option.
 
 | id | severity | description | status |
 | --- | --- | --- | --- |
@@ -13,7 +13,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 | R26-7 | medium | With `v`, `prevStartHash` and `sig` removed from every row, `starts.jsonl` reads as a file from before signing: a three-day gap rewritten to one second verifies with exit 0. The output does say `unsigned (not verified)`. No key is needed. | option (#183) |
 | R26-8 | low | The 64 KiB bound on a downstream tool counted UTF-16 units of three fields. A 180 KB description was attached and republished; megabytes in `outputSchema` or `title` were never measured. | fixed (#174) |
 | R26-9 | medium | The MCP client ran a child's own `outputSchema` on the child's own result inside the body. A backtracking `pattern` held the body's event loop past the call's timeout: 7.9 s at 31 characters, about twice that per further character. | fixed (#177) |
-| R26-10 | low | `key-custody` is `ok` for a record key the user owns but has denied itself; one `icacls /remove:d` or `chmod` gives read back. | open |
+| R26-10 | low | `key-custody` is `ok` for a record key the user owns but has denied itself; one `icacls /remove:d` or `chmod` gives read back. | fixed (#184) |
 | R26-11 | low | A transparency service that answered JSON `null` made `registerCheckpoint` throw a TypeError; `verax anchor` ended on an exception. | fixed (#172) |
 
 ## Fixes
@@ -26,6 +26,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 - R26-7: a stripped row cannot be told from one written before signing, so the default is unchanged: the file is counted, named `unsigned (not verified)`, and verifies. `verax verify --require-signed-starts` refuses it for a reader who knows the ledger was written signed: each unsigned row is `start-row-unsigned`, a ledger with no start row is `start-rows-missing`.
 - R26-8: the bound is the UTF-8 byte length of the whole entry as the child sent it.
 - R26-9: `tools/list` and `tools/call` are sent as plain requests, so no schema a child sends is compiled or run in the body. The same call returns in a few milliseconds.
+- R26-10: when the open is refused, `doctor` reads who owns the file: the uid on POSIX, the owner SID on Windows. A key this user owns is a `fail`, an owner that cannot be read is a warning, and only a key the user neither opens nor owns is `ok`.
 - R26-11: a `null` answer is refused as `wrong-receipt`, like `[]` and `{}`.
 - Outside the round's five areas, in a released one: a top-level `egress` list with no rule carrying `egress: true` loaded and restricted nothing. The parser refuses a list beside an unmarked `message.send` rule with `policy-rule-egress-unmarked:<id>`, and a list no rule is marked for with `policy-egress-unused`; a snapshot already on disk is still read (#180).
 
@@ -43,7 +44,6 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 
 ## Open
 
-- R26-10: the owner case needs the file's owner read beside the open. On POSIX that is one `stat`; on Windows it is the owner SID, which the installer reads for directories and `doctor` does not.
 - The bound on a downstream tool is applied after the child's `tools/list` answer has been read and parsed. Nothing limits how many bytes a child may send in one message.
 
 ## Known limits
