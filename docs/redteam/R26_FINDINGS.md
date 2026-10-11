@@ -1,6 +1,6 @@
 # R26 findings
 
-Round R26 read the five areas merged to main after 0.4.8 and not yet released: the key custody check and the stale lock rule (#160, #164), the downstream `tools` list (#157), the unknown policy key refusal (#169), automatic anchoring with `--require-anchored` (#158), and signed start rows (#159). Each area was attacked at least four ways on a Windows host. Eleven findings, none high: six medium, five low. Thirty-eight other attacks held. Nine findings are fixed on main; two are open.
+Round R26 read the five areas merged to main after 0.4.8 and not yet released: the key custody check and the stale lock rule (#160, #164), the downstream `tools` list (#157), the unknown policy key refusal (#169), automatic anchoring with `--require-anchored` (#158), and signed start rows (#159). Each area was attacked at least four ways on a Windows host. Eleven findings, none high: six medium, five low. Thirty-eight other attacks held. Nine findings are fixed on main, one is answered by an option, and one is open.
 
 | id | severity | description | status |
 | --- | --- | --- | --- |
@@ -10,7 +10,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 | R26-4 | medium | `verax reconcile --channel card` took statement descriptors from the stored document for every rule. With R26-3, a card line was matched to an approved spend through a descriptor the policy hash did not cover. | fixed (#176) |
 | R26-5 | low | `--require-anchored` counts the grace from the end the checkpoint itself states. A checkpoint signed with a window ending in 2100 and no receipt was exempt for good. Needs the witness key. | fixed (#175) |
 | R26-6 | low | `verax verify` dropped an option it did not know. `--require-anchord` printed `VERIFIED` and exited 0 over a checkpoint with no receipt. | fixed (#172) |
-| R26-7 | medium | With `v`, `prevStartHash` and `sig` removed from every row, `starts.jsonl` reads as a file from before signing: a three-day gap rewritten to one second verifies with exit 0. The output does say `unsigned (not verified)`. No key is needed. | open |
+| R26-7 | medium | With `v`, `prevStartHash` and `sig` removed from every row, `starts.jsonl` reads as a file from before signing: a three-day gap rewritten to one second verifies with exit 0. The output does say `unsigned (not verified)`. No key is needed. | option (#183) |
 | R26-8 | low | The 64 KiB bound on a downstream tool counted UTF-16 units of three fields. A 180 KB description was attached and republished; megabytes in `outputSchema` or `title` were never measured. | fixed (#174) |
 | R26-9 | medium | The MCP client ran a child's own `outputSchema` on the child's own result inside the body. A backtracking `pattern` held the body's event loop past the call's timeout: 7.9 s at 31 characters, about twice that per further character. | fixed (#177) |
 | R26-10 | low | `key-custody` is `ok` for a record key the user owns but has denied itself; one `icacls /remove:d` or `chmod` gives read back. | open |
@@ -23,6 +23,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 - R26-4: descriptors come from the parsed spend rule (`Policy.descriptorsByPayee`), so what decides a match is what the hash covers.
 - R26-5: a window that ends more than a minute after the reader's clock is named `checkpoint-window-in-future <hash>`.
 - R26-6: an option `verify` does not know is named and refused with exit 1; a second directory is refused too.
+- R26-7: a stripped row cannot be told from one written before signing, so the default is unchanged: the file is counted, named `unsigned (not verified)`, and verifies. `verax verify --require-signed-starts` refuses it for a reader who knows the ledger was written signed: each unsigned row is `start-row-unsigned`, a ledger with no start row is `start-rows-missing`.
 - R26-8: the bound is the UTF-8 byte length of the whole entry as the child sent it.
 - R26-9: `tools/list` and `tools/call` are sent as plain requests, so no schema a child sends is compiled or run in the body. The same call returns in a few milliseconds.
 - R26-11: a `null` answer is refused as `wrong-receipt`, like `[]` and `{}`.
@@ -38,10 +39,10 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - The first version of the `egress` fix asked only that some rule be marked. A list beside a marked `memory.get` rule and an unmarked `message.send` rule still loaded, and `message.send` still reached any host. The unmarked rule is now named and refused.
 - With the list case closed, a `message.send` rule without the mark in a document with no list still reached any host, against the description the tool publishes. The mark is now required on that rule (`policy-rule-egress-unmarked:<id>`); a marked rule with no list reaches no host.
 - Three existing tests wrote a lock naming their own pid by hand and expected it to be held. A first rule that called every such lock stale broke them; the rule was dropped, and the future start time is what decides.
+- The first version of `--require-signed-starts` left a line that cannot be read as a warning. History replaced by one such line, with the body's next signed start chained on it, passed under the flag. The line is now `start-row-unreadable` and the ledger does not verify.
 
 ## Open
 
-- R26-7: whether a file of unsigned start rows may verify. The line `unsigned (not verified)` is printed and `docs/STATUS.md` says unsigned rows before the first signed one are counted; the exit code is 0 and the changed gap is not named. The maintainer's call.
 - R26-10: the owner case needs the file's owner read beside the open. On POSIX that is one `stat`; on Windows it is the owner SID, which the installer reads for directories and `doctor` does not.
 - The bound on a downstream tool is applied after the child's `tools/list` answer has been read and parsed. Nothing limits how many bytes a child may send in one message.
 
