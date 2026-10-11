@@ -252,7 +252,11 @@ null) and `sig`, an Ed25519 signature by the record key over
 `verax verify` checks them under the pinned `--key`, else the key the
 records carry, and says which. A signature that does not verify, a
 `prevStartHash` that is not the line before, or an unsigned row after a
-signed one is a problem, and the ledger does not verify. Unsigned rows
+signed one is a problem, and the ledger does not verify. So is a row that
+carries `v`, `sig` or `prevStartHash` and is not a well-formed v2 row,
+a line that no longer parses included: it is named `signed start row is
+malformed`, not skipped. A line that carries none of those names and
+cannot be read is a warning, as a removed file is nothing. Unsigned rows
 before the first signed one, written by an earlier version, are counted
 and named as unsigned. With no records and no `--key`, signed rows are
 counted and not checked. `starts` in `--json` gains `signed`,
