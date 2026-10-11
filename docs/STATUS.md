@@ -102,6 +102,16 @@ activity is attested by these observations.
 
 Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
+## A child's output schema is not run — unreleased
+
+Until this change the MCP client the body uses compiled every `outputSchema`
+a child listed and ran it on the child's own result, inside the body. A
+backtracking `pattern` in such a schema held the body's event loop past the
+call's timeout: 7.9 seconds at 31 characters, about twice that for each
+further character (R26, measured with SDK 1.32.1). The body now sends
+`tools/list` and `tools/call` as plain requests and runs no schema a child
+sends. It does not republish `outputSchema`, before or after.
+
 ## Downstream tools list — unreleased tree
 
 A downstream entry may carry `tools`, a list of the child's own tool names.
