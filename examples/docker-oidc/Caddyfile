@@ -1,0 +1,14 @@
+{
+	local_certs
+	skip_install_trust
+}
+
+verax.localhost {
+	tls internal
+	reverse_proxy body:8787
+}
+
+idp.localhost {
+	tls internal
+	reverse_proxy idp:9000
+}
