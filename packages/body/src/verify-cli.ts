@@ -302,7 +302,20 @@ export async function runVerify(
     args.splice(credentialsAt, 2);
     credentialsFile = path;
   }
-  const dir = args.find((a) => !a.startsWith("-"));
+  // Every flag this command knows has been taken out of args by now. What is left is one
+  // directory. A flag it does not know is refused, not dropped: `--require-anchord` used to
+  // print VERIFIED over a checkpoint with no receipt.
+  const rest = args.filter((a) => a !== "--json");
+  const unknown = rest.find((a) => a.startsWith("-"));
+  if (unknown !== undefined) {
+    out(`verify: unknown option ${unknown}`);
+    return EX_VERIFY_FAILED;
+  }
+  if (rest.length > 1) {
+    out(`verify: one ledger directory at a time, got ${rest.length}`);
+    return EX_VERIFY_FAILED;
+  }
+  const dir = rest[0];
   if (!dir) {
     out(usage());
     return EX_VERIFY_FAILED;

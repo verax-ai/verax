@@ -119,7 +119,9 @@ export async function registerCheckpoint(
   } catch (err) {
     return { ok: false, reason: "unreachable", message: err instanceof Error ? err.message : String(err) };
   }
-  const { receipt_b64, entry_hash, leaf_index, tree_size } = answer;
+  // JSON `null` parses and is not an object: read through `?? {}` so it is refused below
+  // like `[]` and `{}`, not thrown as a TypeError the caller has no row for.
+  const { receipt_b64, entry_hash, leaf_index, tree_size } = (answer ?? {}) as RegisterAnswer;
   if (
     typeof receipt_b64 !== "string" ||
     receipt_b64.length > MAX_RECEIPT_B64 ||
