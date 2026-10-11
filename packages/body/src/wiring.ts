@@ -80,6 +80,11 @@ export function createBodyServices(opts: {
     extraNames.push(tool.name);
   }
 
+  // The policy is read before the ledger opens: opening takes the ledger lock,
+  // and a start the policy stops must not leave that lock for the next one.
+  const policyText = readFileSync(opts.policyFile, "utf8");
+  const policyDocument = JSON.parse(policyText) as unknown;
+  const policy = loadPolicy(policyText);
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
   ledger.onPieceClose = async (window) => {
@@ -89,10 +94,12 @@ export function createBodyServices(opts: {
       endMs: window.endMs,
     });
   };
-  const policyText = readFileSync(opts.policyFile, "utf8");
-  const policyDocument = JSON.parse(policyText) as unknown;
-  const policy = loadPolicy(policyText);
-  persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
+  try {
+    persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
+  } catch (err) {
+    ledger.close();
+    throw err;
+  }
   const now = opts.now ?? (() => Date.now());
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
