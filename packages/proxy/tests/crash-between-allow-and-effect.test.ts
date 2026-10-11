@@ -30,6 +30,7 @@ const APPROVE_POLICY = {
   version: 1,
   default: "deny",
   approvalTtlMs: 86_400_000,
+  egress: ["ornek.com"],
   rules: [
     {
       id: "send-approve",
@@ -37,6 +38,7 @@ const APPROVE_POLICY = {
       requires: ["verax:memory"],
       mode: "approve",
       text: "Sending needs operator approval.",
+      egress: true,
     },
   ],
 } as const;

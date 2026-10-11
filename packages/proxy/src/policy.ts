@@ -162,6 +162,10 @@ function asRule(raw: unknown, index: number, options: PolicyParseOptions): Polic
       throw new Error(`policy-rule-egress:${rec.id}`);
     }
     rule.egress = true;
+  } else if (options.unknownKeys !== "ignore" && Object.hasOwn(HOST_EXTRACTORS, rec.tool)) {
+    // The gate reads this tool's host, and only under the mark. Without it
+    // the call would reach any host, so the rule does not load.
+    throw new Error(`policy-rule-egress-unmarked:${rec.id}`);
   }
   return rule;
 }
@@ -271,18 +275,10 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
       throw new Error("policy-egress");
     }
     // Only a rule marked `egress: true` reads the list. A file that names
-    // hosts and leaves a tool whose host the gate can read unmarked, or marks
-    // no rule at all, would restrict less than it reads, so it does not load.
-    if (options.unknownKeys !== "ignore") {
-      const unmarked = document.rules.find(
-        (rule) => rule.egress !== true && Object.hasOwn(HOST_EXTRACTORS, rule.tool),
-      );
-      if (unmarked) {
-        throw new Error(`policy-rule-egress-unmarked:${unmarked.id}`);
-      }
-      if (!document.rules.some((rule) => rule.egress === true)) {
-        throw new Error("policy-egress-unused");
-      }
+    // hosts and marks no rule would restrict less than it reads, so it does
+    // not load.
+    if (options.unknownKeys !== "ignore" && !document.rules.some((rule) => rule.egress === true)) {
+      throw new Error("policy-egress-unused");
     }
     document.egress = rec.egress as string[];
   }

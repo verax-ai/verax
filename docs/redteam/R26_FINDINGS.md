@@ -36,6 +36,7 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - A still lock under a live pid is either a frozen body or a dead one whose pid another process now has. Nothing on disk tells them apart, and on main the second case could only be ended by deleting the lock by hand. `verax unlock` refuses it as `still-running` and names it `lock-not-beating`; `verax doctor` warns; `verax unlock --force` removes it and writes `reason: "not-beating"` to `unlocks.jsonl`. `--force` does not remove a lock that moves.
 - The R26-9 test required a timer tick during the call. A call that now answers in 2 ms leaves no tick to count; the tick is still required when the call lasts.
 - The first version of the `egress` fix asked only that some rule be marked. A list beside a marked `memory.get` rule and an unmarked `message.send` rule still loaded, and `message.send` still reached any host. The unmarked rule is now named and refused.
+- With the list case closed, a `message.send` rule without the mark in a document with no list still reached any host, against the description the tool publishes. The mark is now required on that rule (`policy-rule-egress-unmarked:<id>`); a marked rule with no list reaches no host.
 - Three existing tests wrote a lock naming their own pid by hand and expected it to be held. A first rule that called every such lock stale broke them; the rule was dropped, and the future start time is what decides.
 
 ## Open
