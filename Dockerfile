@@ -11,7 +11,8 @@ ARG VERAX_VERSION=0.4.8
 RUN npm install -g --no-audit --no-fund "@verax-ai/body@${VERAX_VERSION}" \
  && npm cache clean --force \
  && mkdir -p /var/lib/verax \
- && chown node:node /var/lib/verax
+ && chown node:node /var/lib/verax \
+ && chmod 700 /var/lib/verax
 ENV VERAX_STATE_DIR=/var/lib/verax \
     VERAX_BIND=0.0.0.0:8787
 USER node
