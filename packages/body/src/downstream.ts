@@ -6,6 +6,7 @@ import { effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptReje
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { Principal, ToolCall, ToolResult } from "@verax-ai/proxy";
 
 export type DownstreamToolFn = (
@@ -380,7 +381,11 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
   let listed: Awaited<ReturnType<Client["listTools"]>>;
   try {
     await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
-    listed = await client.listTools(undefined, { timeout: timeoutMs });
+    // Asked as a plain request, not through client.listTools: that call compiles every
+        // outputSchema the child lists into a validator, and client.callTool then runs it
+        // on the child's own result inside this process. A child's schema is the child's
+        // input; a backtracking pattern in it held the body for seconds per call.
+        listed = await client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
   } catch (err) {
     await shut(client, transport);
     throw attachTimeoutError(err, spec.prefix);
@@ -431,11 +436,13 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
         try {
           // Mutation check: stub this call and the allow test expecting
           // "pong":true from the child goes red.
-          raw = await client.callTool(
-            { name: childName, arguments: call.arguments,
-              ...(spec.effectKeyPem ? { _meta: { "io.cedulon/decision": { ref, deciderId: "verax-proxy", prefix: spec.prefix } } } : {}),
+          raw = await client.request(
+            { method: "tools/call",
+              params: { name: childName, arguments: call.arguments,
+                ...(spec.effectKeyPem ? { _meta: { "io.cedulon/decision": { ref, deciderId: "verax-proxy", prefix: spec.prefix } } } : {}),
+              },
             },
-            undefined,
+            CallToolResultSchema,
             { timeout: timeoutMs },
           );
         } catch (err) {
