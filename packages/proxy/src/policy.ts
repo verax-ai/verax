@@ -270,6 +270,11 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
     ) {
       throw new Error("policy-egress");
     }
+    // Only a rule marked `egress: true` reads the list. With no such rule it
+    // would name hosts and restrict nothing, so the file does not load.
+    if (options.unknownKeys !== "ignore" && !document.rules.some((rule) => rule.egress === true)) {
+      throw new Error("policy-egress-unused");
+    }
     document.egress = rec.egress as string[];
   }
   if (rec.approvalTtlMs !== undefined) {

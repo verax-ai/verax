@@ -26,6 +26,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 - R26-8: the bound is the UTF-8 byte length of the whole entry as the child sent it.
 - R26-9: `tools/list` and `tools/call` are sent as plain requests, so no schema a child sends is compiled or run in the body. The same call returns in a few milliseconds.
 - R26-11: a `null` answer is refused as `wrong-receipt`, like `[]` and `{}`.
+- Outside the round's five areas, in a released one: a top-level `egress` list with no rule carrying `egress: true` loaded and restricted nothing. The parser refuses it with `policy-egress-unused`; a snapshot already on disk is still read (#180).
 
 Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that failed on main before the change.
 
@@ -41,7 +42,6 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - R26-7: whether a file of unsigned start rows may verify. The line `unsigned (not verified)` is printed and `docs/STATUS.md` says unsigned rows before the first signed one are counted; the exit code is 0 and the changed gap is not named. The maintainer's call.
 - R26-10: the owner case needs the file's owner read beside the open. On POSIX that is one `stat`; on Windows it is the owner SID, which the installer reads for directories and `doctor` does not.
 - The bound on a downstream tool is applied after the child's `tools/list` answer has been read and parsed. Nothing limits how many bytes a child may send in one message.
-- Outside this round's scope, in a released area: a top-level `egress` list with no rule carrying `egress: true` loads and restricts nothing.
 
 ## Known limits
 
