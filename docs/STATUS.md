@@ -283,10 +283,13 @@ rule only.
 A top-level `egress` list is read only by a rule that carries
 `egress: true`. With no such rule the list loaded and restricted nothing, so
 a file could name its hosts and still send anywhere (R26). The parser now
-refuses it (`policy-egress-unused`), an empty list included; a snapshot
-already on disk is still read. A policy that keeps a host list beside an
-unmarked `message.send` rule stops loading after this change: mark the rule
-or remove the list.
+refuses a list beside an unmarked rule for a tool whose host the gate reads,
+today `message.send` (`policy-rule-egress-unmarked:<id>`), whether or not
+another rule is marked, and a list no rule is marked for
+(`policy-egress-unused`); an empty list is a list. A snapshot already on
+disk is still read. A policy that keeps a host list beside an unmarked
+`message.send` rule stops loading after this change: mark the rule or remove
+the list.
 
 Guards: `policy-unknown-keys`, `policy-snapshot-unknown-keys`,
 `attack-r26-egress-unused`. Not released.

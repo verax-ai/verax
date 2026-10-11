@@ -8,8 +8,9 @@ import { loadPolicy } from "@verax-ai/proxy";
  * `egress` list is read only by a rule that carries `egress: true`. With no
  * such rule the list loads, enters the policy hash, and restricts nothing: an
  * operator who lists the hosts and leaves the mark off the rule has a file
- * that reads as an allow-list and a gate that sends anywhere. Same class as
- * #169 and R26-3: the policy is weaker than its file reads.
+ * that reads as an allow-list and a gate that sends anywhere. A mark on some
+ * other rule does not change that for the unmarked one. Same class as #169
+ * and R26-3: the policy is weaker than its file reads.
  */
 
 const sender = { brain: "brain-1", scopes: new Set(["verax:act"]) };
@@ -47,7 +48,7 @@ describe("R26 an egress list that no rule reads", () => {
       );
     }
     assert.equal(got.ok, false, "a list no rule reads loaded without a word");
-    if (!got.ok) assert.equal(got.reason, "policy-egress-unused");
+    if (!got.ok) assert.equal(got.reason, "policy-rule-egress-unmarked:message-send");
   });
 
   it("a host list with no rules at all does not load", () => {
@@ -59,7 +60,43 @@ describe("R26 an egress list that no rule reads", () => {
   it("an empty list reads as 'no host' and is refused the same way", () => {
     const got = load({ version: 1, default: "deny", egress: [], rules: [UNMARKED_SEND] });
     assert.equal(got.ok, false, "egress: [] loaded and message.send still reaches any host");
+    if (!got.ok) assert.equal(got.reason, "policy-rule-egress-unmarked:message-send");
+  });
+
+  it("a host list beside rules for other tools only does not load", () => {
+    const got = load({
+      version: 1,
+      default: "deny",
+      egress: ["mail.example"],
+      rules: [{ id: "get", tool: "memory.get", requires: ["verax:act"], text: "Reading memory needs the act scope." }],
+    });
+    assert.equal(got.ok, false);
     if (!got.ok) assert.equal(got.reason, "policy-egress-unused");
+  });
+
+  it("a mark on another rule does not cover an unmarked message.send", () => {
+    const got = load({
+      version: 1,
+      default: "deny",
+      egress: ["mail.example"],
+      rules: [
+        UNMARKED_SEND,
+        { id: "get", tool: "memory.get", requires: ["verax:act"], text: "Reading memory needs the act scope.", egress: true },
+      ],
+    });
+    if (got.ok) {
+      const decision = got.policy.evaluate(
+        { name: "message.send", arguments: { to: "alice@evil.example", text: "hi" } },
+        sender,
+      );
+      assert.notEqual(
+        decision.decision,
+        "allow",
+        "the file lists mail.example, one rule is marked, and message.send still reached evil.example",
+      );
+    }
+    assert.equal(got.ok, false);
+    if (!got.ok) assert.equal(got.reason, "policy-rule-egress-unmarked:message-send");
   });
 
   it("a list a marked rule reads still loads and still blocks", () => {
