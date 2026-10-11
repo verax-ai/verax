@@ -199,6 +199,22 @@ describe("R26-7 start rows with their signatures taken off", () => {
     }
   });
 
+  it("a signed row cut so it no longer parses is a problem too", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      // Every row keeps its fields and loses its closing brace: not JSON any more.
+      const cut = rows(dir).map((r) => JSON.stringify(r).slice(0, -1));
+      writeFileSync(join(dir, "starts.jsonl"), `${cut.join("\n")}\n`, "utf8");
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 1/, got.text);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("the same for one altered row in a ledger that has only that row", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
     try {

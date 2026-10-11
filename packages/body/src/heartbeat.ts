@@ -116,8 +116,13 @@ function isStartRow(row: StartRow): boolean {
   );
 }
 
-/** Whether a parsed line carries a field only a signed start row has. */
-function claimsSigned(parsed: unknown): boolean {
+/**
+ * Whether a line carries a field only a signed start row has. A line that no
+ * longer parses is read as text, so a signed row cut short is not passed as
+ * one nothing can read.
+ */
+function claimsSigned(parsed: unknown, line = ""): boolean {
+  if (parsed === undefined) return /"(?:v|sig|prevStartHash)"\s*:/.test(line);
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
   const rec = parsed as Record<string, unknown>;
   return rec.v !== undefined || rec.sig !== undefined || rec.prevStartHash !== undefined;
@@ -176,7 +181,7 @@ export function readStartSummary(
     } catch {
       // A line that carries what only a signed row carries, and no longer reads
       // as a start row, is a signed row someone altered: it is not skipped.
-      if (claimsSigned(parsed)) {
+      if (claimsSigned(parsed, line)) {
         seenSigned = true;
         result.signed += 1;
         result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
