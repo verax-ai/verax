@@ -144,7 +144,11 @@ Guard: `attack-r26-child-message-bound`. Published in 0.5.0.
 A downstream entry may carry `tools`, a list of the child's own tool names.
 Only those are attached: they enter the registry, appear on `tools/list` as
 `prefix.childName` and are held to the 64 KiB bound. The rest of the child's
-list is read for names and nothing else. A name the child does not offer
+list is not attached and not held to that bound. The whole list is still
+read against the MCP tool shape first, so an entry that is not a well-formed
+tool stops the attach even when it is not selected; and a field that shape
+does not know is dropped before the 64 KiB count and is not kept. A name
+the child does not offer
 stops the attach with `downstream-tool-missing:<prefix>.<name>`, as any
 half-attach does. A list that is empty, longer than 256, repeats a name or
 holds a name outside the child-name pattern is `downstream-tools-invalid`.

@@ -24,7 +24,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 - R26-5: a window that ends more than a minute after the reader's clock is named `checkpoint-window-in-future <hash>`.
 - R26-6: an option `verify` does not know is named and refused with exit 1; a second directory is refused too.
 - R26-7: a stripped row cannot be told from one written before signing, so the default is unchanged: the file is counted, named `unsigned (not verified)`, and verifies. `verax verify --require-signed-starts` refuses it for a reader who knows the ledger was written signed: each unsigned row is `start-row-unsigned`, a ledger with no start row is `start-rows-missing`.
-- R26-8: the bound is the UTF-8 byte length of the whole entry as the child sent it.
+- R26-8: the bound is the UTF-8 byte length of the whole entry as the MCP client parsed it. A field the MCP tool shape does not know is dropped before the count and is not kept.
 - R26-9: `tools/list` and `tools/call` are sent as plain requests, so no schema a child sends is compiled or run in the body. The same call returns in a few milliseconds.
 - R26-10: when the open is refused, `doctor` reads who owns the file: the uid on POSIX, the owner SID on Windows. A key this user owns is a `fail`, an owner that cannot be read is a warning, and only a key the user neither opens nor owns is `ok`.
 - R26-11: a `null` answer is refused as `wrong-receipt`, like `[]` and `{}`.
