@@ -134,6 +134,7 @@ export function readStartSummary(
   stateDir: string,
   publicKeyPem: string | null = null,
   keySource: "pinned" | "in-ledger" | "none" = publicKeyPem ? "in-ledger" : "none",
+  opts: { requireSigned?: boolean } = {},
 ): StartSummary {
   const result: StartSummary = {
     count: 0,
@@ -151,6 +152,7 @@ export function readStartSummary(
     raw = readFileSync(join(stateDir, "starts.jsonl"), "utf8");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") result.warnings.push("starts.jsonl could not be read");
+    if (opts.requireSigned) result.problems.push("start-rows-missing: no start row could be read");
     return result;
   }
   let prevLine: string | null = null;
@@ -190,8 +192,17 @@ export function readStartSummary(
     } else {
       result.unsigned = true;
       if (seenSigned) result.problems.push(`unsigned start row after a signed one: starts.jsonl line ${n}`);
+      // A row with its signature taken off reads as one written before signing.
+      // Only a reader who knows the ledger was written signed can refuse it.
+      else if (opts.requireSigned) result.problems.push(`start-row-unsigned: starts.jsonl line ${n}`);
     }
     prevLine = line;
+  }
+  if (opts.requireSigned) {
+    if (result.count === 0) result.problems.push("start-rows-missing: no start row could be read");
+    if (result.signed > 0 && result.startKey === "none") {
+      result.problems.push("start-rows-not-checked: signed start rows need a record key");
+    }
   }
   return result;
 }

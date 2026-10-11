@@ -28,7 +28,7 @@ export const EX_VERIFY_FAILED = 1;
 
 function usage(): string {
   return [
-    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--anchor-key <public.pem> [--require-anchored [--anchor-grace-ms <n>]]] [--operator-credentials <file>] [--json]",
+    "usage: verax verify <stateDir> [--key <public.pem>] [--effect-key <public.pem>] [--witness-key <public.pem>] [--checkpoint-key <public.pem>] [--anchor-key <public.pem> [--require-anchored [--anchor-grace-ms <n>]]] [--require-signed-starts] [--operator-credentials <file>] [--json]",
     "",
     "  <stateDir>        the directory holding decisions.jsonl and effects.jsonl",
     "  --key <file>      verify decision records against a public key you hold,",
@@ -69,6 +69,13 @@ function usage(): string {
     "  --anchor-grace-ms <n>",
     "                    the grace for --require-anchored, in milliseconds",
     "                    (default 600000, ten minutes).",
+    "  --require-signed-starts",
+    "                    every row of starts.jsonl must be a signed start row.",
+    "                    An unsigned row is start-row-unsigned and a ledger",
+    "                    with no start row is start-rows-missing. For a ledger",
+    "                    you know was written by a body that signs its starts:",
+    "                    a signed row with its signature removed otherwise",
+    "                    reads as one written before signing.",
     "  --operator-credentials <file>",
     "                    verify HTTP approval signatures against this operator",
     "                    credential file, instead of operator-credentials.json",
@@ -281,6 +288,9 @@ export async function runVerify(
     out("verify: --require-anchored needs --anchor-key: a receipt is checked only under a key you supply");
     return EX_VERIFY_FAILED;
   }
+  const signedStartsAt = args.indexOf("--require-signed-starts");
+  const requireSignedStarts = signedStartsAt !== -1;
+  if (requireSignedStarts) args.splice(signedStartsAt, 1);
   let credentialsFile: string | undefined;
   const credentialsAt = args.indexOf("--operator-credentials");
   if (credentialsAt !== -1) {
@@ -365,7 +375,9 @@ export async function runVerify(
       anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
     };
-    const starts = readStartSummary(dir, publicKeyPem ?? null, publicKeyPem ? "pinned" : "none");
+    const starts = readStartSummary(dir, publicKeyPem ?? null, publicKeyPem ? "pinned" : "none", {
+      requireSigned: requireSignedStarts,
+    });
     const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
     out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
     return EX_VERIFY_FAILED;
@@ -402,7 +414,9 @@ export async function runVerify(
   }
   // Start rows are signed by the record key: the pinned one, else the one the records carry.
   const startKeyPem = publicKeyPem ?? result.trust.publicKeyPem ?? null;
-  const starts = readStartSummary(dir, startKeyPem, publicKeyPem ? "pinned" : "in-ledger");
+  const starts = readStartSummary(dir, startKeyPem, publicKeyPem ? "pinned" : "in-ledger", {
+    requireSigned: requireSignedStarts,
+  });
   if (starts.problems.length > 0) {
     result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
   }

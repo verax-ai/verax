@@ -234,13 +234,24 @@ counted and not checked. `starts` in `--json` gains `signed`,
 `signedVerified`, `startKey` and `problems`; `unsigned` is now true only
 when some row is unsigned.
 
+A signed row with `v`, `prevStartHash` and `sig` taken off reads as one
+written before signing, and a reader cannot tell the two apart (R26). The
+default therefore stays: such a file is counted, named `unsigned (not
+verified)`, and verifies. `verax verify --require-signed-starts` is for a
+reader who knows the ledger was written by a body that signs its starts:
+every unsigned row is `start-row-unsigned: starts.jsonl line N`, a ledger
+with no start row is `start-rows-missing`, signed rows with no record key to
+check them under are `start-rows-not-checked`, and the ledger does not
+verify. A ledger that began under 0.4.8 or earlier keeps its unsigned rows
+and does not pass under this flag.
+
 Rows removed from the end leave nothing to compare. Whoever holds the
 record key can write a valid row: the signature says the body's key wrote
 it, not that the gap is true. A signed halt from a remote watcher is
 designed in `docs/design/remote-halt.md` and not built.
 
-Guards: `signed-starts`; `heartbeat-watch` reads a real body's signed rows
-back. Not released.
+Guards: `signed-starts`, `attack-r26-unsigned-starts`; `heartbeat-watch`
+reads a real body's signed rows back. Not released.
 
 ## Key custody check — unreleased
 
