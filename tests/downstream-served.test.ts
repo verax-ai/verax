@@ -101,29 +101,34 @@ async function withServedBody(
       : [];
   const audience = "http://127.0.0.1/verax-test";
   const issuer = await startDevIssuer(0, audience);
-  const server = await listen({
-    issuer: issuer.issuer,
-    jwksUrl: issuer.jwksUrl,
-    audience,
-    stateDir,
-    bindHost: "127.0.0.1",
-    bindPort: 0,
-    policyFile,
-    tlsTerminated: false,
-    downstreamFile,
-  });
-  const port = (server.address() as { port: number }).port;
+  // The issuer is closed whether or not the body opens: a listening server
+  // left behind keeps this file's process alive after its tests have ended.
   try {
-    await fn({
-      mcp: `http://127.0.0.1:${port}/mcp`,
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
       stateDir,
-      token: (scope = "verax:read") => issuer.sign({ scope }),
-      trace: readTrace,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+      downstreamFile,
     });
+    const port = (server.address() as { port: number }).port;
+    try {
+      await fn({
+        mcp: `http://127.0.0.1:${port}/mcp`,
+        stateDir,
+        token: (scope = "verax:read") => issuer.sign({ scope }),
+        trace: readTrace,
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
+    }
   } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
     await issuer.close();
   }
 }
@@ -211,6 +216,31 @@ describe("downstream on the served path", { timeout: 60_000 }, () => {
         assert.equal(trace().filter((e) => e.event === "start").length, 1);
         assert.equal(trace().filter((e) => e.event === "call").length, 0);
       },
+    );
+  });
+
+  it("a child that never answers stops the body, and the helper leaves nothing listening", async () => {
+    // The helper starts an issuer before the body. When `listen` threw, the
+    // issuer stayed open and this file never exited: in a loaded run an attach
+    // that timed out became a file that hung until someone killed it.
+    await assert.rejects(
+      () =>
+        withServedBody(
+          {
+            policyText: ECHO_POLICY,
+            downstream: {
+              prefix: "echo",
+              command: process.execPath,
+              args: ["-e", "setInterval(() => {}, 1000)"],
+              trust: "same-user",
+              timeoutMs: 500,
+            },
+          },
+          async () => {
+            assert.fail("the body opened over a child that never answered");
+          },
+        ),
+      /downstream-attach-timeout:echo/,
     );
   });
 
