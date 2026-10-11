@@ -102,6 +102,19 @@ activity is attested by these observations.
 
 Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
+## Key custody check — unreleased
+
+`verax doctor` opens `<stateDir>/keys/record.private.pem` as the user who
+runs it. When that works and the session is not elevated, `key-custody`
+fails: an agent running as that user can sign records as the body. Local
+mode (`VERAX_JWKS_FILE` set) is named in the line. An elevated session that
+can open it is a warning, since an administrator is outside the model. A
+key the user cannot open is `ok`. Moving the key out of a file is designed
+in `docs/design/key-custody.md` and not built; Windows CNG on 26H2 has no
+Ed25519 (measured), AWS KMS does.
+
+Guard: `key-custody-doctor`. Not released.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a

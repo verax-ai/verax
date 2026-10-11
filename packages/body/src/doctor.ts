@@ -1,7 +1,7 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { readWindowsMachineRoots, SystemToolError, windowsAgentTokenPath } from "./install.ts";
+import { defaultElevated, readWindowsMachineRoots, SystemToolError, windowsAgentTokenPath } from "./install.ts";
 import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
@@ -19,7 +19,12 @@ export type DoctorCheck = {
 const SECRET_RE = /sk-|-----BEGIN|Bearer |eyJ[A-Za-z0-9_-]{10,}\./;
 const SECRET_NAME = /^(VERAX_DEV_TOKEN|.*_(TOKEN|SECRET|KEY))$/;
 
-export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): DoctorCheck[] {
+export type DoctorOptions = {
+  /** Whether this process is elevated. Asked only when the record key is readable. */
+  elevated?: () => boolean;
+};
+
+export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts: DoctorOptions = {}): DoctorCheck[] {
   const checks: DoctorCheck[] = [];
   const issuer = Boolean(env.VERAX_ISSUER?.trim());
   const jwksUrl = Boolean(env.VERAX_JWKS_URL?.trim());
@@ -116,6 +121,8 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
       }
     }
     checks.push(...evidenceChecks(stateDir, env));
+    const custody = keyCustodyCheck(stateDir, env, opts.elevated ?? (() => defaultElevated()));
+    if (custody) checks.push(custody);
   }
 
   const secretNames = Object.entries(env)
@@ -360,6 +367,41 @@ export function doctorBodyLog(stateDir: string): string {
   const tail = readLogTail(file, 20);
   if (tail === null) return `body.log missing: ${file}\n`;
   return tail;
+}
+
+/**
+ * The record key signs every decision. If the user running doctor can open
+ * it, an agent running as that user can too, and can sign records the body
+ * never made. Opening the file is the test, because on Windows only an open
+ * reads the ACL. An elevated session is outside the model either way.
+ */
+function keyCustodyCheck(stateDir: string, env: NodeJS.ProcessEnv, elevated: () => boolean): DoctorCheck | null {
+  const path = join(stateDir, "keys", "record.private.pem");
+  if (!existsSync(path)) return null;
+  try {
+    closeSync(openSync(path, "r"));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") {
+      return { id: "key-custody", level: "ok", detail: "this user cannot read the body's record key" };
+    }
+    return { id: "key-custody", level: "warn", detail: `record key could not be checked: ${code ?? "error"}` };
+  }
+  if (elevated()) {
+    return {
+      id: "key-custody",
+      level: "warn",
+      detail: "this elevated session can read the body's record key; an administrator is outside the model",
+    };
+  }
+  const local = Boolean(env.VERAX_JWKS_FILE?.trim());
+  return {
+    id: "key-custody",
+    level: "fail",
+    detail:
+      `${local ? "local mode: " : ""}this user can read keys/record.private.pem, so an agent running as this user can sign records as the body. ` +
+      "That is a way to try Verax, not a boundary; verax install runs the body under its own account.",
+  };
 }
 
 export function doctorExit(checks: readonly DoctorCheck[]): number {
