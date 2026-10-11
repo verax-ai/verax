@@ -18,7 +18,7 @@ export function persistPolicySnapshot(stateDir: string, hash: string, document: 
   const path = snapshotPath(stateDir, hash);
   if (existsSync(path)) {
     const existing = JSON.parse(readFileSync(path, "utf8")) as unknown;
-    if (loadPolicy(existing).hash !== hash) {
+    if (loadPolicy(existing, { unknownKeys: "ignore" }).hash !== hash) {
       throw new Error(`policy-snapshot-mismatch:${hash}`);
     }
     return;
@@ -37,7 +37,7 @@ export function readPolicySnapshots(
     if (!existsSync(path)) continue;
     try {
       const document = JSON.parse(readFileSync(path, "utf8")) as unknown;
-      if (loadPolicy(document).hash !== hash) continue;
+      if (loadPolicy(document, { unknownKeys: "ignore" }).hash !== hash) continue;
       out[hash] = document;
     } catch {
       // Omit a bad snapshot so the panel can say the historical policy is unavailable.
