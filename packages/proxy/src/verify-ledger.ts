@@ -872,6 +872,9 @@ const ANCHORS_NONE: VerifyAnchors = {
   checked: false,
 };
 
+/** How far past the reader's clock a checkpoint window may end before it is called a future window. */
+const FUTURE_WINDOW_SKEW_MS = 60_000;
+
 /** Checkpoints past the grace with no receipt that verified are named. */
 function requireAnchoredProblems(
   checkpoints: readonly VerifiedCheckpoint[],
@@ -882,6 +885,12 @@ function requireAnchoredProblems(
   const out: string[] = [];
   for (const c of checkpoints) {
     if (anchoredHashes.has(c.hash)) continue;
+    // The grace is counted from the end the checkpoint itself states. A window that has
+    // not ended yet would never come due, so it is named instead of being left to age.
+    if (c.endMs !== null && c.endMs > required.nowMs + FUTURE_WINDOW_SKEW_MS) {
+      out.push(`checkpoint-window-in-future ${c.hash.slice(0, 12)}`);
+      continue;
+    }
     // A checkpoint with no window end cannot be aged; it is held to the rule.
     if (c.endMs !== null && c.endMs + required.graceMs >= required.nowMs) continue;
     out.push(`checkpoint-not-anchored ${c.hash.slice(0, 12)}`);
