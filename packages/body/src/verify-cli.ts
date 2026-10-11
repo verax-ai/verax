@@ -319,7 +319,7 @@ export async function runVerify(
       anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
     };
-    const starts = readStartSummary(dir);
+    const starts = readStartSummary(dir, publicKeyPem ?? null, publicKeyPem ? "pinned" : "none");
     const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
     out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
     return EX_VERIFY_FAILED;
@@ -354,7 +354,13 @@ export async function runVerify(
       problems: [...result.problems, `control signatures: ${control.signedFailed} did not verify`],
     };
   }
-  const reported = { ...result, approvalSignatures: approval, controlSignatures: control, starts: readStartSummary(dir) };
+  // Start rows are signed by the record key: the pinned one, else the one the records carry.
+  const startKeyPem = publicKeyPem ?? result.trust.publicKeyPem ?? null;
+  const starts = readStartSummary(dir, startKeyPem, publicKeyPem ? "pinned" : "in-ledger");
+  if (starts.problems.length > 0) {
+    result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
+  }
+  const reported = { ...result, approvalSignatures: approval, controlSignatures: control, starts };
   out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control, reported.starts));
   return reported.ok ? 0 : EX_VERIFY_FAILED;
 }

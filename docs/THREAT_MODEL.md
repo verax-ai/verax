@@ -71,6 +71,15 @@ from "nothing happened" if the only copy and watcher live on the same host
 and that host stops or removes both. These local observations are not
 independent evidence of uptime or of what happened during a gap.
 
+Unreleased: start rows are signed by the record key and each names the
+SHA-256 of the row before it. `verax verify` names a changed gap, a row
+removed from the middle, or an unsigned row after a signed one. Rows removed
+from the end leave nothing to compare, and anyone holding the record key can
+write a valid row; the signature binds the row to the key, not to the truth
+of the gap. An operator session can already stop the body with `POST
+/api/halt`; `verax watch --url` does not call it, and a signed halt from a
+remote watcher is designed in `docs/design/remote-halt.md`, not built.
+
 The no-bypass scan is deliberately conservative: the character sequences `import(` and `require(` may not appear anywhere in packages/body, including strings and comments.
 
 Exception: `src/desktop.ts` may import `node:child_process` to supervise the issuer, body, and panel. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.

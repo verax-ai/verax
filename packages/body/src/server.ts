@@ -429,7 +429,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
   }
   try {
     // This must precede syncControlRecords: those records pulse too.
-    recordBodyStart(config.stateDir, services.ledger.startedAtMs);
+    recordBodyStart(config.stateDir, services.ledger.startedAtMs, signers.recordSigner);
   } catch (err) {
     services.ledger.close();
     await closeAll(sessions);

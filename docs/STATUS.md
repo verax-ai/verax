@@ -102,6 +102,30 @@ activity is attested by these observations.
 
 Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
+## Signed start rows — unreleased
+
+A body started by `verax serve` writes v2 start rows: the v1 fields plus
+`v: 2`, `prevStartHash` (SHA-256 of the previous line in `starts.jsonl`, or
+null) and `sig`, an Ed25519 signature by the record key over
+`verax-start-v2` and a newline followed by the canonical row without `sig`.
+`verax verify` checks them under the pinned `--key`, else the key the
+records carry, and says which. A signature that does not verify, a
+`prevStartHash` that is not the line before, or an unsigned row after a
+signed one is a problem, and the ledger does not verify. Unsigned rows
+before the first signed one, written by an earlier version, are counted
+and named as unsigned. With no records and no `--key`, signed rows are
+counted and not checked. `starts` in `--json` gains `signed`,
+`signedVerified`, `startKey` and `problems`; `unsigned` is now true only
+when some row is unsigned.
+
+Rows removed from the end leave nothing to compare. Whoever holds the
+record key can write a valid row: the signature says the body's key wrote
+it, not that the gap is true. A signed halt from a remote watcher is
+designed in `docs/design/remote-halt.md` and not built.
+
+Guards: `signed-starts`; `heartbeat-watch` reads a real body's signed rows
+back. Not released.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a
