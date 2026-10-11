@@ -152,6 +152,10 @@ function asRule(raw: unknown, index: number, options: PolicyParseOptions): Polic
       throw new Error(`policy-rule-spend-missing:${rec.id}`);
     }
     rule.spend = asSpend(rec.spend, rec.id, options);
+  } else if (rec.spend !== undefined && options.unknownKeys !== "ignore") {
+    // The gate reads a spend block on the spend tool only. On any other rule it
+    // would set no cap and stay out of the policy hash, so the file does not load.
+    throw new Error(`policy-rule-spend-not-spend-tool:${rec.id}`);
   }
   if (rec.egress !== undefined) {
     if (rec.egress !== true) {
@@ -334,8 +338,15 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
     ...(document.limits?.dailyMax !== undefined ? { dailyMax: document.limits.dailyMax } : {}),
   };
   const spendRule = document.rules.find((rule) => rule.tool === "spend");
+  // Only a spend rule carries a parsed spend block, so these are the descriptors the hash covers.
+  const descriptorsByPayee: Record<string, readonly string[]> = {};
+  for (const rule of document.rules) {
+    if (rule.tool !== "spend" || !rule.spend?.descriptors) continue;
+    for (const payee of rule.spend.payees) descriptorsByPayee[payee] = rule.spend.descriptors;
+  }
   return {
     hash,
+    descriptorsByPayee,
     dayOffsetMinutes: spendRule?.spend?.dayOffsetMinutes ?? 0,
     approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
     limits,
