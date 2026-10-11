@@ -116,6 +116,13 @@ function isStartRow(row: StartRow): boolean {
   );
 }
 
+/** Whether a parsed line carries a field only a signed start row has. */
+function claimsSigned(parsed: unknown): boolean {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const rec = parsed as Record<string, unknown>;
+  return rec.v !== undefined || rec.sig !== undefined || rec.prevStartHash !== undefined;
+}
+
 function signedVerifies(row: SignedStartRow, publicKeyPem: string): boolean {
   try {
     const { sig, ...rest } = row;
@@ -161,10 +168,21 @@ export function readStartSummary(
     if (line.trim() === "") continue;
     const n = i + 1;
     let row: StartRow | SignedStartRow;
+    let parsed: unknown;
     try {
-      row = JSON.parse(line) as StartRow | SignedStartRow;
+      parsed = JSON.parse(line) as unknown;
+      row = parsed as StartRow | SignedStartRow;
       if (!isStartRow(row)) throw new Error("start row shape");
     } catch {
+      // A line that carries what only a signed row carries, and no longer reads
+      // as a start row, is a signed row someone altered: it is not skipped.
+      if (claimsSigned(parsed)) {
+        seenSigned = true;
+        result.signed += 1;
+        result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
+        prevLine = line;
+        continue;
+      }
       result.warnings.push(`starts.jsonl line ${n} is unreadable`);
       if (seenSigned) result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
       // A line nothing can read is not a signed row either.
@@ -191,6 +209,12 @@ export function readStartSummary(
         if (signedVerifies(signed, publicKeyPem)) result.signedVerified += 1;
         else result.problems.push(`start signature does not verify: starts.jsonl line ${n}`);
       }
+    } else if (claimsSigned(row)) {
+      // A version other than 2, or a signature with no version: a row written
+      // before signing carries none of these fields.
+      seenSigned = true;
+      result.signed += 1;
+      result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
     } else {
       result.unsigned = true;
       if (seenSigned) result.problems.push(`unsigned start row after a signed one: starts.jsonl line ${n}`);

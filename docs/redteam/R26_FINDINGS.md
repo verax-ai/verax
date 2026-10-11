@@ -44,6 +44,7 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - The first version of `--require-signed-starts` left a line that cannot be read as a warning. History replaced by one such line, with the body's next signed start chained on it, passed under the flag. The line is now `start-row-unreadable` and the ledger does not verify.
 - The first version of the R26-10 fix compared the Windows owner with the user's own SID only. A key owned by a group the user's token holds enabled read as someone else's, and `key-custody` stayed `ok`. The owner is now held against the user and those groups, and output that names no owner or no user is unknown rather than someone else's.
 - The first version of the message bound restarted its count at every empty line whenever the content type contained `text/event-stream`. An HTTP 500 labelled that way, and a JSON answer with that name in a content-type parameter, are read whole by the client: with empty lines inside them, 12 MiB passed. The count now restarts only for a successful answer whose media type is exactly `text/event-stream`.
+- Found in the pre-release review: a row that still said `v: 2` and carried its signature, with one field changed so it no longer read as a start row, was skipped as unreadable before the signature was looked at. With every row altered that way the default `verify` printed `VERIFIED`. A row that carries a signed row's fields and is not a well-formed v2 row is now a problem.
 
 ## Open
 
