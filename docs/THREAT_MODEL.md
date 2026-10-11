@@ -90,8 +90,9 @@ Exception: `src/downstream.ts` may import the SDK stdio client transport (`clien
 Append-only records conflict with a right to erase. Phase 1 payloads are
 plaintext. A ledger-piece split lives in the tree. keep/move/drop of
 closed pieces and their copies is designed in
-`docs/design/ledger-rotation.md` and not applied. Payload encryption
-and a right-to-erase path are still not designed.
+`docs/design/ledger-rotation.md` and not applied. Payload sealing and
+erasure by destroying a per-subject key are designed in
+`docs/design/erasure.md` and not built.
 
 ## out of scope: OS compromise
 
