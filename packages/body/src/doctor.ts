@@ -21,6 +21,12 @@ export type DoctorCheck = {
 
 const SECRET_RE = /sk-|-----BEGIN|Bearer |eyJ[A-Za-z0-9_-]{10,}\./;
 const SECRET_NAME = /^(VERAX_DEV_TOKEN|.*_(TOKEN|SECRET|KEY))$/;
+/**
+ * Variables whose name ends like a secret's and whose value is a path to a
+ * file holding a public key. The value is still held to SECRET_RE, so key
+ * text written there instead of a path is named.
+ */
+const PUBLIC_KEY_PATH_NAMES = new Set(["VERAX_ANCHOR_SERVICE_KEY"]);
 
 export type DoctorOptions = {
   /** Whether this process is elevated. Asked only when the record key is readable. */
@@ -148,7 +154,9 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
   }
 
   const secretNames = Object.entries(env)
-    .filter(([k, v]) => Boolean(v) && (SECRET_NAME.test(k) || SECRET_RE.test(String(v))))
+    .filter(
+      ([k, v]) => Boolean(v) && ((SECRET_NAME.test(k) && !PUBLIC_KEY_PATH_NAMES.has(k)) || SECRET_RE.test(String(v))),
+    )
     .map(([k]) => k);
   const secretInArgv = argv.some((a) => SECRET_RE.test(a));
   if (secretInArgv) {
