@@ -191,14 +191,18 @@ export function readStartSummary(
   try {
     raw = readFileSync(join(stateDir, "starts.jsonl"), "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") result.warnings.push("starts.jsonl could not be read");
+    // A file that is there and cannot be read has not been checked: that is a
+    // problem, not a warning. Only a file that is not there is nothing.
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") result.problems.push("starts.jsonl could not be read");
     if (opts.requireSigned) result.problems.push("start-rows-missing: no start row could be read");
     return result;
   }
   let prevLine: string | null = null;
   let seenSigned = false;
   for (const [i, line] of raw.split("\n").entries()) {
-    if (line.trim() === "") continue;
+    // The empty piece after the last newline. A line of spaces is not empty:
+    // the body does not write one, and it is read like any other line.
+    if (line === "") continue;
     const n = i + 1;
     let row: StartRow | SignedStartRow;
     let parsed: unknown;
@@ -238,8 +242,19 @@ export function readStartSummary(
       if (signed.prevStartHash !== expected) {
         result.problems.push(`start chain breaks at starts.jsonl line ${n}: the row before it is not the one it names`);
       }
+      // A signed row is accepted in one spelling, the one the body writes. A
+      // second copy of a key, padding, or an escape leaves the parsed row and
+      // its signature as they were and makes the line say something else to
+      // another reader.
+      if (JSON.stringify(parsed) !== line) {
+        result.problems.push(`signed start row is not written as the body writes it: starts.jsonl line ${n}`);
+      }
       if (typeof signed.sig !== "string" || signed.sig === "") {
         result.problems.push(`start row at starts.jsonl line ${n} is v2 with no signature`);
+      } else if (Buffer.from(signed.sig, "base64").toString("base64") !== signed.sig) {
+        // Base64 decoding skips characters outside its alphabet, so the same
+        // signature has many spellings; only the one the body writes is read.
+        result.problems.push(`start signature is not canonical base64: starts.jsonl line ${n}`);
       } else if (publicKeyPem) {
         if (signedVerifies(signed, publicKeyPem)) result.signedVerified += 1;
         else result.problems.push(`start signature does not verify: starts.jsonl line ${n}`);
