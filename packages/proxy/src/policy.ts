@@ -87,7 +87,34 @@ export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => 
 
 const DEFAULT_APPROVAL_TTL_MS = 86_400_000;
 
-function asRule(raw: unknown, index: number): PolicyRule {
+const DOCUMENT_KEYS = new Set(["version", "default", "rules", "egress", "approvalTtlMs", "limits", "requireInputs"]);
+const RULE_KEYS = new Set(["id", "tool", "requires", "text", "mode", "spend", "egress"]);
+const SPEND_KEYS = new Set(["maxAmountMinor", "currency", "payees", "dailyMaxMinor", "dayOffsetMinutes", "descriptors"]);
+const LIMIT_KEYS = new Set(["ratePerMinute", "dailyMax", "diskFreeBytes"]);
+
+export type PolicyParseOptions = {
+  /**
+   * "refuse" (the default) for a policy an operator is loading: a misspelt
+   * control would otherwise leave the policy weaker than the file reads.
+   * "ignore" only for a snapshot already on disk, written by a release that
+   * dropped unknown keys; its hash was taken without them.
+   */
+  unknownKeys?: "refuse" | "ignore";
+};
+
+function rejectUnknownKeys(
+  rec: Record<string, unknown>,
+  known: ReadonlySet<string>,
+  code: string,
+  options: PolicyParseOptions,
+): void {
+  if (options.unknownKeys === "ignore") return;
+  for (const key of Object.keys(rec)) {
+    if (!known.has(key)) throw new Error(`${code}:${key}`);
+  }
+}
+
+function asRule(raw: unknown, index: number, options: PolicyParseOptions): PolicyRule {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`policy-rule-invalid:${index}`);
   }
@@ -95,6 +122,7 @@ function asRule(raw: unknown, index: number): PolicyRule {
   if (typeof rec.id !== "string" || rec.id === "") {
     throw new Error(`policy-rule-id:${index}`);
   }
+  rejectUnknownKeys(rec, RULE_KEYS, `policy-rule-unknown-key:${rec.id}`, options);
   if (typeof rec.tool !== "string" || rec.tool === "") {
     throw new Error(`policy-rule-tool:${rec.id}`);
   }
@@ -123,7 +151,7 @@ function asRule(raw: unknown, index: number): PolicyRule {
     if (rec.spend === undefined) {
       throw new Error(`policy-rule-spend-missing:${rec.id}`);
     }
-    rule.spend = asSpend(rec.spend, rec.id);
+    rule.spend = asSpend(rec.spend, rec.id, options);
   }
   if (rec.egress !== undefined) {
     if (rec.egress !== true) {
@@ -134,11 +162,12 @@ function asRule(raw: unknown, index: number): PolicyRule {
   return rule;
 }
 
-function asSpend(raw: unknown, id: string): PolicySpend {
+function asSpend(raw: unknown, id: string, options: PolicyParseOptions): PolicySpend {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`policy-rule-spend-missing:${id}`);
   }
   const rec = raw as Record<string, unknown>;
+  rejectUnknownKeys(rec, SPEND_KEYS, `policy-rule-spend-unknown-key:${id}`, options);
   if (
     typeof rec.maxAmountMinor !== "number" ||
     !Number.isInteger(rec.maxAmountMinor) ||
@@ -209,12 +238,13 @@ function spendArgsInvalid(args: Record<string, unknown>): boolean {
   return false;
 }
 
-export function parsePolicyDocument(json: unknown): PolicyDocument {
+export function parsePolicyDocument(json: unknown, options: PolicyParseOptions = {}): PolicyDocument {
   const raw = typeof json === "string" ? parseIJson(json) : json;
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("policy-not-object");
   }
   const rec = raw as Record<string, unknown>;
+  rejectUnknownKeys(rec, DOCUMENT_KEYS, "policy-unknown-key", options);
   if (rec.version !== 1) {
     throw new Error("policy-version");
   }
@@ -227,7 +257,7 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
   const document: PolicyDocument = {
     version: 1,
     default: "deny",
-    rules: rec.rules.map(asRule),
+    rules: rec.rules.map((rule, index) => asRule(rule, index, options)),
   };
   if (rec.egress !== undefined) {
     if (
@@ -245,7 +275,7 @@ export function parsePolicyDocument(json: unknown): PolicyDocument {
     document.approvalTtlMs = rec.approvalTtlMs;
   }
   if (rec.limits !== undefined) {
-    document.limits = asLimits(rec.limits);
+    document.limits = asLimits(rec.limits, options);
   }
   if (rec.requireInputs !== undefined) {
     if (rec.requireInputs !== true) {
@@ -273,11 +303,12 @@ function rejectDuplicateRules(rules: readonly PolicyRule[]): void {
   }
 }
 
-function asLimits(raw: unknown): NonNullable<PolicyDocument["limits"]> {
+function asLimits(raw: unknown, options: PolicyParseOptions): NonNullable<PolicyDocument["limits"]> {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("policy-limits");
   }
   const rec = raw as Record<string, unknown>;
+  rejectUnknownKeys(rec, LIMIT_KEYS, "policy-limits-unknown-key", options);
   const limits: NonNullable<PolicyDocument["limits"]> = {};
   for (const key of ["ratePerMinute", "dailyMax", "diskFreeBytes"] as const) {
     if (rec[key] === undefined) continue;
@@ -294,8 +325,8 @@ export function ruleTextHash(text: string): string {
   return sha256Canonical(text);
 }
 
-export function loadPolicy(json: unknown): Policy {
-  const document = parsePolicyDocument(json);
+export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Policy {
+  const document = parsePolicyDocument(json, options);
   const hash = sha256Canonical(document);
   const limits: PolicyLimits = {
     diskFreeBytes: document.limits?.diskFreeBytes ?? defaultDiskFreeBytes(),

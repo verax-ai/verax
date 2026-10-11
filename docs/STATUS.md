@@ -180,6 +180,24 @@ wherever the operator starts it; `verax install` does not start a witness.
 
 Guard: `auto-anchor`. Not released.
 
+## Unknown policy keys refused — unreleased
+
+Up to 0.4.8 the policy parser dropped a key it did not know, so a misspelt
+control loaded without a word and the policy was weaker than the file read:
+`requireInput` for `requireInputs` let a call with no `_inputs` through,
+and `dailyMax` written inside `spend` set no daily cap. The parser now refuses an unknown key on the document
+(`policy-unknown-key:<key>`), on a rule (`policy-rule-unknown-key:<id>:<key>`),
+in `spend` (`policy-rule-spend-unknown-key:<id>:<key>`) and in `limits`
+(`policy-limits-unknown-key:<key>`), and the body does not start. The shipped
+policy carries only known keys. A policy file that holds comments or notes
+under keys of its own stops loading after this change; move them out of the
+file. Snapshots already in `<state>/policies/` were stored as the file was
+written, under the hash of the document without the extra keys; they are
+still read, so the cleaned policy starts on the same state directory and the
+panel and `verax approve` still find the historical policy.
+
+Guards: `policy-unknown-keys`, `policy-snapshot-unknown-keys`. Not released.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a

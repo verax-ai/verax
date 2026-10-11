@@ -22,7 +22,7 @@ function policyFromSnapshot(stateDir: string, policyHash: string): Policy | null
   const snap = join(stateDir, "policies", `${policyHash}.json`);
   if (!existsSync(snap)) return null;
   try {
-    const loaded = loadPolicy(JSON.parse(readFileSync(snap, "utf8")) as unknown);
+    const loaded = loadPolicy(JSON.parse(readFileSync(snap, "utf8")) as unknown, { unknownKeys: "ignore" });
     if (loaded.hash !== policyHash) return null;
     return loaded;
   } catch {

@@ -2,6 +2,7 @@ export { createProxy, LedgerDenyUnrecorded } from "./proxy.ts";
 export { effectDescriptor, sha256Canonical } from "./hash.ts";
 export { samePublicKey, thirdPartyReceiptRejection } from "./third-party.ts";
 export { loadPolicy, TERMINAL_CONTROL_CLASS } from "./policy.ts";
+export type { PolicyParseOptions } from "./policy.ts";
 export { FileLedger, MemoryLedger, readLedgerTail, lockHolderAlive } from "./ledger.ts";
 export { indexCoverage, listPieceFiles } from "./ledger-manifest.ts";
 export { explain } from "./explain.ts";

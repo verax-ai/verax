@@ -59,7 +59,7 @@ function loadDescriptorsFromDir(stateDir: string): {
     const doc = JSON.parse(readFileSync(join(dir, chosen.name), "utf8")) as {
       rules?: Array<{ spend?: { payees?: unknown; descriptors?: unknown } }>;
     };
-    if (loadPolicy(doc).hash !== hash) return { descriptorsByPayee: {}, policyHash: null };
+    if (loadPolicy(doc, { unknownKeys: "ignore" }).hash !== hash) return { descriptorsByPayee: {}, policyHash: null };
     return { descriptorsByPayee: descriptorsFromDoc(doc), policyHash: hash };
   } catch {
     return { descriptorsByPayee: {}, policyHash: null };
