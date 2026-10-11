@@ -1,0 +1,58 @@
+# Verax body behind TLS with an OIDC issuer, all on one Docker host.
+# The body is the published image. The issuer (idp/idp.mjs) is a stand-in for
+# a local run and NOT for production: it signs a token for anyone holding the
+# shared secret. In production point VERAX_ISSUER, VERAX_JWKS_URL and
+# VERAX_AUDIENCE at your own identity provider. See README.md.
+services:
+  caddy:
+    image: caddy:2.10.2
+    ports:
+      - "127.0.0.1:8443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    networks:
+      default:
+        aliases: [verax.localhost, idp.localhost]
+
+  idp:
+    build: ./idp
+    environment:
+      IDP_ISSUER: https://idp.localhost
+      IDP_CLIENT_SECRET_FILE: /run/secrets/idp_client_secret
+    secrets: [idp_client_secret]
+
+  body:
+    image: ${VERAX_IMAGE:-veraxai/verax:latest}
+    command: ["serve"]
+    depends_on: [caddy, idp]
+    environment:
+      VERAX_ISSUER: https://idp.localhost
+      VERAX_JWKS_URL: https://idp.localhost/jwks
+      VERAX_AUDIENCE: https://verax.localhost/mcp
+      VERAX_TLS_TERMINATED: "1"
+      VERAX_POLICY_FILE: ${VERAX_POLICY_FILE:-/usr/local/lib/node_modules/@verax-ai/body/node_modules/@verax-ai/proxy/policy/default.json}
+      # Caddy's local CA, so the body can fetch the issuer's keys over https.
+      NODE_EXTRA_CA_CERTS: /ca/root.crt
+    volumes:
+      - verax-state:/var/lib/verax
+      - ./ca:/ca:ro
+
+  agent:
+    image: ${VERAX_IMAGE:-veraxai/verax:latest}
+    profiles: [agent]
+    entrypoint: ["node", "/usr/local/lib/node_modules/@verax-ai/body/agent-2b.mjs"]
+    environment:
+      NODE_EXTRA_CA_CERTS: /ca/root.crt
+    volumes:
+      - ./ca:/ca:ro
+      - ./agent/agent.mjs:/usr/local/lib/node_modules/@verax-ai/body/agent-2b.mjs:ro
+    secrets: [idp_client_secret]
+
+secrets:
+  idp_client_secret:
+    file: ./secrets/idp_client_secret
+
+volumes:
+  verax-state:
+  caddy-data:
