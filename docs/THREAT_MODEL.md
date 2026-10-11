@@ -94,7 +94,10 @@ Unreleased: with `VERAX_ANCHOR_SERVICE` set, `verax witness` registers each
 checkpoint it signs with a SCITT Transparency Service someone else runs and
 keeps the receipt, and `verax verify --anchor-key <pem> --require-anchored`
 names every checkpoint older than the grace that has no receipt verifying
-under that key. This detects; it does not prevent. Whoever can write the
+under that key. The grace is counted from the end the checkpoint itself
+states, so a checkpoint whose window ends more than a minute after the
+reader's clock is named `checkpoint-window-in-future` instead of being left
+to come due. This detects; it does not prevent. Whoever can write the
 state directory can still stop the witness, roll the ledger back or delete
 it. What changes is that a deleted receipt is named instead of passing, and
 the service's log keeps the checkpoint hash after the local copy is gone.
