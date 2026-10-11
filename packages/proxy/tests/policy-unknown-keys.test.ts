@@ -30,7 +30,7 @@ describe("policy unknown keys", () => {
   it("still loads a document that uses only known keys", () => {
     const doc = base();
     doc.egress = ["example.com"];
-    (doc.rules as Record<string, unknown>[])[0].egress = true;
+    (doc.rules as unknown[]).push({ id: "send", tool: "message.send", requires: [], text: "send messages", egress: true });
     doc.approvalTtlMs = 1000;
     doc.limits = { ratePerMinute: 5, dailyMax: 10, diskFreeBytes: 1 };
     doc.requireInputs = true;

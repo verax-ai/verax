@@ -346,7 +346,11 @@ while the tool's own description says a host is reached only when the
 policy lists it (R26). The parser now refuses a rule for a tool whose host
 the gate reads, today `message.send`, that does not carry the mark
 (`policy-rule-egress-unmarked:<id>`), approve mode included, and a list no
-rule is marked for (`policy-egress-unused`); an empty list is a list. A
+marked rule for such a tool reads (`policy-egress-unused`); an empty list
+is a list. A mark on a tool with no host reader refuses every call to it
+and keeps no list. A mark on the `spend` rule is refused
+(`policy-rule-egress-on-spend:<id>`): the gate decides a spend by payee and
+amount before it looks at a host. A
 marked rule in a document with no list loads and reaches no host. A
 snapshot already on disk is still read. A policy with an unmarked
 `message.send` rule stops loading after this change: add `egress: true` to

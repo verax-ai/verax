@@ -139,6 +139,55 @@ describe("R26 an egress list that no rule reads", () => {
  * list, made that false: nothing read the host. The mark is now required on
  * a rule for a tool whose host the gate reads.
  */
+/**
+ * Found in the pre-release review. "Some rule is marked" was enough to keep a
+ * host list. The gate decides `spend` before it looks at any host, and a tool
+ * with no host reader is refused whatever the list says, so a mark on either
+ * reads the list no more than no mark does.
+ */
+describe("a mark on a rule that never reads a host", () => {
+  const SPEND = {
+    id: "pay",
+    tool: "spend",
+    requires: ["verax:act"],
+    mode: "approve",
+    text: "Paying a listed payee needs approval.",
+    spend: { maxAmountMinor: 1000, currency: "EUR", payees: ["acme"] },
+  };
+
+  it("on the spend rule is refused: the gate does not apply it there", () => {
+    const got = load({ version: 1, default: "deny", rules: [{ ...SPEND, egress: true }] });
+    assert.equal(got.ok, false, "a spend rule marked egress loaded, and the mark is never read");
+    if (!got.ok) assert.equal(got.reason, "policy-rule-egress-on-spend:pay");
+  });
+
+  it("on the spend rule does not keep a host list either", () => {
+    const got = load({
+      version: 1,
+      default: "deny",
+      egress: ["mail.example"],
+      rules: [{ ...SPEND, egress: true }],
+    });
+    assert.equal(got.ok, false, "the list loaded beside a rule that never reads a host");
+  });
+
+  it("on a tool with no host reader does not keep a host list", () => {
+    const got = load({
+      version: 1,
+      default: "deny",
+      egress: ["mail.example"],
+      rules: [{ id: "get", tool: "memory.get", requires: ["verax:act"], text: "Reading memory needs the act scope.", egress: true }],
+    });
+    assert.equal(got.ok, false, "the list loaded and no rule can read it");
+    if (!got.ok) assert.equal(got.reason, "policy-egress-unused");
+  });
+
+  it("a snapshot already on disk with a marked spend rule still opens", () => {
+    const got = load({ version: 1, default: "deny", rules: [{ ...SPEND, egress: true }] }, { unknownKeys: "ignore" });
+    assert.equal(got.ok, true);
+  });
+});
+
 describe("a message.send rule without the mark", () => {
   it("does not load, list or no list", () => {
     const got = load({ version: 1, default: "deny", rules: [UNMARKED_SEND] });
