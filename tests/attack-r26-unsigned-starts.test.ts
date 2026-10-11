@@ -166,6 +166,69 @@ describe("R26-7 start rows with their signatures taken off", () => {
     }
   });
 
+  // Found in the pre-release review. A row that still says it is signed but no
+  // longer has the shape of a start row was skipped as unreadable before its
+  // signature was looked at. With every row altered that way nothing was
+  // checked, and the default verify passed with warnings.
+  it("a row that says it is signed and is malformed is a problem, with no flag", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      const altered = rows(dir).map((r) => ({ ...r, atMs: String(r.atMs), gapMs: r.gapMs === null ? null : 1_000 }));
+      writeRows(dir, altered);
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 1/, got.text);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a row that keeps its signature under another version number is a problem too", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      const altered = rows(dir).map((r) => ({ ...r, v: 3, gapMs: r.gapMs === null ? null : 1_000 }));
+      writeRows(dir, altered);
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a signed row cut so it no longer parses is a problem too", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      // Every row keeps its fields and loses its closing brace: not JSON any more.
+      const cut = rows(dir).map((r) => JSON.stringify(r).slice(0, -1));
+      writeFileSync(join(dir, "starts.jsonl"), `${cut.join("\n")}\n`, "utf8");
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 1/, got.text);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 2/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("the same for one altered row in a ledger that has only that row", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
+    try {
+      const keyFile = await ledgerWithAThreeDayGap(dir);
+      const first = rows(dir)[0]!;
+      writeRows(dir, [{ ...first, atMs: String(first.atMs) }]);
+      const got = await verify(dir, keyFile);
+      assert.match(got.text, /signed start row is malformed: starts\.jsonl line 1/, got.text);
+      assert.equal(got.code, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("without the flag the stripped file still reads as an older ledger, and says unsigned", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-r26-7-"));
     try {

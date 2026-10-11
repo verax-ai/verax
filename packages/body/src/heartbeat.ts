@@ -1,5 +1,5 @@
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
 import type { FileLedger, RecordSigner } from "@verax-ai/proxy";
 import { canonical } from "@cedulon/core";
@@ -32,16 +32,44 @@ function lineHash(line: string): string {
   return createHash("sha256").update(line, "utf8").digest("hex");
 }
 
-function lastLine(path: string): string | null {
-  let text: string;
+/**
+ * The last line of the file that is not blank, read from the end. The file
+ * gains a row on every start and is never trimmed, so reading all of it to
+ * find one line grew with the body's history and, past the longest string
+ * the runtime holds, stopped the start. The window doubles until it holds a
+ * whole line; a file that is one long line is read whole, as before.
+ */
+export function lastLine(path: string, windowBytes = 64 * 1024): string | null {
+  let fd: number;
   try {
-    text = readFileSync(path, "utf8");
+    fd = openSync(path, "r");
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw err;
   }
-  const lines = text.split("\n").filter((l) => l.trim() !== "");
-  return lines.length === 0 ? null : lines[lines.length - 1]!;
+  try {
+    const size = fstatSync(fd).size;
+    for (let window = Math.max(1, windowBytes); ; window *= 2) {
+      const start = Math.max(0, size - window);
+      const buf = Buffer.alloc(size - start);
+      let read = 0;
+      while (read < buf.length) {
+        const n = readSync(fd, buf, read, buf.length - read, start + read);
+        if (n === 0) break;
+        read += n;
+      }
+      // The bytes are cut at a newline, not at a character: a window may begin
+      // inside a multi-byte character, and inside a line either way.
+      const firstNewline = start === 0 ? -1 : buf.indexOf(0x0a);
+      if (start > 0 && firstNewline === -1) continue;
+      const text = buf.subarray(firstNewline + 1, read).toString("utf8");
+      const lines = text.split("\n").filter((l) => l.trim() !== "");
+      if (lines.length > 0) return lines[lines.length - 1]!;
+      if (start === 0) return null;
+    }
+  } finally {
+    closeSync(fd);
+  }
 }
 
 export function heartbeatEveryMs(env: NodeJS.ProcessEnv = process.env): number {
@@ -116,6 +144,18 @@ function isStartRow(row: StartRow): boolean {
   );
 }
 
+/**
+ * Whether a line carries a field only a signed start row has. A line that no
+ * longer parses is read as text, so a signed row cut short is not passed as
+ * one nothing can read.
+ */
+function claimsSigned(parsed: unknown, line = ""): boolean {
+  if (parsed === undefined) return /"(?:v|sig|prevStartHash)"\s*:/.test(line);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  const rec = parsed as Record<string, unknown>;
+  return rec.v !== undefined || rec.sig !== undefined || rec.prevStartHash !== undefined;
+}
+
 function signedVerifies(row: SignedStartRow, publicKeyPem: string): boolean {
   try {
     const { sig, ...rest } = row;
@@ -161,10 +201,21 @@ export function readStartSummary(
     if (line.trim() === "") continue;
     const n = i + 1;
     let row: StartRow | SignedStartRow;
+    let parsed: unknown;
     try {
-      row = JSON.parse(line) as StartRow | SignedStartRow;
+      parsed = JSON.parse(line) as unknown;
+      row = parsed as StartRow | SignedStartRow;
       if (!isStartRow(row)) throw new Error("start row shape");
     } catch {
+      // A line that carries what only a signed row carries, and no longer reads
+      // as a start row, is a signed row someone altered: it is not skipped.
+      if (claimsSigned(parsed, line)) {
+        seenSigned = true;
+        result.signed += 1;
+        result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
+        prevLine = line;
+        continue;
+      }
       result.warnings.push(`starts.jsonl line ${n} is unreadable`);
       if (seenSigned) result.problems.push(`starts.jsonl line ${n} is unreadable after a signed start`);
       // A line nothing can read is not a signed row either.
@@ -191,6 +242,12 @@ export function readStartSummary(
         if (signedVerifies(signed, publicKeyPem)) result.signedVerified += 1;
         else result.problems.push(`start signature does not verify: starts.jsonl line ${n}`);
       }
+    } else if (claimsSigned(row)) {
+      // A version other than 2, or a signature with no version: a row written
+      // before signing carries none of these fields.
+      seenSigned = true;
+      result.signed += 1;
+      result.problems.push(`signed start row is malformed: starts.jsonl line ${n}`);
     } else {
       result.unsigned = true;
       if (seenSigned) result.problems.push(`unsigned start row after a signed one: starts.jsonl line ${n}`);

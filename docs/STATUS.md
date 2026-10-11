@@ -200,8 +200,12 @@ lock that does not move is then judged by its pid and start time as
 before, and is stale only when that says so too. Deciding that a lock is
 stale therefore takes about 10 seconds; a live one is seen within a
 beat. A lock from 0.4.8 or earlier records no beat and is judged by its
-pid alone. In both cases a start time that has not come yet, or one that
-is not a finite number, no longer counts as a live holder. Does not:
+pid alone. In both cases a start time that is not a finite number does
+not count as a live holder, and neither does a lock that names this
+process's own pid with a start time that has not come yet. A lock that
+names another live pid is held whatever start time it states: after a
+clock step backwards a running body's lock reads as written in the
+future, and calling it stale would let `verax unlock` take it. Does not:
 protect a body in another container that is frozen for longer than five
 beats while an operator there runs `verax unlock` under a pid that reads
 as dead or as the caller's own; that body loses the lock and its next
@@ -258,12 +262,23 @@ null) and `sig`, an Ed25519 signature by the record key over
 `verax verify` checks them under the pinned `--key`, else the key the
 records carry, and says which. A signature that does not verify, a
 `prevStartHash` that is not the line before, or an unsigned row after a
-signed one is a problem, and the ledger does not verify. Unsigned rows
+signed one is a problem, and the ledger does not verify. So is a row that
+carries `v`, `sig` or `prevStartHash` and is not a well-formed v2 row,
+a line that no longer parses included: it is named `signed start row is
+malformed`, not skipped. A line that carries none of those names and
+cannot be read is a warning, as a removed file is nothing. Unsigned rows
 before the first signed one, written by an earlier version, are counted
 and named as unsigned. With no records and no `--key`, signed rows are
 counted and not checked. `starts` in `--json` gains `signed`,
 `signedVerified`, `startKey` and `problems`; `unsigned` is now true only
 when some row is unsigned.
+
+To chain a start the body needs the line before it. It read the whole of
+`starts.jsonl` for that on every start: measured, a 300 MiB file took 874 ms
+and grew the process from 64 to 608 MiB, and at 700 MiB the read threw and
+the body did not start. Only the end of the file is read now, and both
+sizes take 2 ms. `verax verify` still reads the file whole; one it cannot
+read is a warning by default and a problem under `--require-signed-starts`.
 
 A signed row with `v`, `prevStartHash` and `sig` taken off reads as one
 written before signing, and a reader cannot tell the two apart (R26). The
@@ -352,7 +367,11 @@ while the tool's own description says a host is reached only when the
 policy lists it (R26). The parser now refuses a rule for a tool whose host
 the gate reads, today `message.send`, that does not carry the mark
 (`policy-rule-egress-unmarked:<id>`), approve mode included, and a list no
-rule is marked for (`policy-egress-unused`); an empty list is a list. A
+marked rule for such a tool reads (`policy-egress-unused`); an empty list
+is a list. A mark on a tool with no host reader refuses every call to it
+and keeps no list. A mark on the `spend` rule is refused
+(`policy-rule-egress-on-spend:<id>`): the gate decides a spend by payee and
+amount before it looks at a host. A
 marked rule in a document with no list loads and reaches no host. A
 snapshot already on disk is still read. A policy with an unmarked
 `message.send` rule stops loading after this change: add `egress: true` to

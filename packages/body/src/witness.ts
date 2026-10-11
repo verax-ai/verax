@@ -1,4 +1,4 @@
-import { randomBytes, generateKeyPairSync } from "node:crypto";
+import { createPublicKey, randomBytes, generateKeyPairSync } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
@@ -66,6 +66,13 @@ export function witnessAnchorFromEnv(
       return { ok: false, reason: `cannot read VERAX_ANCHOR_SERVICE_KEY file ${keyPath}` };
     }
     if (serviceKey.trim() === "") return { ok: false, reason: `VERAX_ANCHOR_SERVICE_KEY file ${keyPath} is empty` };
+    // A file that holds something else would start a witness that refuses
+    // every receipt it is sent.
+    try {
+      createPublicKey(serviceKey);
+    } catch {
+      return { ok: false, reason: `VERAX_ANCHOR_SERVICE_KEY file ${keyPath} is not a public key` };
+    }
   }
   return { ok: true, anchor: { serviceName: serviceNameOf(url), serviceKey } };
 }
@@ -497,6 +504,43 @@ export async function requestWitnessSign(
   }
 }
 
+/**
+ * One registration run at a time: two checkpoints in quick succession must
+ * not send the same pending hash twice.
+ */
+export function anchorInTurn(run: () => Promise<void>, onFailure: () => void): () => void {
+  let running = false;
+  let again = false;
+  const drain = async (): Promise<void> => {
+    do {
+      again = false;
+      try {
+        await run();
+      } catch {
+        // Recording the failure can fail for the reason the run did (a full
+        // disk). Nothing may leave this function as a rejection: an unhandled
+        // one ends the witness process.
+        try {
+          onFailure();
+        } catch {
+          /* the status file was the only place to say so */
+        }
+      }
+    } while (again);
+    running = false;
+  };
+  // A run retries everything still pending, so checkpoints that arrive while
+  // one is in flight need one more run after it, not one each.
+  return () => {
+    if (running) {
+      again = true;
+      return;
+    }
+    running = true;
+    void drain();
+  };
+}
+
 export async function runWitness(stateDir: string): Promise<void> {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const existing = readWitnessListen(stateDir);
@@ -512,22 +556,18 @@ export async function runWitness(stateDir: string): Promise<void> {
     process.exit(64);
   }
   const anchor = anchorConfig.anchor;
-  // One registration run at a time: two checkpoints in quick succession must
-  // not send the same pending hash twice.
-  let anchoring: Promise<void> = Promise.resolve();
-  const anchorAfterCheckpoint = (): void => {
-    if (!anchor) return;
-    anchoring = anchoring
-      .then(() => anchorPendingCheckpoints(stateDir, anchor))
-      .catch(() => {
-        appendStatus(stateDir, {
-          atMs: Date.now(),
-          result: "anchor-failed",
-          service: anchor.serviceName,
-          reason: "exception",
-        });
-      });
-  };
+  const anchorAfterCheckpoint: () => void = anchor
+    ? anchorInTurn(
+        () => anchorPendingCheckpoints(stateDir, anchor),
+        () =>
+          appendStatus(stateDir, {
+            atMs: Date.now(),
+            result: "anchor-failed",
+            service: anchor.serviceName,
+            reason: "exception",
+          }),
+      )
+    : () => undefined;
   const keys = loadOrCreateWitnessKeys(stateDir);
   const token = randomBytes(16).toString("hex");
   const server = createServer((req, res) => {
