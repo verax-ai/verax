@@ -29,6 +29,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 - R26-10: when the open is refused, `doctor` reads who owns the file: the uid on POSIX, the owner SID on Windows. A key this user owns is a `fail`, an owner that cannot be read is a warning, and only a key the user neither opens nor owns is `ok`.
 - R26-11: a `null` answer is refused as `wrong-receipt`, like `[]` and `{}`.
 - Outside the round's five areas, in a released one: a top-level `egress` list with no rule carrying `egress: true` loaded and restricted nothing. The parser refuses a list beside an unmarked `message.send` rule with `policy-rule-egress-unmarked:<id>`, and a list no rule is marked for with `policy-egress-unused`; a snapshot already on disk is still read (#180).
+- Beside the eleven, noted while fixing R26-8: the bound on a downstream tool was applied after the child's answer had been read and parsed. Measured afterwards: over HTTP nothing bounded one message (a 50 MiB `tools/call` answer was accepted); over stdio the MCP client's own 10 MiB read buffer already cut the child, without a name. One message is now at most 10 MiB on either transport and a larger one is `downstream-message-too-large` (#185).
 
 Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that failed on main before the change.
 
@@ -42,10 +43,11 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 - Three existing tests wrote a lock naming their own pid by hand and expected it to be held. A first rule that called every such lock stale broke them; the rule was dropped, and the future start time is what decides.
 - The first version of `--require-signed-starts` left a line that cannot be read as a warning. History replaced by one such line, with the body's next signed start chained on it, passed under the flag. The line is now `start-row-unreadable` and the ledger does not verify.
 - The first version of the R26-10 fix compared the Windows owner with the user's own SID only. A key owned by a group the user's token holds enabled read as someone else's, and `key-custody` stayed `ok`. The owner is now held against the user and those groups, and output that names no owner or no user is unknown rather than someone else's.
+- The first version of the message bound restarted its count at every empty line whenever the content type contained `text/event-stream`. An HTTP 500 labelled that way, and a JSON answer with that name in a content-type parameter, are read whole by the client: with empty lines inside them, 12 MiB passed. The count now restarts only for a successful answer whose media type is exactly `text/event-stream`.
 
 ## Open
 
-- The bound on a downstream tool is applied after the child's `tools/list` answer has been read and parsed. Nothing limits how many bytes a child may send in one message.
+Nothing from this round is open.
 
 ## Known limits
 

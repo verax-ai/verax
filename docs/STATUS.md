@@ -112,6 +112,31 @@ further character (R26, measured with SDK 1.32.1). The body now sends
 `tools/list` and `tools/call` as plain requests and runs no schema a child
 sends. It does not republish `outputSchema`, before or after.
 
+## One message from a child is bounded — unreleased
+
+The bounds on a child's tools were applied after its answer had been read
+and parsed, and a `tools/call` answer had none. Measured with SDK 1.32.1: an
+HTTP child that answered `tools/call` with 50 MiB was accepted whole, and a
+50 MiB `tools/list` was read whole before `downstream-tool-too-large`
+refused it. A stdio child was already cut at the MCP client's own 10 MiB
+read buffer, with no name for it (`Connection closed`). One message from a
+child is now at most 10 MiB on either transport: a line on stdio, an HTTP
+response body, or one event of an event stream. A larger one is counted as
+it arrives and refused at the bound: the attach stops with
+`downstream-message-too-large:<prefix>`, a call answers
+`downstream-call-failed:<prefix>.<tool>:downstream-message-too-large`. The
+child is then detached: its session is closed, calls waiting on it end at
+once, and later calls answer the same without reaching it until the body
+restarts. A whole `tools/list` answer is one message, so a child whose list
+is over 10 MiB does not attach, whatever its `tools` selection. The bound
+is not configurable. The count restarts at an empty line only for a
+successful answer whose media type is exactly `text/event-stream`; an error
+answer, and a JSON answer whose content type merely mentions that name, are
+read whole by the client and counted whole. An event stream that ends its
+lines with a bare CR is counted as one message.
+
+Guard: `attack-r26-child-message-bound`. Not released.
+
 ## Downstream tools list — unreleased tree
 
 A downstream entry may carry `tools`, a list of the child's own tool names.
