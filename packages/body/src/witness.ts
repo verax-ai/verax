@@ -17,6 +17,7 @@ import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract } from "@cedulon/effect-extract";
 import { checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
 import { assertEd25519PublicKey } from "./keys.ts";
+import { lockHolderAlive } from "@verax-ai/proxy";
 import { pidAlive } from "./unlock.ts";
 
 const WITNESS_CLASS = "same-org" as const;
@@ -414,7 +415,9 @@ export async function requestWitnessSign(
 export async function runWitness(stateDir: string): Promise<void> {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   const existing = readWitnessListen(stateDir);
-  if (existing && pidAlive(existing.pid)) {
+  // A restarted container runs the witness under the same pid; a listen file
+  // written before this process started is not a running witness.
+  if (existing && lockHolderAlive({ pid: existing.pid, startedAt: existing.startedAt })) {
     process.stderr.write(`witness-already-running:${existing.pid}\n`);
     process.exit(1);
   }

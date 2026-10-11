@@ -6,7 +6,8 @@ import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
-import { pidAlive, readLockFile } from "./unlock.ts";
+import { lockHolderAlive } from "@verax-ai/proxy";
+import { readLockFile } from "./unlock.ts";
 
 export type DoctorLevel = "ok" | "warn" | "fail";
 
@@ -103,9 +104,9 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[]): Doct
       const existing = readLockFile(lockPath);
       if (!existing) {
         checks.push({ id: "ledger-lock", level: "fail", detail: "ledger.lock is unreadable" });
-      } else if (existing.pid === process.pid) {
+      } else if (existing.pid === process.pid && lockHolderAlive(existing)) {
         checks.push({ id: "ledger-lock", level: "ok", detail: `ledger.lock is this process (${existing.pid})` });
-      } else if (pidAlive(existing.pid)) {
+      } else if (lockHolderAlive(existing)) {
         checks.push({ id: "ledger-lock", level: "warn", detail: `ledger.lock is held by live pid ${existing.pid}` });
       } else {
         checks.push({

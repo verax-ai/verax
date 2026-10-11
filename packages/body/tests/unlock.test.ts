@@ -59,7 +59,7 @@ describe("2 verax unlock", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-unlock-live-"));
     writeFileSync(
       join(dir, "ledger.lock"),
-      `${JSON.stringify({ pid: process.pid, startedAt: 22 })}\n`,
+      `${JSON.stringify({ pid: process.pid, startedAt: Date.now() })}\n`,
       { encoding: "utf8" },
     );
     const code = runUnlock(dir);
