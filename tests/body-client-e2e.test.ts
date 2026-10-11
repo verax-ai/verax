@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -39,6 +39,11 @@ describe("E real SDK client", () => {
       const raced = Promise.race([
         (async () => {
           await client.connect(transport);
+          // The client sees the version that was installed, not a placeholder.
+          const bodyPackage = JSON.parse(readFileSync(join(root, "packages", "body", "package.json"), "utf8")) as {
+            version: string;
+          };
+          assert.deepEqual(client.getServerVersion(), { name: "verax-body", version: bodyPackage.version });
           const listed = await client.listTools();
           const names = listed.tools.map((t) => t.name).sort();
           assert.deepEqual(names, [
