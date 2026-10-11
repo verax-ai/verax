@@ -255,6 +255,18 @@ Ed25519 (measured), AWS KMS does.
 
 Guard: `key-custody-doctor`. Not released.
 
+## Unrecorded disk deny answered once — unreleased
+
+When a deny cannot be appended the body answers HTTP 507 itself. The MCP
+transport then wrote its own answer to the same response: the second header
+write threw, its adapter printed the stack on stderr and destroyed the
+socket. The client still read the 507, but the connection that carried it
+was closed under it and each such deny left a stack trace. The transport's
+writes after the body's answer are now dropped, so the 507 is the only
+write and the connection stays open.
+
+Guard: `disk-unrecorded-one-answer`. Not released.
+
 ## Unknown policy keys refused — unreleased
 
 Up to 0.4.8 the policy parser dropped a key it did not know, so a misspelt

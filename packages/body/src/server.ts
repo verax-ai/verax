@@ -325,6 +325,20 @@ function send(res: ServerResponse, status: number, body: unknown, headers?: Reco
 }
 
 /**
+ * The body has answered on a response the MCP transport also holds. The
+ * transport still writes its own answer when the handler throws; a second
+ * `writeHead` would throw, and its adapter would print the stack and destroy
+ * the socket under the answer already sent. After this, those writes go
+ * nowhere. The adapter's own already-sent header is read from the Response
+ * the transport builds, which the body does not hold.
+ */
+function closeToTransport(res: ServerResponse): void {
+  res.writeHead = (() => res) as ServerResponse["writeHead"];
+  res.write = (() => true) as ServerResponse["write"];
+  res.end = (() => res) as ServerResponse["end"];
+}
+
+/**
  * Republishes a child's own `tools/list` entry under its prefixed name. The
  * description is the child's; the sentence added here says what changes by
  * going through the body, because the answers a caller gets back
@@ -471,6 +485,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           const res = responseSlot.getStore();
           if (res && !res.headersSent) {
             send(res, 507, { error: "insufficient-storage" });
+            closeToTransport(res);
           }
           throw err;
         }
