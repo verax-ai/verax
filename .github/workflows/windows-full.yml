@@ -59,6 +59,21 @@ jobs:
           icacls $root /setowner "*S-1-5-32-544" /C /Q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "drive root $root $((Get-Acl $root).Sddl)"
+          # The directories between the drive root and the checkout inherit from
+          # the root, and the root is not the same on every hosted machine. On one
+          # image version two root ACLs were measured: one lets Users read and add
+          # folders below it, the other lets Authenticated Users write below it
+          # ((A;OICIIO;SDGXGWGR;;;AU) on the root). On the second
+          # desktop refuses the checkout's parent (desktop-code-writable) and four
+          # desktop tests fail; a rerun on the first passes. So those directories
+          # get the same three entries as the checkout.
+          $dir = Split-Path -Parent $env:GITHUB_WORKSPACE
+          while ($dir -and $dir -ne $root) {
+            icacls $dir /inheritance:r /grant:r "*$($me.User.Value):(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" /C /Q
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            "ancestor $dir $((Get-Acl $dir).Sddl)"
+            $dir = Split-Path -Parent $dir
+          }
           $null = [IO.File]::ReadAllBytes("$env:GITHUB_WORKSPACE\package-lock.json")
           "package-lock.json readable after the change"
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
