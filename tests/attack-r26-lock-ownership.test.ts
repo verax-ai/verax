@@ -117,6 +117,15 @@ describe("R26 a lock on this pid that this process did not write", () => {
     assert.equal(lockHolderAlive({ pid: process.pid, startedAt: Date.now() + HOUR }), false);
   });
 
+  // The future-time rule is for a lock that names this process. A lock that
+  // names another live process is held whatever time it states: after a clock
+  // step backwards a running body's lock reads as written in the future, and
+  // calling that stale would let `verax unlock` take it.
+  it("a lock on another live pid is held, whatever start time it states", () => {
+    assert.equal(lockHolderAlive({ pid: process.ppid, startedAt: Date.now() + HOUR }), true);
+    assert.equal(lockHolderAlive({ pid: process.ppid, startedAt: Number.NaN }), false);
+  });
+
   it("the body names it stale, as it does for a lock from before it started", () => {
     const dir = temp();
     try {
