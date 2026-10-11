@@ -129,8 +129,11 @@ child is then detached: its session is closed, calls waiting on it end at
 once, and later calls answer the same without reaching it until the body
 restarts. A whole `tools/list` answer is one message, so a child whose list
 is over 10 MiB does not attach, whatever its `tools` selection. The bound
-is not configurable. An event stream that ends its lines with a bare CR is
-counted as one message.
+is not configurable. The count restarts at an empty line only for a
+successful answer whose media type is exactly `text/event-stream`; an error
+answer, and a JSON answer whose content type merely mentions that name, are
+read whole by the client and counted whole. An event stream that ends its
+lines with a bare CR is counted as one message.
 
 Guard: `attack-r26-child-message-bound`. Not released.
 

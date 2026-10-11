@@ -359,7 +359,12 @@ function boundedFetch(overflow: Overflow): (url: string | URL, init?: RequestIni
   return async (url, init) => {
     const res = await fetch(url, init);
     if (res.body === null) return res;
-    const events = (res.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
+    // Events only where every version of the client reads events: a success
+    // whose media type is exactly this. An error answer is read whole as text,
+    // and so is a JSON answer whose parameters merely mention the name; an
+    // empty line inside either must not restart the count.
+    const mediaType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+    const events = res.ok && mediaType === "text/event-stream";
     let count = 0;
     let lineEmpty = true;
     const counted = res.body.pipeThrough(

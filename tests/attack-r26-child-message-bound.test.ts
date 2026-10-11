@@ -42,7 +42,12 @@ after(async () => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true });
 });
 
-type Answer = { result: unknown; sse?: boolean };
+type Answer = {
+  result: unknown;
+  sse?: boolean;
+  /** Sends this instead: the test writes the status, the content type and the bytes. */
+  raw?: (id: unknown) => { status: number; contentType: string; body: string };
+};
 
 /** An HTTP MCP server that answers each method with `answer(method)`, as JSON or as one SSE event. */
 async function httpChild(answer: (method: string) => Answer): Promise<string> {
@@ -64,7 +69,13 @@ async function httpChild(answer: (method: string) => Answer): Promise<string> {
       res.writeHead(202).end();
       return;
     }
-    const { result, sse } = answer(method);
+    const { result, sse, raw } = answer(method);
+    if (raw) {
+      const sent = raw(msg.id ?? 1);
+      res.writeHead(sent.status, { "content-type": sent.contentType });
+      res.end(sent.body);
+      return;
+    }
     const body = JSON.stringify({ jsonrpc: "2.0", id: msg.id ?? 1, result });
     if (sse) {
       res.writeHead(200, { "content-type": "text/event-stream" });
@@ -184,6 +195,46 @@ describe("R26 one message from a downstream child is bounded", { timeout: 120_00
     } finally {
       await session.close();
     }
+  });
+
+  // The count restarts at an empty line only where the client reads events. Anywhere the
+  // client reads the body whole, empty lines inside it must not restart the count.
+  it("HTTP: an error answer labelled as an event stream, full of empty lines, is still one message", async () => {
+    const filler = `${"x".repeat(1000)}\n\n`.repeat(Math.ceil(OVER / 1002));
+    const url = await httpChild((m) =>
+      m === "initialize"
+        ? { result: INIT }
+        : m === "tools/list"
+          ? { result: { tools: [TOOL] } }
+          : { result: null, raw: () => ({ status: 500, contentType: "text/event-stream", body: filler }) },
+    );
+    const err = await callOnce({ prefix: "big", url, timeoutMs: 15_000 }).then(
+      () => null,
+      (e: unknown) => e as Error,
+    );
+    assert.ok(err, "a 12 MiB error answer was accepted");
+    assert.match(err.message, /downstream-call-failed:big\.echo:downstream-message-too-large/);
+    assert.ok(err.message.length < 1000, `the refusal carries ${err.message.length} characters of the child's answer`);
+  });
+
+  it("HTTP: a JSON answer whose content type also names an event stream, with empty lines between its items, is one message", async () => {
+    const items = Math.ceil(OVER / 1040);
+    const item = `{"type":"text","text":"${"x".repeat(1000)}"}`;
+    const url = await httpChild((m) =>
+      m === "initialize"
+        ? { result: INIT }
+        : m === "tools/list"
+          ? { result: { tools: [TOOL] } }
+          : {
+              result: null,
+              raw: (id) => ({
+                status: 200,
+                contentType: "application/json; note=text/event-stream",
+                body: `{"jsonrpc":"2.0","id":${JSON.stringify(id)},"result":{"content":[${Array.from({ length: items }, () => item).join(",\n\n")}]}}`,
+              }),
+            },
+    );
+    await assert.rejects(() => callOnce({ prefix: "big", url, timeoutMs: 15_000 }), /downstream-message-too-large/);
   });
 
   it("stdio: a tools/call line over the bound is refused by the same name", async () => {
