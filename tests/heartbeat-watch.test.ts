@@ -82,9 +82,12 @@ describe("periodic body heartbeat and start gaps", () => {
       assert.equal(report.count, 2);
       assert.ok(report.largestGapMs >= 120);
       assert.equal(report.missingPreviousBeat.length, 1);
+      assert.equal(report.signed, 2);
+      assert.equal(report.signedVerified, 2);
+      assert.deepEqual(report.problems, []);
       const text = capture();
       assert.equal(await runCli(["verify", b.dir], text.hooks), 0);
-      assert.match(text.out(), /starts\s+2.*largest gap.*unsigned/);
+      assert.match(text.out(), /starts\s+2.*largest gap.*2 of 2 signed verify under the in-ledger record key/);
     } finally { await b.close(); }
   });
 });
