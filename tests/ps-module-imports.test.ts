@@ -78,6 +78,7 @@ const EXPECT_CMDLET: Record<string, string | null> = {
   "sddl-batch": "ConvertFrom-Json",
   "acl-owner": "Get-Acl",
   "directory-owner-sid": "Get-Acl",
+  "file-owner": "Get-Acl",
   "service-sid": "Get-LocalUser",
   "profile-image-path": "Get-ItemProperty",
   "account-create": "New-LocalUser",
@@ -214,8 +215,9 @@ describe("PowerShell module imports", () => {
     const desktop = readFileSync(join(root, "desktop.ts"), "utf8");
     // readWindowsMachineRoots, windowsSddlArgv, windowsSddlBatchArgv, powershellStdin,
     // ownerModeLine, execute service SID, directoryOwnerSid, ProfileImagePath, windowsServiceSid,
-    // and desktop localAccountSids. A new call site has to join windowsPowerShellScripts.
-    assert.equal(powershellToolCalls(install), 9, install);
+    // windowsFileOwner, and desktop localAccountSids. A new call site has to join
+    // windowsPowerShellScripts.
+    assert.equal(powershellToolCalls(install), 10, install);
     assert.equal(powershellToolCalls(desktop), 1, desktop);
   });
 });

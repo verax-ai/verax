@@ -2183,6 +2183,7 @@ export function windowsPowerShellScripts(): WindowsPowerShellScript[] {
     { id: "sddl-batch", script: windowsSddlBatchArgv(["C:\\ProgramData\\Verax"]).at(-1) ?? "" },
     { id: "acl-owner", script: aclOwnerCommand("C:\\ProgramData\\Verax") },
     { id: "directory-owner-sid", script: directoryOwnerSidCommand("C:\\ProgramData\\Verax") },
+    { id: "file-owner", script: fileOwnerSidCommand("C:\\ProgramData\\Verax\\state\\keys\\record.private.pem") },
     { id: "service-sid", script: WINDOWS_SERVICE_SID_COMMAND },
     { id: "profile-image-path", script: profileImagePathCommand("S-1-5-21-1001") },
     { id: "account-create", script: powerShellScript(windowsAccountBody(true, temp)) },
@@ -5275,6 +5276,57 @@ function invokingSid(exec: (argv: string[]) => ExecResult): string | undefined {
     winOwnerCache.sid = sid;
   }
   return sid;
+}
+
+const OWNER_DENIED = "VERAX-OWNER-DENIED";
+
+/**
+ * Prints the file's owner, then this token's user and the groups it holds
+ * enabled. `WindowsIdentity.Groups` leaves out a group held for deny only,
+ * which is what Administrators is in a session that is not elevated.
+ */
+function fileOwnerSidCommand(file: string): string {
+  const literal = file.replaceAll("'", "''");
+  return psPrefixed(
+    ["Microsoft.PowerShell.Security"],
+    [
+      `try { $owner = (Get-Acl -LiteralPath '${literal}' -ErrorAction Stop).GetOwner([System.Security.Principal.SecurityIdentifier]).Value }`,
+      `catch [System.UnauthorizedAccessException] { '${OWNER_DENIED}'; exit 0 }`,
+      "$id = [System.Security.Principal.WindowsIdentity]::GetCurrent()",
+      "'owner ' + $owner",
+      "'user ' + $id.User.Value",
+      "$id.Groups | ForEach-Object { 'group ' + $_.Value }",
+    ].join("\n"),
+  );
+}
+
+/**
+ * Whether this process holds the owner's rights over `file`: the owner is its
+ * user, or a group its token holds enabled. An owner reads the security
+ * descriptor even under an entry that denies it the file, so a caller who is
+ * refused the descriptor is not the owner. Output that names no owner or no
+ * user is "unknown", never "other".
+ */
+export function windowsFileOwner(
+  file: string,
+  exec: (argv: string[]) => ExecResult = defaultExec,
+): "self" | "other" | "unknown" {
+  let ran: ExecResult;
+  try {
+    ran = exec(toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", fileOwnerSidCommand(file)], "win32"));
+  } catch {
+    return "unknown";
+  }
+  if ((ran.status ?? 1) !== 0) return "unknown";
+  const lines = `${ran.stdout ?? ""}`.split(/\r?\n/).map((line) => line.trim());
+  if (lines.includes(OWNER_DENIED)) return "other";
+  const sidOf = (kind: string, line: string): string | undefined =>
+    new RegExp(`^${kind} (S-1-[0-9-]+)$`, "i").exec(line)?.[1]?.toUpperCase();
+  const owner = lines.map((line) => sidOf("owner", line)).find((sid) => sid !== undefined);
+  const user = lines.map((line) => sidOf("user", line)).find((sid) => sid !== undefined);
+  if (!owner || !user) return "unknown";
+  const held = new Set([user, ...lines.map((line) => sidOf("group", line)).filter((sid) => sid !== undefined)]);
+  return held.has(owner) ? "self" : "other";
 }
 
 /** The SID `whoami /user` names for this process. */
