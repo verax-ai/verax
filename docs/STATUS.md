@@ -102,6 +102,32 @@ activity is attested by these observations.
 
 Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
+## Downstream tools list — unreleased tree
+
+A downstream entry may carry `tools`, a list of the child's own tool names.
+Only those are attached: they enter the registry, appear on `tools/list` as
+`prefix.childName` and are held to the 64 KiB bound. The rest of the child's
+list is read for names and nothing else. A name the child does not offer
+stops the attach with `downstream-tool-missing:<prefix>.<name>`, as any
+half-attach does. A list that is empty, longer than 256, repeats a name or
+holds a name outside the child-name pattern is `downstream-tools-invalid`.
+Without `tools` the attach is unchanged.
+
+The list is how an operator puts a large child behind the gate for the few
+tools it writes rules for. Driven against REA (`rea-agents` 6.3.0, 139 tools,
+one advertising 87 KB) on 11 October 2026: without a list the attach stopped
+at `downstream-tool-too-large:rea.compare_web_captures`. With
+`["analyze_javascript_application", "capture_process_scenario"]` and one
+rule for the first, `tools/list` showed those two. The static analysis ran
+and left an allow and an effect row. The process capture, which asked to run
+`/bin/sh`, was refused `denied:no-rule` and REA never saw it. `verax verify`
+reported every signature valid.
+
+Not done: the list is not a rule. A listed tool still needs a policy rule
+to run, and the list does not narrow a tool's arguments.
+
+Guards: `downstream-tools`; not published.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a
