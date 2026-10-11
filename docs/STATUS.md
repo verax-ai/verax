@@ -267,8 +267,10 @@ open but owns fails too (R26): an owner that has shut itself out gives
 itself read again with one `chmod` or `icacls`. The owner is the file's uid
 on POSIX, compared with the effective uid, and the owner SID on Windows,
 compared with the user's SID and the groups its token holds enabled, since a
-group may own a file there. When the owner cannot be read the line is a
-warning. On Windows that read starts PowerShell once, and only when the open
+group may own a file there. A caller refused the file's security descriptor
+is read as not its owner; an owner whose own rights were narrowed by an
+OWNER RIGHTS entry to rewriting the ACL without reading it is not told
+apart. When the owner cannot be read the line is a warning. On Windows that read starts PowerShell once, and only when the open
 was refused. Moving the key out of a file is designed
 in `docs/design/key-custody.md` and not built; Windows CNG on 26H2 has no
 Ed25519 (measured), AWS KMS does.

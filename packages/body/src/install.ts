@@ -2183,6 +2183,7 @@ export function windowsPowerShellScripts(): WindowsPowerShellScript[] {
     { id: "sddl-batch", script: windowsSddlBatchArgv(["C:\\ProgramData\\Verax"]).at(-1) ?? "" },
     { id: "acl-owner", script: aclOwnerCommand("C:\\ProgramData\\Verax") },
     { id: "directory-owner-sid", script: directoryOwnerSidCommand("C:\\ProgramData\\Verax") },
+    { id: "file-owner", script: fileOwnerSidCommand("C:\\ProgramData\\Verax\\state\\keys\\record.private.pem") },
     { id: "service-sid", script: WINDOWS_SERVICE_SID_COMMAND },
     { id: "profile-image-path", script: profileImagePathCommand("S-1-5-21-1001") },
     { id: "account-create", script: powerShellScript(windowsAccountBody(true, temp)) },
