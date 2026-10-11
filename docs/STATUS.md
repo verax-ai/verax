@@ -164,10 +164,13 @@ is not a finite number, no longer counts as a live holder. Does not:
 protect a body in another container that is frozen for longer than five
 beats while an operator there runs `verax unlock` under a pid that reads
 as dead or as the caller's own; that body loses the lock and its next
-append stops with `ledger-lost-lock`. Does not: free a still lock whose
-pid was handed to another live process; that is refused as
-`still-running`, as before. The witness's listen file and the unreleased
-desktop launcher do not use the beat.
+append stops with `ledger-lost-lock`. Does not: tell a frozen body from
+a dead one whose pid another live process now has. Such a lock is still
+under a live pid; `verax unlock` refuses it as `still-running` and names
+it `lock-not-beating`, `verax doctor` warns, and `verax unlock --force`
+removes it with `reason: "not-beating"` in `unlocks.jsonl`. `--force`
+does not remove a lock that moves. The witness's listen file and the
+unreleased desktop launcher do not use the beat.
 
 Guard: `stale-lock-pid-reuse`. Not released.
 

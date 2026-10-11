@@ -238,10 +238,47 @@ describe("R26 a held lock beats", { timeout: 120_000 }, () => {
       assert.equal(holder.exitCode, null, "the holder exited before the check; the run proves nothing");
       assert.equal(existsSync(join(dir, "ledger.lock")), true, "unlock removed the lock of a live process that had only stopped beating");
       assert.equal(code, 1);
-      assert.equal(err.join("").trim(), `still-running:${holder.pid}`);
+      assert.equal(err.join("").split("\n")[0], `still-running:${holder.pid}`);
       assert.match(openError(dir), /^ledger-locked:\d+$/);
     } finally {
       holder.kill("SIGKILL");
+      await ended(holder);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A still lock under a live pid is either a frozen body or a dead one whose pid
+  // another process now has. Nothing on disk tells them apart, so the operator decides.
+  it("a still lock under a live pid is named as such, and only --force removes it, on record", async () => {
+    const dir = temp();
+    const holder = run(FROZEN, { R26_PROXY_URL: proxyUrl, R26_DIR: dir, R26_BEAT_MS: "100" });
+    try {
+      assert.equal(await firstLine(holder, 30_000), "held");
+      const err: string[] = [];
+      assert.equal(runUnlock(dir, (s) => err.push(s)), 1);
+      assert.match(err.join(""), /^lock-not-beating: .*verax unlock --force/m);
+      assert.equal(runUnlock(dir, () => {}, { force: true }), 0);
+      assert.equal(existsSync(join(dir, "ledger.lock")), false);
+      const rows = readFileSync(join(dir, "unlocks.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+      assert.deepEqual(rows.map((r) => [r.result, r.reason]), [["removing", "not-beating"], ["removed", "not-beating"]]);
+    } finally {
+      holder.kill("SIGKILL");
+      await ended(holder);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("--force does not remove a lock that is moving", async () => {
+    const dir = temp();
+    const holder = run(HOLDER, { R26_PROXY_URL: proxyUrl, R26_DIR: dir, R26_BEAT_MS: "100" });
+    try {
+      assert.equal(await firstLine(holder, 30_000), "held");
+      const err: string[] = [];
+      assert.equal(runUnlock(dir, (s) => err.push(s), { force: true }), 1);
+      assert.equal(err.join("").trim(), `still-running:${holder.pid}`);
+      assert.equal(existsSync(join(dir, "ledger.lock")), true);
+    } finally {
+      holder.kill();
       await ended(holder);
       rmSync(dir, { recursive: true, force: true });
     }

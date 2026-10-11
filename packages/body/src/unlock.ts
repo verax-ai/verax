@@ -71,6 +71,7 @@ export function runUnlock(
     return 1;
   }
   const existing = readLockFile(lockPath);
+  let forcedQuiet = false;
   if (!existing) {
     if (!options.force) {
       writeErr("lock-unreadable\n");
@@ -79,12 +80,20 @@ export function runUnlock(
   } else {
     // A lock that beats is watched, so a body in another container that shares this pid is seen.
     const state = lockState(lockPath, existing);
-    if (state === "held") {
-      writeErr(`still-running:${existing.pid}\n`);
-      return 1;
-    }
     if (state === "gone") {
       writeErr("no-lock\n");
+      return 1;
+    }
+    // A still lock under a live pid: a frozen body, or a dead one whose pid another
+    // process now has. Only the operator can say which, so it takes --force and a record.
+    forcedQuiet = state === "quiet" && options.force === true;
+    if (state === "held" || (state === "quiet" && !forcedQuiet)) {
+      writeErr(`still-running:${existing.pid}\n`);
+      if (state === "quiet") {
+        writeErr(
+          `lock-not-beating: pid ${existing.pid} is alive but the lock has not moved; if no body is running, run verax unlock --force\n`,
+        );
+      }
       return 1;
     }
   }
@@ -94,6 +103,7 @@ export function runUnlock(
         removedPid: existing.pid,
         startedAt: existing.startedAt,
         operator,
+        ...(forcedQuiet ? { reason: "not-beating" } : {}),
       }
     : {
         removedPid: null,

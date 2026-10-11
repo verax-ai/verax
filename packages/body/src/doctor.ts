@@ -109,9 +109,17 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
     const lockPath = join(stateDir, "ledger.lock");
     if (existsSync(lockPath)) {
       const existing = readLockFile(lockPath);
+      // Watched once: a still lock takes five beats to read.
+      const state = existing ? lockState(lockPath, existing) : null;
       if (!existing) {
         checks.push({ id: "ledger-lock", level: "fail", detail: "ledger.lock is unreadable" });
-      } else if (lockState(lockPath, existing) !== "stale") {
+      } else if (state === "quiet") {
+        checks.push({
+          id: "ledger-lock",
+          level: "warn",
+          detail: `ledger.lock names live pid ${existing.pid} but has not moved; if no body is running: verax unlock --force ${stateDir}`,
+        });
+      } else if (state !== "stale") {
         const own = existing.pid === process.pid;
         checks.push(
           own

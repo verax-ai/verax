@@ -503,16 +503,21 @@ export function watchLock(lockPath: string, beatMs: number, sleep: (ms: number) 
  * nothing: a live body can miss its beats while a long synchronous call holds
  * it. So a lock that does not move, like one from a version that did not
  * beat, is then judged by its pid and start time, and is stale only when
- * that says so too.
+ * that says so too. "quiet" is the case in between: a beating lock that did
+ * not move while its pid is alive. That is a frozen body, or a dead one whose
+ * pid another process now has, and nothing on disk tells the two apart.
  */
-export function lockState(lockPath: string, lock: LockHolder): "held" | "stale" | "gone" {
+export function lockState(lockPath: string, lock: LockHolder): "held" | "quiet" | "stale" | "gone" {
   if (lock.token !== undefined && ownLockTokens.has(lock.token)) return "held";
+  let still = false;
   if (lock.beatMs !== undefined) {
     const seen = watchLock(lockPath, lock.beatMs);
     if (seen === "moving") return "held";
     if (seen === "gone") return "gone";
+    still = true;
   }
-  return lockHolderAlive(lock) ? "held" : "stale";
+  if (!lockHolderAlive(lock)) return "stale";
+  return still ? "quiet" : "held";
 }
 
 /**
