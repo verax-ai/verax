@@ -72,6 +72,22 @@ const EXTRA_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63
 // hostile or broken; the body is not a registry for thousands of names.
 const MAX_CHILD_TOOLS = 256;
 const MAX_TOOL_BYTES = 64 * 1024;
+/**
+ * One message from a child: a line on stdio, an HTTP response body, or one
+ * SSE event. A whole `tools/list` answer is one message, so this also caps
+ * the list the per-tool bounds are then applied to.
+ */
+const MAX_CHILD_MESSAGE_BYTES = 10 * 1024 * 1024;
+const MESSAGE_TOO_LARGE = "downstream-message-too-large";
+
+/** Set when a child sent a message over the bound. The child is then detached. */
+type Overflow = { hit: boolean; detach: () => void };
+
+function tripOverflow(overflow: Overflow): void {
+  if (overflow.hit) return;
+  overflow.hit = true;
+  overflow.detach();
+}
 
 function assertEffectKey(pem: unknown): asserts pem is string {
   try {
@@ -302,6 +318,9 @@ function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
     cwd: spec.cwd,
     env,
     stderr: "pipe",
+    // The client's own default is the same number; it is stated here so the
+    // bound is this file's and not a dependency's.
+    maxBufferSize: MAX_CHILD_MESSAGE_BYTES,
   });
   // The SDK types the pipe as Stream; only a Readable can be drained.
   const stderr = transport.stderr;
@@ -314,9 +333,10 @@ function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
  * document — the body's own bearer is never forwarded, for the same
  * confused-deputy reason the stdio child does not inherit `VERAX_*`.
  */
-function httpTransport(spec: DownstreamSpec): StreamableHTTPClientTransport {
+function httpTransport(spec: DownstreamSpec, overflow: Overflow): StreamableHTTPClientTransport {
   if (spec.url === undefined) throw new Error("downstream-url-invalid");
   return new StreamableHTTPClientTransport(new URL(spec.url), {
+    fetch: boundedFetch(overflow),
     requestInit: {
       // The child's address is the operator's document, not a place the
       // child may name. Following a redirect would rewrite that document
@@ -326,6 +346,53 @@ function httpTransport(spec: DownstreamSpec): StreamableHTTPClientTransport {
       ...(spec.headers ? { headers: spec.headers } : {}),
     },
   });
+}
+
+/**
+ * Counts what a child's response carries as it is read, so an answer over the
+ * bound is refused at the bound instead of after it has been held and parsed.
+ * A JSON answer is one message. On an event stream each event is one, and an
+ * empty line ends it; a stream that ends its lines with a bare CR is counted
+ * as a single message.
+ */
+function boundedFetch(overflow: Overflow): (url: string | URL, init?: RequestInit) => Promise<Response> {
+  return async (url, init) => {
+    const res = await fetch(url, init);
+    if (res.body === null) return res;
+    const events = (res.headers.get("content-type") ?? "").toLowerCase().includes("text/event-stream");
+    let count = 0;
+    let lineEmpty = true;
+    const counted = res.body.pipeThrough(
+      new TransformStream<Uint8Array, Uint8Array>({
+        transform(chunk, controller) {
+          if (!events) {
+            count += chunk.byteLength;
+          } else {
+            let at = 0;
+            while (at < chunk.byteLength && count <= MAX_CHILD_MESSAGE_BYTES) {
+              const newline = chunk.indexOf(0x0a, at);
+              const end = newline === -1 ? chunk.byteLength : newline;
+              const length = end - at;
+              if (length > 1 || (length === 1 && chunk[at] !== 0x0d)) lineEmpty = false;
+              count += length;
+              if (newline === -1) break;
+              count += 1;
+              if (lineEmpty) count = 0;
+              lineEmpty = true;
+              at = newline + 1;
+            }
+          }
+          if (count > MAX_CHILD_MESSAGE_BYTES) {
+            tripOverflow(overflow);
+            controller.error(new Error(MESSAGE_TOO_LARGE));
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+      }),
+    );
+    return new Response(counted, { status: res.status, statusText: res.statusText, headers: res.headers });
+  };
 }
 
 /**
@@ -376,8 +443,18 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
     throw new Error("downstream-transport-missing");
   }
   const timeoutMs = spec.timeoutMs ?? 10_000;
-  const transport = spec.url !== undefined ? httpTransport(spec) : stdioTransport(spec);
+  const overflow: Overflow = { hit: false, detach: () => undefined };
+  const transport = spec.url !== undefined ? httpTransport(spec, overflow) : stdioTransport(spec);
   const client = new Client({ name: "verax-downstream", version: "0.0.0" });
+  // Closing the transport ends every call still waiting on this child at once,
+  // an event stream included, instead of at its timeout.
+  overflow.detach = () => void transport.close().catch(() => undefined);
+  // On stdio the client's read buffer enforces the bound and closes the child.
+  // This is where it says so; the text is the client's, and the stdio cases
+  // of `attack-r26-child-message-bound` fail if it changes.
+  client.onerror = (err) => {
+    if (/ReadBuffer exceeded maximum size/.test(err.message)) overflow.hit = true;
+  };
   let listed: Awaited<ReturnType<Client["listTools"]>>;
   try {
     await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
@@ -388,6 +465,7 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
         listed = await client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
   } catch (err) {
     await shut(client, transport);
+    if (overflow.hit) throw new Error(`${MESSAGE_TOO_LARGE}:${spec.prefix}`);
     throw attachTimeoutError(err, spec.prefix);
   }
   if (listed.tools.length > MAX_CHILD_TOOLS) {
@@ -432,6 +510,8 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
       ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
       fn: async (call, _principal, ref) => {
+        // A child that sent one message over the bound is not asked again.
+        if (overflow.hit) throw new DownstreamCallError(spec.prefix, childName, new Error(MESSAGE_TOO_LARGE));
         let raw: Awaited<ReturnType<Client["callTool"]>>;
         try {
           // Mutation check: stub this call and the allow test expecting
@@ -446,7 +526,7 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
             { timeout: timeoutMs },
           );
         } catch (err) {
-          throw new DownstreamCallError(spec.prefix, childName, err);
+          throw new DownstreamCallError(spec.prefix, childName, overflow.hit ? new Error(MESSAGE_TOO_LARGE) : err);
         }
         const result = asTextResult(raw);
         if (result.isError) {

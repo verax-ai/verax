@@ -29,6 +29,7 @@ Round R26 read the five areas merged to main after 0.4.8 and not yet released: t
 - R26-10: when the open is refused, `doctor` reads who owns the file: the uid on POSIX, the owner SID on Windows. A key this user owns is a `fail`, an owner that cannot be read is a warning, and only a key the user neither opens nor owns is `ok`.
 - R26-11: a `null` answer is refused as `wrong-receipt`, like `[]` and `{}`.
 - Outside the round's five areas, in a released one: a top-level `egress` list with no rule carrying `egress: true` loaded and restricted nothing. The parser refuses a list beside an unmarked `message.send` rule with `policy-rule-egress-unmarked:<id>`, and a list no rule is marked for with `policy-egress-unused`; a snapshot already on disk is still read (#180).
+- Beside the eleven, noted while fixing R26-8: the bound on a downstream tool was applied after the child's answer had been read and parsed. Measured afterwards: over HTTP nothing bounded one message (a 50 MiB `tools/call` answer was accepted); over stdio the MCP client's own 10 MiB read buffer already cut the child, without a name. One message is now at most 10 MiB on either transport and a larger one is `downstream-message-too-large` (#185).
 
 Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that failed on main before the change.
 
@@ -45,7 +46,7 @@ Each fix carries the attack as a test under `tests/attack-r26-*.test.ts` that fa
 
 ## Open
 
-- The bound on a downstream tool is applied after the child's `tools/list` answer has been read and parsed. Nothing limits how many bytes a child may send in one message.
+Nothing from this round is open.
 
 ## Known limits
 
