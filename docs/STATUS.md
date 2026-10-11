@@ -102,6 +102,24 @@ activity is attested by these observations.
 
 Guards: `heartbeat-watch`, `watch-exec`; published in 0.4.7 and listed in the matrix.
 
+## Stale lock after a container restart — unreleased
+
+A container restarted on the same volume runs the body as PID 1 again,
+and the lock its last run left names PID 1. Up to 0.4.8 that pid counted
+as alive, so the body refused with `ledger-locked:1` rather than
+`ledger-locked-stale`, and `verax unlock` run in a new container (also PID
+1) answered `still-running:1`; the lock could only be deleted by hand.
+Measured on `veraxai/verax:0.4.7`. A lock is now held only when its pid is
+alive, it does not name this process with a start time before this
+process started, and, on Linux, it does not record a different boot id
+(written into the lock from `/proc/sys/kernel/random/boot_id`). The body
+then refuses with `ledger-locked-stale:1` and `verax unlock` removes the
+lock; measured in a container built from this tree. The same rule judges
+the witness's listen file and the doctor and desktop checks. A lock is
+still never taken over automatically.
+
+Guard: `stale-lock-pid-reuse`. Not released.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a
