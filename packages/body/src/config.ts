@@ -43,6 +43,16 @@ export type BodyConfig = {
    * Default is 1 MiB. `VERAX_MESSAGE_QUOTA_BYTES` overrides it.
    */
   messageQuotaBytes?: number;
+  /** The operator door, a second listener. Null leaves it shut. */
+  operatorDoor?: OperatorDoorConfig | null;
+};
+
+export type OperatorDoorConfig = {
+  /** The one origin the door answers for. It is the passkey relying party. */
+  origin: string;
+  rpID: string;
+  bindHost: string;
+  bindPort: number;
 };
 
 /** Per-tenant `memory.put` cap. The HTTP body cap does not reset this total. */
@@ -109,6 +119,44 @@ function jwksFileParses(path: string): boolean {
   }
 }
 
+const DEFAULT_DOOR_BIND = "127.0.0.1:8788";
+
+/**
+ * `VERAX_OPERATOR_DOOR` names the origin an operator reaches the door at. It
+ * is HTTPS, or `http://localhost` for a trial on the machine itself, and it
+ * is a name: WebAuthn does not take an IP address as a relying party. The
+ * door itself listens on loopback (`VERAX_OPERATOR_BIND`); what stands in
+ * front of it with a certificate is the operator's.
+ */
+export function readOperatorDoor(
+  env: NodeJS.ProcessEnv,
+): { ok: true; value: OperatorDoorConfig | null } | { ok: false; reason: string } {
+  const raw = env.VERAX_OPERATOR_DOOR?.trim() ?? "";
+  if (raw === "") return { ok: true, value: null };
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return { ok: false, reason: "VERAX_OPERATOR_DOOR is not an origin" };
+  }
+  if (url.origin !== raw) {
+    return { ok: false, reason: "VERAX_OPERATOR_DOOR is an origin only: scheme, host and port" };
+  }
+  const host = url.hostname;
+  if (/^[0-9.]+$/.test(host) || host.startsWith("[")) {
+    return { ok: false, reason: "VERAX_OPERATOR_DOOR needs a name, not an IP address" };
+  }
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && host === "localhost")) {
+    return { ok: false, reason: "VERAX_OPERATOR_DOOR needs https" };
+  }
+  const bindRaw = env.VERAX_OPERATOR_BIND?.trim() ?? "";
+  const bind = parseBind(bindRaw === "" ? DEFAULT_DOOR_BIND : bindRaw);
+  if (!isLoopbackHost(bind.host)) {
+    return { ok: false, reason: "VERAX_OPERATOR_BIND needs a loopback address" };
+  }
+  return { ok: true, value: { origin: url.origin, rpID: host, bindHost: bind.host, bindPort: bind.port } };
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   const issuer = env.VERAX_ISSUER?.trim() ?? "";
   const jwksUrl = env.VERAX_JWKS_URL?.trim() ?? "";
@@ -167,6 +215,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   if (policyFile === "") {
     return { ok: false, code: EX_CONFIG, reason: "missing VERAX_POLICY_FILE" };
   }
+  const door = readOperatorDoor(env);
+  if (!door.ok) {
+    return { ok: false, code: EX_CONFIG, reason: door.reason };
+  }
   const inventoryRaw = env.VERAX_INVENTORY_FILE?.trim() ?? "";
   const downstreamRaw = env.VERAX_DOWNSTREAM?.trim() ?? "";
   return {
@@ -190,6 +242,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
         .filter((item) => item !== ""),
       memoryQuotaBytes: memoryQuotaBytes(env),
       messageQuotaBytes: messageQuotaBytes(env),
+      operatorDoor: door.value,
     },
   };
 }
