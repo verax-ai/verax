@@ -822,12 +822,16 @@ export async function listen(config: BodyConfig): Promise<Server> {
     try {
       door = await openOperatorDoor({ door: config.operatorDoor, stateDir: config.stateDir, services });
     } catch (err) {
-      services.ledger.close();
-      await closeAll(sessions);
+      try {
+        services.ledger.close();
+      } finally {
+        await closeAll(sessions);
+      }
       throw err;
     }
     const opened = door;
-    server.once("close", () => opened.close());
+    // First among the close listeners: the door shuts even when closing the ledger throws.
+    server.prependOnceListener("close", () => opened.close());
   }
   try {
     await new Promise<void>((resolve, reject) => {
@@ -836,8 +840,11 @@ export async function listen(config: BodyConfig): Promise<Server> {
     });
   } catch (err) {
     door?.close();
-    services.ledger.close();
-    await closeAll(sessions);
+    try {
+      services.ledger.close();
+    } finally {
+      await closeAll(sessions);
+    }
     throw err;
   }
   const bound = server.address();
