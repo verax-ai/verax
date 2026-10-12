@@ -25,9 +25,9 @@ import { get } from "node:http";
 import { createServer as createNetServer } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { EX_CONFIG } from "./config.ts";
+import { EX_CONFIG, type OperatorDoorConfig } from "./config.ts";
 import { INSTALL_HEALTH_NONCE } from "./health-extras.ts";
-import { runInitLocal } from "./init-local.ts";
+import { parseOperatorDoorFlag, runInitLocal } from "./init-local.ts";
 import { psModuleImports, type PsModule } from "./ps-module-imports.ts";
 
 export const EX_ELEVATION = 77;
@@ -826,6 +826,8 @@ export type PlanOpts = {
   port?: number;
   days?: number;
   force?: boolean;
+  /** The operator door to open with the service. Off when absent. */
+  operatorDoor?: OperatorDoorConfig;
   /**
    * Test-only. Prefixes the fixed POSIX install roots. Not read from CLI argv.
    * Win32 ignores it.
@@ -900,7 +902,7 @@ export type PlanOp =
   | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string }
   | { op: "write"; path: string; contents: string; mode?: number; exclusive?: boolean }
   | { op: "lock-root"; path: string; create: boolean }
-  | { op: "init"; stateDir: string; port: number; days: number; force: boolean; noOwnerGrant: boolean }
+  | { op: "init"; stateDir: string; port: number; days: number; force: boolean; noOwnerGrant: boolean; operatorDoor?: string }
   | { op: "user-token"; tokenDir: string; tokenPath: string; uid: number; gid: number }
   | { op: "place-token"; path: string }
   | { op: "remove"; path: string }
@@ -2249,7 +2251,7 @@ function shSingleQuoted(value: string): string {
 
 export function successText(
   platform: InstallPlatform,
-  info: { codeDir: string; stateDir: string; tokenPath: string; port: number },
+  info: { codeDir: string; stateDir: string; tokenPath: string; port: number; operatorDoor?: OperatorDoorConfig },
 ): string {
   const origin = `http://127.0.0.1:${info.port}`;
   const claude =
@@ -2274,11 +2276,22 @@ export function successText(
     platform === "win32"
       ? 'Uninstall from that copy: & "$env:ProgramFiles\\verax-cli\\verax.cmd" uninstall'
       : `Uninstall from the root-owned Node: ${posixRootOwnedCommand(platform, "uninstall")}`;
+  const enroll =
+    platform === "win32"
+      ? `& "$env:ProgramFiles\\verax-cli\\verax.cmd" operator enroll --state ${psSingleQuoted(info.stateDir)}`
+      : posixRootOwnedCommand(platform, `operator enroll --state ${shSingleQuoted(info.stateDir)}`);
+  const door = info.operatorDoor
+    ? [
+        `operator door ${info.operatorDoor.bindHost}:${info.operatorDoor.bindPort} for ${info.operatorDoor.origin}`,
+        `A pairing code for a new passkey, good for five minutes: ${enroll}`,
+      ]
+    : [];
   return [
     `code ${info.codeDir}`,
     `state ${info.stateDir}`,
     "service is running",
     `agent token ${info.tokenPath}`,
+    ...door,
     "",
     "Claude Code:",
     claude,
@@ -2738,6 +2751,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     days: limited.days,
     force: Boolean(opts.force),
     noOwnerGrant: true,
+    ...(opts.operatorDoor ? { operatorDoor: opts.operatorDoor.origin } : {}),
   });
   // Before the service starts, so /healthz can echo a value only this install wrote.
   ops.push({ op: "write", path: noncePath, contents: `${healthNonce}\n`, mode: 0o600 });
@@ -2778,7 +2792,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     { op: "wait-healthz", port: limited.port, timeoutMs: HEALTH_WAIT_MS, nonce: healthNonce },
     {
       op: "print",
-      text: successText(platform, { ...paths, port: limited.port }),
+      text: successText(platform, { ...paths, port: limited.port, ...(opts.operatorDoor ? { operatorDoor: opts.operatorDoor } : {}) }),
     },
   );
   if (platform === "win32") tagWinTemp(ops, tempDir);
@@ -3474,14 +3488,22 @@ function parseFlag(argv: readonly string[], name: string): { value?: string; err
 
 function parseInstallArgs(
   argv: readonly string[],
-): { port: number; days: number; force: boolean; fromTarballs?: string } | { error: string } {
+): { port: number; days: number; force: boolean; fromTarballs?: string; operatorDoor?: OperatorDoorConfig } | { error: string } {
   const body = argv[0] === "install" ? argv.slice(1) : argv;
   let port = DEFAULT_PORT;
   let days = DEFAULT_DAYS;
   let force = false;
   let fromTarballs: string | undefined;
+  let operatorDoor: OperatorDoorConfig | undefined;
   for (let i = 0; i < body.length; i += 1) {
     const a = body[i]!;
+    if (a === "--operator-door") {
+      const door = parseOperatorDoorFlag(body[i + 1]);
+      i += 1;
+      if ("error" in door) return door;
+      operatorDoor = door.value;
+      continue;
+    }
     if (a === "--force") {
       force = true;
       continue;
@@ -3511,7 +3533,10 @@ function parseInstallArgs(
   if (!Number.isInteger(days) || days < 1 || days > MAX_DAYS) {
     return { error: "--days wants an integer from 1 to 90" };
   }
-  return { port, days, force, ...(fromTarballs ? { fromTarballs } : {}) };
+  if (operatorDoor && operatorDoor.bindPort === port) {
+    return { error: `--operator-door listens on ${operatorDoor.bindPort}, which --port has taken` };
+  }
+  return { port, days, force, ...(fromTarballs ? { fromTarballs } : {}), ...(operatorDoor ? { operatorDoor } : {}) };
 }
 
 function hashFile(file: string): string {
@@ -4742,6 +4767,7 @@ async function execute(
           "--port",
           String(step.port),
           ...(step.force ? ["--force"] : []),
+          ...(step.operatorDoor ? ["--operator-door", step.operatorDoor] : []),
         ],
         io,
         { quiet: true, noOwnerGrant: step.noOwnerGrant, env: installEnv },
@@ -5757,6 +5783,10 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     io.stderr.write(`port-busy:${parsed.port}\n`);
     return EX_CONFIG;
   }
+  if (parsed.operatorDoor && !(await loopbackPortFree(parsed.operatorDoor.bindPort))) {
+    io.stderr.write(`port-busy:${parsed.operatorDoor.bindPort}\n`);
+    return EX_CONFIG;
+  }
   const exec = hooks.exec ?? defaultExec;
   const resolvedEnv = invokingEnv(platform, env, exec);
   if ("error" in resolvedEnv) {
@@ -5971,6 +6001,7 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     port: parsed.port,
     days: parsed.days,
     force: parsed.force,
+    ...(parsed.operatorDoor ? { operatorDoor: parsed.operatorDoor } : {}),
     posixRoot,
     stateExists: exists,
     veraxRootExists,

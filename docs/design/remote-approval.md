@@ -2,8 +2,9 @@
 
 Status: not in a release. The door's listener, the passkey sign-in, the list
 of what is waiting, the approval, halt and enrolment with a pairing code are
-in the tree, off unless `VERAX_OPERATOR_DOOR` names an origin. The install
-flag and the page are not built.
+in the tree, off unless `VERAX_OPERATOR_DOOR` names an origin, which
+`verax install --operator-door <origin>` and `verax init --local
+--operator-door <origin>` write for the service. The page is not built.
 
 The capability matrix says there is no remote approver, and on a released
 install that is true: a held call is approved with `verax approve` at the

@@ -10,7 +10,7 @@ import {
   importPKCS8,
   SignJWT,
 } from "jose";
-import { EX_CONFIG } from "./config.ts";
+import { EX_CONFIG, readOperatorDoor, type OperatorDoorConfig } from "./config.ts";
 import { shippedPolicyPath } from "./shipped-policy.ts";
 
 const ISSUER = "verax-local";
@@ -105,15 +105,23 @@ function psQuote(path: string): string {
 
 function parseInitArgs(
   argv: readonly string[],
-): { stateDir: string; force: boolean; days: number; port: number } | { error: string } {
+): { stateDir: string; force: boolean; days: number; port: number; operatorDoor?: OperatorDoorConfig } | { error: string } {
   let stateDir = "";
   let force = false;
   let days = DEFAULT_DAYS;
   let port = DEFAULT_PORT;
   let sawDays = false;
   let sawPort = false;
+  let operatorDoor: OperatorDoorConfig | undefined;
   for (let i = 0; i < argv.length; i += 1) {
     const a = argv[i]!;
+    if (a === "--operator-door") {
+      const door = parseOperatorDoorFlag(argv[i + 1]);
+      i += 1;
+      if ("error" in door) return door;
+      operatorDoor = door.value;
+      continue;
+    }
     if (a === "--local") {
       stateDir = argv[i + 1] ?? "";
       i += 1;
@@ -142,7 +150,7 @@ function parseInitArgs(
     return { error: `flag-unknown:${a}` };
   }
   if (stateDir === "" || stateDir.startsWith("-")) {
-    return { error: "verax init --local <stateDir> [--force] [--days N] [--port N]" };
+    return { error: "verax init --local <stateDir> [--force] [--days N] [--port N] [--operator-door <origin>]" };
   }
   if (sawDays && (!Number.isInteger(days) || days < 1 || days > MAX_DAYS)) {
     return { error: "--days wants an integer from 1 to 90" };
@@ -150,7 +158,25 @@ function parseInitArgs(
   if (sawPort && (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT)) {
     return { error: "--port wants an integer from 1024 to 65535" };
   }
-  return { stateDir: resolve(stateDir), force, days, port };
+  if (operatorDoor && operatorDoor.bindPort === port) {
+    return { error: `--operator-door listens on ${operatorDoor.bindPort}, which --port has taken` };
+  }
+  return { stateDir: resolve(stateDir), force, days, port, ...(operatorDoor ? { operatorDoor } : {}) };
+}
+
+/**
+ * The origin after `--operator-door`, held to what the body will accept when
+ * it reads `VERAX_OPERATOR_DOOR`, so a door the service would refuse to open
+ * is refused here, before anything is written.
+ */
+export function parseOperatorDoorFlag(raw: string | undefined): { value: OperatorDoorConfig } | { error: string } {
+  if (raw === undefined || raw === "" || raw.startsWith("-")) {
+    return { error: "--operator-door needs an origin, such as https://approve.example.com" };
+  }
+  const door = readOperatorDoor({ VERAX_OPERATOR_DOOR: raw });
+  if (!door.ok) return { error: door.reason.replace("VERAX_OPERATOR_DOOR", "--operator-door") };
+  if (!door.value) return { error: "--operator-door needs an origin, such as https://approve.example.com" };
+  return { value: door.value };
 }
 
 export type InitLocalOpts = {
@@ -286,6 +312,7 @@ async function runInitLocalBody(
     `VERAX_STATE_DIR=${stateDir}`,
     `VERAX_POLICY_FILE=${policyDest}`,
     `VERAX_BIND=127.0.0.1:${parsed.port}`,
+    ...(parsed.operatorDoor ? [`VERAX_OPERATOR_DOOR=${parsed.operatorDoor.origin}`] : []),
     "",
   ].join("\n");
   writeNew(envPath, envBody);

@@ -27,9 +27,9 @@ Usage: verax <command> [options]
   serve [--env-file <file>] [--log-file <file>]
                        same as serving, after loading KEY=VALUE lines from that file.
                        --log-file appends this process's stdout and stderr
-  init --local <stateDir> [--force] [--days N] [--port N]
+  init --local <stateDir> [--force] [--days N] [--port N] [--operator-door <origin>]
                        write a loopback key, one agent token, and verax.env
-  install [--port N] [--days N] [--force]
+  install [--port N] [--days N] [--force] [--operator-door <origin>]
                        copy this body to an administrator-owned directory and run it
                        as another account. Needs an elevated shell, and this program
                        must live in a directory only an administrator can change.

@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { readOperatorDoor } from "../packages/body/src/config.ts";
 import { refusedAsElevated } from "./elevated-refusal.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -117,6 +118,39 @@ describe("verax init --local", () => {
       const audiences = Array.isArray(aud) ? aud : [aud];
       assert.ok(audiences.includes("http://127.0.0.1:8797"));
       assert.match(r.stdout, /http:\/\/127\.0\.0\.1:8797\/mcp/);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("writes the operator door into verax.env only when asked, and refuses one the body would refuse", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-init-door-"));
+    try {
+      const refused = run(["init", "--local", stateDir, "--operator-door", "https://203.0.113.5"]);
+      if (refusedAsElevated(refused.status, refused.stderr)) return;
+      assert.equal(refused.status, 78);
+      assert.match(refused.stderr, /--operator-door needs a name, not an IP address/);
+      assert.equal(existsSync(join(stateDir, "verax.env")), false);
+
+      const clash = run(["init", "--local", stateDir, "--port", "8788", "--operator-door", "https://approve.example.com"]);
+      assert.equal(clash.status, 78);
+      assert.match(clash.stderr, /--operator-door listens on 8788, which --port has taken/);
+      assert.equal(existsSync(join(stateDir, "verax.env")), false);
+
+      const plain = run(["init", "--local", stateDir, "--port", "8797"]);
+      assert.equal(plain.status, 0, plain.stderr);
+      assert.doesNotMatch(readFileSync(join(stateDir, "verax.env"), "utf8"), /VERAX_OPERATOR/);
+
+      const r = run(["init", "--local", stateDir, "--port", "8797", "--force", "--operator-door", "https://approve.example.com"]);
+      assert.equal(r.status, 0, r.stderr);
+      const env = readFileSync(join(stateDir, "verax.env"), "utf8");
+      assert.match(env, /^VERAX_OPERATOR_DOOR=https:\/\/approve\.example\.com$/m);
+      // What was written is what the body reads back as a door.
+      const origin = /^VERAX_OPERATOR_DOOR=(.*)$/m.exec(env)?.[1] ?? "";
+      assert.deepEqual(readOperatorDoor({ VERAX_OPERATOR_DOOR: origin }), {
+        ok: true,
+        value: { origin: "https://approve.example.com", rpID: "approve.example.com", bindHost: "127.0.0.1", bindPort: 8788 },
+      });
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
     }

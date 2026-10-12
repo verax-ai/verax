@@ -286,6 +286,59 @@ describe("verax install plan", () => {
     assert.equal(userToken.gid, 1000);
   });
 
+  it("--operator-door reaches init and the printed summary, and is absent from both without the flag", () => {
+    const door = { origin: "https://approve.example.com", rpID: "approve.example.com", bindHost: "127.0.0.1", bindPort: 8788 };
+    const printed = (plan: ReturnType<typeof okPlan>) =>
+      plan.ops.map((op) => (op.op === "print" ? op.text : "")).join("\n");
+    for (const [platform, env, opts] of [
+      ["linux", linuxEnv, linuxOpts],
+      ["win32", winEnv, winOpts],
+    ] as const) {
+      const off = okPlan(platform, env, opts);
+      const offInit = off.ops.find((op) => op.op === "init");
+      assert.ok(offInit && offInit.op === "init");
+      assert.equal("operatorDoor" in offInit, false, platform);
+      assert.doesNotMatch(printed(off), /operator door|operator enroll/, platform);
+
+      const on = okPlan(platform, env, { ...opts, operatorDoor: door });
+      const onInit = on.ops.find((op) => op.op === "init");
+      assert.ok(onInit && onInit.op === "init");
+      assert.equal(onInit.operatorDoor, "https://approve.example.com", platform);
+      const text = printed(on);
+      assert.match(text, /^operator door 127\.0\.0\.1:8788 for https:\/\/approve\.example\.com$/m, platform);
+      // The command names the state directory this install made, so it can be pasted as it is.
+      assert.ok(text.includes(`operator enroll --state '${on.stateDir}'`), `${platform}: ${text}`);
+    }
+  });
+
+  it("--operator-door is refused at install when the body would refuse it at start", async () => {
+    for (const [args, said] of [
+      [["--operator-door"], /--operator-door needs an origin/],
+      [["--operator-door", "--force"], /--operator-door needs an origin/],
+      [["--operator-door", "approve.example.com"], /--operator-door is not an origin/],
+      [["--operator-door", "https://approve.example.com/door"], /--operator-door is an origin only/],
+      [["--operator-door", "https://203.0.113.5"], /--operator-door needs a name, not an IP address/],
+      [["--operator-door", "http://approve.example.com"], /--operator-door needs https/],
+      [["--operator-door", "http://localhost:8788", "--port", "8788"], /--operator-door listens on 8788, which --port has taken/],
+    ] as const) {
+      const err: string[] = [];
+      const code = await runInstall(["install", ...args], {
+        platform: "linux",
+        env: linuxEnv,
+        elevated: () => true,
+        spawnUserToken: userTokenStandIn,
+        codeProbe: () => false,
+        layout: linuxOpts,
+        exec: () => {
+          throw new Error("argv must not reach install");
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      assert.equal(code, 78, args.join(" "));
+      assert.match(err.join(""), said, args.join(" "));
+    }
+  });
+
   it("install init carries no owner grant, and only the token icacls names the invoking user", () => {
     const sid = "S-1-5-21-1001";
     const win = okPlan("win32", { ...winEnv, USERNAME: "Everyone", USERDOMAIN: "" }, { ...winOpts, userSid: sid });
