@@ -2284,6 +2284,7 @@ export function successText(
     ? [
         `operator door ${info.operatorDoor.bindHost}:${info.operatorDoor.bindPort} for ${info.operatorDoor.origin}`,
         `A pairing code for a new passkey, good for five minutes: ${enroll}`,
+        `Type the code at ${info.operatorDoor.origin}/ on the device whose passkey it is for. The same page signs in and approves.`,
       ]
     : [];
   return [

@@ -15,6 +15,7 @@ import {
   type Policy,
 } from "@verax-ai/proxy";
 import { EX_CONFIG } from "./config.ts";
+import { heldSpend, type HeldSpend } from "./held-spend.ts";
 import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, elevatedStateDirRefusal, readWindowsMachineRoots, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal, type ToolExec, type WindowsMachineRoots } from "./install.ts";
 import { loadOrCreateSigners } from "./keys.ts";
 
@@ -79,16 +80,6 @@ export function resolveApproveRef(
 const NEEDS_TERMINAL =
   "verax approve needs a terminal: it shows what is waiting and asks you to type the amount back\n";
 
-function integerMinor(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) ? value : null;
-}
-
-/** An integer minor-unit amount, or null when the stored amount cannot be read as one. */
-function minorUnits(row: ApprovalRow): number | null {
-  if (typeof row.amount === "number") return integerMinor(row.amount);
-  return integerMinor(row.args.amountMinor);
-}
-
 const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "gu");
 
 /**
@@ -107,16 +98,13 @@ function quotedField(name: string, value: unknown): string {
   return `${quotedName}: ${quoted}\n`;
 }
 
-function spendPrompt(row: ApprovalRow, amount: number): string {
-  const payee = typeof row.payee === "string" ? row.payee : String(row.args.payee ?? "");
-  const currency = typeof row.currency === "string" ? row.currency : String(row.args.currency ?? "");
-  const reference = typeof row.args.reference === "string" ? row.args.reference : "";
+function spendPrompt(row: ApprovalRow, spend: HeldSpend, amount: number): string {
   return [
     quotedField("tool", row.subject),
-    quotedField("payee", payee),
+    quotedField("payee", spend.payee),
     quotedField("amount", String(amount)),
-    quotedField("currency", currency),
-    quotedField("reference", reference),
+    quotedField("currency", spend.currency),
+    quotedField("reference", spend.reference),
     quotedField("requestHash", row.requestHash.slice(0, 12)),
   ].join("");
 }
@@ -268,13 +256,14 @@ export async function runApprove(
       writeErr("approve-unknown-ref\n");
       return 78;
     }
-    if (waiting.subject === "spend") {
-      const expected = minorUnits(waiting);
+    const spend = heldSpend(waiting);
+    if (spend) {
+      const expected = spend.amountMinor;
       if (expected === null) {
         writeErr("approve-amount-unreadable\n");
         return 1;
       }
-      writeOut(spendPrompt(waiting, expected));
+      writeOut(spendPrompt(waiting, spend, expected));
       writeOut("Type the amount in minor units:\n");
       const typed = (await terminal.ask("Type the amount in minor units:\n")).trim();
       if (typed !== String(expected)) {

@@ -1,17 +1,19 @@
 import { strict as assert } from "node:assert";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { request, type Server } from "node:http";
+import { request } from "node:http";
 import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { Script } from "node:vm";
 
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
-import { exportJWK, generateKeyPair, SignJWT } from "jose";
+import { exportJWK, generateKeyPair } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
+import { heldSpend } from "../packages/body/src/held-spend.ts";
 import { lookWithoutFollowing, pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
 import { credentialsPath, readCredentials, saveCredential } from "../packages/body/src/operator-credentials.ts";
 import {
@@ -20,6 +22,7 @@ import {
   doorHostAllowed,
   openOperatorDoor,
 } from "../packages/body/src/operator-door.ts";
+import { DOOR_CSS, DOOR_HTML, DOOR_JS } from "../packages/body/src/operator-door-page.ts";
 import {
   beginPairing,
   checkPairing,
@@ -31,6 +34,17 @@ import {
 } from "../packages/body/src/operator-pairing.ts";
 import { listen, operatorDoorOf } from "../packages/body/src/server.ts";
 import {
+  approvePolicyFile,
+  AUDIENCE,
+  DOOR_HOST,
+  DOOR_ORIGIN,
+  hold,
+  holdSpend,
+  ISSUER,
+  openBody,
+  RP_ID,
+} from "./operator-door-fixture.ts";
+import {
   assertWithSoftwarePasskey,
   attestedAuthData,
   mintSoftwarePasskey,
@@ -39,13 +53,9 @@ import {
   type SoftwarePasskey,
 } from "./software-passkey.ts";
 
-// The door's name is what the operator's proxy answers for. The port the door
-// itself listens on is another matter, so the two differ here as they would there.
-const DOOR_ORIGIN = "http://localhost:4174";
-const DOOR_HOST = "localhost:4174";
-const RP_ID = "localhost";
-const ISSUER = "https://issuer.local.test";
-const AUDIENCE = "http://127.0.0.1/verax-operator-door";
+// Written out here and not read from the door: a policy loosened there fails here.
+const PAGE_CSP =
+  "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'";
 
 type Answer = { status: number; body: Record<string, unknown>; headers: Record<string, string | string[] | undefined> };
 
@@ -90,110 +100,6 @@ function call(
     req.once("error", reject);
     req.end(text);
   });
-}
-
-function approvePolicyFile(dir: string): string {
-  const path = join(dir, "approve-policy.json");
-  writeFileSync(
-    path,
-    JSON.stringify({
-      version: 1,
-      default: "deny",
-      approvalTtlMs: 86_400_000,
-      rules: [
-        {
-          id: "put-approve",
-          tool: "memory.put",
-          requires: ["verax:memory"],
-          mode: "approve",
-          text: "Writes need operator approval.",
-        },
-      ],
-    }),
-    "utf8",
-  );
-  return path;
-}
-
-type Body = {
-  stateDir: string;
-  main: string;
-  doorPort: number;
-  server: Server;
-  /** A token the local key signs, as an installed body's agent token is. */
-  local: (scope: string, sub?: string) => Promise<string>;
-  close: () => Promise<void>;
-};
-
-/** A body as `verax install` sets one up: local mode, the door on. */
-async function openBody(passkey: SoftwarePasskey | null, door = true): Promise<Body> {
-  const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-"));
-  if (passkey) {
-    saveCredential(stateDir, {
-      id: passkey.id,
-      publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()),
-      counter: 0,
-      sub: "operator-1",
-    });
-  }
-  const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
-  const jwksFile = join(stateDir, "jwks.json");
-  writeFileSync(jwksFile, JSON.stringify({ keys: [{ ...(await exportJWK(publicKey)), kid: "local-1", alg: "ES256", use: "sig" }] }));
-  const server = await listen({
-    issuer: ISSUER,
-    jwksUrl: "",
-    jwksFile,
-    audience: AUDIENCE,
-    stateDir,
-    bindHost: "127.0.0.1",
-    bindPort: 0,
-    policyFile: approvePolicyFile(stateDir),
-    tlsTerminated: false,
-    operatorDoor: door ? { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 } : null,
-  });
-  const doorServer = operatorDoorOf(server);
-  return {
-    stateDir,
-    main: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    doorPort: doorServer ? (doorServer.address() as AddressInfo).port : 0,
-    server,
-    local: (scope, sub = "agent-1") =>
-      new SignJWT({ scope })
-        .setProtectedHeader({ alg: "ES256", kid: "local-1" })
-        .setIssuer(ISSUER)
-        .setAudience(AUDIENCE)
-        .setSubject(sub)
-        .setIssuedAt()
-        .setExpirationTime("5m")
-        .setJti(randomUUID())
-        .sign(privateKey),
-    close: async () => {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-    },
-  };
-}
-
-async function hold(body: Body, id: string): Promise<void> {
-  const res = await fetch(`${body.main}/mcp`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      authorization: `Bearer ${await body.local("verax:memory")}`,
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "memory.put",
-        arguments: { id, body: { t: 1 }, source: { uri: "file://t", retrievedAtMs: 1 }, validUntilMs: Date.now() + 60_000 },
-      },
-    }),
-  });
-  assert.equal(res.status, 200);
-  assert.match(await res.text(), /deferred:approval-required/);
 }
 
 async function signIn(port: number, passkey: SoftwarePasskey, over: { origin?: string; counter?: number } = {}): Promise<Answer> {
@@ -300,7 +206,12 @@ describe("operator door", () => {
           ["POST", "/api/contest/x"],
           ["GET", "/healthz"],
           ["GET", "/.well-known/oauth-protected-resource"],
-          ["GET", "/"],
+          ["POST", "/"],
+          ["GET", "/index.html"],
+          ["GET", "/door.js.map"],
+          ["POST", "/door.js"],
+          ["GET", "/door.css/"],
+          ["GET", "/favicon.ico"],
           ["GET", "/api/signin"],
           ["DELETE", "/api/approve"],
         ] as const) {
@@ -1051,7 +962,8 @@ describe("operator door", () => {
       const { code } = beginPairing(stateDir);
       // Thirty-two enrolment requests that each send the start of a body and then nothing.
       for (let i = 0; i < 32; i += 1) {
-        const socket = connect(port, "127.0.0.1");
+        // Half-open on this side, as in `unending`: a door that only stopped writing leaves these up.
+        const socket = connect({ port, host: "127.0.0.1", allowHalfOpen: true });
         socket.on("error", () => undefined);
         socket.write(
           `POST ${i % 2 === 0 ? "/api/enroll" : "/api/enroll/options"} HTTP/1.1\r\nHost: ${DOOR_HOST}\r\nOrigin: ${DOOR_ORIGIN}\r\n` +
@@ -1078,7 +990,11 @@ describe("operator door", () => {
 
       // Nobody closes those sockets: the door stops waiting for them by itself.
       await new Promise((resolve) => setTimeout(resolve, 900));
-      // Dropped means hung up on, not only no longer counted.
+      // Dropped means hung up on, not only no longer counted: what these go on to send finds nobody reading.
+      for (let wrote = 0; wrote < 3; wrote += 1) {
+        for (const socket of sockets.slice(0, 32)) if (!socket.destroyed) socket.write("0");
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       assert.equal(sockets.slice(0, 32).filter((socket) => !socket.destroyed).length, 0);
       assert.equal((await call(port, "POST", "/api/enroll/options", { body: { code } })).status, 200);
       assert.equal((await signIn(port, passkey)).status, 200);
@@ -1102,6 +1018,10 @@ describe("operator door", () => {
         ["another name", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}`, "400", { host: "evil.example" }],
         ["a target that is no address", body.doorPort, `GET http://x:99999/ HTTP/1.1\r\n`, "400"],
         ["an expectation the door does not meet", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}Expect: x\r\n`, "417"],
+        // Node says go on, as the header asks. The door reads no further than any other body, and hangs up.
+        ["an expectation Node meets", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}Expect: 100-continue\r\n`, "100"],
+        ["the page takes no body", body.doorPort, `GET / HTTP/1.1\r\n`, "200"],
+        ["nor do its files, enrolled or not", empty.doorPort, `GET /door.js HTTP/1.1\r\n`, "200"],
         ["not on the list", body.doorPort, `POST /mcp HTTP/1.1\r\n${named}`, "404"],
         ["another origin", body.doorPort, `POST /api/signin HTTP/1.1\r\nOrigin: https://evil.example\r\n`, "403"],
         ["no origin", body.doorPort, `POST /api/signin HTTP/1.1\r\n`, "403"],
@@ -1282,6 +1202,142 @@ describe("operator door", () => {
     } finally {
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
+  });
+
+  it("D25 the page is three files handed to anyone who asks under the door's name, each sealed by its headers", async () => {
+    const enrolled = await openBody(mintSoftwarePasskey());
+    const empty = await openBody(null);
+    try {
+      for (const body of [enrolled, empty]) {
+        for (const [path, type, text] of [
+          ["/", "text/html; charset=utf-8", DOOR_HTML],
+          ["/door.js", "text/javascript; charset=utf-8", DOOR_JS],
+          ["/door.css", "text/css; charset=utf-8", DOOR_CSS],
+        ] as const) {
+          const res = await call(body.doorPort, "GET", path);
+          assert.equal(res.status, 200, path);
+          // The same bytes whether or not anyone is enrolled: the page says nothing about this body.
+          assert.equal(res.body.raw, text, path);
+          assert.equal(res.headers["content-type"], type, path);
+          assert.equal(res.headers["content-security-policy"], PAGE_CSP, path);
+          assert.equal(res.headers["x-frame-options"], "DENY", path);
+          assert.equal(res.headers["referrer-policy"], "no-referrer", path);
+          assert.equal(res.headers["cross-origin-opener-policy"], "same-origin", path);
+          assert.equal(res.headers["cross-origin-resource-policy"], "same-origin", path);
+          assert.equal(res.headers["x-content-type-options"], "nosniff", path);
+          assert.equal(res.headers["cache-control"], "no-store", path);
+          assert.equal(res.headers.connection, "close", path);
+          // Under another name the page is not served, and a page elsewhere cannot read it.
+          assert.equal((await call(body.doorPort, "GET", path, { host: "evil.example" })).status, 400, path);
+          assert.equal((await call(body.doorPort, "GET", path, { origin: "https://evil.example" })).status, 403, path);
+        }
+      }
+      // The policy lets the page load its own two files and call its own origin. Nothing else.
+      const policy = new Map(PAGE_CSP.split("; ").map((part) => [part.split(" ")[0]!, part.split(" ").slice(1).join(" ")]));
+      assert.equal(policy.get("default-src"), "'none'");
+      assert.equal(policy.get("script-src"), "'self'");
+      assert.equal(policy.get("style-src"), "'self'");
+      assert.equal(policy.get("connect-src"), "'self'");
+      assert.equal(policy.get("frame-ancestors"), "'none'");
+      assert.equal(policy.get("form-action"), "'none'");
+      assert.equal(policy.get("base-uri"), "'none'");
+      assert.equal(policy.get("require-trusted-types-for"), "'script'");
+      assert.equal(policy.get("trusted-types"), "'none'");
+      assert.equal(policy.size, 9);
+    } finally {
+      await enrolled.close();
+      await empty.close();
+    }
+  });
+
+  it("D26 the page carries no script or style of its own in the markup, and its script has no way to write markup or keep a token", () => {
+    for (const text of [DOOR_HTML, DOOR_JS, DOOR_CSS]) {
+      assert.ok(Buffer.byteLength(text) < 48 * 1024);
+    }
+    // The script compiles. Nothing here runs it.
+    new Script(DOOR_JS, { filename: "door.js" });
+    for (const banned of [
+      /innerHTML/,
+      /outerHTML/,
+      /insertAdjacentHTML/,
+      /document\s*\.\s*write/,
+      /\beval\b/,
+      /Function\s*\(/,
+      /localStorage/,
+      /sessionStorage/,
+      /indexedDB/,
+      /\.cookie\b/,
+      /console\s*\./,
+      /https?:\/\//,
+      /importScripts/,
+      /postMessage/,
+      /\bwindow\s*\.\s*[A-Za-z_$][\w$]*\s*=[^=]/,
+      /globalThis/,
+    ]) {
+      assert.equal(banned.test(DOOR_JS), false, `door.js: ${banned}`);
+    }
+    // The markup loads the two files by path and holds nothing a strict policy would have to excuse.
+    const scripts = [...DOOR_HTML.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)];
+    assert.equal(scripts.length, 1);
+    assert.match(scripts[0]![1]!, /\bsrc="\/door\.js"/);
+    assert.equal(scripts[0]![2]!.trim(), "");
+    const links = [...DOOR_HTML.matchAll(/<link\b([^>]*)>/gi)];
+    assert.equal(links.length, 1);
+    assert.match(links[0]![1]!, /\bhref="\/door\.css"/);
+    for (const banned of [/<style\b/i, /\sstyle\s*=/i, /\son[a-z]+\s*=/i, /<form\b/i, /<iframe\b/i, /<img\b/i, /<base\b/i, /https?:\/\//i, /javascript:/i]) {
+      assert.equal(banned.test(DOOR_HTML), false, `page: ${banned}`);
+    }
+    for (const banned of [/url\s*\(/i, /@import/i, /expression\s*\(/i, /https?:\/\//i]) {
+      assert.equal(banned.test(DOOR_CSS), false, `door.css: ${banned}`);
+    }
+  });
+
+  it("D27 a held spend is listed with the payee and the amount `verax approve` prints, and no other call is", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      await hold(body, "door-d27");
+      await holdSpend(body, { amountMinor: 1250, currency: "USD", payee: "sample-merchant", reference: "inv-7" });
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const listed = (await call(body.doorPort, "GET", "/api/waiting", { token })).body.waiting as Array<{
+        tool: string;
+        spend?: unknown;
+      }>;
+      assert.equal(listed.length, 2);
+      assert.deepEqual(listed.find((row) => row.tool === "spend")?.spend, {
+        payee: "sample-merchant",
+        amountMinor: 1250,
+        currency: "USD",
+        reference: "inv-7",
+      });
+      assert.equal("spend" in listed.find((row) => row.tool === "memory.put")!, false);
+    } finally {
+      await body.close();
+    }
+    const row = {
+      ref: "r",
+      requestHash: "h",
+      ruleId: null,
+      ruleText: null,
+      inputsSummary: { count: 0, ids: [] },
+      expiresAtMs: 1,
+      status: "pending" as const,
+      brain: "b",
+    };
+    // An amount that is not a whole number of minor units is not an amount, here as at the terminal.
+    assert.deepEqual(heldSpend({ ...row, subject: "spend", amount: "1250", payee: 7, args: { payee: 7, currency: "USD" } }), {
+      payee: "7",
+      amountMinor: null,
+      currency: "USD",
+      reference: "",
+    });
+    assert.equal(heldSpend({ ...row, subject: "spend", amount: 12.5, args: {} })?.amountMinor, null);
+    assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: "1250" } })?.amountMinor, null);
+    // What was stored when the call was held is what is shown, as at the terminal.
+    assert.equal(heldSpend({ ...row, subject: "spend", payee: "stored", args: { payee: "argued" } })?.payee, "stored");
+    assert.equal(heldSpend({ ...row, subject: "spend", currency: "EUR", args: { currency: "USD" } })?.currency, "EUR");
+    assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: 40 } })?.amountMinor, 40);
+    assert.equal(heldSpend({ ...row, subject: "memory.put", amount: 5, payee: "x", args: {} }), null);
   });
 
   it("D12 the origin is a name over HTTPS, and the door binds loopback", () => {

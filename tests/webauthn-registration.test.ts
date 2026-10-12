@@ -198,7 +198,10 @@ describe("registration", () => {
   });
 
   it("R8 what an enrolment offers is what the verifier takes, one for one", () => {
-    const ec = generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
+    // The limits written out: read only from the code, they would pass whatever they were.
+    assert.equal(RSA_MIN_BITS, 2048);
+    assert.equal(RSA_MAX_BITS, 8192);
+    const ec =generateKeyPairSync("ec", { namedCurve: "P-256" }).publicKey.export({ format: "jwk" });
     const ed = generateKeyPairSync("ed25519").publicKey.export({ format: "jwk" });
     const rsa = generateKeyPairSync("rsa", { modulusLength: 2048 }).publicKey.export({ format: "jwk" });
     const bytes = (value: string | undefined) => new Uint8Array(Buffer.from(value ?? "", "base64url"));
