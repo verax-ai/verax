@@ -80,8 +80,10 @@ way to reach that from another device.
    refuses that code until it stops. If the file can be neither written nor
    removed, a body started afterwards reads the old count again. The door reads the new credential itself:
    made for its challenge, its origin and its relying party, with the user
-   verified, a key it can verify with, and no byte of the authenticator data
-   left unexplained.
+   verified, a key of a kind and size it verifies with, and no byte of the
+   authenticator data left unexplained. An enrolment carries no signature,
+   so the first sign-in is what shows the device holds the key; a credential
+   that never signs in has cost a code and nothing else.
 4. **Each approval still needs its own assertion.** The session lets the
    operator see what is waiting. Approving one request asks the passkey again
    over that request's challenge. The screen shows what the CLI shows: tool,
@@ -106,9 +108,11 @@ way to reach that from another device.
   the body's memory, add a credential, or approve from the CLI.
 - It does not reach a body that is off or cut from the network. The call
   stays held.
-- It does not limit connections or request rate. A sign-in body nobody has
-  vouched for is at most 16 KiB, at most 32 are read at once, and one that
-  takes longer than five seconds is dropped. A caller who keeps those 32
+- It does not limit connections or request rate. A sign-in or enrolment
+  body nobody has vouched for is at most 16 KiB, at most 32 are read at
+  once, and one that takes longer than five seconds is dropped. A request
+  the door answers without reading its body is cut once the answer has gone
+  out, whatever the caller goes on sending. A caller who keeps those 32
   busy can still delay a sign-in; a limit on that belongs at the operator's
   TLS endpoint.
 - It does not check what kind of device holds a passkey. Enrolment asks for

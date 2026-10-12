@@ -219,6 +219,31 @@ async function enroll(port: number, code: string, passkey: SoftwarePasskey): Pro
   return call(port, "POST", "/api/enroll", { body: { code, response } });
 }
 
+/** Sends a request that never ends its body, and reports the answer and whether the door hung up. */
+function unending(port: number, head: string, sockets: Socket[]): Promise<{ status: string; cut: boolean }> {
+  return new Promise((resolve) => {
+    const socket = connect(port, "127.0.0.1");
+    sockets.push(socket);
+    let status = "";
+    let more: NodeJS.Timeout | undefined;
+    const done = (cut: boolean) => {
+      clearInterval(more);
+      clearTimeout(patience);
+      resolve({ status, cut });
+    };
+    const patience = setTimeout(() => done(false), 1500);
+    socket.on("error", () => undefined);
+    socket.once("data", (chunk: Buffer) => {
+      status = (chunk.toString("utf8").split("\r\n")[0] ?? "").replace("HTTP/1.1 ", "").slice(0, 3);
+    });
+    socket.once("close", () => done(true));
+    socket.write(`${head}Host: ${DOOR_HOST}\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n`);
+    more = setInterval(() => {
+      if (!socket.destroyed) socket.write(`400\r\n${"x".repeat(1024)}\r\n`);
+    }, 20);
+  });
+}
+
 type Waiting = { ref: string; requestHash: string; tool: string; args: Record<string, unknown> };
 
 async function waitingAt(port: number, token: string): Promise<Waiting[]> {
@@ -1031,6 +1056,11 @@ describe("operator door", () => {
         assert.deepEqual(busy.body, { error: "busy" });
         assert.equal(busy.headers["retry-after"], "5");
       }
+      // A caller told the line is full is not then read from for as long as it likes.
+      assert.deepEqual(
+        await unending(port, `POST /api/enroll HTTP/1.1\r\nOrigin: ${DOOR_ORIGIN}\r\n`, sockets),
+        { status: "503", cut: true },
+      );
       // The line is one line: a sign-in waits behind enrolment bodies too.
       assert.equal((await signIn(port, passkey)).status, 503);
       // A code that never arrived whole was not a wrong try.
@@ -1044,6 +1074,33 @@ describe("operator door", () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => door.close(() => resolve()));
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D22 a request the door answers without reading is cut, whatever it goes on sending", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    const empty = await openBody(null);
+    const sockets: Socket[] = [];
+    try {
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const named = `Origin: ${DOOR_ORIGIN}\r\n`;
+      for (const [why, port, head, status] of [
+        ["not on the list", body.doorPort, `POST /mcp HTTP/1.1\r\n${named}`, "404"],
+        ["another origin", body.doorPort, `POST /api/signin HTTP/1.1\r\nOrigin: https://evil.example\r\n`, "403"],
+        ["no origin", body.doorPort, `POST /api/signin HTTP/1.1\r\n`, "403"],
+        ["no operator", empty.doorPort, `POST /api/approve HTTP/1.1\r\n${named}`, "403"],
+        ["no session", body.doorPort, `POST /api/approve HTTP/1.1\r\n${named}`, "401"],
+        ["options take no body", body.doorPort, `POST /api/signin/options HTTP/1.1\r\n${named}`, "200"],
+        ["sign-out takes no body", body.doorPort, `POST /api/signout HTTP/1.1\r\n${named}Authorization: Bearer ${token}\r\n`, "200"],
+      ] as const) {
+        const seen = await unending(port, head, sockets);
+        assert.deepEqual(seen, { status, cut: true }, why);
+      }
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await body.close();
+      await empty.close();
     }
   });
 

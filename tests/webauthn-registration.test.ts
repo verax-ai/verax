@@ -216,6 +216,10 @@ describe("registration", () => {
     assert.equal(coseKeyToPublicKey(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))), null);
     const short = generateKeyPairSync("rsa", { modulusLength: RSA_MIN_BITS - 8 }).publicKey.export({ format: "jwk" });
     assert.equal(coseKeyToPublicKey(rsaKey(bytes(short.n), bytes(short.e))), null);
+    // Nor is an exponent no signature verifies under: none, one, small, even.
+    for (const e of [[0], [1], [3], [1, 0, 0], [1, 0, 2]]) {
+      assert.equal(coseKeyToPublicKey(rsaKey(bytes(rsa.n), new Uint8Array(e))), null, `e ${e.join(",")}`);
+    }
     // And an enrolment that carries one is refused before the code is spent on it.
     const passkey = mintSoftwarePasskey();
     const tiny = { ...passkey, publicKeyCose: isoBase64URL.toBuffer(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))) };

@@ -100,8 +100,12 @@ export function coseKeyToPublicKey(base64urlCose: string): KeyObject | null {
         format: "jwk",
         key: { kty: "RSA", alg: "RS256", n: b64url(n), e: b64url(e) },
       });
-      // A modulus that imports is not yet one a signature fits in, or one worth trusting.
-      return (key.asymmetricKeyDetails?.modulusLength ?? 0) >= RSA_MIN_BITS ? key : null;
+      // A key that imports is not yet one a signature verifies under: the
+      // modulus has to hold one, and the exponent has to be odd and at least 65537.
+      const details = key.asymmetricKeyDetails;
+      const exponent = details?.publicExponent ?? 0n;
+      if ((details?.modulusLength ?? 0) < RSA_MIN_BITS) return null;
+      return exponent >= 65537n && exponent % 2n === 1n ? key : null;
     }
     return null;
   } catch {
@@ -244,7 +248,9 @@ function decoded(bytes: Uint8Array): CborVal | undefined {
  * pairing code from the machine). What it does establish is that the answer
  * was made for this challenge, origin and relying party with the user
  * verified, that every byte of the authenticator data is accounted for, and
- * that the key is one `verifyAssertion` can use.
+ * that the key is of a kind and size `verifyAssertion` takes. Nothing here
+ * is signed, so it does not show the caller holds the private key: the
+ * first sign-in does.
  */
 export function verifyRegistration(opts: {
   response: PostedRegistration;

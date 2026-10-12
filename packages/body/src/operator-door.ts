@@ -102,10 +102,14 @@ function challengeInClientData(clientDataJSON: string): string | null {
   }
 }
 
-/** The answer goes out, then the rest of what was being sent is not waited for. */
-function refuseTooLarge(req: IncomingMessage, res: ServerResponse): void {
-  res.once("finish", () => req.destroy());
-  send(res, 413, { error: "payload-too-large" }, { connection: "close" });
+/**
+ * The answer to a request whose body the door does not read. It goes out and
+ * the connection is cut: what the caller was still sending is neither waited
+ * for nor read, so a request the door turned away holds nothing open.
+ */
+function answerUnread(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
+  // Node closes the socket, both ways, once an answer marked like this has gone out.
+  send(res, status, body, { ...headers, connection: "close" });
 }
 
 /** Oldest out first: a Map keeps insertion order. */
@@ -169,12 +173,11 @@ export async function openOperatorDoor(opts: {
   const readUnvouched = async (req: IncomingMessage, res: ServerResponse): Promise<{ value: unknown } | null> => {
     const declared = Number(first(req.headers["content-length"]) ?? "0");
     if (Number.isFinite(declared) && declared > SIGNIN_BODY_BYTES) {
-      refuseTooLarge(req, res);
+      answerUnread(res, 413, { error: "payload-too-large" });
       return null;
     }
     if (signinsInFlight >= MAX_SIGNINS_IN_FLIGHT) {
-      send(res, 503, { error: "busy" }, { "retry-after": "5" });
-      req.resume();
+      answerUnread(res, 503, { error: "busy" }, { "retry-after": "5" });
       return null;
     }
     signinsInFlight += 1;
@@ -188,7 +191,7 @@ export async function openOperatorDoor(opts: {
     }
     if (!parsed.ok) {
       if ("tooLarge" in parsed) {
-        refuseTooLarge(req, res);
+        answerUnread(res, 413, { error: "payload-too-large" });
         return null;
       }
       send(res, 400, { error: "bad-body" });
@@ -240,31 +243,26 @@ export async function openOperatorDoor(opts: {
       res.setHeader("cache-control", "no-store");
       const listenPort = (server.address() as AddressInfo).port;
       if (!doorHostAllowed(first(req.headers.host), door, listenPort)) {
-        send(res, 400, { error: "host-not-allowed" });
-        req.resume();
+        answerUnread(res, 400, { error: "host-not-allowed" });
         return;
       }
       const origin = first(req.headers.origin);
       if (origin !== undefined && origin !== door.origin) {
-        send(res, 403, { error: "origin-not-allowed" });
-        req.resume();
+        answerUnread(res, 403, { error: "origin-not-allowed" });
         return;
       }
       const url = new URL(req.url ?? "/", door.origin);
       if (!ROUTES.has(`${req.method} ${url.pathname}`)) {
-        send(res, 404, { error: "not-found" });
-        req.resume();
+        answerUnread(res, 404, { error: "not-found" });
         return;
       }
       // A browser names the origin on every POST. One that does not is not the door's page.
       if (req.method === "POST" && origin === undefined) {
-        send(res, 403, { error: "origin-required" });
-        req.resume();
+        answerUnread(res, 403, { error: "origin-required" });
         return;
       }
       if (req.method === "POST" && contentLengthOverLimit(req)) {
-        send(res, 413, { error: "payload-too-large" });
-        req.resume();
+        answerUnread(res, 413, { error: "payload-too-large" });
         return;
       }
       if (url.pathname === "/api/enroll/options" || url.pathname === "/api/enroll") {
@@ -340,14 +338,12 @@ export async function openOperatorDoor(opts: {
       // With no operator enrolled an approval over HTTP needs no signature.
       // That path must not be reachable from here, so past enrolment the door stays shut.
       if (!hasRegisteredOperator(stateDir)) {
-        send(res, 403, { error: "no-operator" });
-        req.resume();
+        answerUnread(res, 403, { error: "no-operator" });
         return;
       }
 
       if (url.pathname === "/api/signin/options") {
-        req.resume();
-        send(res, 200, {
+        answerUnread(res, 200, {
           challenge: mintChallenge(signinKey),
           rpId: door.rpID,
           allowCredentials: readCredentials(stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
@@ -395,15 +391,13 @@ export async function openOperatorDoor(opts: {
       const token = readBearer(req.headers.authorization);
       const session = liveSession(token);
       if (!session) {
-        send(res, 401, { error: "unauthorized" });
-        req.resume();
+        answerUnread(res, 401, { error: "unauthorized" });
         return;
       }
 
       if (url.pathname === "/api/signout") {
-        req.resume();
         sessions.delete(sessionKey(token!));
-        send(res, 200, { ok: true });
+        answerUnread(res, 200, { ok: true });
         return;
       }
 
