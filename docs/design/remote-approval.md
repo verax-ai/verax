@@ -1,9 +1,9 @@
 # Remote approval — design, partly built, not released
 
 Status: not in a release. The door's listener, the passkey sign-in, the list
-of what is waiting, the approval and halt are in the tree, off unless
-`VERAX_OPERATOR_DOOR` names an origin. Enrolment through the door, the
-install flag and the page are not built.
+of what is waiting, the approval, halt and enrolment with a pairing code are
+in the tree, off unless `VERAX_OPERATOR_DOOR` names an origin. The install
+flag and the page are not built.
 
 The capability matrix says there is no remote approver, and on a released
 install that is true: a held call is approved with `verax approve` at the
@@ -69,7 +69,22 @@ way to reach that from another device.
    scopes stays as it is. A restart of the body ends every session.
 3. **Enrolment stays at the machine.** A credential is added only with a
    pairing code from an elevated `verax operator enroll`, as today. A phone
-   cannot enrol itself, and the agent's account cannot ask for a code.
+   cannot enrol itself, and the agent's account cannot ask for a code. The
+   door takes the code on `POST /api/enroll/options` and `POST /api/enroll`,
+   and those two are the only paths open before an operator exists.
+   A code buys one enrolment, five wrong tries end it wherever they arrive,
+   and enrolling opens no session. A refused code gets one answer whether it
+   was wrong, late, used up or never asked for. The wrong tries are counted
+   in the pairing file; a wrong try that cannot be counted there, as on a
+   full disk, ends the code: the file is removed, and the running body
+   refuses that code until it stops. If the file can be neither written nor
+   removed, a body started afterwards reads the old count again. The door reads the new credential itself:
+   made for its challenge, its origin and its relying party, with the user
+   verified, a key read the way a sign-in reads it (ES256, EdDSA, or RS256
+   with an odd modulus of 2048 to 8192 bits and the exponent 65537), and no byte of the
+   authenticator data left unexplained. An enrolment carries no signature,
+   so the first sign-in is what shows the device holds the key; a credential
+   that never signs in has cost a code and nothing else.
 4. **Each approval still needs its own assertion.** The session lets the
    operator see what is waiting. Approving one request asks the passkey again
    over that request's challenge. The screen shows what the CLI shows: tool,
@@ -94,11 +109,20 @@ way to reach that from another device.
   the body's memory, add a credential, or approve from the CLI.
 - It does not reach a body that is off or cut from the network. The call
   stays held.
-- It does not limit connections or request rate. A sign-in body nobody has
-  vouched for is at most 16 KiB, at most 32 are read at once, and one that
-  takes longer than five seconds is dropped. A caller who keeps those 32
+- It does not limit connections or request rate. A sign-in or enrolment
+  body nobody has vouched for is at most 16 KiB, at most 32 are read at
+  once, and one that takes longer than five seconds is dropped. Every
+  answer the door gives closes its connection once it has gone out, so a
+  caller who goes on sending after one holds no line open. A caller who keeps those 32
   busy can still delay a sign-in; a limit on that belongs at the operator's
   TLS endpoint.
+- It does not check what kind of device holds a passkey. Enrolment asks for
+  no attestation and refuses an answer that carries one; the pairing code
+  from the machine is what vouches for the device.
+- It does not keep a pairing code open against a caller who can reach the
+  door. Five wrong tries end the code, the operator asks for another, and a
+  caller who keeps guessing can keep enrolment from happening. Nobody is
+  enrolled that way; a limit on it belongs at the operator's TLS endpoint.
 - It does not make a lost phone harmless by itself: the passkey's own user
   verification is what stands between a thief and an approval, and
   `verax operator` needs a way to remove one credential.

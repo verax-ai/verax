@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request, type Server } from "node:http";
 import { connect, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,15 +12,31 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
-import { credentialsPath, saveCredential } from "../packages/body/src/operator-credentials.ts";
+import { credentialsPath, readCredentials, saveCredential } from "../packages/body/src/operator-credentials.ts";
 import {
   DOOR_CHALLENGE_TTL_MS,
   DOOR_SESSION_TTL_MS,
   doorHostAllowed,
   openOperatorDoor,
 } from "../packages/body/src/operator-door.ts";
+import {
+  beginPairing,
+  checkPairing,
+  hashPairingCode,
+  PAIRING_TTL_MS,
+  pairingPath,
+  readPairing,
+  writePairing,
+} from "../packages/body/src/operator-pairing.ts";
 import { listen, operatorDoorOf } from "../packages/body/src/server.ts";
-import { assertWithSoftwarePasskey, mintSoftwarePasskey, type SoftwarePasskey } from "./software-passkey.ts";
+import {
+  assertWithSoftwarePasskey,
+  attestedAuthData,
+  mintSoftwarePasskey,
+  registerWithSoftwarePasskey,
+  registrationFrom,
+  type SoftwarePasskey,
+} from "./software-passkey.ts";
 
 // The door's name is what the operator's proxy answers for. The port the door
 // itself listens on is another matter, so the two differ here as they would there.
@@ -189,6 +205,52 @@ async function signIn(port: number, passkey: SoftwarePasskey, over: { origin?: s
     ...(over.counter !== undefined ? { counter: over.counter } : {}),
   });
   return call(port, "POST", "/api/signin", { body: { assertion } });
+}
+
+/** What the door's page does with a code typed at it: ask for a challenge, make the passkey, send it back. */
+async function enroll(port: number, code: string, passkey: SoftwarePasskey): Promise<Answer> {
+  const options = await call(port, "POST", "/api/enroll/options", { body: { code } });
+  if (options.status !== 200) return options;
+  const response = registerWithSoftwarePasskey(passkey, {
+    challenge: options.body.challenge as string,
+    rpID: RP_ID,
+    origin: DOOR_ORIGIN,
+  });
+  return call(port, "POST", "/api/enroll", { body: { code, response } });
+}
+
+/** Sends a request that never ends its body, and reports the answer and whether the door hung up. */
+function unending(
+  port: number,
+  head: string,
+  sockets: Socket[],
+  over: { host?: string; framing?: string } = {},
+): Promise<{ status: string; cut: boolean }> {
+  return new Promise((resolve) => {
+    // Half-open on this side: a door that only stopped writing and went on
+    // reading would leave this socket up, and that is not being cut.
+    const socket = connect({ port, host: "127.0.0.1", allowHalfOpen: true });
+    sockets.push(socket);
+    let status = "";
+    let more: NodeJS.Timeout | undefined;
+    const done = (cut: boolean) => {
+      clearInterval(more);
+      clearTimeout(patience);
+      resolve({ status, cut });
+    };
+    const patience = setTimeout(() => done(false), 1500);
+    socket.on("error", () => undefined);
+    socket.once("data", (chunk: Buffer) => {
+      status = (chunk.toString("utf8").split("\r\n")[0] ?? "").replace("HTTP/1.1 ", "").slice(0, 3);
+    });
+    socket.once("close", () => done(true));
+    socket.write(
+      `${head}Host: ${over.host ?? DOOR_HOST}\r\n${over.framing ?? "Transfer-Encoding: chunked"}\r\nContent-Type: application/json\r\n\r\n`,
+    );
+    more = setInterval(() => {
+      if (!socket.destroyed) socket.write(`400\r\n${"x".repeat(1024)}\r\n`);
+    }, 20);
+  });
 }
 
 type Waiting = { ref: string; requestHash: string; tool: string; args: Record<string, unknown> };
@@ -685,6 +747,379 @@ describe("operator door", () => {
       for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => door.close(() => resolve()));
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D15 with no operator the door opens for enrolment with a code, and for nothing else", async () => {
+    const body = await openBody(null);
+    try {
+      // No code was asked for at the machine, so there is nothing to guess at.
+      for (const sent of [{}, { code: "00000000" }, { code: 7 }, "00000000", null]) {
+        for (const path of ["/api/enroll/options", "/api/enroll"]) {
+          const res = await call(body.doorPort, "POST", path, { body: sent });
+          assert.equal(res.status, 403, `${path} ${JSON.stringify(sent)}`);
+          assert.deepEqual(res.body, { error: "pairing-refused" });
+        }
+      }
+      const { code } = beginPairing(body.stateDir);
+      const options = await call(body.doorPort, "POST", "/api/enroll/options", { body: { code } });
+      assert.equal(options.status, 200);
+      assert.deepEqual(options.body.rp, { id: RP_ID, name: "Verax" });
+      assert.equal(options.body.attestation, "none");
+      assert.deepEqual(options.body.authenticatorSelection, { userVerification: "required", residentKey: "preferred" });
+      assert.deepEqual(options.body.excludeCredentials, []);
+      // A live code opens enrolment. The rest of the door is as shut as it was.
+      for (const [method, path] of [
+        ["POST", "/api/signin/options"],
+        ["POST", "/api/signin"],
+        ["GET", "/api/waiting"],
+        ["POST", "/api/approve"],
+        ["POST", "/api/halt"],
+        ["POST", "/api/resume"],
+      ] as const) {
+        const res = await call(body.doorPort, method, path, method === "POST" ? { body: { code } } : {});
+        assert.deepEqual(res.body, { error: "no-operator" }, `${method} ${path}`);
+      }
+      // Asking for a challenge enrolled nobody.
+      assert.equal(existsSync(credentialsPath(body.stateDir)), false);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D16 a code from the machine enrolls one passkey, which then signs in and approves", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(null);
+    let open = true;
+    const shut = async () => {
+      if (!open) return;
+      open = false;
+      await new Promise<void>((resolve) => body.server.close(() => resolve()));
+    };
+    try {
+      const { code } = beginPairing(body.stateDir);
+      const done = await enroll(body.doorPort, code, passkey);
+      assert.equal(done.status, 200, JSON.stringify(done.body));
+      // Enrolling is not signing in: the answer carries no session.
+      assert.deepEqual(done.body, { enrolled: true, sub: "operator-1" });
+      assert.deepEqual(readCredentials(body.stateDir), [
+        { id: passkey.id, publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()), counter: 0, sub: "operator-1" },
+      ]);
+      assert.equal((await call(body.doorPort, "GET", "/api/waiting")).status, 401);
+
+      // The code bought one enrolment.
+      const again = await enroll(body.doorPort, code, mintSoftwarePasskey());
+      assert.equal(again.status, 403);
+      assert.deepEqual(again.body, { error: "pairing-refused" });
+      assert.equal(readCredentials(body.stateDir).length, 1);
+
+      await hold(body, "door-d16");
+      const signed = await signIn(body.doorPort, passkey);
+      assert.equal(signed.status, 200, JSON.stringify(signed.body));
+      const token = signed.body.token as string;
+      const [row] = await waitingAt(body.doorPort, token);
+      const unsigned = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: row!.ref, requestHash: row!.requestHash },
+      });
+      assert.equal(unsigned.status, 403, JSON.stringify(unsigned.body));
+      const assertion = await approvalAssertion(body.doorPort, token, passkey, row!.ref);
+      const ok = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: row!.ref, requestHash: row!.requestHash, assertion },
+      });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      await shut();
+      const report = await verifyApprovalSignatures(body.stateDir);
+      assert.equal(report.signedVerified, 1);
+      assert.equal(report.signedFailed, 0);
+    } finally {
+      await shut();
+      rmSync(body.stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D17 five wrong codes spend the pairing wherever they arrive, a code that ran out is refused, and the door does not say which", async () => {
+    const body = await openBody(null);
+    const refused = { error: "pairing-refused" };
+    const ask = (path: string, code: string) => call(body.doorPort, "POST", path, { body: { code } });
+    try {
+      const { code } = beginPairing(body.stateDir);
+      const wrong = code === "00000000" ? "11111111" : "00000000";
+      for (const path of ["/api/enroll/options", "/api/enroll", "/api/enroll/options", "/api/enroll"]) {
+        const res = await ask(path, wrong);
+        assert.equal(res.status, 403);
+        assert.deepEqual(res.body, refused);
+      }
+      // Four wrong tries leave the code good. The fifth ends it, and the right
+      // code is then answered as the wrong one was.
+      assert.equal(readPairing(body.stateDir)?.attempts, 4);
+      assert.equal((await ask("/api/enroll/options", code)).status, 200);
+      assert.deepEqual((await ask("/api/enroll/options", wrong)).body, refused);
+      const late = await enroll(body.doorPort, code, mintSoftwarePasskey());
+      assert.equal(late.status, 403);
+      assert.deepEqual(late.body, refused);
+
+      // Callers who arrive together have five tries between them, not five each.
+      const next = beginPairing(body.stateDir).code;
+      const miss = next === "00000000" ? "11111111" : "00000000";
+      const together = await Promise.all(Array.from({ length: 12 }, () => ask("/api/enroll/options", miss)));
+      for (const res of together) assert.deepEqual(res.body, refused);
+      assert.equal(readPairing(body.stateDir)?.attempts, 5);
+      assert.deepEqual((await enroll(body.doorPort, next, mintSoftwarePasskey())).body, refused);
+
+      // The same code and the same passkey, a moment too late and then in time.
+      const passkey = mintSoftwarePasskey();
+      writePairing(body.stateDir, { hash: hashPairingCode("12345678"), expiresAtMs: Date.now() - 1, attempts: 0 });
+      assert.deepEqual((await enroll(body.doorPort, "12345678", passkey)).body, refused);
+      assert.equal(existsSync(credentialsPath(body.stateDir)), false);
+      writePairing(body.stateDir, { hash: hashPairingCode("12345678"), expiresAtMs: Date.now() + 60_000, attempts: 0 });
+      assert.equal((await enroll(body.doorPort, "12345678", passkey)).status, 200);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D18 enrolment refuses an answer made elsewhere, a used challenge and a passkey it already has", async () => {
+    const first = mintSoftwarePasskey();
+    const second = mintSoftwarePasskey();
+    const third = mintSoftwarePasskey();
+    const body = await openBody(first);
+    const answer = (code: string, response: unknown) => call(body.doorPort, "POST", "/api/enroll", { body: { code, response } });
+    const fresh = async (code: string) =>
+      (await call(body.doorPort, "POST", "/api/enroll/options", { body: { code } })).body.challenge as string;
+    try {
+      const { code } = beginPairing(body.stateDir);
+      const options = await call(body.doorPort, "POST", "/api/enroll/options", { body: { code } });
+      assert.deepEqual(options.body.excludeCredentials, [{ id: first.id, type: "public-key" }]);
+
+      // A sign-in challenge is not an enrolment challenge, and the other way round.
+      const signinChallenge = (await call(body.doorPort, "POST", "/api/signin/options")).body.challenge as string;
+      const crossed = await answer(code, registerWithSoftwarePasskey(second, { challenge: signinChallenge, rpID: RP_ID, origin: DOOR_ORIGIN }));
+      assert.deepEqual(crossed.body, { error: "enroll-refused", reason: "challenge" });
+      const enrollChallenge = await fresh(code);
+      const backwards = await call(body.doorPort, "POST", "/api/signin", {
+        body: { assertion: assertWithSoftwarePasskey(first, { challenge: enrollChallenge, rpID: RP_ID, origin: DOOR_ORIGIN }) },
+      });
+      assert.deepEqual(backwards.body, { error: "signin-refused" });
+
+      const invented = randomBytes(56).toString("base64url");
+      const forged = await answer(code, registerWithSoftwarePasskey(second, { challenge: invented, rpID: RP_ID, origin: DOOR_ORIGIN }));
+      assert.deepEqual(forged.body, { error: "enroll-refused", reason: "challenge" });
+      for (const response of [undefined, null, "x", {}, { response: {} }, { response: { clientDataJSON: 7 } }]) {
+        assert.deepEqual((await answer(code, response)).body, { error: "enroll-refused", reason: "challenge" });
+      }
+
+      const elsewhere = await answer(
+        code,
+        registerWithSoftwarePasskey(second, { challenge: await fresh(code), rpID: RP_ID, origin: "https://evil.example" }),
+      );
+      assert.deepEqual(elsewhere.body, { error: "enroll-refused", reason: "origin" });
+      const otherParty = await answer(
+        code,
+        registerWithSoftwarePasskey(second, { challenge: await fresh(code), rpID: "evil.example", origin: DOOR_ORIGIN }),
+      );
+      assert.deepEqual(otherParty.body, { error: "enroll-refused", reason: "rp-id" });
+      const asSignIn = await answer(
+        code,
+        registrationFrom(second.id, attestedAuthData(second, RP_ID), { challenge: await fresh(code), origin: DOOR_ORIGIN, type: "webauthn.get" }),
+      );
+      assert.deepEqual(asSignIn.body, { error: "enroll-refused", reason: "type" });
+
+      // None of those spent the code: it was right every time, the answers were not.
+      const used = await fresh(code);
+      const done = await answer(code, registerWithSoftwarePasskey(second, { challenge: used, rpID: RP_ID, origin: DOOR_ORIGIN }));
+      assert.equal(done.status, 200, JSON.stringify(done.body));
+
+      const another = beginPairing(body.stateDir).code;
+      const replayed = await answer(another, registerWithSoftwarePasskey(third, { challenge: used, rpID: RP_ID, origin: DOOR_ORIGIN }));
+      assert.deepEqual(replayed.body, { error: "enroll-refused", reason: "challenge" });
+      const twice = await answer(another, registerWithSoftwarePasskey(second, { challenge: await fresh(another), rpID: RP_ID, origin: DOOR_ORIGIN }));
+      assert.deepEqual(twice.body, { error: "enroll-refused", reason: "already-enrolled" });
+      assert.equal((await enroll(body.doorPort, another, third)).status, 200);
+
+      assert.deepEqual(
+        readCredentials(body.stateDir).map((row) => row.id),
+        [first.id, second.id, third.id],
+      );
+      for (const passkey of [first, second, third]) assert.equal((await signIn(body.doorPort, passkey)).status, 200);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D19 an enrolment challenge runs out, and an enrolment body is held to what a sign-in body is", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-enroll-"));
+    let clock = Date.now();
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      now: () => clock,
+    });
+    const port = (door.address() as AddressInfo).port;
+    try {
+      const { code } = beginPairing(stateDir, clock);
+      const passkey = mintSoftwarePasskey();
+      const options = await call(port, "POST", "/api/enroll/options", { body: { code } });
+      assert.equal(options.body.timeout, DOOR_CHALLENGE_TTL_MS);
+      const response = registerWithSoftwarePasskey(passkey, { challenge: options.body.challenge as string, rpID: RP_ID, origin: DOOR_ORIGIN });
+      clock += DOOR_CHALLENGE_TTL_MS;
+      const late = await call(port, "POST", "/api/enroll", { body: { code, response } });
+      assert.deepEqual(late.body, { error: "enroll-refused", reason: "challenge" });
+      // The door's clock is the one the code is read against.
+      clock += PAIRING_TTL_MS;
+      const stale = await call(port, "POST", "/api/enroll/options", { body: { code } });
+      assert.deepEqual(stale.body, { error: "pairing-refused" });
+
+      for (const path of ["/api/enroll/options", "/api/enroll"]) {
+        const big = await call(port, "POST", path, { body: { code, response: "x".repeat(17 * 1024) } });
+        assert.equal(big.status, 413, path);
+        const foreign = await call(port, "POST", path, { body: { code }, origin: "https://evil.example" });
+        assert.deepEqual(foreign.body, { error: "origin-not-allowed" }, path);
+        const unnamed = await call(port, "POST", path, { body: { code }, origin: null });
+        assert.deepEqual(unnamed.body, { error: "origin-required" }, path);
+        assert.equal((await call(port, "GET", path)).status, 404, path);
+      }
+      assert.equal(existsSync(credentialsPath(stateDir)), false);
+    } finally {
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D20 a wrong code that cannot be counted ends the code, on disk and in the running body", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-full-"));
+    // A full disk: the right code is read, a wrong one cannot be counted.
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      checkPairing: (dir, code, nowMs) => {
+        const open = readPairing(dir);
+        if (open && hashPairingCode(code) !== open.hash) throw new Error("ENOSPC: no space left on device");
+        return checkPairing(dir, code, nowMs);
+      },
+    });
+    const port = (door.address() as AddressInfo).port;
+    const refused = { error: "pairing-refused" };
+    try {
+      // Four wrong tries were counted while there was room. The fifth cannot be.
+      const code = "24681357";
+      const record = { hash: hashPairingCode(code), expiresAtMs: Date.now() + 60_000, attempts: 4 };
+      writePairing(stateDir, record);
+      assert.equal((await call(port, "POST", "/api/enroll/options", { body: { code } })).status, 200);
+      const fifth = await call(port, "POST", "/api/enroll/options", { body: { code: "00000000" } });
+      assert.equal(fifth.status, 403);
+      assert.deepEqual(fifth.body, refused);
+      // The code is gone from the disk, so a body started later does not take it either.
+      assert.equal(existsSync(pairingPath(stateDir)), false);
+      assert.deepEqual((await enroll(port, code, mintSoftwarePasskey())).body, refused);
+
+      // Had the file been one that could not be removed, this body still refuses the code.
+      writePairing(stateDir, { ...record, attempts: 0 });
+      assert.deepEqual((await enroll(port, code, mintSoftwarePasskey())).body, refused);
+      assert.equal(existsSync(credentialsPath(stateDir)), false);
+
+      // A code asked for afresh is another code.
+      assert.equal((await enroll(port, beginPairing(stateDir).code, mintSoftwarePasskey())).status, 200);
+    } finally {
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D21 enrolment bodies wait in the same short line as sign-in bodies, and a slow one is dropped", async () => {
+    const passkey = mintSoftwarePasskey();
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-line-"));
+    saveCredential(stateDir, {
+      id: passkey.id,
+      publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()),
+      counter: 0,
+      sub: "operator-1",
+    });
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      signinBodyMs: 600,
+    });
+    const port = (door.address() as AddressInfo).port;
+    const sockets: Socket[] = [];
+    try {
+      const { code } = beginPairing(stateDir);
+      // Thirty-two enrolment requests that each send the start of a body and then nothing.
+      for (let i = 0; i < 32; i += 1) {
+        const socket = connect(port, "127.0.0.1");
+        socket.on("error", () => undefined);
+        socket.write(
+          `POST ${i % 2 === 0 ? "/api/enroll" : "/api/enroll/options"} HTTP/1.1\r\nHost: ${DOOR_HOST}\r\nOrigin: ${DOOR_ORIGIN}\r\n` +
+            `Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{"code":"1`,
+        );
+        sockets.push(socket);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      for (const path of ["/api/enroll/options", "/api/enroll"]) {
+        const busy = await call(port, "POST", path, { body: { code } });
+        assert.equal(busy.status, 503, path);
+        assert.deepEqual(busy.body, { error: "busy" });
+        assert.equal(busy.headers["retry-after"], "5");
+      }
+      // A caller told the line is full is not then read from for as long as it likes.
+      assert.deepEqual(
+        await unending(port, `POST /api/enroll HTTP/1.1\r\nOrigin: ${DOOR_ORIGIN}\r\n`, sockets),
+        { status: "503", cut: true },
+      );
+      // The line is one line: a sign-in waits behind enrolment bodies too.
+      assert.equal((await signIn(port, passkey)).status, 503);
+      // A code that never arrived whole was not a wrong try.
+      assert.equal(readPairing(stateDir)?.attempts, 0);
+
+      // Nobody closes those sockets: the door stops waiting for them by itself.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      // Dropped means hung up on, not only no longer counted.
+      assert.equal(sockets.slice(0, 32).filter((socket) => !socket.destroyed).length, 0);
+      assert.equal((await call(port, "POST", "/api/enroll/options", { body: { code } })).status, 200);
+      assert.equal((await signIn(port, passkey)).status, 200);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D22 a request the door answers without reading is cut, whatever it goes on sending", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    const empty = await openBody(null);
+    const sockets: Socket[] = [];
+    try {
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const named = `Origin: ${DOOR_ORIGIN}\r\n`;
+      const session = `Authorization: Bearer ${token}\r\n`;
+      const rows: [why: string, port: number, head: string, status: string, over?: { host?: string; framing?: string }][] = [
+        ["another name", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}`, "400", { host: "evil.example" }],
+        ["a target that is no address", body.doorPort, `GET http://x:99999/ HTTP/1.1\r\n`, "400"],
+        ["an expectation the door does not meet", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}Expect: x\r\n`, "417"],
+        ["not on the list", body.doorPort, `POST /mcp HTTP/1.1\r\n${named}`, "404"],
+        ["another origin", body.doorPort, `POST /api/signin HTTP/1.1\r\nOrigin: https://evil.example\r\n`, "403"],
+        ["no origin", body.doorPort, `POST /api/signin HTTP/1.1\r\n`, "403"],
+        ["no operator", empty.doorPort, `POST /api/approve HTTP/1.1\r\n${named}`, "403"],
+        ["no session", body.doorPort, `POST /api/approve HTTP/1.1\r\n${named}`, "401"],
+        ["a length announced past the limit", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}`, "413", { framing: "Content-Length: 20000" }],
+        ["a body that runs past the limit", body.doorPort, `POST /api/enroll HTTP/1.1\r\n${named}`, "413"],
+        ["options take no body", body.doorPort, `POST /api/signin/options HTTP/1.1\r\n${named}`, "200"],
+        ["a list read takes no body", body.doorPort, `GET /api/waiting HTTP/1.1\r\n${session}`, "200"],
+        ["sign-out takes no body", body.doorPort, `POST /api/signout HTTP/1.1\r\n${named}${session}`, "200"],
+      ];
+      for (const [why, port, head, status, over] of rows) {
+        const seen = await unending(port, head, sockets, over);
+        assert.deepEqual(seen, { status, cut: true }, why);
+      }
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await body.close();
+      await empty.close();
     }
   });
 

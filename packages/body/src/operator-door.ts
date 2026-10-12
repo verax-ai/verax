@@ -4,12 +4,17 @@
  * approve one request, stop and resume the body. It never serves `/mcp`, the
  * ledger or the inventory, and it takes no token the main listener takes.
  *
+ * A passkey is enrolled through the door only with a pairing code that
+ * `verax operator enroll` printed at the machine. Enrolling opens no session
+ * and approves nothing.
+ *
  * A session is a random value this process remembers and nothing else: there
  * is no key on disk that could sign one, and a restart ends them all. The
  * session lets the operator look. An approval still needs a passkey
  * assertion made for that one request.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -19,9 +24,17 @@ import { asAssertion } from "./approval-signature.ts";
 import { readBearer } from "./auth.ts";
 import type { OperatorDoorConfig } from "./config.ts";
 import { contentLengthOverLimit, readJsonBody, send } from "./http-io.ts";
-import { findCredential, hasRegisteredOperator, readCredentials, updateCounter } from "./operator-credentials.ts";
+import {
+  DEFAULT_OPERATOR_SUB,
+  findCredential,
+  hasRegisteredOperator,
+  readCredentials,
+  saveCredential,
+  updateCounter,
+} from "./operator-credentials.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
-import { verifyAssertion } from "./webauthn-verify.ts";
+import { checkPairing, consumePairing, pairingPath, readPairing } from "./operator-pairing.ts";
+import { COSE_ALGORITHMS, verifyAssertion, verifyRegistration, type PostedRegistration } from "./webauthn-verify.ts";
 import type { createBodyServices } from "./wiring.ts";
 
 export const DOOR_SESSION_TTL_MS = 10 * 60_000;
@@ -38,6 +51,8 @@ type Session = { sub: string; credentialId: string; expiresAtMs: number };
 
 /** Method and path, exactly. Anything else on the door is not found. */
 const ROUTES = new Set([
+  "POST /api/enroll/options",
+  "POST /api/enroll",
   "POST /api/signin/options",
   "POST /api/signin",
   "POST /api/signout",
@@ -67,6 +82,11 @@ export function doorHostAllowed(hostHeader: string | undefined, door: OperatorDo
   return raw === `127.0.0.1:${listenPort}` || raw === `localhost:${listenPort}` || raw === `[::1]:${listenPort}`;
 }
 
+/** One operator, one name on the device, however many times it enrolls. */
+function operatorUserId(sub: string): string {
+  return createHash("sha256").update(`verax-operator:${sub}`, "utf8").digest("base64url");
+}
+
 function sessionKey(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
@@ -80,12 +100,6 @@ function challengeInClientData(clientDataJSON: string): string | null {
   } catch {
     return null;
   }
-}
-
-/** The answer goes out, then the rest of what was being sent is not waited for. */
-function refuseTooLarge(req: IncomingMessage, res: ServerResponse): void {
-  res.once("finish", () => req.destroy());
-  send(res, 413, { error: "payload-too-large" }, { connection: "close" });
 }
 
 /** Oldest out first: a Map keeps insertion order. */
@@ -104,33 +118,97 @@ export async function openOperatorDoor(opts: {
   now?: () => number;
   /** How long an unauthenticated sign-in body may take to arrive. */
   signinBodyMs?: number;
+  /** Test hook. Stands in for the pairing check, to make its write fail. */
+  checkPairing?: typeof checkPairing;
 }): Promise<Server> {
   const { door, stateDir, services } = opts;
   const now = opts.now ?? (() => Date.now());
+  const pairingCheck = opts.checkPairing ?? checkPairing;
   const sessions = new Map<string, Session>();
   const signinBodyMs = opts.signinBodyMs ?? SIGNIN_BODY_MS;
   let signinsInFlight = 0;
-  // A sign-in challenge is its own expiry and a random part under a MAC this
-  // process keys. Nothing is stored when one is handed out, so a caller who
-  // asks for a thousand takes nothing from the operator who asked for one.
-  const challengeKey = randomBytes(32);
+  // A challenge is its own expiry and a random part under a MAC this process
+  // keys. Nothing is stored when one is handed out, so a caller who asks for
+  // a thousand takes nothing from the operator who asked for one. Sign-in and
+  // enrolment have a key each: a challenge made for one is not one for the other.
+  const signinKey = randomBytes(32);
+  const enrollKey = randomBytes(32);
   const spent = new Map<string, number>();
-  const mintChallenge = (): string => {
+  const mintChallenge = (key: Buffer): string => {
     const head = Buffer.alloc(24);
     head.writeBigUInt64BE(BigInt(now() + DOOR_CHALLENGE_TTL_MS), 0);
     randomBytes(16).copy(head, 8);
-    return Buffer.concat([head, createHmac("sha256", challengeKey).update(head).digest()]).toString("base64url");
+    return Buffer.concat([head, createHmac("sha256", key).update(head).digest()]).toString("base64url");
   };
   /** When a challenge this door made runs out, or null for one it did not make, one that ran out, or one already used. */
-  const challengeExpiry = (challenge: string): number | null => {
+  const challengeExpiry = (key: Buffer, challenge: string): number | null => {
     const bytes = Buffer.from(challenge, "base64url");
     if (bytes.length !== 56 || bytes.toString("base64url") !== challenge) return null;
     const head = bytes.subarray(0, 24);
-    const mac = createHmac("sha256", challengeKey).update(head).digest();
+    const mac = createHmac("sha256", key).update(head).digest();
     if (!timingSafeEqual(mac, bytes.subarray(24))) return null;
     const expiresAtMs = Number(head.readBigUInt64BE(0));
     if (now() >= expiresAtMs || spent.has(challenge)) return null;
     return expiresAtMs;
+  };
+  /** Good once. Only a verified answer gets a challenge onto this list, so a stranger cannot fill it. */
+  const spend = (challenge: string, expiresAtMs: number): void => {
+    for (const [known, until] of spent) if (now() >= until) spent.delete(known);
+    spent.set(challenge, expiresAtMs);
+  };
+  /**
+   * A body from a caller who has proved nothing yet: small, few are read at
+   * once, and one that dawdles is dropped. Null when the answer has gone out.
+   */
+  const readUnvouched = async (req: IncomingMessage, res: ServerResponse): Promise<{ value: unknown } | null> => {
+    const declared = Number(first(req.headers["content-length"]) ?? "0");
+    if (Number.isFinite(declared) && declared > SIGNIN_BODY_BYTES) {
+      send(res, 413, { error: "payload-too-large" });
+      return null;
+    }
+    if (signinsInFlight >= MAX_SIGNINS_IN_FLIGHT) {
+      send(res, 503, { error: "busy" }, { "retry-after": "5" });
+      return null;
+    }
+    signinsInFlight += 1;
+    const dawdling = setTimeout(() => req.destroy(), signinBodyMs);
+    let parsed: Awaited<ReturnType<typeof readJsonBody>>;
+    try {
+      parsed = await readJsonBody(req, SIGNIN_BODY_BYTES);
+    } finally {
+      clearTimeout(dawdling);
+      signinsInFlight -= 1;
+    }
+    if (!parsed.ok) {
+      if ("tooLarge" in parsed) {
+        send(res, 413, { error: "payload-too-large" });
+        return null;
+      }
+      send(res, 400, { error: "bad-body" });
+      return null;
+    }
+    return { value: parsed.value };
+  };
+  // Wrong codes are counted in the pairing file, and that count is the only
+  // one. A wrong try that cannot be counted, as on a full disk, ends the code
+  // instead: the file is removed, which needs no room, and this body refuses
+  // the code for as long as it runs in case the file could not be removed either.
+  const uncountable = new Set<string>();
+  const codeHolds = (code: string): boolean => {
+    const open = readPairing(stateDir);
+    if (open && uncountable.has(open.hash)) return false;
+    try {
+      return pairingCheck(stateDir, code, now()).ok;
+    } catch (err) {
+      process.stderr.write(`verax-door: pairing check: ${err instanceof Error ? err.message : "fault"}\n`);
+      if (open) uncountable.add(open.hash);
+      try {
+        rmSync(pairingPath(stateDir), { force: true });
+      } catch {
+        // The refusal above still stands while this body runs.
+      }
+      return false;
+    }
   };
   // The handlers read the relying party from an environment. The door's is
   // its own origin, whatever the process environment says.
@@ -153,47 +231,115 @@ export async function openOperatorDoor(opts: {
     try {
       // What the door says names payees and amounts; no cache keeps a copy.
       res.setHeader("cache-control", "no-store");
+      // One request to a connection. Many of the door's answers go out before
+      // a body is read, or without one being wanted, and a caller who goes on
+      // sending after such an answer must not hold the line: Node closes the
+      // socket once an answer marked like this has gone out.
+      res.setHeader("connection", "close");
       const listenPort = (server.address() as AddressInfo).port;
       if (!doorHostAllowed(first(req.headers.host), door, listenPort)) {
         send(res, 400, { error: "host-not-allowed" });
-        req.resume();
         return;
       }
       const origin = first(req.headers.origin);
       if (origin !== undefined && origin !== door.origin) {
         send(res, 403, { error: "origin-not-allowed" });
-        req.resume();
         return;
       }
       const url = new URL(req.url ?? "/", door.origin);
       if (!ROUTES.has(`${req.method} ${url.pathname}`)) {
         send(res, 404, { error: "not-found" });
-        req.resume();
         return;
       }
       // A browser names the origin on every POST. One that does not is not the door's page.
       if (req.method === "POST" && origin === undefined) {
         send(res, 403, { error: "origin-required" });
-        req.resume();
         return;
       }
       if (req.method === "POST" && contentLengthOverLimit(req)) {
         send(res, 413, { error: "payload-too-large" });
-        req.resume();
         return;
       }
+      if (url.pathname === "/api/enroll/options" || url.pathname === "/api/enroll") {
+        const read = await readUnvouched(req, res);
+        if (!read) return;
+        const posted =
+          read.value && typeof read.value === "object" ? (read.value as { code?: unknown; response?: unknown }) : {};
+        // Nothing is awaited from here to the answer. The count of wrong codes
+        // is read and written in one turn, so callers who arrive together
+        // still have five tries between them.
+        // One answer for no code asked for, a wrong one, one that ran out and
+        // one used up: a caller without the code is not told which.
+        if (!codeHolds(typeof posted.code === "string" ? posted.code : "")) {
+          send(res, 403, { error: "pairing-refused" });
+          return;
+        }
+        if (url.pathname === "/api/enroll/options") {
+          send(res, 200, {
+            challenge: mintChallenge(enrollKey),
+            rp: { id: door.rpID, name: "Verax" },
+            user: {
+              id: operatorUserId(DEFAULT_OPERATOR_SUB),
+              name: DEFAULT_OPERATOR_SUB,
+              displayName: DEFAULT_OPERATOR_SUB,
+            },
+            pubKeyCredParams: COSE_ALGORITHMS.map((alg) => ({ type: "public-key" as const, alg })),
+            authenticatorSelection: { userVerification: "required", residentKey: "preferred" },
+            attestation: "none",
+            excludeCredentials: readCredentials(stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
+            timeout: DOOR_CHALLENGE_TTL_MS,
+          });
+          return;
+        }
+        // The caller holds the code, so the reason is theirs to read.
+        const refuse = (reason: string): void => send(res, 403, { error: "enroll-refused", reason });
+        const registration =
+          posted.response && typeof posted.response === "object" ? (posted.response as PostedRegistration) : null;
+        const clientData = registration?.response?.clientDataJSON;
+        const made = typeof clientData === "string" ? challengeInClientData(clientData) : null;
+        const madeUntilMs = made ? challengeExpiry(enrollKey, made) : null;
+        if (!registration || !made || madeUntilMs === null) {
+          refuse("challenge");
+          return;
+        }
+        const enrolled = verifyRegistration({
+          response: registration,
+          expectedChallenge: made,
+          expectedOrigins: [door.origin],
+          rpId: door.rpID,
+        });
+        if (!enrolled.ok) {
+          refuse(enrolled.reason);
+          return;
+        }
+        if (findCredential(stateDir, enrolled.credentialId)) {
+          refuse("already-enrolled");
+          return;
+        }
+        spend(made, madeUntilMs);
+        // The code goes first: if the write after it fails, the operator asks
+        // for another code, and no code outlives an enrolment it paid for.
+        consumePairing(stateDir);
+        saveCredential(stateDir, {
+          id: enrolled.credentialId,
+          publicKey: enrolled.publicKeyCose,
+          counter: enrolled.counter,
+          sub: DEFAULT_OPERATOR_SUB,
+        });
+        send(res, 200, { enrolled: true, sub: DEFAULT_OPERATOR_SUB });
+        return;
+      }
+
       // With no operator enrolled an approval over HTTP needs no signature.
-      // That path must not be reachable from here, so the door stays shut.
+      // That path must not be reachable from here, so past enrolment the door stays shut.
       if (!hasRegisteredOperator(stateDir)) {
         send(res, 403, { error: "no-operator" });
-        req.resume();
         return;
       }
 
       if (url.pathname === "/api/signin/options") {
-        req.resume();
         send(res, 200, {
-          challenge: mintChallenge(),
+          challenge: mintChallenge(signinKey),
           rpId: door.rpID,
           allowCredentials: readCredentials(stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
           userVerification: "required",
@@ -203,38 +349,11 @@ export async function openOperatorDoor(opts: {
       }
 
       if (url.pathname === "/api/signin") {
-        // Nobody has proved anything yet, so this body is small, few are read
-        // at once, and one that dawdles is dropped.
-        const declared = Number(first(req.headers["content-length"]) ?? "0");
-        if (Number.isFinite(declared) && declared > SIGNIN_BODY_BYTES) {
-          refuseTooLarge(req, res);
-          return;
-        }
-        if (signinsInFlight >= MAX_SIGNINS_IN_FLIGHT) {
-          send(res, 503, { error: "busy" }, { "retry-after": "5" });
-          req.resume();
-          return;
-        }
-        signinsInFlight += 1;
-        const dawdling = setTimeout(() => req.destroy(), signinBodyMs);
-        let parsed: Awaited<ReturnType<typeof readJsonBody>>;
-        try {
-          parsed = await readJsonBody(req, SIGNIN_BODY_BYTES);
-        } finally {
-          clearTimeout(dawdling);
-          signinsInFlight -= 1;
-        }
-        if (!parsed.ok) {
-          if ("tooLarge" in parsed) {
-            refuseTooLarge(req, res);
-            return;
-          }
-          send(res, 400, { error: "bad-body" });
-          return;
-        }
-        const assertion = asAssertion((parsed.value as { assertion?: unknown } | undefined)?.assertion);
+        const read = await readUnvouched(req, res);
+        if (!read) return;
+        const assertion = asAssertion((read.value as { assertion?: unknown } | undefined)?.assertion);
         const challenge = assertion ? challengeInClientData(assertion.response.clientDataJSON) : null;
-        const expiresAtMs = challenge ? challengeExpiry(challenge) : null;
+        const expiresAtMs = challenge ? challengeExpiry(signinKey, challenge) : null;
         const stored = assertion ? findCredential(stateDir, assertion.id) : null;
         if (!assertion || !challenge || expiresAtMs === null || !stored) {
           send(res, 403, { error: "signin-refused" });
@@ -251,10 +370,7 @@ export async function openOperatorDoor(opts: {
           send(res, 403, { error: "signin-refused" });
           return;
         }
-        // Good once. Only a signature from an enrolled passkey gets a
-        // challenge onto this list, so a stranger cannot fill it.
-        for (const [known, until] of spent) if (now() >= until) spent.delete(known);
-        spent.set(challenge, expiresAtMs);
+        spend(challenge, expiresAtMs);
         if (!updateCounter(stateDir, stored.id, verified.counter)) {
           send(res, 403, { error: "cloned-authenticator" });
           return;
@@ -271,12 +387,10 @@ export async function openOperatorDoor(opts: {
       const session = liveSession(token);
       if (!session) {
         send(res, 401, { error: "unauthorized" });
-        req.resume();
         return;
       }
 
       if (url.pathname === "/api/signout") {
-        req.resume();
         sessions.delete(sessionKey(token!));
         send(res, 200, { ok: true });
         return;
@@ -336,6 +450,13 @@ export async function openOperatorDoor(opts: {
       process.stderr.write(`verax-door: ${err instanceof Error ? err.message : "fault"}\n`);
       send(res, 500, { error: "fault" });
     }
+  });
+  // An Expect the server does not know never reaches the handler above: Node
+  // answers 417 itself and keeps the line. The door gives that answer instead,
+  // closed like every other.
+  server.on("checkExpectation", (_req: IncomingMessage, res: ServerResponse) => {
+    res.setHeader("cache-control", "no-store");
+    send(res, 417, { error: "expectation-failed" }, { connection: "close" });
   });
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = HEADERS_TIMEOUT_MS;

@@ -83,10 +83,16 @@ function authData(rpID: string, flags: number, counter: number, attested?: Uint8
   return attested ? Buffer.concat([head, attested]) : head;
 }
 
-export function registerWithSoftwarePasskey(
+/**
+ * Authenticator data as a new credential carries it. UP, UV and AT unless a
+ * test asks for other flags; `afterKey` is whatever follows the credential
+ * key, which on a real device is the extensions map and nothing else.
+ */
+export function attestedAuthData(
   passkey: SoftwarePasskey,
-  options: { challenge: string; rpID: string; origin: string },
-): RegistrationResponseJSON {
+  rpID: string,
+  over: { flags?: number; afterKey?: Uint8Array } = {},
+): Buffer {
   const credId = isoBase64URL.toBuffer(passkey.id);
   const credIdLen = Buffer.alloc(2);
   credIdLen.writeUInt16BE(credId.length);
@@ -95,20 +101,36 @@ export function registerWithSoftwarePasskey(
     credIdLen,
     Buffer.from(credId),
     Buffer.from(passkey.publicKeyCose),
+    Buffer.from(over.afterKey ?? new Uint8Array()),
   ]);
-  const flags = 0x01 | 0x04 | 0x40;
-  const authenticatorData = authData(options.rpID, flags, passkey.counter, new Uint8Array(attested));
+  return authData(rpID, over.flags ?? (0x01 | 0x04 | 0x40), passkey.counter, new Uint8Array(attested));
+}
+
+/** A registration answer around authenticator data a test built itself. */
+export function registrationFrom(
+  id: string,
+  authenticatorData: Uint8Array,
+  options: {
+    challenge: string;
+    origin: string;
+    type?: "webauthn.create" | "webauthn.get";
+    crossOrigin?: boolean;
+    fmt?: string;
+    statement?: Map<string | number, Uint8Array>;
+  },
+): RegistrationResponseJSON {
   // tiny-cbor only encodes Map, not plain objects.
-  const attStmt = new Map<string | number, never>();
-  const attestation = new Map<string | number, string | Uint8Array | Map<string | number, never>>();
-  attestation.set("fmt", "none");
-  attestation.set("attStmt", attStmt);
+  const attestation = new Map<string | number, string | Uint8Array | Map<string | number, Uint8Array>>();
+  attestation.set("fmt", options.fmt ?? "none");
+  attestation.set("attStmt", options.statement ?? new Map<string | number, Uint8Array>());
   attestation.set("authData", new Uint8Array(authenticatorData));
   const attestationObject = isoCBOR.encode(attestation);
-  const clientDataJSON = clientData("webauthn.create", options.challenge, options.origin);
+  const clientDataJSON = clientData(options.type ?? "webauthn.create", options.challenge, options.origin, {
+    ...(options.crossOrigin !== undefined ? { crossOrigin: options.crossOrigin } : {}),
+  });
   return {
-    id: passkey.id,
-    rawId: passkey.id,
+    id,
+    rawId: id,
     type: "public-key",
     response: {
       clientDataJSON: isoBase64URL.fromUTF8String(clientDataJSON),
@@ -116,6 +138,13 @@ export function registerWithSoftwarePasskey(
     },
     clientExtensionResults: {},
   };
+}
+
+export function registerWithSoftwarePasskey(
+  passkey: SoftwarePasskey,
+  options: { challenge: string; rpID: string; origin: string },
+): RegistrationResponseJSON {
+  return registrationFrom(passkey.id, attestedAuthData(passkey, options.rpID), options);
 }
 
 export function assertWithSoftwarePasskey(
