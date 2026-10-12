@@ -1077,6 +1077,8 @@ describe("operator door", () => {
 
       // Nobody closes those sockets: the door stops waiting for them by itself.
       await new Promise((resolve) => setTimeout(resolve, 900));
+      // Dropped means hung up on, not only no longer counted.
+      assert.equal(sockets.slice(0, 32).filter((socket) => !socket.destroyed).length, 0);
       assert.equal((await call(port, "POST", "/api/enroll/options", { body: { code } })).status, 200);
       assert.equal((await signIn(port, passkey)).status, 200);
     } finally {
@@ -1098,6 +1100,7 @@ describe("operator door", () => {
       const rows: [why: string, port: number, head: string, status: string, over?: { host?: string; framing?: string }][] = [
         ["another name", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}`, "400", { host: "evil.example" }],
         ["a target that is no address", body.doorPort, `GET http://x:99999/ HTTP/1.1\r\n`, "400"],
+        ["an expectation the door does not meet", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}Expect: x\r\n`, "417"],
         ["not on the list", body.doorPort, `POST /mcp HTTP/1.1\r\n${named}`, "404"],
         ["another origin", body.doorPort, `POST /api/signin HTTP/1.1\r\nOrigin: https://evil.example\r\n`, "403"],
         ["no origin", body.doorPort, `POST /api/signin HTTP/1.1\r\n`, "403"],

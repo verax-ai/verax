@@ -80,7 +80,8 @@ way to reach that from another device.
    refuses that code until it stops. If the file can be neither written nor
    removed, a body started afterwards reads the old count again. The door reads the new credential itself:
    made for its challenge, its origin and its relying party, with the user
-   verified, a key of a kind and size it verifies with, and no byte of the
+   verified, a key read the way a sign-in reads it (ES256, EdDSA, or RS256
+   with an odd modulus of 2048 to 8192 bits and the exponent 65537), and no byte of the
    authenticator data left unexplained. An enrolment carries no signature,
    so the first sign-in is what shows the device holds the key; a credential
    that never signs in has cost a code and nothing else.

@@ -451,6 +451,13 @@ export async function openOperatorDoor(opts: {
       send(res, 500, { error: "fault" });
     }
   });
+  // An Expect the server does not know never reaches the handler above: Node
+  // answers 417 itself and keeps the line. The door gives that answer instead,
+  // closed like every other.
+  server.on("checkExpectation", (_req: IncomingMessage, res: ServerResponse) => {
+    res.setHeader("cache-control", "no-store");
+    send(res, 417, { error: "expectation-failed" }, { connection: "close" });
+  });
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = HEADERS_TIMEOUT_MS;
   await new Promise<void>((resolve, reject) => {

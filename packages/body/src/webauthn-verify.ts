@@ -17,8 +17,9 @@ export type RegistrationVerdict =
 /** The COSE algorithms `coseKeyToPublicKey` takes. An enrolment offers these and no others. */
 export const COSE_ALGORITHMS: readonly number[] = [-7, -8, -257];
 
-/** The shortest RSA modulus taken, for a sign-in as for an enrolment. */
+/** The shortest and the longest RSA modulus taken, for a sign-in as for an enrolment. */
 export const RSA_MIN_BITS = 2048;
+export const RSA_MAX_BITS = 8192;
 
 type PostedAssertion = {
   response?: {
@@ -64,7 +65,8 @@ function mapBytes(map: CborMap, key: number, length?: number): Uint8Array | null
 
 /**
  * COSE public key, base64url, to a node key. EC2 is P-256 / ES256, OKP is
- * Ed25519 / EdDSA, RSA is RS256. Any other kty, alg, or curve is refused.
+ * Ed25519 / EdDSA, RSA is RS256 with an odd modulus of 2048 to 8192 bits
+ * and the exponent 65537. Any other kty, alg, curve or RSA shape is refused.
  * A refusal returns null; this does not throw.
  */
 export function coseKeyToPublicKey(base64urlCose: string): KeyObject | null {
@@ -100,12 +102,12 @@ export function coseKeyToPublicKey(base64urlCose: string): KeyObject | null {
         format: "jwk",
         key: { kty: "RSA", alg: "RS256", n: b64url(n), e: b64url(e) },
       });
-      // A key that imports is not yet a sound one. The modulus is odd and at
-      // least 2048 bits; the exponent is odd, at least 65537 and under 2^256.
-      const details = key.asymmetricKeyDetails;
-      const exponent = details?.publicExponent ?? 0n;
-      if ((details?.modulusLength ?? 0) < RSA_MIN_BITS || (n[n.length - 1]! & 1) === 0) return null;
-      return exponent >= 65537n && exponent < 1n << 256n && exponent % 2n === 1n ? key : null;
+      // A key that imports is not yet one to store. The modulus is odd and
+      // from 2048 to 8192 bits, and the exponent is 65537, which is what
+      // authenticators make; anything else is refused rather than reasoned about.
+      const bits = key.asymmetricKeyDetails?.modulusLength ?? 0;
+      if (bits < RSA_MIN_BITS || bits > RSA_MAX_BITS || (n[n.length - 1]! & 1) === 0) return null;
+      return key.asymmetricKeyDetails?.publicExponent === 65537n ? key : null;
     }
     return null;
   } catch {
@@ -248,7 +250,8 @@ function decoded(bytes: Uint8Array): CborVal | undefined {
  * pairing code from the machine). What it does establish is that the answer
  * was made for this challenge, origin and relying party with the user
  * verified, that every byte of the authenticator data is accounted for, and
- * that the key is of a kind and size `verifyAssertion` takes. Nothing here
+ * that the key passes `coseKeyToPublicKey`, the same reading a sign-in
+ * gives it. Nothing here
  * is signed, so it does not show the caller holds the private key: the
  * first sign-in does.
  */

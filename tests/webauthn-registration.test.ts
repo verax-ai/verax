@@ -7,6 +7,7 @@ import { isoBase64URL, isoCBOR } from "@simplewebauthn/server/helpers";
 import {
   COSE_ALGORITHMS,
   coseKeyToPublicKey,
+  RSA_MAX_BITS,
   RSA_MIN_BITS,
   verifyAssertion,
   verifyRegistration,
@@ -216,24 +217,33 @@ describe("registration", () => {
     assert.equal(coseKeyToPublicKey(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))), null);
     const short = generateKeyPairSync("rsa", { modulusLength: RSA_MIN_BITS - 8 }).publicKey.export({ format: "jwk" });
     assert.equal(coseKeyToPublicKey(rsaKey(bytes(short.n), bytes(short.e))), null);
-    // Nor is an exponent that is none, one, small, even, or as long as a modulus.
-    const longE = new Uint8Array(33).fill(0);
+    // Nor is any exponent but 65537: none, one, small, its neighbours, a long one, the modulus itself.
+    assert.deepEqual([...bytes(rsa.e)], [1, 0, 1]);
+    const longE = new Uint8Array(9).fill(0);
     longE[0] = 1;
-    longE[32] = 1;
-    for (const e of [[0], [1], [3], [1, 0, 0], [1, 0, 2], [...longE], [...bytes(rsa.n)]]) {
+    longE[8] = 1;
+    for (const e of [[0], [1], [3], [0xff, 0xff], [1, 0, 0], [1, 0, 2], [1, 0, 3], [...longE], [...bytes(rsa.n)]]) {
       assert.equal(coseKeyToPublicKey(rsaKey(bytes(rsa.n), new Uint8Array(e))), null, `e ${e.slice(0, 4).join(",")} (${e.length} bytes)`);
     }
-    // Nor an even modulus of the right length.
+    // Nor an even modulus of the right length, nor one longer than is taken.
     const evenN = bytes(rsa.n);
     evenN[evenN.length - 1] = evenN[evenN.length - 1]! & 0xfe;
     assert.equal(coseKeyToPublicKey(rsaKey(evenN, bytes(rsa.e))), null);
+    const sized = (bits: number) => {
+      const n = new Uint8Array(randomBytes(bits / 8));
+      n[0] = n[0]! | 0x80;
+      n[n.length - 1] = n[n.length - 1]! | 1;
+      return coseKeyToPublicKey(rsaKey(n, bytes(rsa.e)));
+    };
+    assert.notEqual(sized(RSA_MAX_BITS), null);
+    assert.equal(sized(RSA_MAX_BITS + 8), null);
     // The rule is the same when a stored key is read back for a sign-in.
     const stored = verifyAssertion({
       response: assertWithSoftwarePasskey(mintSoftwarePasskey(), { challenge: "bGF0ZXI", rpID: RP_ID, origin: ORIGIN }),
       expectedChallenge: "bGF0ZXI",
       expectedOrigins: [ORIGIN],
       rpId: RP_ID,
-      publicKeyCose: rsaKey(bytes(rsa.n), new Uint8Array([3])),
+      publicKeyCose: rsaKey(bytes(rsa.n), new Uint8Array([1, 0, 3])),
     });
     assert.deepEqual(stored, { ok: false, reason: "public-key" });
     // And an enrolment that carries one is refused before the code is spent on it.
