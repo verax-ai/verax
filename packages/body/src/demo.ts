@@ -406,11 +406,14 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       writeOut("Approve this payment as the operator on this machine? [y/N]\n");
       const answer = await readAnswer(io.stdin);
       if (answer.trim().toLowerCase() === "y") {
+        // `verax approve` has the operator type the amount. Its own output is not
+        // shown here, so the demo asks the question that approve then reads.
+        writeOut(`Type the amount in minor units to approve it (${SPEND.amountMinor}):\n`);
         const code = await runApprove(["approve", stateDir, held.ref], writeErr, () => undefined, {
           isTTY: io.isTTY,
           ask: async () => readAnswer(io.stdin),
         }, { elevated: () => false });
-        if (code !== 0) throw new Error("demo: approve failed");
+        if (code !== 0) throw new Error(`demo: approve failed; the amount to type was ${SPEND.amountMinor}`);
         approved = true;
       }
     }
@@ -517,7 +520,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       discardState = true;
       writeErr(`could not start the Conarium child (${detail}). run without --with-conarium\n`);
     } else {
-      writeErr(`demo: ${detail}\n`);
+      writeErr(`demo: ${detail.replace(/^demo: /, "")}\n`);
     }
     await cleanup();
     return 1;

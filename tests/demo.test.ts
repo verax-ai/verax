@@ -306,6 +306,24 @@ describe("verax demo", { concurrency: 1 }, () => {
     }
   });
 
+  // `verax approve` has the operator type the amount. The demo passed that
+  // question to nobody: after `y` it waited for a number it had not asked for,
+  // and a person who pressed Enter got `approve-amount-mismatch`.
+  it("T5b: after y the demo asks for the amount it then reads", { timeout: DEMO_MS * 2 }, async () => {
+    const io = ioFor({ isTTY: true, answer: ["y", "100"] });
+    const code = await runOwnedDemo(["demo"], {}, io);
+    assert.equal(code, 0, io.err());
+    const out = io.out();
+    const question = out.indexOf("Type the amount in minor units to approve it (100):");
+    assert.ok(question > out.indexOf("[y/N]"), out);
+    assert.ok(question < out.indexOf("approved; operator id bound on the record"), out);
+
+    const blank = ioFor({ isTTY: true, answer: ["y", ""] });
+    const blankCode = await runOwnedDemo(["demo"], {}, blank);
+    assert.notEqual(blankCode, 0);
+    assert.match(blank.err(), /^approve-amount-mismatch\ndemo: approve failed; the amount to type was 100\n$/);
+  });
+
   it("T6: listen addresses are loopback, not 0.0.0.0", { timeout: DEMO_MS }, async () => {
     const listen = installListenSpy();
     const io = ioFor();
@@ -361,7 +379,7 @@ describe("verax demo", { concurrency: 1 }, () => {
     assert.ok(shown.length > 0, "no <text> rows in docs/demo.svg");
 
     // The answer is typed, not printed; the recording shows it after the question.
-    const printed = io.out().replace("[y/N]", "[y/N] y ");
+    const printed = io.out().replace("[y/N]", "[y/N] y ").replace("(100):", "(100): 100 ");
     assert.equal(words(shown.join("\n")), words(`$ npx @verax-ai/body demo\n${printed}`));
   });
 });
