@@ -216,10 +216,26 @@ describe("registration", () => {
     assert.equal(coseKeyToPublicKey(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))), null);
     const short = generateKeyPairSync("rsa", { modulusLength: RSA_MIN_BITS - 8 }).publicKey.export({ format: "jwk" });
     assert.equal(coseKeyToPublicKey(rsaKey(bytes(short.n), bytes(short.e))), null);
-    // Nor is an exponent no signature verifies under: none, one, small, even.
-    for (const e of [[0], [1], [3], [1, 0, 0], [1, 0, 2]]) {
-      assert.equal(coseKeyToPublicKey(rsaKey(bytes(rsa.n), new Uint8Array(e))), null, `e ${e.join(",")}`);
+    // Nor is an exponent that is none, one, small, even, or as long as a modulus.
+    const longE = new Uint8Array(33).fill(0);
+    longE[0] = 1;
+    longE[32] = 1;
+    for (const e of [[0], [1], [3], [1, 0, 0], [1, 0, 2], [...longE], [...bytes(rsa.n)]]) {
+      assert.equal(coseKeyToPublicKey(rsaKey(bytes(rsa.n), new Uint8Array(e))), null, `e ${e.slice(0, 4).join(",")} (${e.length} bytes)`);
     }
+    // Nor an even modulus of the right length.
+    const evenN = bytes(rsa.n);
+    evenN[evenN.length - 1] = evenN[evenN.length - 1]! & 0xfe;
+    assert.equal(coseKeyToPublicKey(rsaKey(evenN, bytes(rsa.e))), null);
+    // The rule is the same when a stored key is read back for a sign-in.
+    const stored = verifyAssertion({
+      response: assertWithSoftwarePasskey(mintSoftwarePasskey(), { challenge: "bGF0ZXI", rpID: RP_ID, origin: ORIGIN }),
+      expectedChallenge: "bGF0ZXI",
+      expectedOrigins: [ORIGIN],
+      rpId: RP_ID,
+      publicKeyCose: rsaKey(bytes(rsa.n), new Uint8Array([3])),
+    });
+    assert.deepEqual(stored, { ok: false, reason: "public-key" });
     // And an enrolment that carries one is refused before the code is spent on it.
     const passkey = mintSoftwarePasskey();
     const tiny = { ...passkey, publicKeyCose: isoBase64URL.toBuffer(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))) };

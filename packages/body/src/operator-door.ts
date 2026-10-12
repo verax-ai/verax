@@ -102,16 +102,6 @@ function challengeInClientData(clientDataJSON: string): string | null {
   }
 }
 
-/**
- * The answer to a request whose body the door does not read. It goes out and
- * the connection is cut: what the caller was still sending is neither waited
- * for nor read, so a request the door turned away holds nothing open.
- */
-function answerUnread(res: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}): void {
-  // Node closes the socket, both ways, once an answer marked like this has gone out.
-  send(res, status, body, { ...headers, connection: "close" });
-}
-
 /** Oldest out first: a Map keeps insertion order. */
 function capped<K, V>(map: Map<K, V>, max: number): void {
   while (map.size > max) {
@@ -173,11 +163,11 @@ export async function openOperatorDoor(opts: {
   const readUnvouched = async (req: IncomingMessage, res: ServerResponse): Promise<{ value: unknown } | null> => {
     const declared = Number(first(req.headers["content-length"]) ?? "0");
     if (Number.isFinite(declared) && declared > SIGNIN_BODY_BYTES) {
-      answerUnread(res, 413, { error: "payload-too-large" });
+      send(res, 413, { error: "payload-too-large" });
       return null;
     }
     if (signinsInFlight >= MAX_SIGNINS_IN_FLIGHT) {
-      answerUnread(res, 503, { error: "busy" }, { "retry-after": "5" });
+      send(res, 503, { error: "busy" }, { "retry-after": "5" });
       return null;
     }
     signinsInFlight += 1;
@@ -191,7 +181,7 @@ export async function openOperatorDoor(opts: {
     }
     if (!parsed.ok) {
       if ("tooLarge" in parsed) {
-        answerUnread(res, 413, { error: "payload-too-large" });
+        send(res, 413, { error: "payload-too-large" });
         return null;
       }
       send(res, 400, { error: "bad-body" });
@@ -241,28 +231,33 @@ export async function openOperatorDoor(opts: {
     try {
       // What the door says names payees and amounts; no cache keeps a copy.
       res.setHeader("cache-control", "no-store");
+      // One request to a connection. Many of the door's answers go out before
+      // a body is read, or without one being wanted, and a caller who goes on
+      // sending after such an answer must not hold the line: Node closes the
+      // socket once an answer marked like this has gone out.
+      res.setHeader("connection", "close");
       const listenPort = (server.address() as AddressInfo).port;
       if (!doorHostAllowed(first(req.headers.host), door, listenPort)) {
-        answerUnread(res, 400, { error: "host-not-allowed" });
+        send(res, 400, { error: "host-not-allowed" });
         return;
       }
       const origin = first(req.headers.origin);
       if (origin !== undefined && origin !== door.origin) {
-        answerUnread(res, 403, { error: "origin-not-allowed" });
+        send(res, 403, { error: "origin-not-allowed" });
         return;
       }
       const url = new URL(req.url ?? "/", door.origin);
       if (!ROUTES.has(`${req.method} ${url.pathname}`)) {
-        answerUnread(res, 404, { error: "not-found" });
+        send(res, 404, { error: "not-found" });
         return;
       }
       // A browser names the origin on every POST. One that does not is not the door's page.
       if (req.method === "POST" && origin === undefined) {
-        answerUnread(res, 403, { error: "origin-required" });
+        send(res, 403, { error: "origin-required" });
         return;
       }
       if (req.method === "POST" && contentLengthOverLimit(req)) {
-        answerUnread(res, 413, { error: "payload-too-large" });
+        send(res, 413, { error: "payload-too-large" });
         return;
       }
       if (url.pathname === "/api/enroll/options" || url.pathname === "/api/enroll") {
@@ -338,12 +333,12 @@ export async function openOperatorDoor(opts: {
       // With no operator enrolled an approval over HTTP needs no signature.
       // That path must not be reachable from here, so past enrolment the door stays shut.
       if (!hasRegisteredOperator(stateDir)) {
-        answerUnread(res, 403, { error: "no-operator" });
+        send(res, 403, { error: "no-operator" });
         return;
       }
 
       if (url.pathname === "/api/signin/options") {
-        answerUnread(res, 200, {
+        send(res, 200, {
           challenge: mintChallenge(signinKey),
           rpId: door.rpID,
           allowCredentials: readCredentials(stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
@@ -391,13 +386,13 @@ export async function openOperatorDoor(opts: {
       const token = readBearer(req.headers.authorization);
       const session = liveSession(token);
       if (!session) {
-        answerUnread(res, 401, { error: "unauthorized" });
+        send(res, 401, { error: "unauthorized" });
         return;
       }
 
       if (url.pathname === "/api/signout") {
         sessions.delete(sessionKey(token!));
-        answerUnread(res, 200, { ok: true });
+        send(res, 200, { ok: true });
         return;
       }
 

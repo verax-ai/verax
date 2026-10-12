@@ -220,9 +220,16 @@ async function enroll(port: number, code: string, passkey: SoftwarePasskey): Pro
 }
 
 /** Sends a request that never ends its body, and reports the answer and whether the door hung up. */
-function unending(port: number, head: string, sockets: Socket[]): Promise<{ status: string; cut: boolean }> {
+function unending(
+  port: number,
+  head: string,
+  sockets: Socket[],
+  over: { host?: string; framing?: string } = {},
+): Promise<{ status: string; cut: boolean }> {
   return new Promise((resolve) => {
-    const socket = connect(port, "127.0.0.1");
+    // Half-open on this side: a door that only stopped writing and went on
+    // reading would leave this socket up, and that is not being cut.
+    const socket = connect({ port, host: "127.0.0.1", allowHalfOpen: true });
     sockets.push(socket);
     let status = "";
     let more: NodeJS.Timeout | undefined;
@@ -237,7 +244,9 @@ function unending(port: number, head: string, sockets: Socket[]): Promise<{ stat
       status = (chunk.toString("utf8").split("\r\n")[0] ?? "").replace("HTTP/1.1 ", "").slice(0, 3);
     });
     socket.once("close", () => done(true));
-    socket.write(`${head}Host: ${DOOR_HOST}\r\nTransfer-Encoding: chunked\r\nContent-Type: application/json\r\n\r\n`);
+    socket.write(
+      `${head}Host: ${over.host ?? DOOR_HOST}\r\n${over.framing ?? "Transfer-Encoding: chunked"}\r\nContent-Type: application/json\r\n\r\n`,
+    );
     more = setInterval(() => {
       if (!socket.destroyed) socket.write(`400\r\n${"x".repeat(1024)}\r\n`);
     }, 20);
@@ -1085,16 +1094,23 @@ describe("operator door", () => {
     try {
       const token = (await signIn(body.doorPort, passkey)).body.token as string;
       const named = `Origin: ${DOOR_ORIGIN}\r\n`;
-      for (const [why, port, head, status] of [
+      const session = `Authorization: Bearer ${token}\r\n`;
+      const rows: [why: string, port: number, head: string, status: string, over?: { host?: string; framing?: string }][] = [
+        ["another name", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}`, "400", { host: "evil.example" }],
+        ["a target that is no address", body.doorPort, `GET http://x:99999/ HTTP/1.1\r\n`, "400"],
         ["not on the list", body.doorPort, `POST /mcp HTTP/1.1\r\n${named}`, "404"],
         ["another origin", body.doorPort, `POST /api/signin HTTP/1.1\r\nOrigin: https://evil.example\r\n`, "403"],
         ["no origin", body.doorPort, `POST /api/signin HTTP/1.1\r\n`, "403"],
         ["no operator", empty.doorPort, `POST /api/approve HTTP/1.1\r\n${named}`, "403"],
         ["no session", body.doorPort, `POST /api/approve HTTP/1.1\r\n${named}`, "401"],
+        ["a length announced past the limit", body.doorPort, `POST /api/signin HTTP/1.1\r\n${named}`, "413", { framing: "Content-Length: 20000" }],
+        ["a body that runs past the limit", body.doorPort, `POST /api/enroll HTTP/1.1\r\n${named}`, "413"],
         ["options take no body", body.doorPort, `POST /api/signin/options HTTP/1.1\r\n${named}`, "200"],
-        ["sign-out takes no body", body.doorPort, `POST /api/signout HTTP/1.1\r\n${named}Authorization: Bearer ${token}\r\n`, "200"],
-      ] as const) {
-        const seen = await unending(port, head, sockets);
+        ["a list read takes no body", body.doorPort, `GET /api/waiting HTTP/1.1\r\n${session}`, "200"],
+        ["sign-out takes no body", body.doorPort, `POST /api/signout HTTP/1.1\r\n${named}${session}`, "200"],
+      ];
+      for (const [why, port, head, status, over] of rows) {
+        const seen = await unending(port, head, sockets, over);
         assert.deepEqual(seen, { status, cut: true }, why);
       }
     } finally {

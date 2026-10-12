@@ -100,12 +100,12 @@ export function coseKeyToPublicKey(base64urlCose: string): KeyObject | null {
         format: "jwk",
         key: { kty: "RSA", alg: "RS256", n: b64url(n), e: b64url(e) },
       });
-      // A key that imports is not yet one a signature verifies under: the
-      // modulus has to hold one, and the exponent has to be odd and at least 65537.
+      // A key that imports is not yet a sound one. The modulus is odd and at
+      // least 2048 bits; the exponent is odd, at least 65537 and under 2^256.
       const details = key.asymmetricKeyDetails;
       const exponent = details?.publicExponent ?? 0n;
-      if ((details?.modulusLength ?? 0) < RSA_MIN_BITS) return null;
-      return exponent >= 65537n && exponent % 2n === 1n ? key : null;
+      if ((details?.modulusLength ?? 0) < RSA_MIN_BITS || (n[n.length - 1]! & 1) === 0) return null;
+      return exponent >= 65537n && exponent < 1n << 256n && exponent % 2n === 1n ? key : null;
     }
     return null;
   } catch {

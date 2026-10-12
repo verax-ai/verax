@@ -110,9 +110,9 @@ way to reach that from another device.
   stays held.
 - It does not limit connections or request rate. A sign-in or enrolment
   body nobody has vouched for is at most 16 KiB, at most 32 are read at
-  once, and one that takes longer than five seconds is dropped. A request
-  the door answers without reading its body is cut once the answer has gone
-  out, whatever the caller goes on sending. A caller who keeps those 32
+  once, and one that takes longer than five seconds is dropped. Every
+  answer the door gives closes its connection once it has gone out, so a
+  caller who goes on sending after one holds no line open. A caller who keeps those 32
   busy can still delay a sign-in; a limit on that belongs at the operator's
   TLS endpoint.
 - It does not check what kind of device holds a passkey. Enrolment asks for
