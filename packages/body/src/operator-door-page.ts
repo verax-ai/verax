@@ -15,7 +15,7 @@
 import { TERMINAL_CONTROL_CLASS } from "@verax-ai/proxy";
 
 export const DOOR_HTML: string = `<!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -124,6 +124,10 @@ section > * + * { margin-top: 14px; }
 .dim { color: var(--dim); font-size: 0.9rem; }
 .label { color: var(--dim); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; }
 code, pre, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.85rem; }
+/* Arguments and identifiers: one character after another, left to right, whatever script they are in. */
+pre, .mono { direction: ltr; unicode-bidi: bidi-override; }
+/* Every other value keeps its own direction to itself. */
+bdi, [data-test="session-sub"], [data-test="session-expires"] { unicode-bidi: isolate; }
 .notice { padding: 12px 14px; border-radius: 8px; border: 1px solid var(--line); margin-bottom: 16px; overflow-wrap: anywhere; }
 .notice[data-kind="ok"] { background: var(--ok-paper); border-color: var(--ok); }
 .notice[data-kind="error"] { background: var(--bad-paper); border-color: var(--stop); }
@@ -211,6 +215,25 @@ const SCRIPT: string = String.raw`(function () {
     return (root || document).querySelector('[data-test="' + name + '"]');
   }
 
+  /**
+   * The page's own words as text, and each value among them in an element of
+   * its own direction: letters that run right to left stay inside the value
+   * and move nothing beside it.
+   */
+  function fill(el, parts) {
+    while (el.firstChild) el.removeChild(el.firstChild);
+    for (var i = 0; i < parts.length; i += 1) {
+      if (typeof parts[i] === "string") {
+        el.appendChild(document.createTextNode(parts[i]));
+      } else {
+        var value = document.createElement("bdi");
+        value.textContent = parts[i].value;
+        el.appendChild(value);
+      }
+    }
+    return el;
+  }
+
   function show(name) {
     SCREENS.forEach(function (screen) {
       at("screen-" + screen).hidden = screen !== name;
@@ -229,15 +252,16 @@ const SCRIPT: string = String.raw`(function () {
   function say(kind, code, more) {
     var notice = at("notice");
     hush();
-    var text = Object.prototype.hasOwnProperty.call(TEXT, code) ? TEXT[code] : plain(code);
+    // The page's own sentence where it has one. A word of the door's it does not know is shown as a value.
+    var parts = [Object.prototype.hasOwnProperty.call(TEXT, code) ? TEXT[code] : { value: plain(code) }];
     if (more && typeof more.reason === "string" && more.reason !== "") {
       notice.setAttribute("data-reason", more.reason);
-      text += " (" + plain(more.reason) + ")";
+      parts.push(" (", { value: plain(more.reason) }, ")");
     }
     if (more && typeof more.allowRef === "string") notice.setAttribute("data-allow-ref", more.allowRef);
     notice.setAttribute("data-kind", kind);
     notice.setAttribute("data-code", code);
-    notice.textContent = text;
+    fill(notice, parts);
     notice.hidden = false;
   }
 
@@ -407,12 +431,7 @@ const SCRIPT: string = String.raw`(function () {
 
   /** A sentence with values in it, each value apart from the words around it. */
   function sentence(parts) {
-    var line = document.createElement("p");
-    for (var i = 0; i < parts.length; i += 1) {
-      if (typeof parts[i] === "string") line.appendChild(document.createTextNode(parts[i]));
-      else line.appendChild(piece("bdi", null, parts[i].value));
-    }
-    return line;
+    return fill(document.createElement("p"), parts);
   }
 
   function drawRow(row) {
@@ -507,7 +526,7 @@ const SCRIPT: string = String.raw`(function () {
     at("resume").hidden = !halted;
     var since = at("halt-since");
     if (halted && state.since && typeof state.since === "object") {
-      since.textContent = "Stopped by " + shown(state.since.by) + ", " + clock(state.since.atMs);
+      fill(since, ["Stopped by ", { value: shown(state.since.by) }, ", " + clock(state.since.atMs)]);
       since.hidden = false;
     } else {
       since.textContent = "";

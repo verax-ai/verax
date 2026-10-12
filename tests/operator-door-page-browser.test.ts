@@ -29,6 +29,7 @@ const SCREENS = ["loading", "enroll", "signin", "main"] as const;
 const MARKUP = `<img src=x onerror="document.title='written'"><script>document.title='written'</script>`;
 // And what it might put there to turn a line around, break it in two, or hide in it.
 const TRICK = "pay ‮ecalper‬ Rule: none​\u{E0001}";
+const RTL = "אבג 100";
 
 /** A body whose door answers for the port it listens on. A taken port is tried again elsewhere. */
 async function openBodyOnOnePort(): Promise<{ body: Body; origin: string; port: number }> {
@@ -148,7 +149,7 @@ describe("operator door page", () => {
         await holdSpend(body, { amountMinor: 1250, currency: "USD", payee: "sample-merchant", reference: "inv-7" });
         await holdTool(body, "verax:memory", "memory.put", {
           id: "door-page-1",
-          body: { note: MARKUP, trick: TRICK },
+          body: { note: MARKUP, trick: TRICK, rtl: RTL },
           source: { uri: "file://t", retrievedAtMs: 1 },
           validUntilMs: Date.now() + 60_000,
         });
@@ -175,7 +176,7 @@ describe("operator door page", () => {
         assert.equal(await write.count(), 1);
         assert.equal(await write.locator('[data-test="row-tool"]').textContent(), "memory.put");
         const held = (await write.locator('[data-test="row-args"]').textContent()) ?? "";
-        const shown = JSON.parse(held) as { body?: { note?: unknown; trick?: unknown } };
+        const shown = JSON.parse(held) as { body?: { note?: unknown; trick?: unknown; rtl?: unknown } };
         assert.equal(shown.body?.note, MARKUP);
         // Characters that turn text around, break a line or cannot be seen are shown as their escapes,
         // as the terminal shows them. Read back as JSON, it is still the value the agent sent.
@@ -184,6 +185,26 @@ describe("operator door page", () => {
           assert.ok(held.includes(escape), escape);
         }
         assert.equal(shown.body?.trick, TRICK);
+        // Letters that run right to left need no control character to move the digits beside them.
+        // The arguments are laid out one character after another, and every other value is kept to itself.
+        assert.equal(shown.body?.rtl, RTL);
+        const laidOut = (name: string) =>
+          write.locator(`[data-test="${name}"]`).evaluate((el) => {
+            const style = (globalThis as unknown as { getComputedStyle: (el: unknown) => { direction: string; unicodeBidi: string } }).getComputedStyle(el);
+            return `${style.direction} ${style.unicodeBidi}`;
+          });
+        assert.equal(await laidOut("row-args"), "ltr bidi-override");
+        assert.equal(await laidOut("row-ref"), "ltr bidi-override");
+        assert.equal(await laidOut("row-hash"), "ltr bidi-override");
+        assert.equal(await laidOut("row-tool"), "ltr bidi-override");
+        assert.equal(await laidOut("row-agent"), "ltr isolate");
+        assert.equal(await laidOut("row-rule"), "ltr isolate");
+        for (const name of ["row-payee", "row-amount", "row-currency", "row-reference"]) {
+          assert.equal(await payment.locator(`[data-test="${name}"]`).evaluate((el) => (el as unknown as { tagName: string }).tagName), "BDI", name);
+        }
+        // The question a tap answers is built the same way: three values, each in its own element.
+        assert.deepEqual(await payment.locator('[data-test="approve-panel"] bdi').allTextContents(), ["1250", "USD", "sample-merchant"]);
+        assert.deepEqual(await write.locator('[data-test="approve-panel"] bdi').allTextContents(), ["memory.put"]);
         assert.equal(await page.locator('[data-test="door"] img, [data-test="door"] script').count(), 0);
         assert.equal(await page.title(), "Verax operator door");
 
@@ -209,6 +230,7 @@ describe("operator door page", () => {
         assert.equal(await at(page, "halt").isVisible(), false);
         assert.equal(await at(page, "resume").isVisible(), true);
         assert.match((await at(page, "halt-since").textContent()) ?? "", /operator-1/);
+        assert.deepEqual(await at(page, "halt-since").locator("bdi").allTextContents(), ["operator-1"]);
         await write.locator('[data-test="approve"]').click();
         await write.locator('[data-test="approve-confirm"]').click();
         await told(page, "error", "approve-halted");
