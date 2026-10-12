@@ -6,21 +6,11 @@ import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { bodyVersion } from "./body-version.ts";
 import { isLoopbackHost, type BodyConfig } from "./config.ts";
-import { approvalChallenge, gateApprovalSignature } from "./approval-signature.ts";
-import { readCredentials } from "./operator-credentials.ts";
-import { readRpConfig } from "./rp-config.ts";
-import {
-  approvalsLogFor,
-  approvePending,
-  createApprovalBudgetGuard,
-  explain,
-  LedgerDenyUnrecorded,
-  loadApprovalsFromDir,
-  type LedgerCounts,
-} from "@verax-ai/proxy";
+import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
+import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
+import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir, type LedgerCounts } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
 import { isRevokedJti } from "./revoke.ts";
@@ -29,8 +19,6 @@ import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
-import { gateControlSignature, nextControlChallenge } from "./control-signature.ts";
-import { haltBody, readHalt, resumeBody } from "./halt.ts";
 import { recordBodyStart, startHeartbeat } from "./heartbeat.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
@@ -214,7 +202,6 @@ export const TOOL_META = [
   },
 ];
 
-const MAX_BODY_BYTES = 1024 * 1024;
 // Node's default requestTimeout is 300s. A stalled body would otherwise stay
 // authorised until that default. Headers are bounded tighter than the body.
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -251,41 +238,6 @@ export function loopbackHostDecision(hostHeader: string | undefined, bindPort: n
   return port === bindPort ? "allow" : "deny";
 }
 
-function contentLengthOverLimit(req: IncomingMessage): boolean {
-  const raw = req.headers["content-length"];
-  if (raw === undefined) return false;
-  const n = Number(Array.isArray(raw) ? raw[0] : raw);
-  return Number.isFinite(n) && n > MAX_BODY_BYTES;
-}
-
-async function readJsonBody(
-  req: IncomingMessage,
-  max: number,
-): Promise<{ ok: true; value: unknown } | { ok: false; tooLarge: true } | { ok: false; bad: true }> {
-  if (contentLengthOverLimit(req)) return { ok: false, tooLarge: true };
-  const chunks: Buffer[] = [];
-  let seen = 0;
-  try {
-    for await (const chunk of req) {
-      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-      seen += buf.length;
-      if (seen > max) {
-        return { ok: false, tooLarge: true };
-      }
-      chunks.push(buf);
-    }
-  } catch {
-    return { ok: false, bad: true };
-  }
-  const text = Buffer.concat(chunks).toString("utf8");
-  if (text === "") return { ok: true, value: undefined };
-  try {
-    return { ok: true, value: JSON.parse(text) };
-  } catch {
-    return { ok: false, bad: true };
-  }
-}
-
 /**
  * Second look at a bearer that already verified. The first look runs before
  * the body is read; this one runs after the body and before dispatch or
@@ -303,25 +255,6 @@ export function bearerStillLive(payload: { jti?: unknown; exp?: unknown }, state
 function isProtectedResourcePath(pathname: string, audience: string): boolean {
   const want = new URL(resourceMetadataUrl(audience)).pathname;
   return pathname === want || pathname === "/.well-known/oauth-protected-resource";
-}
-
-async function signedDefer(
-  ledger: { decisions(): Promise<SignedDecisionRecord[]> },
-  ref: string,
-): Promise<SignedDecisionRecord | null> {
-  const rows = await ledger.decisions();
-  return rows.find((row) => row.claims.ref === ref && row.claims.decision === "defer") ?? null;
-}
-
-function send(res: ServerResponse, status: number, body: unknown, headers?: Record<string, string>): void {
-  const text = typeof body === "string" ? body : JSON.stringify(body);
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(text),
-    "x-content-type-options": "nosniff",
-    ...headers,
-  });
-  res.end(text);
 }
 
 /**
@@ -662,196 +595,30 @@ export async function listen(config: BodyConfig): Promise<Server> {
       return;
     }
     try {
+      const operatorRequest: OperatorRequest = {
+        req,
+        res,
+        url,
+        stateDir: config.stateDir,
+        services,
+        subject: verified.principal.brain,
+        scopes: verified.principal.scopes,
+        refuseStale: refuseStaleBearer,
+        env: process.env,
+      };
       if (apiHalt || apiResume || apiControlChallenge) {
-        if (await refuseStaleBearer()) return;
-        const scopes = verified.principal.scopes;
-        const operator = scopes.has("verax:audit") || scopes.has("verax:approve");
-        const resuming = apiResume || url.pathname === "/api/resume/challenge";
-        // Stopping is the safe direction, so any operator session may do it.
-        // Lifting a halt lets everything through again: that is an approval of
-        // everything at once and needs the approve scope. The agent token
-        // carries neither, so an agent cannot stop itself being stopped.
-        if (!operator || (resuming && !scopes.has("verax:approve"))) {
-          send(res, 403, { error: "scope-missing" });
-          return;
-        }
-        if (apiControlChallenge) {
-          const rp = readRpConfig(process.env);
-          if (!rp.ok) {
-            send(res, 503, { error: "passkey-closed", reason: rp.reason });
-            return;
-          }
-          send(res, 200, {
-            ...nextControlChallenge(config.stateDir, resuming ? "resume" : "halt"),
-            rpId: rp.config.rpID,
-            allowCredentials: readCredentials(config.stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
-          });
-          return;
-        }
-        if (req.method === "GET") {
-          send(res, 200, readHalt(config.stateDir));
-          return;
-        }
-        const parsed = await readJsonBody(req, MAX_BODY_BYTES);
-        if (await refuseStaleBearer()) return;
-        if (!parsed.ok && apiResume) {
-          send(res, 400, { error: "bad-body" });
-          return;
-        }
-        const asked = parsed.ok && parsed.value && typeof parsed.value === "object" ? parsed.value : {};
-        // The tail is read inside the gate and the line is appended right
-        // after it, with nothing awaited in between.
-        const gated = gateControlSignature({
-          stateDir: config.stateDir,
-          env: process.env,
-          action: apiResume ? "resume" : "halt",
-          assertion: (asked as { assertion?: unknown }).assertion,
+        await handleControl(operatorRequest, {
+          resuming: apiResume || url.pathname === "/api/resume/challenge",
+          challenge: apiControlChallenge,
         });
-        // A refused resume writes nothing. A halt is never refused for its
-        // signature: it stops unsigned, and the answer says what was refused.
-        if (!gated.ok && apiResume) {
-          send(res, gated.status, { error: gated.error, ...(gated.reason ? { reason: gated.reason } : {}) });
-          return;
-        }
-        const signature = gated.ok ? gated.signature : undefined;
-        const refused = !parsed.ok ? "bad-body" : gated.ok ? undefined : gated.error;
-        const by = verified.principal.brain;
-        const state = apiResume
-          ? resumeBody(config.stateDir, by, "http", Date.now(), signature)
-          : {
-              ...haltBody(config.stateDir, by, "http", Date.now(), signature),
-              ...(refused ? { signatureRefused: refused } : {}),
-            };
-        try {
-          await services.proxy.syncControlRecords();
-        } catch (err) {
-          // The switch is already on disk. A sync miss must not turn this into a 500.
-          const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
-          process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
-        }
-        send(res, 200, state);
         return;
       }
       if (apiApproveChallenge) {
-        if (!verified.principal.scopes.has("verax:approve")) {
-          send(res, 403, { error: "scope-missing" });
-          return;
-        }
-        if (await refuseStaleBearer()) return;
-        const ref = url.searchParams.get("ref") ?? "";
-        const deferRecord = ref === "" ? null : await signedDefer(services.ledger, ref);
-        if (!deferRecord) {
-          send(res, 404, { error: "unknown-ref" });
-          return;
-        }
-        const rp = readRpConfig(process.env);
-        if (!rp.ok) {
-          send(res, 503, { error: "passkey-closed", reason: rp.reason });
-          return;
-        }
-        send(res, 200, {
-          challenge: approvalChallenge({
-            ref,
-            requestHash: deferRecord.claims.requestHash,
-            deferRecordHash: decisionRecordHash(deferRecord),
-          }),
-          rpId: rp.config.rpID,
-          allowCredentials: readCredentials(config.stateDir).map((row) => ({ id: row.id, type: "public-key" as const })),
-        });
+        await handleApproveChallenge(operatorRequest);
         return;
       }
       if (apiApprove) {
-        // Reading the ledger is not approving from it. The audit scope opens
-        // every door above; this one signs a new decision and lets money go,
-        // so it has a scope of its own.
-        if (!verified.principal.scopes.has("verax:approve")) {
-          send(res, 403, { error: "scope-missing" });
-          return;
-        }
-        const parsed = await readJsonBody(req, MAX_BODY_BYTES);
-        if (await refuseStaleBearer()) return;
-        if (!parsed.ok) {
-          send(res, 400, { error: "bad-body" });
-          return;
-        }
-        const asked = (parsed.value ?? {}) as { ref?: unknown; requestHash?: unknown; assertion?: unknown };
-        const ref = typeof asked.ref === "string" ? asked.ref : "";
-        const sawHash = typeof asked.requestHash === "string" ? asked.requestHash : "";
-        if (ref === "" || sawHash === "") {
-          send(res, 400, { error: "ref-and-requestHash-required" });
-          return;
-        }
-        const waiting = loadApprovalsFromDir(config.stateDir).find((row) => row.ref === ref);
-        if (!waiting) {
-          send(res, 404, { error: "unknown-ref" });
-          return;
-        }
-        // The list on a phone can be ten minutes old. An approval names the
-        // request the operator was looking at, and if that is not what is
-        // waiting any more, nothing is approved: "I approved what I saw" is
-        // only true when something checks it.
-        if (waiting.requestHash !== sawHash) {
-          send(res, 409, { error: "stale", requestHash: waiting.requestHash });
-          return;
-        }
-        const deferRecord = await signedDefer(services.ledger, ref);
-        if (!deferRecord) {
-          send(res, 404, { error: "unknown-ref" });
-          return;
-        }
-        const deferRecordHash = decisionRecordHash(deferRecord);
-        // The challenge is rebuilt from the defer on disk, not from anything the client sent.
-        const gated = await gateApprovalSignature({
-          stateDir: config.stateDir,
-          env: process.env,
-          assertion: asked.assertion,
-          ref,
-          requestHash: deferRecord.claims.requestHash,
-          deferRecordHash,
-        });
-        if (!gated.ok) {
-          send(res, gated.status, {
-            error: gated.error,
-            ...(gated.reason ? { reason: gated.reason } : {}),
-          });
-          return;
-        }
-        // Who approved, on the record. The CLI writes the machine's login name,
-        // which says nothing about the person holding the phone; the session's
-        // own subject does.
-        const approver = verified.principal.brain;
-        const approvals = approvalsLogFor(services.ledger);
-        const outcome = await approvePending({
-          ledger: services.ledger,
-          recordSigner: loadOrCreateSigners(config.stateDir).recordSigner,
-          now: () => Date.now(),
-          nonce: () => crypto.randomUUID(),
-          ref,
-          approverId: approver,
-          via: "http",
-          policyHash: deferRecord.claims.policyHash,
-          ...(gated.signature ? { signature: gated.signature } : {}),
-          approvals,
-          budgetGuard: createApprovalBudgetGuard({
-            policy: services.policy,
-            approvals,
-            now: () => Date.now(),
-            ledger: services.ledger,
-          }),
-        });
-        if (!outcome.ok) {
-          if (outcome.reason === "halted") {
-            send(res, 409, { error: "approve-halted" });
-            return;
-          }
-          const code = outcome.reason === "unknown-ref" || outcome.reason === "snapshot-missing" ? 404 : 409;
-          send(res, code, {
-            error: outcome.reason,
-            ...(outcome.allowRef ? { allowRef: outcome.allowRef } : {}),
-          });
-          return;
-        }
-        send(res, 200, { allowRef: outcome.allowRef, approver });
+        await handleApprove(operatorRequest);
         return;
       }
       if (apiLedger || apiInventory || contest || apiAgents) {
