@@ -64,6 +64,28 @@ describe("install-e2e workflow", () => {
     assert.match(workflow, /Write-Host "::error::ProgramData\\Verax ACL contains \$banned"; exit 1/);
   });
 
+  it("opens the operator door on each platform and enrols through it with a code the administrator asked for", () => {
+    const withDoor = workflow.split(/\r?\n/).filter((line) => /install\b.*--operator-door http:\/\/localhost:8788\b/.test(line));
+    // One install per platform carries the flag; the reinstall and the refusal runs stay as they were.
+    assert.equal(withDoor.length, 3);
+    for (const line of withDoor) {
+      assert.match(line, /--from-tarballs\b/);
+      assert.match(line, /--port 8801\b/);
+    }
+    // Shut first, then open: a 200 alone would not show the code was what opened it.
+    const probes = [...workflow.matchAll(/operator-door-probe\.ts http:\/\/localhost:8788 (shut|enrol)/g)].map((m) => m[1]);
+    assert.deepEqual(probes, ["shut", "enrol", "shut", "enrol", "shut", "enrol"]);
+    assert.match(workflow, /\/opt\/verax-cli\/bin\/verax operator enroll --state \/var\/lib\/verax\)/);
+    assert.match(workflow, /\/opt\/verax-cli\/bin\/verax operator enroll --state "\/Library\/Application Support\/Verax\/state"\)/);
+    assert.match(workflow, /\$env:VERAX_CLI operator enroll --state "\$env:ProgramData\\Verax\\state"/);
+    // The account that ran the install's shell does not read what the service wrote.
+    assert.match(workflow, /if cat \/var\/lib\/verax\/operator-credentials\.json >\/dev\/null 2>&1; then echo "operator credentials were readable"; exit 1; fi/);
+    assert.match(workflow, /if cat "\/Library\/Application Support\/Verax\/state\/operator-credentials\.json" >\/dev\/null 2>&1; then echo "operator credentials were readable"; exit 1; fi/);
+    assert.match(workflow, /readFileSync\(state \+ "\\\\operator-credentials\.json"\)\)\) process\.exit\(6\)/);
+    assert.equal((workflow.match(/sudo test -s .*operator-credentials\.json/g) ?? []).length, 2);
+    assert.match(workflow, /Test-Path -LiteralPath "\$env:ProgramData\\Verax\\state\\operator-credentials\.json"/);
+  });
+
   it("races a probe user against a real Windows install and accepts only a clean win or a named refusal", () => {
     const at = workflow.indexOf("- name: a probe user racing the install cannot plant inside the Verax root\n");
     assert.ok(at > 0, "race step missing");

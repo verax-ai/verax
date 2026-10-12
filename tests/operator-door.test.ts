@@ -1,8 +1,8 @@
 import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request, type Server } from "node:http";
-import { connect, type AddressInfo, type Socket } from "node:net";
+import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -12,6 +12,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
+import { lookWithoutFollowing, pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
 import { credentialsPath, readCredentials, saveCredential } from "../packages/body/src/operator-credentials.ts";
 import {
   DOOR_CHALLENGE_TTL_MS,
@@ -1120,6 +1121,166 @@ describe("operator door", () => {
       for (const socket of sockets) socket.destroy();
       await body.close();
       await empty.close();
+    }
+  });
+
+  it("D23 the door opens before the main listener, a taken port stops the start, and what did open is shut again", async () => {
+    const hold = async () => {
+      const server = createNetServer();
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+      return { server, port: (server.address() as AddressInfo).port };
+    };
+    const release = (server: ReturnType<typeof createNetServer>) => new Promise<void>((resolve) => server.close(() => resolve()));
+    const doorSquatter = await hold();
+    const mainSquatter = await hold();
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-taken-"));
+    const { publicKey } = await generateKeyPair("ES256", { extractable: true });
+    const jwksFile = join(stateDir, "jwks.json");
+    writeFileSync(jwksFile, JSON.stringify({ keys: [{ ...(await exportJWK(publicKey)), kid: "local-1", alg: "ES256", use: "sig" }] }));
+    const start = (doorPort: number, mainPort: number) =>
+      listen({
+        issuer: ISSUER,
+        jwksUrl: "",
+        jwksFile,
+        audience: AUDIENCE,
+        stateDir,
+        bindHost: "127.0.0.1",
+        bindPort: mainPort,
+        policyFile: approvePolicyFile(stateDir),
+        tlsTerminated: false,
+        operatorDoor: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: doorPort },
+      });
+    try {
+      // Both ports are taken. The one the start names is the one it tried first.
+      await assert.rejects(start(doorSquatter.port, mainSquatter.port), new RegExp(`EADDRINUSE.*:${doorSquatter.port}\\b`));
+
+      // The door's port is free and the main one is not: the door opened, then had to shut.
+      await release(doorSquatter.server);
+      await assert.rejects(start(doorSquatter.port, mainSquatter.port), new RegExp(`EADDRINUSE.*:${mainSquatter.port}\\b`));
+      const again = createNetServer();
+      await new Promise<void>((resolve, reject) => {
+        again.once("error", reject);
+        again.listen(doorSquatter.port, "127.0.0.1", () => resolve());
+      });
+      await release(again);
+
+      // Nothing of the refused starts is left holding the ledger: the same state starts once both ports are free.
+      const server = await start(0, 0);
+      assert.notEqual(operatorDoorOf(server), null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    } finally {
+      if (doorSquatter.server.listening) await release(doorSquatter.server);
+      await release(mainSquatter.server);
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D24 root asks for a pairing code as the owner of the state directory, or not at all", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-enroll-"));
+    const service = { uid: 997, gid: 995, isDirectory: true };
+    type Disk = Record<string, typeof service | undefined>;
+    type Fake = { sys: OperatorSys; calls: string[] };
+    /** A process that says it is root, over a disk the test describes. */
+    const root = (disk: Disk, over: Partial<OperatorSys> = {}): Fake => {
+      const calls: string[] = [];
+      let uid = 0;
+      let gid = 0;
+      const sys: OperatorSys = {
+        platform: "linux",
+        getuid: () => uid,
+        getgid: () => gid,
+        setgroups: (groups) => void calls.push(`setgroups ${groups.join(",")}`),
+        setgid: (next) => {
+          calls.push(`setgid ${next}`);
+          gid = next;
+        },
+        setuid: (next) => {
+          calls.push(`setuid ${next}`);
+          uid = next;
+        },
+        look: (path) => disk[path] ?? null,
+        ...over,
+      };
+      return { sys, calls };
+    };
+    const quiet = async (run: () => Promise<number>): Promise<{ code: number; out: string; err: string }> => {
+      const out: string[] = [];
+      const err: string[] = [];
+      const write = { out: process.stdout.write, err: process.stderr.write };
+      process.stdout.write = ((chunk: string) => (out.push(String(chunk)), true)) as typeof process.stdout.write;
+      process.stderr.write = ((chunk: string) => (err.push(String(chunk)), true)) as typeof process.stderr.write;
+      try {
+        return { code: await run(), out: out.join(""), err: err.join("") };
+      } finally {
+        process.stdout.write = write.out;
+        process.stderr.write = write.err;
+      }
+    };
+    const enroll = (fake: Fake, dir = stateDir) => quiet(() => runOperator(["operator", "enroll", "--state", dir], fake.sys));
+    try {
+      // The service's directory: root becomes the service, in this order, and only then writes.
+      const drop = root({ [stateDir]: service });
+      const done = await enroll(drop);
+      assert.equal(done.code, 0, done.err);
+      assert.match(done.out, /^\d{8}\n$/);
+      assert.deepEqual(drop.calls, ["setgroups 995", "setgid 995", "setuid 997"]);
+      assert.equal(readPairing(stateDir)?.attempts, 0);
+      rmSync(pairingPath(stateDir));
+
+      // A drop that cannot be made, or that did not take in either half, writes nothing.
+      for (const [why, over, said] of [
+        ["no setuid", { setuid: undefined }, /cannot-change-account/],
+        ["setgid throws", { setgid: () => { throw new Error("EPERM"); } }, /cannot-change-account/],
+        ["setuid changes nothing", { setuid: () => undefined }, /account-did-not-change/],
+        ["setgid changes nothing", { setgid: () => undefined }, /account-did-not-change/],
+      ] as const) {
+        const stuck = await enroll(root({ [stateDir]: service }, over as Partial<OperatorSys>));
+        assert.equal(stuck.code, 78, why);
+        assert.match(stuck.err, said, why);
+        assert.equal(existsSync(pairingPath(stateDir)), false, why);
+      }
+
+      // Root makes no state directory, follows no link to one, and keeps no group of its own.
+      const missing = join(stateDir, "not-there");
+      const none = await enroll(root({}), missing);
+      assert.equal(none.code, 78);
+      assert.match(none.err, /state-dir-missing/);
+      assert.equal(existsSync(missing), false);
+      for (const [seen, said] of [
+        [{ ...service, isDirectory: false }, /state-dir-not-a-directory/],
+        [{ ...service, gid: 0 }, /state-dir-group-is-roots/],
+      ] as const) {
+        const refused = await enroll(root({ [stateDir]: seen }));
+        assert.equal(refused.code, 78);
+        assert.match(refused.err, said);
+        assert.equal(existsSync(pairingPath(stateDir)), false);
+      }
+      // A slash after a link would have the link looked through. The path is resolved before it is looked at.
+      const looked: string[] = [];
+      const slashed = pairingWriter(`${stateDir}/`, { ...root({}).sys, look: (path) => (looked.push(path), null) });
+      assert.equal(slashed.kind, "refuse");
+      assert.deepEqual(looked.map((path) => /[\\/]$/.test(path)), [false]);
+
+      // On the real disk: a link to a directory is seen as a link, so root is refused at it and not at the directory.
+      const real = join(stateDir, "real");
+      const link = join(stateDir, "link");
+      mkdirSync(real);
+      symlinkSync(real, link, "junction");
+      assert.equal(lookWithoutFollowing(real)?.isDirectory, true);
+      assert.equal(lookWithoutFollowing(link)?.isDirectory, false);
+      assert.equal(lookWithoutFollowing(join(stateDir, "nothing")), null);
+      const atLink = pairingWriter(link, { platform: "linux", getuid: () => 0, look: lookWithoutFollowing });
+      assert.deepEqual(atLink, { kind: "refuse", reason: `state-dir-not-a-directory:${link}` });
+
+      // Root's own directory is written as root, as before. Anyone but root, and anyone on Windows, writes as who they are.
+      const own = root({ [stateDir]: { ...service, uid: 0, gid: 0 } });
+      assert.equal((await enroll(own)).code, 0);
+      assert.deepEqual(own.calls, []);
+      assert.equal(pairingWriter(stateDir, { ...root({}).sys, getuid: () => 1000 }).kind, "as-is");
+      assert.equal(pairingWriter(stateDir, { ...root({}).sys, platform: "win32" }).kind, "as-is");
+      assert.equal(pairingWriter(stateDir, { ...root({}).sys, getuid: undefined }).kind, "as-is");
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 

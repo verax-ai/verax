@@ -234,10 +234,18 @@ jobs:
         id: install-probe
         shell: pwsh
         run: |
-          & $env:VERAX_CLI install --from-tarballs $env:VERAX_TARBALLS --port 8801
+          & $env:VERAX_CLI install --from-tarballs $env:VERAX_TARBALLS --port 8801 --operator-door http://localhost:8788
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The operator door: shut without a code, then a code an administrator asked for enrols a passkey through the service account.
+          node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 shut
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::operator door is not shut as expected"; exit $LASTEXITCODE }
+          $pairing = (& $env:VERAX_CLI operator enroll --state "$env:ProgramData\Verax\state" | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::operator enroll exit $LASTEXITCODE"; exit $LASTEXITCODE }
+          node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 enrol $pairing
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::enrolment through the operator door failed"; exit $LASTEXITCODE }
+          if (-not (Test-Path -LiteralPath "$env:ProgramData\Verax\state\operator-credentials.json")) { Write-Host "::error::operator credentials were not written"; exit 1 }
           $rootAcl = (Get-Acl -LiteralPath "$env:ProgramData\Verax").Sddl
           Write-Host $rootAcl
           foreach ($banned in @('BU', 'S-1-5-32-545', 'WD', 'S-1-1-0', 'AU', 'S-1-5-11', 'CO', 'S-1-3-0', 'IU', 'S-1-5-4')) {
@@ -274,6 +282,7 @@ jobs:
           function denied(fn) { try { fn(); return false; } catch { return true; } }
           if (!denied(() => readFileSync(state + "\\keys\\record.private.pem"))) process.exit(2);
           if (!denied(() => appendFileSync(state + "\\approval-commands.jsonl", "x\n"))) process.exit(3);
+          if (!denied(() => readFileSync(state + "\\operator-credentials.json"))) process.exit(6);
           if (!denied(() => writeFileSync(code, "x"))) process.exit(4);
           const res = await fetch("http://127.0.0.1:8801/mcp", {
             method: "POST",
@@ -656,11 +665,17 @@ jobs:
         run: |
           set -euo pipefail
           # sudo sets SUDO_USER to the invoking account (runner on this job).
-          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801 --operator-door http://localhost:8788
           curl -fsS http://127.0.0.1:8801/healthz >/dev/null
           if cat /var/lib/verax/keys/record.private.pem; then echo "private key was readable"; exit 1; fi
           if echo x >> /var/lib/verax/approval-commands.jsonl; then echo "approval log was writable"; exit 1; fi
           if touch /opt/verax/probe-write; then echo "code dir was writable"; exit 1; fi
+          # The operator door: shut without a code, then a code root asked for enrols a passkey through the service account.
+          node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 shut
+          pairing="$(sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax operator enroll --state /var/lib/verax)"
+          node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 enrol "$pairing"
+          if cat /var/lib/verax/operator-credentials.json >/dev/null 2>&1; then echo "operator credentials were readable"; exit 1; fi
+          sudo test -s /var/lib/verax/operator-credentials.json
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
             const token = readFileSync(process.env.HOME + "/.verax/agent.token", "utf8").trim();
@@ -805,11 +820,17 @@ jobs:
         id: install-probe
         run: |
           set -euo pipefail
-          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801
+          sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax install --from-tarballs "$VERAX_TARBALLS" --port 8801 --operator-door http://localhost:8788
           curl -fsS http://127.0.0.1:8801/healthz >/dev/null
           if cat "/Library/Application Support/Verax/state/keys/record.private.pem"; then echo "private key was readable"; exit 1; fi
           if echo x >> "/Library/Application Support/Verax/state/approval-commands.jsonl"; then echo "approval log was writable"; exit 1; fi
           if touch "/Library/Verax/code/probe-write"; then echo "code dir was writable"; exit 1; fi
+          # The operator door: shut without a code, then a code root asked for enrols a passkey through the service account.
+          node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 shut
+          pairing="$(sudo -E env "PATH=$PATH" /opt/verax-cli/bin/verax operator enroll --state "/Library/Application Support/Verax/state")"
+          node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 enrol "$pairing"
+          if cat "/Library/Application Support/Verax/state/operator-credentials.json" >/dev/null 2>&1; then echo "operator credentials were readable"; exit 1; fi
+          sudo test -s "/Library/Application Support/Verax/state/operator-credentials.json"
           node --input-type=module -e '
             import { readFileSync } from "node:fs";
             const token = readFileSync(process.env.HOME + "/.verax/agent.token", "utf8").trim();

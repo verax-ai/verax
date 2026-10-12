@@ -809,18 +809,49 @@ export async function listen(config: BodyConfig): Promise<Server> {
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = HEADERS_TIMEOUT_MS;
 
+  // Closing the ledger can fail, on a disk that has gone read-only for one.
+  // That is said on stderr and goes no further: thrown from a close listener
+  // it would stop the listeners after it and take the process down, and
+  // thrown after a failed start it would replace the reason the start failed.
+  const closeLedger = (): void => {
+    try {
+      services.ledger.close();
+    } catch (err) {
+      process.stderr.write(`verax: ledger close: ${err instanceof Error ? err.message : "fault"}\n`);
+    }
+  };
   server.on("close", () => {
-    services.ledger.close();
+    closeLedger();
     void closeAll(sessions);
   });
+  const stopStart = async (): Promise<void> => {
+    closeLedger();
+    await closeAll(sessions);
+  };
+  // A door that was asked for and cannot open stops the start: an operator
+  // who expects to approve from away must not find that out with a call held.
+  // It opens before the main listener answers anything, so a body whose
+  // /healthz answers has its door, and the port is not someone else's.
+  let door: Server | null = null;
+  if (config.operatorDoor) {
+    try {
+      door = await openOperatorDoor({ door: config.operatorDoor, stateDir: config.stateDir, services });
+    } catch (err) {
+      await stopStart();
+      throw err;
+    }
+    const opened = door;
+    // First among the close listeners: the door shuts even when closing the ledger throws.
+    server.prependOnceListener("close", () => opened.close());
+  }
   try {
     await new Promise<void>((resolve, reject) => {
       server.once("error", reject);
       server.listen(config.bindPort, config.bindHost, () => resolve());
     });
   } catch (err) {
-    services.ledger.close();
-    await closeAll(sessions);
+    door?.close();
+    await stopStart();
     throw err;
   }
   const bound = server.address();
@@ -836,18 +867,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     throw err;
   }
-  if (config.operatorDoor) {
-    // A door that was asked for and cannot open stops the start: an operator
-    // who expects to approve from away must not find that out with a call held.
-    try {
-      const door = await openOperatorDoor({ door: config.operatorDoor, stateDir: config.stateDir, services });
-      doors.set(server, door);
-      server.once("close", () => door.close());
-    } catch (err) {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      throw err;
-    }
-  }
+  if (door) doors.set(server, door);
   return server;
 }
 
