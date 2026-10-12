@@ -71,7 +71,7 @@ way to reach that from another device.
    pairing code from an elevated `verax operator enroll`, as today. A phone
    cannot enrol itself, and the agent's account cannot ask for a code. The
    door takes the code on `POST /api/enroll/options` and `POST /api/enroll`,
-   and those two are the only paths it answers before an operator exists.
+   and those two are the only paths open before an operator exists.
    A code buys one enrolment, five wrong tries end it wherever they arrive,
    and enrolling opens no session. The door reads the new credential itself:
    made for its challenge, its origin and its relying party, with the user
