@@ -1,6 +1,9 @@
-# Remote approval — design, not built
+# Remote approval — design, partly built, not released
 
-Status: design only. Nothing in this document is in the tree.
+Status: not in a release. The door's listener, the passkey sign-in, the list
+of what is waiting, the approval and halt are in the tree, off unless
+`VERAX_OPERATOR_DOOR` names an origin. Enrolment through the door, the
+install flag and the page are not built.
 
 The capability matrix says there is no remote approver, and on a released
 install that is true: a held call is approved with `verax approve` at the
@@ -60,10 +63,10 @@ way to reach that from another device.
 2. **Sign-in is a passkey and nothing else.** The door issues a short
    session (minutes, one device) after a WebAuthn assertion from a credential
    in `operator-credentials.json`. There is no password and no recovery
-   link. The session is signed with a key only the service account holds; it
-   is a second key, apart from the agent's local issuer key, so local mode's
-   refusal of operator scopes stays as it is for every token the local key
-   signs.
+   link. The session is a random value the running body remembers and
+   nothing else: no key on disk signs one, so nothing the agent's local
+   issuer key signs is ever a session, and local mode's refusal of operator
+   scopes stays as it is. A restart of the body ends every session.
 3. **Enrolment stays at the machine.** A credential is added only with a
    pairing code from an elevated `verax operator enroll`, as today. A phone
    cannot enrol itself, and the agent's account cannot ask for a code.
@@ -88,9 +91,14 @@ way to reach that from another device.
   that ends at the provider, the provider can read them. An operator who
   minds runs the endpoint on the host.
 - It does not protect against the administrator of the host, who can read
-  the session key, add a credential, or approve from the CLI.
+  the body's memory, add a credential, or approve from the CLI.
 - It does not reach a body that is off or cut from the network. The call
   stays held.
+- It does not limit connections or request rate. A sign-in body nobody has
+  vouched for is at most 16 KiB, at most 32 are read at once, and one that
+  takes longer than five seconds is dropped. A caller who keeps those 32
+  busy can still delay a sign-in; a limit on that belongs at the operator's
+  TLS endpoint.
 - It does not make a lost phone harmless by itself: the passkey's own user
   verification is what stands between a thief and an approval, and
   `verax operator` needs a way to remove one credential.

@@ -3,7 +3,7 @@ import { JwksFileError } from "./auth.ts";
 import { EX_CONFIG, loadConfig, overlayInventoryArg } from "./config.ts";
 import { watchDesktopParent } from "./desktop-parent.ts";
 import { KeyAlgorithmError, KeysPartialError } from "./keys.ts";
-import { listen } from "./server.ts";
+import { listen, operatorDoorOf } from "./server.ts";
 
 export async function main(
   env: NodeJS.ProcessEnv = process.env,
@@ -25,6 +25,12 @@ export async function main(
     const addr = server.address();
     if (addr && typeof addr === "object") {
       process.stderr.write(`listening ${(addr as AddressInfo).address}:${(addr as AddressInfo).port}\n`);
+    }
+    const doorAddr = operatorDoorOf(server)?.address();
+    if (doorAddr && typeof doorAddr === "object" && loaded.value.operatorDoor) {
+      process.stderr.write(
+        `operator door ${doorAddr.address}:${doorAddr.port} for ${loaded.value.operatorDoor.origin}\n`,
+      );
     }
     const shutdown = () => {
       server.close(() => process.exit(0));

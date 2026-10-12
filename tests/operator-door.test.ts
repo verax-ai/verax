@@ -1,0 +1,714 @@
+import { strict as assert } from "node:assert";
+import { randomBytes, randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { request, type Server } from "node:http";
+import { connect, type AddressInfo, type Socket } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { describe, it } from "node:test";
+
+import { isoBase64URL } from "@simplewebauthn/server/helpers";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
+
+import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
+import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
+import { credentialsPath, saveCredential } from "../packages/body/src/operator-credentials.ts";
+import {
+  DOOR_CHALLENGE_TTL_MS,
+  DOOR_SESSION_TTL_MS,
+  doorHostAllowed,
+  openOperatorDoor,
+} from "../packages/body/src/operator-door.ts";
+import { listen, operatorDoorOf } from "../packages/body/src/server.ts";
+import { assertWithSoftwarePasskey, mintSoftwarePasskey, type SoftwarePasskey } from "./software-passkey.ts";
+
+// The door's name is what the operator's proxy answers for. The port the door
+// itself listens on is another matter, so the two differ here as they would there.
+const DOOR_ORIGIN = "http://localhost:4174";
+const DOOR_HOST = "localhost:4174";
+const RP_ID = "localhost";
+const ISSUER = "https://issuer.local.test";
+const AUDIENCE = "http://127.0.0.1/verax-operator-door";
+
+type Answer = { status: number; body: Record<string, unknown>; headers: Record<string, string | string[] | undefined> };
+
+/** `node:http` so the test can say exactly which Host and Origin arrive. */
+function call(
+  port: number,
+  method: string,
+  path: string,
+  opts: { token?: string; body?: unknown; origin?: string | null; host?: string } = {},
+): Promise<Answer> {
+  const text = opts.body === undefined ? "" : JSON.stringify(opts.body);
+  const origin = opts.origin === undefined ? (method === "POST" ? DOOR_ORIGIN : null) : opts.origin;
+  return new Promise((resolve, reject) => {
+    const req = request(
+      {
+        host: "127.0.0.1",
+        port,
+        method,
+        path,
+        headers: {
+          host: opts.host ?? DOOR_HOST,
+          ...(origin === null ? {} : { origin }),
+          ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}),
+          ...(text === "" ? {} : { "content-type": "application/json", "content-length": Buffer.byteLength(text) }),
+        },
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          let body: Record<string, unknown> = {};
+          try {
+            body = raw === "" ? {} : (JSON.parse(raw) as Record<string, unknown>);
+          } catch {
+            body = { raw };
+          }
+          resolve({ status: res.statusCode ?? 0, body, headers: res.headers });
+        });
+      },
+    );
+    req.once("error", reject);
+    req.end(text);
+  });
+}
+
+function approvePolicyFile(dir: string): string {
+  const path = join(dir, "approve-policy.json");
+  writeFileSync(
+    path,
+    JSON.stringify({
+      version: 1,
+      default: "deny",
+      approvalTtlMs: 86_400_000,
+      rules: [
+        {
+          id: "put-approve",
+          tool: "memory.put",
+          requires: ["verax:memory"],
+          mode: "approve",
+          text: "Writes need operator approval.",
+        },
+      ],
+    }),
+    "utf8",
+  );
+  return path;
+}
+
+type Body = {
+  stateDir: string;
+  main: string;
+  doorPort: number;
+  server: Server;
+  /** A token the local key signs, as an installed body's agent token is. */
+  local: (scope: string, sub?: string) => Promise<string>;
+  close: () => Promise<void>;
+};
+
+/** A body as `verax install` sets one up: local mode, the door on. */
+async function openBody(passkey: SoftwarePasskey | null, door = true): Promise<Body> {
+  const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-"));
+  if (passkey) {
+    saveCredential(stateDir, {
+      id: passkey.id,
+      publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()),
+      counter: 0,
+      sub: "operator-1",
+    });
+  }
+  const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
+  const jwksFile = join(stateDir, "jwks.json");
+  writeFileSync(jwksFile, JSON.stringify({ keys: [{ ...(await exportJWK(publicKey)), kid: "local-1", alg: "ES256", use: "sig" }] }));
+  const server = await listen({
+    issuer: ISSUER,
+    jwksUrl: "",
+    jwksFile,
+    audience: AUDIENCE,
+    stateDir,
+    bindHost: "127.0.0.1",
+    bindPort: 0,
+    policyFile: approvePolicyFile(stateDir),
+    tlsTerminated: false,
+    operatorDoor: door ? { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 } : null,
+  });
+  const doorServer = operatorDoorOf(server);
+  return {
+    stateDir,
+    main: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    doorPort: doorServer ? (doorServer.address() as AddressInfo).port : 0,
+    server,
+    local: (scope, sub = "agent-1") =>
+      new SignJWT({ scope })
+        .setProtectedHeader({ alg: "ES256", kid: "local-1" })
+        .setIssuer(ISSUER)
+        .setAudience(AUDIENCE)
+        .setSubject(sub)
+        .setIssuedAt()
+        .setExpirationTime("5m")
+        .setJti(randomUUID())
+        .sign(privateKey),
+    close: async () => {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    },
+  };
+}
+
+async function hold(body: Body, id: string): Promise<void> {
+  const res = await fetch(`${body.main}/mcp`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${await body.local("verax:memory")}`,
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "memory.put",
+        arguments: { id, body: { t: 1 }, source: { uri: "file://t", retrievedAtMs: 1 }, validUntilMs: Date.now() + 60_000 },
+      },
+    }),
+  });
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /deferred:approval-required/);
+}
+
+async function signIn(port: number, passkey: SoftwarePasskey, over: { origin?: string; counter?: number } = {}): Promise<Answer> {
+  const options = await call(port, "POST", "/api/signin/options");
+  assert.equal(options.status, 200);
+  const assertion = assertWithSoftwarePasskey(passkey, {
+    challenge: options.body.challenge as string,
+    rpID: RP_ID,
+    origin: over.origin ?? DOOR_ORIGIN,
+    ...(over.counter !== undefined ? { counter: over.counter } : {}),
+  });
+  return call(port, "POST", "/api/signin", { body: { assertion } });
+}
+
+type Waiting = { ref: string; requestHash: string; tool: string; args: Record<string, unknown> };
+
+async function waitingAt(port: number, token: string): Promise<Waiting[]> {
+  const listed = await call(port, "GET", "/api/waiting", { token });
+  assert.equal(listed.status, 200);
+  return listed.body.waiting as Waiting[];
+}
+
+async function approvalAssertion(port: number, token: string, passkey: SoftwarePasskey, ref: string) {
+  const challenge = await call(port, "GET", `/api/approve/challenge?ref=${encodeURIComponent(ref)}`, { token });
+  assert.equal(challenge.status, 200);
+  assert.equal(challenge.body.rpId, RP_ID);
+  return assertWithSoftwarePasskey(passkey, {
+    challenge: challenge.body.challenge as string,
+    rpID: RP_ID,
+    origin: DOOR_ORIGIN,
+  });
+}
+
+describe("operator door", () => {
+  it("D1 is shut unless the body is told an origin for it", async () => {
+    const body = await openBody(mintSoftwarePasskey(), false);
+    try {
+      assert.equal(operatorDoorOf(body.server), null);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D2 serves its own list and nothing else: no /mcp, no ledger, no inventory, no health", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      const signed = await signIn(body.doorPort, passkey);
+      const token = signed.body.token as string;
+      const agent = await body.local("verax:memory");
+      for (const bearer of [undefined, token, agent]) {
+        for (const [method, path] of [
+          ["POST", "/mcp"],
+          ["GET", "/mcp"],
+          ["GET", "/api/ledger"],
+          ["GET", "/api/inventory"],
+          ["GET", "/api/agents"],
+          ["POST", "/api/contest/x"],
+          ["GET", "/healthz"],
+          ["GET", "/.well-known/oauth-protected-resource"],
+          ["GET", "/"],
+          ["GET", "/api/signin"],
+          ["DELETE", "/api/approve"],
+        ] as const) {
+          const res = await call(body.doorPort, method, path, bearer ? { token: bearer } : {});
+          assert.equal(res.status, 404, `${method} ${path}`);
+          assert.deepEqual(res.body, { error: "not-found" });
+        }
+      }
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D3 answers for its own name only, and a POST must name the door's origin", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      const other = await call(body.doorPort, "POST", "/api/signin/options", { host: "evil.example:4174" });
+      assert.equal(other.status, 400);
+      assert.deepEqual(other.body, { error: "host-not-allowed" });
+      // The proxy may forward the door's own loopback address instead of the name.
+      const loopback = await call(body.doorPort, "POST", "/api/signin/options", { host: `127.0.0.1:${body.doorPort}` });
+      assert.equal(loopback.status, 200);
+      const wrongPort = await call(body.doorPort, "POST", "/api/signin/options", { host: "127.0.0.1:1" });
+      assert.equal(wrongPort.status, 400);
+
+      const foreign = await call(body.doorPort, "POST", "/api/signin/options", { origin: "https://evil.example" });
+      assert.equal(foreign.status, 403);
+      assert.deepEqual(foreign.body, { error: "origin-not-allowed" });
+      const none = await call(body.doorPort, "POST", "/api/signin/options", { origin: null });
+      assert.equal(none.status, 403);
+      assert.deepEqual(none.body, { error: "origin-required" });
+      const foreignGet = await call(body.doorPort, "GET", "/api/waiting", { origin: "https://evil.example" });
+      assert.equal(foreignGet.status, 403);
+
+      assert.equal(doorHostAllowed(undefined, { origin: DOOR_ORIGIN } as OperatorDoorConfig, 1), false);
+      assert.equal(doorHostAllowed("LOCALHOST:4174", { origin: DOOR_ORIGIN } as OperatorDoorConfig, 1), true);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D4 stays shut while no operator is enrolled", async () => {
+    const body = await openBody(null);
+    try {
+      for (const [method, path] of [
+        ["POST", "/api/signin/options"],
+        ["POST", "/api/signin"],
+        ["GET", "/api/waiting"],
+        ["POST", "/api/approve"],
+        ["POST", "/api/halt"],
+        ["POST", "/api/resume"],
+      ] as const) {
+        const res = await call(body.doorPort, method, path, method === "POST" ? { body: {} } : {});
+        assert.equal(res.status, 403, `${method} ${path}`);
+        assert.deepEqual(res.body, { error: "no-operator" });
+      }
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D5 a passkey opens a session that sees what is waiting, and only that", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      const closed = await call(body.doorPort, "GET", "/api/waiting");
+      assert.equal(closed.status, 401);
+      await hold(body, "door-d5");
+      const signed = await signIn(body.doorPort, passkey);
+      assert.equal(signed.status, 200);
+      assert.equal(signed.body.sub, "operator-1");
+      assert.equal(signed.headers["cache-control"], "no-store");
+      const listed = await call(body.doorPort, "GET", "/api/waiting", { token: signed.body.token as string });
+      assert.deepEqual(Object.keys(listed.body), ["waiting"]);
+      const rows = listed.body.waiting as Waiting[];
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]!.tool, "memory.put");
+      assert.equal(rows[0]!.args.id, "door-d5");
+      assert.equal(typeof rows[0]!.requestHash, "string");
+
+      const out = await call(body.doorPort, "POST", "/api/signout", { token: signed.body.token as string });
+      assert.equal(out.status, 200);
+      const after = await call(body.doorPort, "GET", "/api/waiting", { token: signed.body.token as string });
+      assert.equal(after.status, 401);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D6 a session does not approve: each approval needs an assertion made for that request", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      await hold(body, "door-d6-a");
+      await hold(body, "door-d6-b");
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const rows = await waitingAt(body.doorPort, token);
+      const a = rows.find((row) => row.args.id === "door-d6-a")!;
+      const b = rows.find((row) => row.args.id === "door-d6-b")!;
+
+      const bare = await call(body.doorPort, "POST", "/api/approve", { token, body: { ref: a.ref, requestHash: a.requestHash } });
+      assert.equal(bare.status, 403);
+      assert.equal(bare.body.error, "approve-signature-required");
+
+      const forA = await approvalAssertion(body.doorPort, token, passkey, a.ref);
+      const crossed = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: b.ref, requestHash: b.requestHash, assertion: forA },
+      });
+      assert.equal(crossed.status, 403);
+      assert.equal(crossed.body.error, "approve-signature-invalid");
+
+      const stale = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: a.ref, requestHash: b.requestHash, assertion: forA },
+      });
+      assert.equal(stale.status, 409);
+      assert.equal(stale.body.error, "stale");
+
+      const ok = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: a.ref, requestHash: a.requestHash, assertion: forA },
+      });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      assert.equal(ok.body.approver, "operator-1");
+
+      const replay = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: a.ref, requestHash: a.requestHash, assertion: forA },
+      });
+      assert.notEqual(replay.status, 200);
+      assert.deepEqual((await waitingAt(body.doorPort, token)).map((row) => row.ref), [b.ref]);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D7 an approval through the door verifies from the files alone and names the door's origin", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    let open = true;
+    const shut = async () => {
+      if (!open) return;
+      open = false;
+      await new Promise<void>((resolve) => body.server.close(() => resolve()));
+    };
+    try {
+      await hold(body, "door-d7");
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const [row] = await waitingAt(body.doorPort, token);
+      const assertion = await approvalAssertion(body.doorPort, token, passkey, row!.ref);
+      const ok = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: row!.ref, requestHash: row!.requestHash, assertion },
+      });
+      assert.equal(ok.status, 200, JSON.stringify(ok.body));
+      // No body is running when the files are read back.
+      await shut();
+      const report = await verifyApprovalSignatures(body.stateDir);
+      assert.equal(report.signedVerified, 1);
+      assert.equal(report.signedFailed, 0);
+      assert.equal(report.unsignedHttp, 0);
+      assert.match(report.line, /origin http:\/\/localhost:4174/);
+    } finally {
+      await shut();
+      rmSync(body.stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D8 the two listeners take none of each other's tokens", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      await hold(body, "door-d8");
+      const session = (await signIn(body.doorPort, passkey)).body.token as string;
+      const [row] = await waitingAt(body.doorPort, session);
+      const minted = await body.local("verax:approve verax:audit", "operator-1");
+
+      // Local mode still refuses operator scopes from the local key, door or no door.
+      const atMain = await fetch(`${body.main}/api/approve`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${minted}`, "content-type": "application/json" },
+        body: JSON.stringify({ ref: row!.ref, requestHash: row!.requestHash }),
+      });
+      assert.equal(atMain.status, 403);
+      assert.deepEqual(await atMain.json(), { error: "local-mode-operator-scope" });
+
+      // A token the local key signed is not a session at the door.
+      for (const [method, path] of [
+        ["GET", "/api/waiting"],
+        ["POST", "/api/approve"],
+        ["POST", "/api/halt"],
+        ["GET", "/api/approve/challenge?ref=x"],
+      ] as const) {
+        const res = await call(body.doorPort, method, path, { token: minted, ...(method === "POST" ? { body: {} } : {}) });
+        assert.equal(res.status, 401, `${method} ${path}`);
+      }
+
+      // A door session is not a bearer at the main listener.
+      for (const path of ["/api/ledger", "/api/halt", "/mcp"]) {
+        const res = await fetch(`${body.main}${path}`, { headers: { authorization: `Bearer ${session}` } });
+        assert.equal(res.status, 401, path);
+      }
+      assert.equal((await waitingAt(body.doorPort, session)).length, 1);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D9 sign-in refuses another origin, a used challenge, an unknown passkey and a counter that went back", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      const elsewhere = await signIn(body.doorPort, passkey, { origin: "https://evil.example" });
+      assert.equal(elsewhere.status, 403);
+      assert.deepEqual(elsewhere.body, { error: "signin-refused" });
+
+      const options = await call(body.doorPort, "POST", "/api/signin/options");
+      const assertion = assertWithSoftwarePasskey(passkey, {
+        challenge: options.body.challenge as string,
+        rpID: RP_ID,
+        origin: DOOR_ORIGIN,
+      });
+      assert.equal((await call(body.doorPort, "POST", "/api/signin", { body: { assertion } })).status, 200);
+      const again = await call(body.doorPort, "POST", "/api/signin", { body: { assertion } });
+      assert.equal(again.status, 403);
+      // A fresh signature over the challenge that was already used: the counter is fine, the challenge is spent.
+      const fresh = assertWithSoftwarePasskey(passkey, {
+        challenge: options.body.challenge as string,
+        rpID: RP_ID,
+        origin: DOOR_ORIGIN,
+      });
+      const spent = await call(body.doorPort, "POST", "/api/signin", { body: { assertion: fresh } });
+      assert.equal(spent.status, 403);
+      assert.deepEqual(spent.body, { error: "signin-refused" });
+
+      const own = assertWithSoftwarePasskey(passkey, { challenge: "made-up-by-the-caller", rpID: RP_ID, origin: DOOR_ORIGIN });
+      assert.equal((await call(body.doorPort, "POST", "/api/signin", { body: { assertion: own } })).status, 403);
+      // The right shape and a time still ahead, but not a challenge this door made.
+      const forged = Buffer.alloc(56);
+      forged.writeBigUInt64BE(BigInt(Date.now() + 60_000), 0);
+      randomBytes(48).copy(forged, 8);
+      const shaped = assertWithSoftwarePasskey(passkey, {
+        challenge: forged.toString("base64url"),
+        rpID: RP_ID,
+        origin: DOOR_ORIGIN,
+      });
+      const refused = await call(body.doorPort, "POST", "/api/signin", { body: { assertion: shaped } });
+      assert.equal(refused.status, 403);
+      assert.deepEqual(refused.body, { error: "signin-refused" });
+
+      const stranger = await signIn(body.doorPort, mintSoftwarePasskey());
+      assert.equal(stranger.status, 403);
+      assert.deepEqual(stranger.body, { error: "signin-refused" });
+
+      const back = await signIn(body.doorPort, passkey, { counter: 1 });
+      assert.equal(back.status, 403);
+      assert.deepEqual(back.body, { error: "cloned-authenticator" });
+
+      assert.equal((await call(body.doorPort, "POST", "/api/signin", { body: {} })).status, 403);
+      assert.equal((await call(body.doorPort, "POST", "/api/signin", { body: { assertion: "x" } })).status, 403);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D10 a challenge and a session both run out, and a removed passkey ends its sessions", async () => {
+    const passkey = mintSoftwarePasskey();
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-clock-"));
+    saveCredential(stateDir, {
+      id: passkey.id,
+      publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()),
+      counter: 0,
+      sub: "operator-1",
+    });
+    let clock = 1_000_000;
+    // Sign-in and the waiting list read the state directory only; the body's services are not reached.
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      now: () => clock,
+    });
+    const port = (door.address() as AddressInfo).port;
+    try {
+      const options = await call(port, "POST", "/api/signin/options");
+      clock += DOOR_CHALLENGE_TTL_MS;
+      const late = assertWithSoftwarePasskey(passkey, { challenge: options.body.challenge as string, rpID: RP_ID, origin: DOOR_ORIGIN });
+      assert.equal((await call(port, "POST", "/api/signin", { body: { assertion: late } })).status, 403);
+
+      const signed = await signIn(port, passkey);
+      assert.equal(signed.status, 200);
+      const token = signed.body.token as string;
+      assert.equal(signed.body.expiresAtMs, clock + DOOR_SESSION_TTL_MS);
+      clock += DOOR_SESSION_TTL_MS - 1;
+      assert.equal((await call(port, "GET", "/api/waiting", { token })).status, 200);
+      clock += 1;
+      assert.equal((await call(port, "GET", "/api/waiting", { token })).status, 401);
+
+      const second = (await signIn(port, passkey)).body.token as string;
+      assert.equal((await call(port, "GET", "/api/waiting", { token: second })).status, 200);
+      writeFileSync(credentialsPath(stateDir), `${JSON.stringify({ credentials: [] })}\n`);
+      assert.equal((await call(port, "GET", "/api/waiting", { token: second })).status, 401);
+    } finally {
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D11 stops the body on a session's word, and resumes it only on a signed one", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const halted = await call(body.doorPort, "POST", "/api/halt", { token, body: {} });
+      assert.equal(halted.status, 200);
+      assert.equal(halted.body.halted, true);
+      assert.equal((await call(body.doorPort, "GET", "/api/halt", { token })).body.halted, true);
+
+      const bare = await call(body.doorPort, "POST", "/api/resume", { token, body: {} });
+      assert.equal(bare.status, 403);
+      assert.equal(bare.body.error, "resume-signature-required");
+
+      const challenge = await call(body.doorPort, "GET", "/api/resume/challenge", { token });
+      assert.equal(challenge.status, 200);
+      const assertion = assertWithSoftwarePasskey(passkey, {
+        challenge: challenge.body.challenge as string,
+        rpID: RP_ID,
+        origin: DOOR_ORIGIN,
+      });
+      const resumed = await call(body.doorPort, "POST", "/api/resume", { token, body: { assertion } });
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+      assert.equal(resumed.body.halted, false);
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D13 a stranger who asks for challenges takes nothing from the operator who asked for one", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      const options = await call(body.doorPort, "POST", "/api/signin/options");
+      const seen = new Set<string>([options.body.challenge as string]);
+      for (let i = 0; i < 200; i += 1) {
+        const other = await call(body.doorPort, "POST", "/api/signin/options");
+        assert.equal(other.status, 200);
+        seen.add(other.body.challenge as string);
+      }
+      assert.equal(seen.size, 201);
+      const assertion = assertWithSoftwarePasskey(passkey, {
+        challenge: options.body.challenge as string,
+        rpID: RP_ID,
+        origin: DOOR_ORIGIN,
+      });
+      const signed = await call(body.doorPort, "POST", "/api/signin", { body: { assertion } });
+      assert.equal(signed.status, 200, JSON.stringify(signed.body));
+    } finally {
+      await body.close();
+    }
+  });
+
+  it("D14 a sign-in body nobody has vouched for is small, few are read at once, and a slow one is dropped", async () => {
+    const passkey = mintSoftwarePasskey();
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-slow-"));
+    saveCredential(stateDir, {
+      id: passkey.id,
+      publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()),
+      counter: 0,
+      sub: "operator-1",
+    });
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      signinBodyMs: 600,
+    });
+    const port = (door.address() as AddressInfo).port;
+    const sockets: Socket[] = [];
+    try {
+      const big = await call(port, "POST", "/api/signin", { body: { assertion: "x".repeat(17 * 1024) } });
+      assert.equal(big.status, 413);
+
+      // A length that is only announced is refused before any of the body is waited for.
+      const announced = await new Promise<string>((resolve, reject) => {
+        const socket = connect(port, "127.0.0.1");
+        sockets.push(socket);
+        const waited = setTimeout(() => reject(new Error("no answer to an announced length")), 400);
+        socket.on("error", () => undefined);
+        socket.once("data", (chunk: Buffer) => {
+          clearTimeout(waited);
+          resolve(chunk.toString("utf8").split("\r\n")[0] ?? "");
+        });
+        socket.write(
+          `POST /api/signin HTTP/1.1\r\nHost: ${DOOR_HOST}\r\nOrigin: ${DOOR_ORIGIN}\r\n` +
+            `Content-Type: application/json\r\nContent-Length: 20000\r\n\r\n`,
+        );
+      });
+      assert.match(announced, /^HTTP\/1\.1 413 /);
+
+      // A body with no announced length is counted as it arrives.
+      const streamed = await new Promise<number>((resolve, reject) => {
+        const req = request(
+          {
+            host: "127.0.0.1",
+            port,
+            method: "POST",
+            path: "/api/signin",
+            headers: { host: DOOR_HOST, origin: DOOR_ORIGIN, "content-type": "application/json", "transfer-encoding": "chunked" },
+          },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.once("error", reject);
+        req.write(`{"assertion":"`);
+        req.write("x".repeat(17 * 1024));
+        req.end(`"}`);
+      });
+      assert.equal(streamed, 413);
+
+      // Thirty-two requests that each send the start of a body and then nothing.
+      for (let i = 0; i < 32; i += 1) {
+        const socket = connect(port, "127.0.0.1");
+        socket.on("error", () => undefined);
+        socket.write(
+          `POST /api/signin HTTP/1.1\r\nHost: ${DOOR_HOST}\r\nOrigin: ${DOOR_ORIGIN}\r\n` +
+            `Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{"assertio`,
+        );
+        sockets.push(socket);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      const busy = await signIn(port, passkey);
+      assert.equal(busy.status, 503);
+      assert.deepEqual(busy.body, { error: "busy" });
+      assert.equal(busy.headers["retry-after"], "5");
+
+      // Nobody closes those sockets: the door stops waiting for them by itself.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const after = await signIn(port, passkey);
+      assert.equal(after.status, 200, JSON.stringify(after.body));
+    } finally {
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D12 the origin is a name over HTTPS, and the door binds loopback", () => {
+    const ok = readOperatorDoor({ VERAX_OPERATOR_DOOR: "https://approve.example.com" });
+    assert.deepEqual(ok, {
+      ok: true,
+      value: { origin: "https://approve.example.com", rpID: "approve.example.com", bindHost: "127.0.0.1", bindPort: 8788 },
+    });
+    assert.deepEqual(readOperatorDoor({}), { ok: true, value: null });
+    assert.equal(readOperatorDoor({ VERAX_OPERATOR_DOOR: "http://localhost:4174" }).ok, true);
+    for (const bad of [
+      "http://approve.example.com",
+      "https://192.0.2.7",
+      "https://[::1]",
+      "https://approve.example.com/door",
+      "https://approve.example.com/",
+      "approve.example.com",
+    ]) {
+      assert.equal(readOperatorDoor({ VERAX_OPERATOR_DOOR: bad }).ok, false, bad);
+    }
+    assert.equal(
+      readOperatorDoor({ VERAX_OPERATOR_DOOR: "https://approve.example.com", VERAX_OPERATOR_BIND: "0.0.0.0:8788" }).ok,
+      false,
+    );
+  });
+});

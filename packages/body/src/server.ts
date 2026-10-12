@@ -9,6 +9,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { bodyVersion } from "./body-version.ts";
 import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
+import { openOperatorDoor } from "./operator-door.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
 import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir, type LedgerCounts } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
@@ -835,7 +836,26 @@ export async function listen(config: BodyConfig): Promise<Server> {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     throw err;
   }
+  if (config.operatorDoor) {
+    // A door that was asked for and cannot open stops the start: an operator
+    // who expects to approve from away must not find that out with a call held.
+    try {
+      const door = await openOperatorDoor({ door: config.operatorDoor, stateDir: config.stateDir, services });
+      doors.set(server, door);
+      server.once("close", () => door.close());
+    } catch (err) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      throw err;
+    }
+  }
   return server;
+}
+
+const doors = new WeakMap<Server, Server>();
+
+/** The operator door opened with this body, or null when it is shut. */
+export function operatorDoorOf(server: Server): Server | null {
+  return doors.get(server) ?? null;
 }
 
 export { TOOL_NAMES };
