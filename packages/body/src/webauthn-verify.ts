@@ -17,6 +17,9 @@ export type RegistrationVerdict =
 /** The COSE algorithms `coseKeyToPublicKey` takes. An enrolment offers these and no others. */
 export const COSE_ALGORITHMS: readonly number[] = [-7, -8, -257];
 
+/** The shortest RSA modulus taken, for a sign-in as for an enrolment. */
+export const RSA_MIN_BITS = 2048;
+
 type PostedAssertion = {
   response?: {
     clientDataJSON?: unknown;
@@ -93,10 +96,12 @@ export function coseKeyToPublicKey(base64urlCose: string): KeyObject | null {
       const n = mapBytes(decoded, -1);
       const e = mapBytes(decoded, -2);
       if (!n || !e) return null;
-      return createPublicKey({
+      const key = createPublicKey({
         format: "jwk",
         key: { kty: "RSA", alg: "RS256", n: b64url(n), e: b64url(e) },
       });
+      // A modulus that imports is not yet one a signature fits in, or one worth trusting.
+      return (key.asymmetricKeyDetails?.modulusLength ?? 0) >= RSA_MIN_BITS ? key : null;
     }
     return null;
   } catch {

@@ -74,9 +74,11 @@ way to reach that from another device.
    and those two are the only paths open before an operator exists.
    A code buys one enrolment, five wrong tries end it wherever they arrive,
    and enrolling opens no session. A refused code gets one answer whether it
-   was wrong, late, used up or never asked for, and the wrong tries are
-   counted in the running body as well as on disk, so a count that cannot be
-   written still ends the code. The door reads the new credential itself:
+   was wrong, late, used up or never asked for. The wrong tries are counted
+   in the pairing file; a wrong try that cannot be counted there, as on a
+   full disk, ends the code: the file is removed, and the running body
+   refuses that code until it stops. If the file can be neither written nor
+   removed, a body started afterwards reads the old count again. The door reads the new credential itself:
    made for its challenge, its origin and its relying party, with the user
    verified, a key it can verify with, and no byte of the authenticator data
    left unexplained.

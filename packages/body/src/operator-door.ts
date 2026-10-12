@@ -14,6 +14,7 @@
  * assertion made for that one request.
  */
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -32,7 +33,7 @@ import {
   updateCounter,
 } from "./operator-credentials.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
-import { checkPairing, consumePairing, PAIRING_MAX_ATTEMPTS, readPairing } from "./operator-pairing.ts";
+import { checkPairing, consumePairing, pairingPath, readPairing } from "./operator-pairing.ts";
 import { COSE_ALGORITHMS, verifyAssertion, verifyRegistration, type PostedRegistration } from "./webauthn-verify.ts";
 import type { createBodyServices } from "./wiring.ts";
 
@@ -195,25 +196,26 @@ export async function openOperatorDoor(opts: {
     }
     return { value: parsed.value };
   };
-  // Wrong codes are counted on disk, where the count outlives a restart. They
-  // are counted here as well, against the code they were tried on: a write
-  // that fails, as on a full disk, must not leave a code open to any number of tries.
-  const wrongCodes = { hash: "", count: 0 };
+  // Wrong codes are counted in the pairing file, and that count is the only
+  // one. A wrong try that cannot be counted, as on a full disk, ends the code
+  // instead: the file is removed, which needs no room, and this body refuses
+  // the code for as long as it runs in case the file could not be removed either.
+  const uncountable = new Set<string>();
   const codeHolds = (code: string): boolean => {
     const open = readPairing(stateDir);
-    if (open && open.hash !== wrongCodes.hash) {
-      wrongCodes.hash = open.hash;
-      wrongCodes.count = 0;
-    }
-    if (wrongCodes.count >= PAIRING_MAX_ATTEMPTS) return false;
-    let held = false;
+    if (open && uncountable.has(open.hash)) return false;
     try {
-      held = pairingCheck(stateDir, code, now()).ok;
+      return pairingCheck(stateDir, code, now()).ok;
     } catch (err) {
       process.stderr.write(`verax-door: pairing check: ${err instanceof Error ? err.message : "fault"}\n`);
+      if (open) uncountable.add(open.hash);
+      try {
+        rmSync(pairingPath(stateDir), { force: true });
+      } catch {
+        // The refusal above still stands while this body runs.
+      }
+      return false;
     }
-    if (!held && open) wrongCodes.count += 1;
-    return held;
   };
   // The handlers read the relying party from an environment. The door's is
   // its own origin, whatever the process environment says.

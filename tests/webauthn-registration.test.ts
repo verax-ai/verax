@@ -7,6 +7,7 @@ import { isoBase64URL, isoCBOR } from "@simplewebauthn/server/helpers";
 import {
   COSE_ALGORITHMS,
   coseKeyToPublicKey,
+  RSA_MIN_BITS,
   verifyAssertion,
   verifyRegistration,
   type RegistrationVerdict,
@@ -209,5 +210,15 @@ describe("registration", () => {
     for (const [alg, key] of taken) assert.notEqual(coseKeyToPublicKey(key), null, `alg ${alg}`);
     const es384 = keyBytes(new Map<number, number | Uint8Array>([[1, 2], [3, -35], [-1, 1], [-2, bytes(ec.x)], [-3, bytes(ec.y)]]));
     assert.equal(coseKeyToPublicKey(es384), null);
+
+    // An RSA modulus that imports is not yet one a signature fits in.
+    const rsaKey = (n: Uint8Array, e: Uint8Array) => keyBytes(new Map<number, number | Uint8Array>([[1, 3], [3, -257], [-1, n], [-2, e]]));
+    assert.equal(coseKeyToPublicKey(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))), null);
+    const short = generateKeyPairSync("rsa", { modulusLength: RSA_MIN_BITS - 8 }).publicKey.export({ format: "jwk" });
+    assert.equal(coseKeyToPublicKey(rsaKey(bytes(short.n), bytes(short.e))), null);
+    // And an enrolment that carries one is refused before the code is spent on it.
+    const passkey = mintSoftwarePasskey();
+    const tiny = { ...passkey, publicKeyCose: isoBase64URL.toBuffer(rsaKey(new Uint8Array([1]), new Uint8Array([1, 0, 1]))) };
+    assert.equal(reason(verify(around(tiny, attestedAuthData(tiny, RP_ID)))), "public-key");
   });
 });

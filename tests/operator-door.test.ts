@@ -24,6 +24,7 @@ import {
   checkPairing,
   hashPairingCode,
   PAIRING_TTL_MS,
+  pairingPath,
   readPairing,
   writePairing,
 } from "../packages/body/src/operator-pairing.ts";
@@ -953,7 +954,7 @@ describe("operator door", () => {
     }
   });
 
-  it("D20 a count of wrong codes that cannot be written still ends the code", async () => {
+  it("D20 a wrong code that cannot be counted ends the code, on disk and in the running body", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-full-"));
     // A full disk: the right code is read, a wrong one cannot be counted.
     const door = await openOperatorDoor({
@@ -967,21 +968,80 @@ describe("operator door", () => {
       },
     });
     const port = (door.address() as AddressInfo).port;
+    const refused = { error: "pairing-refused" };
     try {
-      const { code } = beginPairing(stateDir);
-      const wrong = code === "00000000" ? "11111111" : "00000000";
-      for (let i = 0; i < 5; i += 1) {
-        const res = await call(port, "POST", "/api/enroll/options", { body: { code: wrong } });
-        assert.equal(res.status, 403);
-        assert.deepEqual(res.body, { error: "pairing-refused" });
-      }
-      assert.equal(readPairing(stateDir)?.attempts, 0);
-      const late = await enroll(port, code, mintSoftwarePasskey());
-      assert.deepEqual(late.body, { error: "pairing-refused" });
+      // Four wrong tries were counted while there was room. The fifth cannot be.
+      const code = "24681357";
+      const record = { hash: hashPairingCode(code), expiresAtMs: Date.now() + 60_000, attempts: 4 };
+      writePairing(stateDir, record);
+      assert.equal((await call(port, "POST", "/api/enroll/options", { body: { code } })).status, 200);
+      const fifth = await call(port, "POST", "/api/enroll/options", { body: { code: "00000000" } });
+      assert.equal(fifth.status, 403);
+      assert.deepEqual(fifth.body, refused);
+      // The code is gone from the disk, so a body started later does not take it either.
+      assert.equal(existsSync(pairingPath(stateDir)), false);
+      assert.deepEqual((await enroll(port, code, mintSoftwarePasskey())).body, refused);
+
+      // Had the file been one that could not be removed, this body still refuses the code.
+      writePairing(stateDir, { ...record, attempts: 0 });
+      assert.deepEqual((await enroll(port, code, mintSoftwarePasskey())).body, refused);
       assert.equal(existsSync(credentialsPath(stateDir)), false);
-      // A code asked for afresh starts its own count.
+
+      // A code asked for afresh is another code.
       assert.equal((await enroll(port, beginPairing(stateDir).code, mintSoftwarePasskey())).status, 200);
     } finally {
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D21 enrolment bodies wait in the same short line as sign-in bodies, and a slow one is dropped", async () => {
+    const passkey = mintSoftwarePasskey();
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-line-"));
+    saveCredential(stateDir, {
+      id: passkey.id,
+      publicKey: isoBase64URL.fromBuffer(passkey.publicKeyCose.slice()),
+      counter: 0,
+      sub: "operator-1",
+    });
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      signinBodyMs: 600,
+    });
+    const port = (door.address() as AddressInfo).port;
+    const sockets: Socket[] = [];
+    try {
+      const { code } = beginPairing(stateDir);
+      // Thirty-two enrolment requests that each send the start of a body and then nothing.
+      for (let i = 0; i < 32; i += 1) {
+        const socket = connect(port, "127.0.0.1");
+        socket.on("error", () => undefined);
+        socket.write(
+          `POST ${i % 2 === 0 ? "/api/enroll" : "/api/enroll/options"} HTTP/1.1\r\nHost: ${DOOR_HOST}\r\nOrigin: ${DOOR_ORIGIN}\r\n` +
+            `Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{"code":"1`,
+        );
+        sockets.push(socket);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      for (const path of ["/api/enroll/options", "/api/enroll"]) {
+        const busy = await call(port, "POST", path, { body: { code } });
+        assert.equal(busy.status, 503, path);
+        assert.deepEqual(busy.body, { error: "busy" });
+        assert.equal(busy.headers["retry-after"], "5");
+      }
+      // The line is one line: a sign-in waits behind enrolment bodies too.
+      assert.equal((await signIn(port, passkey)).status, 503);
+      // A code that never arrived whole was not a wrong try.
+      assert.equal(readPairing(stateDir)?.attempts, 0);
+
+      // Nobody closes those sockets: the door stops waiting for them by itself.
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      assert.equal((await call(port, "POST", "/api/enroll/options", { body: { code } })).status, 200);
+      assert.equal((await signIn(port, passkey)).status, 200);
+    } finally {
+      for (const socket of sockets) socket.destroy();
       await new Promise<void>((resolve) => door.close(() => resolve()));
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
