@@ -810,9 +810,22 @@ export async function listen(config: BodyConfig): Promise<Server> {
   server.headersTimeout = HEADERS_TIMEOUT_MS;
 
   server.on("close", () => {
-    services.ledger.close();
-    void closeAll(sessions);
+    try {
+      services.ledger.close();
+    } finally {
+      void closeAll(sessions);
+    }
   });
+  // A start that has failed is about to say why. Clearing up after it must
+  // not replace that reason with one of its own.
+  const stopStart = async (): Promise<void> => {
+    try {
+      services.ledger.close();
+    } catch (err) {
+      process.stderr.write(`verax: ledger close after a failed start: ${err instanceof Error ? err.message : "fault"}\n`);
+    }
+    await closeAll(sessions);
+  };
   // A door that was asked for and cannot open stops the start: an operator
   // who expects to approve from away must not find that out with a call held.
   // It opens before the main listener answers anything, so a body whose
@@ -822,11 +835,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     try {
       door = await openOperatorDoor({ door: config.operatorDoor, stateDir: config.stateDir, services });
     } catch (err) {
-      try {
-        services.ledger.close();
-      } finally {
-        await closeAll(sessions);
-      }
+      await stopStart();
       throw err;
     }
     const opened = door;
@@ -840,11 +849,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     });
   } catch (err) {
     door?.close();
-    try {
-      services.ledger.close();
-    } finally {
-      await closeAll(sessions);
-    }
+    await stopStart();
     throw err;
   }
   const bound = server.address();

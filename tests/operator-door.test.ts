@@ -1177,11 +1177,11 @@ describe("operator door", () => {
 
   it("D24 root asks for a pairing code as the owner of the state directory, or not at all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-enroll-"));
-    const service = { uid: 997, gid: 995, mode: 0o40700, isDirectory: true };
-    const roots = { uid: 0, gid: 0, mode: 0o40755, isDirectory: true };
+    const service = { uid: 997, gid: 995, isDirectory: true };
+    type Disk = Record<string, typeof service | undefined>;
     type Fake = { sys: OperatorSys; calls: string[] };
     /** A process that says it is root, over a disk the test describes. */
-    const root = (disk: Record<string, typeof service | undefined>, over: Partial<OperatorSys> = {}): Fake => {
+    const root = (disk: Disk, over: Partial<OperatorSys> = {}): Fake => {
       const calls: string[] = [];
       let uid = 0;
       let gid = 0;
@@ -1199,7 +1199,6 @@ describe("operator door", () => {
           uid = next;
         },
         look: (path) => disk[path] ?? null,
-        real: (path) => (disk[path] ? path : null),
         ...over,
       };
       return { sys, calls };
@@ -1228,11 +1227,12 @@ describe("operator door", () => {
       assert.equal(readPairing(stateDir)?.attempts, 0);
       rmSync(pairingPath(stateDir));
 
-      // A drop that cannot be made, or that did not take, writes nothing.
+      // A drop that cannot be made, or that did not take in either half, writes nothing.
       for (const [why, over, said] of [
         ["no setuid", { setuid: undefined }, /cannot-change-account/],
         ["setgid throws", { setgid: () => { throw new Error("EPERM"); } }, /cannot-change-account/],
         ["setuid changes nothing", { setuid: () => undefined }, /account-did-not-change/],
+        ["setgid changes nothing", { setgid: () => undefined }, /account-did-not-change/],
       ] as const) {
         const stuck = await enroll(root({ [stateDir]: service }, over as Partial<OperatorSys>));
         assert.equal(stuck.code, 78, why);
@@ -1240,30 +1240,34 @@ describe("operator door", () => {
         assert.equal(existsSync(pairingPath(stateDir)), false, why);
       }
 
-      // Root makes no state directory, and follows no link to one.
+      // Root makes no state directory, follows no link to one, and keeps no group of its own.
       const missing = join(stateDir, "not-there");
       const none = await enroll(root({}), missing);
       assert.equal(none.code, 78);
       assert.match(none.err, /state-dir-missing/);
       assert.equal(existsSync(missing), false);
-      const link = await enroll(root({ [stateDir]: { ...service, isDirectory: false } }));
-      assert.equal(link.code, 78);
-      assert.match(link.err, /state-dir-not-a-directory/);
-      assert.equal(existsSync(pairingPath(stateDir)), false);
+      for (const [seen, said] of [
+        [{ ...service, isDirectory: false }, /state-dir-not-a-directory/],
+        [{ ...service, gid: 0 }, /state-dir-group-is-roots/],
+      ] as const) {
+        const refused = await enroll(root({ [stateDir]: seen }));
+        assert.equal(refused.code, 78);
+        assert.match(refused.err, said);
+        assert.equal(existsSync(pairingPath(stateDir)), false);
+      }
+      // A slash after a link would have the link looked through. The path is resolved before it is looked at.
+      const looked: string[] = [];
+      const slashed = pairingWriter(`${stateDir}/`, { ...root({}).sys, look: (path) => (looked.push(path), null) });
+      assert.equal(slashed.kind, "refuse");
+      assert.deepEqual(looked.map((path) => /[\\/]$/.test(path)), [false]);
 
-      // Root's own directory is written as root only when every directory above is root's alone.
-      const chain = (parent: typeof service) => ({ "/": roots, "/srv": parent, "/srv/state": roots });
-      const at = (disk: Record<string, typeof service>) => pairingWriter("/srv/state", root(disk).sys);
-      assert.deepEqual(at(chain(roots)), { kind: "as-is", stateDir: "/srv/state" });
-      assert.deepEqual(at(chain({ ...roots, mode: 0o41777 })), { kind: "as-is", stateDir: "/srv/state" });
-      assert.deepEqual(at(chain({ ...roots, uid: 1000 })), { kind: "refuse", reason: "state-dir-not-roots-alone:/srv" });
-      assert.deepEqual(at(chain({ ...roots, mode: 0o40777 })), { kind: "refuse", reason: "state-dir-not-roots-alone:/srv" });
-      assert.deepEqual(at(chain({ ...roots, isDirectory: false })), { kind: "refuse", reason: "state-dir-not-roots-alone:/srv" });
-
-      // Anyone but root, and anyone on Windows, writes as who they are.
-      assert.deepEqual(pairingWriter(stateDir, { ...root({}).sys, getuid: () => 1000 }), { kind: "as-is", stateDir });
-      assert.deepEqual(pairingWriter(stateDir, { ...root({}).sys, platform: "win32" }), { kind: "as-is", stateDir });
-      assert.deepEqual(pairingWriter(stateDir, { ...root({}).sys, getuid: undefined }), { kind: "as-is", stateDir });
+      // Root's own directory is written as root, as before. Anyone but root, and anyone on Windows, writes as who they are.
+      const own = root({ [stateDir]: { ...service, uid: 0, gid: 0 } });
+      assert.equal((await enroll(own)).code, 0);
+      assert.deepEqual(own.calls, []);
+      assert.equal(pairingWriter(stateDir, { ...root({}).sys, getuid: () => 1000 }).kind, "as-is");
+      assert.equal(pairingWriter(stateDir, { ...root({}).sys, platform: "win32" }).kind, "as-is");
+      assert.equal(pairingWriter(stateDir, { ...root({}).sys, getuid: undefined }).kind, "as-is");
     } finally {
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }

@@ -1,9 +1,9 @@
-import { lstatSync, realpathSync } from "node:fs";
-import { dirname } from "node:path";
+import { lstatSync } from "node:fs";
+import { resolve } from "node:path";
 
 import { beginPairing } from "./operator-pairing.ts";
 
-type Seen = { uid: number; gid: number; mode: number; isDirectory: boolean };
+type Seen = { uid: number; gid: number; isDirectory: boolean };
 
 /** What `runOperator` asks of the process and the disk. Tests stand in for it. */
 export type OperatorSys = {
@@ -15,7 +15,6 @@ export type OperatorSys = {
   setuid?: (uid: number) => void;
   /** lstat: a link is seen as a link, not as what it points at. Null when there is nothing there. */
   look: (path: string) => Seen | null;
-  real: (path: string) => string | null;
 };
 
 export type PairingWriter =
@@ -27,35 +26,26 @@ export type PairingWriter =
  * As whom the pairing code is written. An installed body runs as its own
  * account and owns its state directory, and root asking for a code is the
  * usual case there. A file root wrote would be root's, which that account
- * cannot read; and a write by root into a place another account controls is a
- * write that account can aim somewhere else. So root writes only in two ways.
- * Into a directory another account owns, it gives up being root first and
- * writes as that owner. Into a directory of its own, it writes as root, and
- * only when every directory above is root's too and nobody else can change
- * it. A link, a missing directory or anything else is refused: root does not
- * make a state directory here.
+ * cannot read; and a write by root into a directory another account owns is
+ * a write that account can aim somewhere else. So for such a directory root
+ * gives up being root first and writes as its owner. A link, a missing
+ * directory, a file, or a directory whose group is root's is refused: root
+ * makes no state directory here and keeps no part of itself.
+ *
+ * A directory that is root's own is written as root, as it always was. There
+ * is no other account to become, and a root-run body whose state someone else
+ * can replace is theirs already, whoever writes the code.
  */
-export function pairingWriter(
-  stateDir: string,
-  sys: Pick<OperatorSys, "platform" | "getuid" | "look" | "real">,
-): PairingWriter {
+export function pairingWriter(stateDir: string, sys: Pick<OperatorSys, "platform" | "getuid" | "look">): PairingWriter {
   if (sys.platform === "win32" || sys.getuid?.() !== 0) return { kind: "as-is", stateDir };
-  const seen = sys.look(stateDir);
-  if (!seen) return { kind: "refuse", reason: `state-dir-missing:${stateDir}` };
-  if (!seen.isDirectory) return { kind: "refuse", reason: `state-dir-not-a-directory:${stateDir}` };
-  if (seen.uid !== 0) return { kind: "become", stateDir, uid: seen.uid, gid: seen.gid };
-  const real = sys.real(stateDir);
-  if (!real) return { kind: "refuse", reason: `state-dir-missing:${stateDir}` };
-  for (let at = real; ; at = dirname(at)) {
-    const dir = sys.look(at);
-    // Group- or other-writable is still root's when the sticky bit keeps others from renaming what is in it.
-    const othersCanChange = dir ? (dir.mode & 0o022) !== 0 && (dir.mode & 0o1000) === 0 : true;
-    if (!dir || !dir.isDirectory || dir.uid !== 0 || othersCanChange) {
-      return { kind: "refuse", reason: `state-dir-not-roots-alone:${at}` };
-    }
-    if (dirname(at) === at) break;
-  }
-  return { kind: "as-is", stateDir: real };
+  // Resolved first: a link with a slash after it is looked through, and must not be.
+  const dir = resolve(stateDir);
+  const seen = sys.look(dir);
+  if (!seen) return { kind: "refuse", reason: `state-dir-missing:${dir}` };
+  if (!seen.isDirectory) return { kind: "refuse", reason: `state-dir-not-a-directory:${dir}` };
+  if (seen.uid === 0) return { kind: "as-is", stateDir: dir };
+  if (seen.gid === 0) return { kind: "refuse", reason: `state-dir-group-is-roots:${dir}` };
+  return { kind: "become", stateDir: dir, uid: seen.uid, gid: seen.gid };
 }
 
 /** Groups first, then the group, then the user: after the last one there is no way back. Null when it held. */
@@ -81,14 +71,7 @@ const realSys: OperatorSys = {
   look: (path) => {
     try {
       const st = lstatSync(path);
-      return { uid: st.uid, gid: st.gid, mode: st.mode, isDirectory: st.isDirectory() };
-    } catch {
-      return null;
-    }
-  },
-  real: (path) => {
-    try {
-      return realpathSync(path);
+      return { uid: st.uid, gid: st.gid, isDirectory: st.isDirectory() };
     } catch {
       return null;
     }
