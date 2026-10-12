@@ -809,21 +809,23 @@ export async function listen(config: BodyConfig): Promise<Server> {
   server.requestTimeout = REQUEST_TIMEOUT_MS;
   server.headersTimeout = HEADERS_TIMEOUT_MS;
 
-  server.on("close", () => {
-    try {
-      services.ledger.close();
-    } finally {
-      void closeAll(sessions);
-    }
-  });
-  // A start that has failed is about to say why. Clearing up after it must
-  // not replace that reason with one of its own.
-  const stopStart = async (): Promise<void> => {
+  // Closing the ledger can fail, on a disk that has gone read-only for one.
+  // That is said on stderr and goes no further: thrown from a close listener
+  // it would stop the listeners after it and take the process down, and
+  // thrown after a failed start it would replace the reason the start failed.
+  const closeLedger = (): void => {
     try {
       services.ledger.close();
     } catch (err) {
-      process.stderr.write(`verax: ledger close after a failed start: ${err instanceof Error ? err.message : "fault"}\n`);
+      process.stderr.write(`verax: ledger close: ${err instanceof Error ? err.message : "fault"}\n`);
     }
+  };
+  server.on("close", () => {
+    closeLedger();
+    void closeAll(sessions);
+  });
+  const stopStart = async (): Promise<void> => {
+    closeLedger();
     await closeAll(sessions);
   };
   // A door that was asked for and cannot open stops the start: an operator

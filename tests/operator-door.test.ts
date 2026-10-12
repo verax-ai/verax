@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request, type Server } from "node:http";
 import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,7 +12,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
-import { pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
+import { lookWithoutFollowing, pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
 import { credentialsPath, readCredentials, saveCredential } from "../packages/body/src/operator-credentials.ts";
 import {
   DOOR_CHALLENGE_TTL_MS,
@@ -1260,6 +1260,17 @@ describe("operator door", () => {
       const slashed = pairingWriter(`${stateDir}/`, { ...root({}).sys, look: (path) => (looked.push(path), null) });
       assert.equal(slashed.kind, "refuse");
       assert.deepEqual(looked.map((path) => /[\\/]$/.test(path)), [false]);
+
+      // On the real disk: a link to a directory is seen as a link, so root is refused at it and not at the directory.
+      const real = join(stateDir, "real");
+      const link = join(stateDir, "link");
+      mkdirSync(real);
+      symlinkSync(real, link, "junction");
+      assert.equal(lookWithoutFollowing(real)?.isDirectory, true);
+      assert.equal(lookWithoutFollowing(link)?.isDirectory, false);
+      assert.equal(lookWithoutFollowing(join(stateDir, "nothing")), null);
+      const atLink = pairingWriter(link, { platform: "linux", getuid: () => 0, look: lookWithoutFollowing });
+      assert.deepEqual(atLink, { kind: "refuse", reason: `state-dir-not-a-directory:${link}` });
 
       // Root's own directory is written as root, as before. Anyone but root, and anyone on Windows, writes as who they are.
       const own = root({ [stateDir]: { ...service, uid: 0, gid: 0 } });

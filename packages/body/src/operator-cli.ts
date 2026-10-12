@@ -61,6 +61,16 @@ export function becomeOwner(sys: OperatorSys, uid: number, gid: number): string 
   return sys.getuid() === uid && sys.getgid() === gid ? null : "account-did-not-change";
 }
 
+/** What is at the path itself. A link is a link here, whatever it points at. */
+export function lookWithoutFollowing(path: string): Seen | null {
+  try {
+    const st = lstatSync(path);
+    return { uid: st.uid, gid: st.gid, isDirectory: st.isDirectory() };
+  } catch {
+    return null;
+  }
+}
+
 const realSys: OperatorSys = {
   platform: process.platform,
   getuid: process.getuid?.bind(process),
@@ -68,14 +78,7 @@ const realSys: OperatorSys = {
   setgroups: process.setgroups?.bind(process),
   setgid: process.setgid?.bind(process),
   setuid: process.setuid?.bind(process),
-  look: (path) => {
-    try {
-      const st = lstatSync(path);
-      return { uid: st.uid, gid: st.gid, isDirectory: st.isDirectory() };
-    } catch {
-      return null;
-    }
-  },
+  look: lookWithoutFollowing,
 };
 
 export async function runOperator(argv: string[], sys: OperatorSys = realSys): Promise<number> {
