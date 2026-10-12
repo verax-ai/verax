@@ -3,7 +3,7 @@
  * set up, as the account that ran the install's shell, not the service's.
  *
  *   operator-door-probe.ts <origin> shut
- *     the door is up, takes no made-up pairing code, and is shut past
+ *     the door is up and serves its page, takes no made-up pairing code, and is shut past
  *     enrolment while nobody is enrolled.
  *   operator-door-probe.ts <origin> enrol <code>
  *     a code an elevated `verax operator enroll` printed enrols a passkey,
@@ -73,6 +73,8 @@ function expect(what: string, got: Answer, status: number, error?: string): void
 }
 
 if (phase === "shut") {
+  // The screen that takes the code is served before anyone is enrolled.
+  expect("the page", await call("GET", "/"), 200);
   expect("a made-up code", await call("POST", "/api/enroll/options", { body: { code: "00000000" } }), 403, "pairing-refused");
   expect("sign-in with nobody enrolled", await call("POST", "/api/signin/options"), 403, "no-operator");
 } else if (phase === "enrol" && /^\d{8}$/.test(code)) {

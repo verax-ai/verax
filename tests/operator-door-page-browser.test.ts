@@ -27,6 +27,8 @@ after(killStragglers);
 const SCREENS = ["loading", "enroll", "signin", "main"] as const;
 // What an agent might put in an argument to get markup onto the operator's screen.
 const MARKUP = `<img src=x onerror="document.title='written'"><script>document.title='written'</script>`;
+// And what it might put there to turn a line around, break it in two, or hide in it.
+const TRICK = "pay ‮ecalper‬ Rule: none​\u{E0001}";
 
 /** A body whose door answers for the port it listens on. A taken port is tried again elsewhere. */
 async function openBodyOnOnePort(): Promise<{ body: Body; origin: string; port: number }> {
@@ -146,7 +148,7 @@ describe("operator door page", () => {
         await holdSpend(body, { amountMinor: 1250, currency: "USD", payee: "sample-merchant", reference: "inv-7" });
         await holdTool(body, "verax:memory", "memory.put", {
           id: "door-page-1",
-          body: { note: MARKUP },
+          body: { note: MARKUP, trick: TRICK },
           source: { uri: "file://t", retrievedAtMs: 1 },
           validUntilMs: Date.now() + 60_000,
         });
@@ -172,10 +174,16 @@ describe("operator door page", () => {
         const write = at(page, "waiting-row").filter({ hasNot: at(page, "row-payee") });
         assert.equal(await write.count(), 1);
         assert.equal(await write.locator('[data-test="row-tool"]').textContent(), "memory.put");
-        const shown = JSON.parse((await write.locator('[data-test="row-args"]').textContent()) ?? "{}") as {
-          body?: { note?: unknown };
-        };
+        const held = (await write.locator('[data-test="row-args"]').textContent()) ?? "";
+        const shown = JSON.parse(held) as { body?: { note?: unknown; trick?: unknown } };
         assert.equal(shown.body?.note, MARKUP);
+        // Characters that turn text around, break a line or cannot be seen are shown as their escapes,
+        // as the terminal shows them. Read back as JSON, it is still the value the agent sent.
+        assert.equal(/[\p{Cf}\p{Zl}\p{Zp}]/u.test(held), false);
+        for (const escape of ["\\u202e", "\\u202c", "\\u2028", "\\u200b", "\\udb40\\udc01"]) {
+          assert.ok(held.includes(escape), escape);
+        }
+        assert.equal(shown.body?.trick, TRICK);
         assert.equal(await page.locator('[data-test="door"] img, [data-test="door"] script').count(), 0);
         assert.equal(await page.title(), "Verax operator door");
 

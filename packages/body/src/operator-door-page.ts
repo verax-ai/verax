@@ -6,7 +6,14 @@
  * no inline style, so the markup carries neither. The script writes every
  * value the door gives it as text, and keeps the session token in a variable
  * of its own: nothing a later page could read, and gone on reload.
+ *
+ * What a held call says comes from the agent. The terminal escapes every
+ * control and format character before it prints one; the script escapes the
+ * same class, read from the same place, and gives each value its own
+ * direction, so text that runs right to left cannot rearrange what is beside it.
  */
+import { TERMINAL_CONTROL_CLASS } from "@verax-ai/proxy";
+
 export const DOOR_HTML: string = `<!doctype html>
 <html lang="en">
 <head>
@@ -156,7 +163,7 @@ pre { margin: 0; padding: 10px 12px; border: 1px solid var(--line); border-radiu
 .confirm p { font-weight: 600; overflow-wrap: anywhere; }
 `;
 
-export const DOOR_JS: string = String.raw`(function () {
+const SCRIPT: string = String.raw`(function () {
   "use strict";
 
   // The session. Held here and nowhere else; a reload ends it.
@@ -222,10 +229,10 @@ export const DOOR_JS: string = String.raw`(function () {
   function say(kind, code, more) {
     var notice = at("notice");
     hush();
-    var text = Object.prototype.hasOwnProperty.call(TEXT, code) ? TEXT[code] : code;
+    var text = Object.prototype.hasOwnProperty.call(TEXT, code) ? TEXT[code] : plain(code);
     if (more && typeof more.reason === "string" && more.reason !== "") {
       notice.setAttribute("data-reason", more.reason);
-      text += " (" + more.reason + ")";
+      text += " (" + plain(more.reason) + ")";
     }
     if (more && typeof more.allowRef === "string") notice.setAttribute("data-allow-ref", more.allowRef);
     notice.setAttribute("data-kind", kind);
@@ -241,6 +248,19 @@ export const DOOR_JS: string = String.raw`(function () {
       at("signin").disabled = true;
       at("enroll-submit").disabled = true;
     }
+  }
+
+  // The class the terminal escapes in a held call. A character from it is shown as
+  // its escape, one per UTF-16 unit, which is also how JSON would write it.
+  var CONTROL = new RegExp("[" + "@@CONTROL_CLASS@@" + "]", "gu");
+
+  function plain(text, keepLineBreaks) {
+    return String(text).replace(CONTROL, function (ch) {
+      if (keepLineBreaks && ch === "\n") return ch;
+      var out = "";
+      for (var i = 0; i < ch.length; i += 1) out += "\\u" + ("000" + ch.charCodeAt(i).toString(16)).slice(-4);
+      return out;
+    });
   }
 
   function clock(ms) {
@@ -368,10 +388,11 @@ export const DOOR_JS: string = String.raw`(function () {
     return el;
   }
 
+  /** A value in an element of its own direction: what runs right to left in it stays in it. */
   function field(label, test, text, mono) {
     var wrap = piece("div", null, undefined, "field");
     wrap.appendChild(piece("span", null, label, "label"));
-    wrap.appendChild(piece("span", test, text, mono ? "mono" : ""));
+    wrap.appendChild(piece("bdi", test, text, mono ? "mono" : ""));
     return wrap;
   }
 
@@ -379,48 +400,72 @@ export const DOOR_JS: string = String.raw`(function () {
     return value === null || value === undefined ? "" : String(value);
   }
 
+  /** A value from the door, as it is put on the screen. */
+  function shown(value) {
+    return plain(word(value));
+  }
+
+  /** A sentence with values in it, each value apart from the words around it. */
+  function sentence(parts) {
+    var line = document.createElement("p");
+    for (var i = 0; i < parts.length; i += 1) {
+      if (typeof parts[i] === "string") line.appendChild(document.createTextNode(parts[i]));
+      else line.appendChild(piece("bdi", null, parts[i].value));
+    }
+    return line;
+  }
+
   function drawRow(row) {
     var item = piece("li", "waiting-row");
     item.setAttribute("data-ref", word(row.ref));
     var spend = row.spend && typeof row.spend === "object" ? row.spend : null;
-    var asked = "Approve " + word(row.tool) + "?";
+    var asked = ["Approve ", { value: shown(row.tool) }, "?"];
     if (spend) {
       var amountText = typeof spend.amountMinor === "number" ? String(spend.amountMinor) : "unreadable";
       var box = piece("div", null, undefined, "spend");
       var amount = piece("p", null, undefined, "amount");
-      amount.appendChild(piece("span", "row-amount", amountText));
+      amount.appendChild(piece("bdi", "row-amount", amountText));
       amount.appendChild(document.createTextNode(" "));
-      amount.appendChild(piece("span", "row-currency", word(spend.currency)));
+      amount.appendChild(piece("bdi", "row-currency", shown(spend.currency)));
       amount.appendChild(document.createTextNode(" "));
       amount.appendChild(piece("small", null, "minor units"));
       box.appendChild(amount);
       var payee = piece("p", null, undefined, "payee");
       payee.appendChild(piece("span", null, "to ", "label"));
-      payee.appendChild(piece("span", "row-payee", word(spend.payee)));
+      payee.appendChild(piece("bdi", "row-payee", shown(spend.payee)));
       box.appendChild(payee);
-      box.appendChild(field("Reference", "row-reference", word(spend.reference), false));
+      box.appendChild(field("Reference", "row-reference", shown(spend.reference), false));
       item.appendChild(box);
-      asked = "Approve " + amountText + " " + word(spend.currency) + " (minor units) to " + word(spend.payee) + "?";
+      asked = [
+        "Approve ",
+        { value: amountText },
+        " ",
+        { value: shown(spend.currency) },
+        " (minor units) to ",
+        { value: shown(spend.payee) },
+        "?"
+      ];
     }
-    item.appendChild(field("Tool", "row-tool", word(row.tool), true));
-    item.appendChild(field("Agent", "row-agent", word(row.agent), false));
-    item.appendChild(field("Rule", "row-rule", row.rule === null || row.rule === undefined ? "—" : String(row.rule), false));
-    var shown = "";
+    item.appendChild(field("Tool", "row-tool", shown(row.tool), true));
+    item.appendChild(field("Agent", "row-agent", shown(row.agent), false));
+    item.appendChild(field("Rule", "row-rule", row.rule === null || row.rule === undefined ? "—" : shown(row.rule), false));
+    var held = "";
     try {
-      shown = JSON.stringify(row.args, null, 2);
+      held = JSON.stringify(row.args, null, 2);
     } catch (err) {
-      shown = "";
+      held = "";
     }
-    item.appendChild(piece("pre", "row-args", shown === undefined ? "" : shown));
-    item.appendChild(field("Held as", "row-ref", word(row.ref), true));
-    item.appendChild(field("Request", "row-hash", word(row.requestHash), true));
+    // The line breaks are the layout's own: JSON has already escaped any inside a value.
+    item.appendChild(piece("pre", "row-args", held === undefined ? "" : plain(held, true)));
+    item.appendChild(field("Held as", "row-ref", shown(row.ref), true));
+    item.appendChild(field("Request", "row-hash", shown(row.requestHash), true));
     item.appendChild(field("Expires", "row-expires", clock(row.expiresAtMs), false));
 
     var open = piece("button", "approve", "Approve", "primary");
     open.type = "button";
     var panel = piece("div", "approve-panel", undefined, "confirm");
     panel.hidden = true;
-    panel.appendChild(piece("p", null, asked));
+    panel.appendChild(sentence(asked));
     var confirm = piece("button", "approve-confirm", "Approve with passkey", "primary");
     confirm.type = "button";
     var cancel = piece("button", "approve-cancel", "Cancel", "plain");
@@ -462,7 +507,7 @@ export const DOOR_JS: string = String.raw`(function () {
     at("resume").hidden = !halted;
     var since = at("halt-since");
     if (halted && state.since && typeof state.since === "object") {
-      since.textContent = "Stopped by " + word(state.since.by) + ", " + clock(state.since.atMs);
+      since.textContent = "Stopped by " + shown(state.since.by) + ", " + clock(state.since.atMs);
       since.hidden = false;
     } else {
       since.textContent = "";
@@ -483,7 +528,7 @@ export const DOOR_JS: string = String.raw`(function () {
 
   function beginSession(session) {
     token = session.token;
-    at("session-sub").textContent = word(session.sub);
+    at("session-sub").textContent = shown(session.sub);
     at("session-expires").textContent = clock(session.expiresAtMs);
     clearTimeout(expiryTimer);
     // The door's clock decides when a session ends. This timer only saves a
@@ -743,3 +788,5 @@ export const DOOR_JS: string = String.raw`(function () {
   start();
 })();
 `;
+
+export const DOOR_JS: string = SCRIPT.replace('"@@CONTROL_CLASS@@"', () => JSON.stringify(TERMINAL_CONTROL_CLASS));
