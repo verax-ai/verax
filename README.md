@@ -29,11 +29,11 @@ the Cedulon record format.
 npx @verax-ai/body demo
 ```
 
-![verax demo in a terminal: an allowed memory write, a signed refuse, and a payment held until the operator answers y](docs/demo.svg)
+![verax demo in a terminal: an allowed memory write, a signed refuse, and a payment held until the operator answers y and types the amount](docs/demo.svg)
 
 The recording is the output of one run in a terminal where the approval
-question was answered `y`. That run took about a second; it is played back
-slowly here so it can be read.
+question was answered `y` and the amount was typed. That run took about a
+second; it is played back slowly here so it can be read.
 
 What it prints, without a terminal to answer the approval question:
 
@@ -66,7 +66,9 @@ Not shown here: data masking arrives with a downstream server such as Conarium; 
 Node 22.6 or newer, `@verax-ai/body` 0.2.1 or later. The command records an
 allowed memory write and read, a
 signed refuse of a message to a host off the policy list, and a payment held
-for the operator on this machine (approved when the terminal answers `y`).
+for the operator on this machine (approved when the terminal answers `y` and
+then types the amount, `100`; up to 0.5.0 the demo did not print that second
+question).
 
 `--keep` leaves the temporary ledger on disk. `verax verify <dir>` reads it
 back without a body, as in [Read the ledger back without us](#read-the-ledger-back-without-us).

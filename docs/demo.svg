@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 637" width="860" height="637" role="img" aria-label="verax demo: the output of one real run, played back slowly">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 860 658" width="860" height="658" role="img" aria-label="verax demo: the output of one real run, played back slowly">
 <title>verax demo: the output of one real run, played back slowly</title>
 <style>
 .m{font:14px ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;white-space:pre}
@@ -10,11 +10,13 @@
 @keyframes b4{0%,48.65%{opacity:0}49.25%,97%{opacity:1}100%{opacity:0}}
 @keyframes b5{0%,56.76%{opacity:0}57.36%,97%{opacity:1}100%{opacity:0}}
 @keyframes b6{0%,64.86%{opacity:0}65.46%,97%{opacity:1}100%{opacity:0}}
-@keyframes y{0%,38.38%{opacity:0}38.98%,97%{opacity:1}100%{opacity:0}}
-@keyframes o{0%,41.08%{opacity:0}41.68%,97%{opacity:1}100%{opacity:0}}
+@keyframes y{0%,37.3%{opacity:0}37.9%,97%{opacity:1}100%{opacity:0}}
+@keyframes q{0%,39.46%{opacity:0}40.06%,97%{opacity:1}100%{opacity:0}}
+@keyframes n{0%,42.16%{opacity:0}42.76%,97%{opacity:1}100%{opacity:0}}
+@keyframes o{0%,44.32%{opacity:0}44.92%,97%{opacity:1}100%{opacity:0}}
 @media (prefers-reduced-motion:reduce){.m,.m tspan{animation:none!important}}
 </style>
-<rect x="0.5" y="0.5" width="859" height="636" rx="10" fill="#0d1117" stroke="#30363d"/>
+<rect x="0.5" y="0.5" width="859" height="657" rx="10" fill="#0d1117" stroke="#30363d"/>
 <circle cx="22" cy="20" r="6" fill="#ff5f56"/><circle cx="42" cy="20" r="6" fill="#ffbd2e"/><circle cx="62" cy="20" r="6" fill="#27c93f"/>
 <text class="m" x="22" y="52" fill="#e6edf3" style="animation:k 18.5s infinite">$ npx @verax-ai/body demo</text>
 <text class="m" x="22" y="94" fill="#c9d1d9" style="animation:b0 18.5s infinite">verax demo</text>
@@ -26,14 +28,15 @@
 <text class="m" x="22" y="283" fill="#c9d1d9" style="animation:b3 18.5s infinite">spend 100 minor USD sample-merchant</text>
 <text class="m" x="22" y="304" fill="#d29922" style="animation:b3 18.5s infinite">  held</text>
 <text class="m" x="22" y="325" fill="#e6edf3" style="animation:b3 18.5s infinite">Approve this payment as the operator on this machine? [y/N]<tspan fill="#7ee787" style="animation:y 18.5s infinite"> y</tspan></text>
-<text class="m" x="22" y="346" fill="#7ee787" style="animation:o 18.5s infinite">  approved; operator id bound on the record</text>
-<text class="m" x="22" y="388" fill="#c9d1d9" style="animation:b4 18.5s infinite">audit.explain of the refuse</text>
-<text class="m" x="22" y="409" fill="#c9d1d9" style="animation:b4 18.5s infinite">  finding none</text>
-<text class="m" x="22" y="430" fill="#c9d1d9" style="animation:b4 18.5s infinite">  trust-root own-key</text>
-<text class="m" x="22" y="451" fill="#c9d1d9" style="animation:b4 18.5s infinite">  chain and signatures read back</text>
-<text class="m" x="22" y="493" fill="#8b949e" style="animation:b5 18.5s infinite">records  6</text>
-<text class="m" x="22" y="514" fill="#8b949e" style="animation:b5 18.5s infinite">effects  4</text>
-<text class="m" x="22" y="535" fill="#8b949e" style="animation:b5 18.5s infinite">ledger   removed on exit (run with --keep to keep it and check it with verax verify)</text>
-<text class="m" x="22" y="577" fill="#8b949e" style="animation:b6 18.5s infinite">Not shown here: data masking arrives with a downstream server such as Conarium; statement</text>
-<text class="m" x="22" y="598" fill="#8b949e" style="animation:b6 18.5s infinite">  reconciliation needs a real statement (verax reconcile).</text>
+<text class="m" x="22" y="346" fill="#e6edf3" style="animation:q 18.5s infinite">Type the amount in minor units to approve it (100):<tspan fill="#7ee787" style="animation:n 18.5s infinite"> 100</tspan></text>
+<text class="m" x="22" y="367" fill="#7ee787" style="animation:o 18.5s infinite">  approved; operator id bound on the record</text>
+<text class="m" x="22" y="409" fill="#c9d1d9" style="animation:b4 18.5s infinite">audit.explain of the refuse</text>
+<text class="m" x="22" y="430" fill="#c9d1d9" style="animation:b4 18.5s infinite">  finding none</text>
+<text class="m" x="22" y="451" fill="#c9d1d9" style="animation:b4 18.5s infinite">  trust-root own-key</text>
+<text class="m" x="22" y="472" fill="#c9d1d9" style="animation:b4 18.5s infinite">  chain and signatures read back</text>
+<text class="m" x="22" y="514" fill="#8b949e" style="animation:b5 18.5s infinite">records  6</text>
+<text class="m" x="22" y="535" fill="#8b949e" style="animation:b5 18.5s infinite">effects  4</text>
+<text class="m" x="22" y="556" fill="#8b949e" style="animation:b5 18.5s infinite">ledger   removed on exit (run with --keep to keep it and check it with verax verify)</text>
+<text class="m" x="22" y="598" fill="#8b949e" style="animation:b6 18.5s infinite">Not shown here: data masking arrives with a downstream server such as Conarium; statement</text>
+<text class="m" x="22" y="619" fill="#8b949e" style="animation:b6 18.5s infinite">  reconciliation needs a real statement (verax reconcile).</text>
 </svg>
