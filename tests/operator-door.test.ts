@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { request, type Server } from "node:http";
-import { connect, type AddressInfo, type Socket } from "node:net";
+import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -12,6 +12,7 @@ import { exportJWK, generateKeyPair, SignJWT } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
+import { stateOwnerToBecome } from "../packages/body/src/operator-cli.ts";
 import { credentialsPath, readCredentials, saveCredential } from "../packages/body/src/operator-credentials.ts";
 import {
   DOOR_CHALLENGE_TTL_MS,
@@ -1121,6 +1122,53 @@ describe("operator door", () => {
       await body.close();
       await empty.close();
     }
+  });
+
+  it("D23 a door whose port is taken stops the start and leaves the state for the next one", async () => {
+    const squatter = createNetServer();
+    await new Promise<void>((resolve) => squatter.listen(0, "127.0.0.1", () => resolve()));
+    const taken = (squatter.address() as AddressInfo).port;
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-taken-"));
+    const { publicKey } = await generateKeyPair("ES256", { extractable: true });
+    const jwksFile = join(stateDir, "jwks.json");
+    writeFileSync(jwksFile, JSON.stringify({ keys: [{ ...(await exportJWK(publicKey)), kid: "local-1", alg: "ES256", use: "sig" }] }));
+    const start = (doorPort: number) =>
+      listen({
+        issuer: ISSUER,
+        jwksUrl: "",
+        jwksFile,
+        audience: AUDIENCE,
+        stateDir,
+        bindHost: "127.0.0.1",
+        bindPort: 0,
+        policyFile: approvePolicyFile(stateDir),
+        tlsTerminated: false,
+        operatorDoor: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: doorPort },
+      });
+    try {
+      await assert.rejects(start(taken), /EADDRINUSE/);
+      // Nothing of the refused start is left holding the ledger: the same state starts once the port is free.
+      const server = await start(0);
+      assert.notEqual(operatorDoorOf(server), null);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    } finally {
+      await new Promise<void>((resolve) => squatter.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D24 root asks for a pairing code as the owner of the state directory, and as nobody else", () => {
+    const service = { uid: 997, gid: 995, isDirectory: true };
+    assert.deepEqual(stateOwnerToBecome("linux", 0, service), { uid: 997, gid: 995 });
+    assert.deepEqual(stateOwnerToBecome("darwin", 0, service), { uid: 997, gid: 995 });
+    // Not root, so there is nothing to give up; and nothing is given to root's own directory.
+    assert.equal(stateOwnerToBecome("linux", 1000, service), null);
+    assert.equal(stateOwnerToBecome("linux", 0, { ...service, uid: 0 }), null);
+    // A file or a link where the directory should be names no owner to become.
+    assert.equal(stateOwnerToBecome("linux", 0, { ...service, isDirectory: false }), null);
+    assert.equal(stateOwnerToBecome("linux", 0, null), null);
+    assert.equal(stateOwnerToBecome("win32", 0, service), null);
+    assert.equal(stateOwnerToBecome("win32", undefined, service), null);
   });
 
   it("D12 the origin is a name over HTTPS, and the door binds loopback", () => {
