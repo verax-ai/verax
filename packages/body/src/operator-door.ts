@@ -4,6 +4,10 @@
  * approve one request, stop and resume the body. It never serves `/mcp`, the
  * ledger or the inventory, and it takes no token the main listener takes.
  *
+ * It also serves the one page that does those things from a browser. The
+ * page is handed to anyone who asks; everything it shows comes from the
+ * routes below it, under the same checks as before.
+ *
  * A passkey is enrolled through the door only with a pairing code that
  * `verax operator enroll` printed at the machine. Enrolling opens no session
  * and approves nothing.
@@ -23,6 +27,7 @@ import { loadApprovalsFromDir } from "@verax-ai/proxy";
 import { asAssertion } from "./approval-signature.ts";
 import { readBearer } from "./auth.ts";
 import type { OperatorDoorConfig } from "./config.ts";
+import { heldSpend } from "./held-spend.ts";
 import { contentLengthOverLimit, readJsonBody, send } from "./http-io.ts";
 import {
   DEFAULT_OPERATOR_SUB,
@@ -32,6 +37,7 @@ import {
   saveCredential,
   updateCounter,
 } from "./operator-credentials.ts";
+import { DOOR_CSS, DOOR_HTML, DOOR_JS } from "./operator-door-page.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
 import { checkPairing, consumePairing, pairingPath, readPairing } from "./operator-pairing.ts";
 import { COSE_ALGORITHMS, verifyAssertion, verifyRegistration, type PostedRegistration } from "./webauthn-verify.ts";
@@ -49,8 +55,32 @@ const SESSION_SCOPES: ReadonlySet<string> = new Set(["verax:approve", "verax:aud
 
 type Session = { sub: string; credentialId: string; expiresAtMs: number };
 
+/**
+ * The page loads its own script and stylesheet and talks to its own origin.
+ * Nothing else loads, nothing frames it, and the browsers that enforce
+ * Trusted Types refuse markup written from a string.
+ */
+const PAGE_HEADERS: Record<string, string> = {
+  "content-security-policy":
+    "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; require-trusted-types-for 'script'; trusted-types 'none'",
+  "x-frame-options": "DENY",
+  "referrer-policy": "no-referrer",
+  "cross-origin-opener-policy": "same-origin",
+  "cross-origin-resource-policy": "same-origin",
+};
+
+/** The page is three files. They hold no secret and name nothing about this body, so they need no session. */
+const PAGE = new Map<string, { type: string; text: string }>([
+  ["/", { type: "text/html; charset=utf-8", text: DOOR_HTML }],
+  ["/door.js", { type: "text/javascript; charset=utf-8", text: DOOR_JS }],
+  ["/door.css", { type: "text/css; charset=utf-8", text: DOOR_CSS }],
+]);
+
 /** Method and path, exactly. Anything else on the door is not found. */
 const ROUTES = new Set([
+  "GET /",
+  "GET /door.js",
+  "GET /door.css",
   "POST /api/enroll/options",
   "POST /api/enroll",
   "POST /api/signin/options",
@@ -260,6 +290,12 @@ export async function openOperatorDoor(opts: {
         send(res, 413, { error: "payload-too-large" });
         return;
       }
+      // Before the operator check: the screen that takes a pairing code is this page.
+      const asset = PAGE.get(url.pathname);
+      if (asset) {
+        send(res, 200, asset.text, { "content-type": asset.type, ...PAGE_HEADERS });
+        return;
+      }
       if (url.pathname === "/api/enroll/options" || url.pathname === "/api/enroll") {
         const read = await readUnvouched(req, res);
         if (!read) return;
@@ -400,16 +436,21 @@ export async function openOperatorDoor(opts: {
         const at = now();
         const waiting = loadApprovalsFromDir(stateDir)
           .filter((row) => row.status === "pending" && row.expiresAtMs > at)
-          .map((row) => ({
-            ref: row.ref,
-            requestHash: row.requestHash,
-            tool: row.subject,
-            args: row.args,
-            agent: row.brain,
-            rule: row.ruleText,
-            ...(row.createdAtMs !== undefined ? { createdAtMs: row.createdAtMs } : {}),
-            expiresAtMs: row.expiresAtMs,
-          }));
+          .map((row) => {
+            const spend = heldSpend(row);
+            return {
+              ref: row.ref,
+              requestHash: row.requestHash,
+              tool: row.subject,
+              args: row.args,
+              agent: row.brain,
+              rule: row.ruleText,
+              ...(row.createdAtMs !== undefined ? { createdAtMs: row.createdAtMs } : {}),
+              expiresAtMs: row.expiresAtMs,
+              // The payee and the amount as `verax approve` prints them at the machine.
+              ...(spend ? { spend } : {}),
+            };
+          });
         send(res, 200, { waiting });
         return;
       }

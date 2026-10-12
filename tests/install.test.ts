@@ -308,6 +308,8 @@ describe("verax install plan", () => {
       assert.match(text, /^operator door 127\.0\.0\.1:8788 for https:\/\/approve\.example\.com$/m, platform);
       // The command names the state directory this install made, so it can be pasted as it is.
       assert.ok(text.includes(`operator enroll --state '${on.stateDir}'`), `${platform}: ${text}`);
+      // Where the code is typed: the door's own name, which is where its page is.
+      assert.match(text, /^Type the code at https:\/\/approve\.example\.com\/ on the device whose passkey it is for\./m, platform);
     }
   });
 

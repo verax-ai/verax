@@ -4,7 +4,9 @@ Status: not in a release. The door's listener, the passkey sign-in, the list
 of what is waiting, the approval, halt and enrolment with a pairing code are
 in the tree, off unless `VERAX_OPERATOR_DOOR` names an origin, which
 `verax install --operator-door <origin>` and `verax init --local
---operator-door <origin>` write for the service. The page is not built.
+--operator-door <origin>` write for the service. The door serves one page
+that does all of this from a browser. It has been driven in Chromium with a
+virtual authenticator, and not yet on a phone.
 
 The capability matrix says there is no remote approver, and on a released
 install that is true: a held call is approved with `verax approve` at the
@@ -89,12 +91,25 @@ way to reach that from another device.
 4. **Each approval still needs its own assertion.** The session lets the
    operator see what is waiting. Approving one request asks the passkey again
    over that request's challenge. The screen shows what the CLI shows: tool,
-   payee, amount, currency, reference, and the start of the request hash.
-5. **Reaching it is the operator's own endpoint.** The door listens on
+   payee, amount, currency, reference, and the request hash. The payee and
+   the amount of a held spend are read by the same code for the terminal and
+   for the door. The terminal has the operator type the amount back and
+   refuses a spend whose amount it cannot read; the page asks once more
+   before it asks the passkey, and shows such an amount as unreadable.
+5. **The page is the door's own.** `GET /`, `GET /door.js` and
+   `GET /door.css` are three fixed files, the same for every caller, and
+   need no session: the page that takes a pairing code has to load before
+   anyone is enrolled. They are sent with a content security policy that
+   lets the page load those two files and call its own origin and nothing
+   else, forbids framing, and in browsers that enforce Trusted Types refuses
+   markup written from a string. The script writes every value it shows as
+   text. The session token is held in the page's memory and nowhere else, so
+   a reload signs the operator out.
+6. **Reaching it is the operator's own endpoint.** The door listens on
    loopback. The operator puts their own TLS endpoint in front of it (a
    reverse proxy on the host, or a tunnel) and names that origin at install. Verax does not run a relay: an approval
    summary names payees and amounts, and a relay of ours would see every one.
-6. **No notification in the first step.** The phone learns of a held call
+7. **No notification in the first step.** The phone learns of a held call
    when the operator opens the page. A push would be a new outbound path from
    the body and gets its own design.
 
@@ -124,6 +139,16 @@ way to reach that from another device.
   door. Five wrong tries end the code, the operator asks for another, and a
   caller who keeps guessing can keep enrolment from happening. Nobody is
   enrolled that way; a limit on it belongs at the operator's TLS endpoint.
+- The page does not refresh itself. The list is as old as the last time the
+  operator asked for it, and an approval names the request hash that was on
+  the screen: if something else is waiting under that reference by then, the
+  answer is `409 stale` and nothing is approved.
+- The page does not have the operator type the amount back, and the door
+  does not refuse a spend whose amount cannot be read, as `verax approve`
+  does at the machine. The page shows such an amount as unreadable.
+- A stop from the page is signed when the passkey answers and goes through
+  unsigned when it does not: stopping is the safe direction. A resume is
+  never taken unsigned.
 - It does not make a lost phone harmless by itself: the passkey's own user
   verification is what stands between a thief and an approval, and
   `verax operator` needs a way to remove one credential.
