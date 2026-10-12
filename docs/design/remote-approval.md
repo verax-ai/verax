@@ -1,9 +1,9 @@
 # Remote approval — design, partly built, not released
 
 Status: not in a release. The door's listener, the passkey sign-in, the list
-of what is waiting, the approval and halt are in the tree, off unless
-`VERAX_OPERATOR_DOOR` names an origin. Enrolment through the door, the
-install flag and the page are not built.
+of what is waiting, the approval, halt and enrolment with a pairing code are
+in the tree, off unless `VERAX_OPERATOR_DOOR` names an origin. The install
+flag and the page are not built.
 
 The capability matrix says there is no remote approver, and on a released
 install that is true: a held call is approved with `verax approve` at the
@@ -69,7 +69,14 @@ way to reach that from another device.
    scopes stays as it is. A restart of the body ends every session.
 3. **Enrolment stays at the machine.** A credential is added only with a
    pairing code from an elevated `verax operator enroll`, as today. A phone
-   cannot enrol itself, and the agent's account cannot ask for a code.
+   cannot enrol itself, and the agent's account cannot ask for a code. The
+   door takes the code on `POST /api/enroll/options` and `POST /api/enroll`,
+   and those two are the only paths it answers before an operator exists.
+   A code buys one enrolment, five wrong tries end it wherever they arrive,
+   and enrolling opens no session. The door reads the new credential itself:
+   made for its challenge, its origin and its relying party, with the user
+   verified, a key it can verify with, and no byte of the authenticator data
+   left unexplained.
 4. **Each approval still needs its own assertion.** The session lets the
    operator see what is waiting. Approving one request asks the passkey again
    over that request's challenge. The screen shows what the CLI shows: tool,
@@ -99,6 +106,13 @@ way to reach that from another device.
   takes longer than five seconds is dropped. A caller who keeps those 32
   busy can still delay a sign-in; a limit on that belongs at the operator's
   TLS endpoint.
+- It does not check what kind of device holds a passkey. Enrolment asks for
+  no attestation and refuses an answer that carries one; the pairing code
+  from the machine is what vouches for the device.
+- It does not keep a pairing code open against a caller who can reach the
+  door. Five wrong tries end the code, the operator asks for another, and a
+  caller who keeps guessing can keep enrolment from happening. Nobody is
+  enrolled that way; a limit on it belongs at the operator's TLS endpoint.
 - It does not make a lost phone harmless by itself: the passkey's own user
   verification is what stands between a thief and an approval, and
   `verax operator` needs a way to remove one credential.
