@@ -54,9 +54,9 @@ checks the receipts: a history rewritten before the last anchored checkpoint
 no longer matches the hash in that service's log, provided the reader asks
 the service or holds a receipt from outside the directory. A rewrite after
 the last anchor, and a body that was simply stopped, are not detected that
-way. Unreleased: the witness anchors each checkpoint automatically, and
+way. Since 0.5.0 the witness can anchor each checkpoint automatically, and
 `verify --require-anchored` names a checkpoint with no receipt. Signed start
-rows (also unreleased) are for someone who cannot read the record key; they
+rows (also 0.5.0) are for someone who cannot read the record key; they
 do not stop an administrator. Moving the key out of a file
 (`docs/design/key-custody.md`, not built) would leave an administrator able
 to use the key while on the host but not to copy it, and a KMS keeps its own
@@ -81,8 +81,8 @@ auditor they do not have yet.
 ## the ledger can be silenced
 
 An operator can skip the publisher, stop the witness process, or delete
-the directory. A running body now pulses even while idle; unsigned start
-rows record the gap from the previous beat. `verax watch` can persist a
+the directory. A running body now pulses even while idle; start rows,
+signed since 0.5.0, record the gap from the previous beat. `verax watch` can persist a
 halt on silence on the same host, or report silence over audit `/healthz`.
 The watcher runs wherever the operator puts it and shares that host's
 trust. A remote watcher cannot halt the body. Silence is indistinguishable
@@ -90,7 +90,7 @@ from "nothing happened" if the only copy and watcher live on the same host
 and that host stops or removes both. These local observations are not
 independent evidence of uptime or of what happened during a gap.
 
-Unreleased: with `VERAX_ANCHOR_SERVICE` set, `verax witness` registers each
+Since 0.5.0: with `VERAX_ANCHOR_SERVICE` set, `verax witness` registers each
 checkpoint it signs with a SCITT Transparency Service someone else runs and
 keeps the receipt, and `verax verify --anchor-key <pem> --require-anchored`
 names every checkpoint older than the grace that has no receipt verifying
@@ -106,7 +106,7 @@ the directory to compare; only asking the service shows it, and `verify`
 does not ask it yet. A witness that cannot reach the service writes
 `anchor-failed` and keeps signing; the gap shows as unanchored checkpoints.
 
-Unreleased: start rows are signed by the record key and each names the
+Since 0.5.0: start rows are signed by the record key and each names the
 SHA-256 of the row before it. `verax verify` names a changed gap, a row
 removed from the middle, or an unsigned row after a signed one. Rows removed
 from the end leave nothing to compare, and anyone holding the record key can
