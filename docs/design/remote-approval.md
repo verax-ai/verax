@@ -73,7 +73,10 @@ way to reach that from another device.
    door takes the code on `POST /api/enroll/options` and `POST /api/enroll`,
    and those two are the only paths open before an operator exists.
    A code buys one enrolment, five wrong tries end it wherever they arrive,
-   and enrolling opens no session. The door reads the new credential itself:
+   and enrolling opens no session. A refused code gets one answer whether it
+   was wrong, late, used up or never asked for, and the wrong tries are
+   counted in the running body as well as on disk, so a count that cannot be
+   written still ends the code. The door reads the new credential itself:
    made for its challenge, its origin and its relying party, with the user
    verified, a key it can verify with, and no byte of the authenticator data
    left unexplained.

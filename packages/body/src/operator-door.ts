@@ -32,7 +32,7 @@ import {
   updateCounter,
 } from "./operator-credentials.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
-import { checkPairing, consumePairing } from "./operator-pairing.ts";
+import { checkPairing, consumePairing, PAIRING_MAX_ATTEMPTS, readPairing } from "./operator-pairing.ts";
 import { COSE_ALGORITHMS, verifyAssertion, verifyRegistration, type PostedRegistration } from "./webauthn-verify.ts";
 import type { createBodyServices } from "./wiring.ts";
 
@@ -123,9 +123,12 @@ export async function openOperatorDoor(opts: {
   now?: () => number;
   /** How long an unauthenticated sign-in body may take to arrive. */
   signinBodyMs?: number;
+  /** Test hook. Stands in for the pairing check, to make its write fail. */
+  checkPairing?: typeof checkPairing;
 }): Promise<Server> {
   const { door, stateDir, services } = opts;
   const now = opts.now ?? (() => Date.now());
+  const pairingCheck = opts.checkPairing ?? checkPairing;
   const sessions = new Map<string, Session>();
   const signinBodyMs = opts.signinBodyMs ?? SIGNIN_BODY_MS;
   let signinsInFlight = 0;
@@ -192,6 +195,26 @@ export async function openOperatorDoor(opts: {
     }
     return { value: parsed.value };
   };
+  // Wrong codes are counted on disk, where the count outlives a restart. They
+  // are counted here as well, against the code they were tried on: a write
+  // that fails, as on a full disk, must not leave a code open to any number of tries.
+  const wrongCodes = { hash: "", count: 0 };
+  const codeHolds = (code: string): boolean => {
+    const open = readPairing(stateDir);
+    if (open && open.hash !== wrongCodes.hash) {
+      wrongCodes.hash = open.hash;
+      wrongCodes.count = 0;
+    }
+    if (wrongCodes.count >= PAIRING_MAX_ATTEMPTS) return false;
+    let held = false;
+    try {
+      held = pairingCheck(stateDir, code, now()).ok;
+    } catch (err) {
+      process.stderr.write(`verax-door: pairing check: ${err instanceof Error ? err.message : "fault"}\n`);
+    }
+    if (!held && open) wrongCodes.count += 1;
+    return held;
+  };
   // The handlers read the relying party from an environment. The door's is
   // its own origin, whatever the process environment says.
   const rpEnv: NodeJS.ProcessEnv = { VERAX_RP_ID: door.rpID, VERAX_RP_ORIGINS: door.origin };
@@ -250,9 +273,10 @@ export async function openOperatorDoor(opts: {
         // Nothing is awaited from here to the answer. The count of wrong codes
         // is read and written in one turn, so callers who arrive together
         // still have five tries between them.
-        const pairing = checkPairing(stateDir, typeof posted.code === "string" ? posted.code : "", now());
-        if (!pairing.ok) {
-          send(res, 403, { error: "pairing-refused", reason: pairing.reason });
+        // One answer for no code asked for, a wrong one, one that ran out and
+        // one used up: a caller without the code is not told which.
+        if (!codeHolds(typeof posted.code === "string" ? posted.code : "")) {
+          send(res, 403, { error: "pairing-refused" });
           return;
         }
         if (url.pathname === "/api/enroll/options") {

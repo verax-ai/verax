@@ -21,6 +21,7 @@ import {
 } from "../packages/body/src/operator-door.ts";
 import {
   beginPairing,
+  checkPairing,
   hashPairingCode,
   PAIRING_TTL_MS,
   readPairing,
@@ -722,7 +723,7 @@ describe("operator door", () => {
         for (const path of ["/api/enroll/options", "/api/enroll"]) {
           const res = await call(body.doorPort, "POST", path, { body: sent });
           assert.equal(res.status, 403, `${path} ${JSON.stringify(sent)}`);
-          assert.deepEqual(res.body, { error: "pairing-refused", reason: "missing" });
+          assert.deepEqual(res.body, { error: "pairing-refused" });
         }
       }
       const { code } = beginPairing(body.stateDir);
@@ -774,7 +775,7 @@ describe("operator door", () => {
       // The code bought one enrolment.
       const again = await enroll(body.doorPort, code, mintSoftwarePasskey());
       assert.equal(again.status, 403);
-      assert.deepEqual(again.body, { error: "pairing-refused", reason: "burned" });
+      assert.deepEqual(again.body, { error: "pairing-refused" });
       assert.equal(readCredentials(body.stateDir).length, 1);
 
       await hold(body, "door-d16");
@@ -803,39 +804,42 @@ describe("operator door", () => {
     }
   });
 
-  it("D17 five wrong codes spend the pairing wherever they arrive, and a code that ran out is refused", async () => {
+  it("D17 five wrong codes spend the pairing wherever they arrive, a code that ran out is refused, and the door does not say which", async () => {
     const body = await openBody(null);
+    const refused = { error: "pairing-refused" };
+    const ask = (path: string, code: string) => call(body.doorPort, "POST", path, { body: { code } });
     try {
       const { code } = beginPairing(body.stateDir);
       const wrong = code === "00000000" ? "11111111" : "00000000";
-      const reasons: unknown[] = [];
-      for (const path of ["/api/enroll/options", "/api/enroll", "/api/enroll/options", "/api/enroll", "/api/enroll/options"]) {
-        const res = await call(body.doorPort, "POST", path, { body: { code: wrong } });
+      for (const path of ["/api/enroll/options", "/api/enroll", "/api/enroll/options", "/api/enroll"]) {
+        const res = await ask(path, wrong);
         assert.equal(res.status, 403);
-        reasons.push(res.body.reason);
+        assert.deepEqual(res.body, refused);
       }
-      assert.deepEqual(reasons, ["mismatch", "mismatch", "mismatch", "mismatch", "burned"]);
+      // Four wrong tries leave the code good. The fifth ends it, and the right
+      // code is then answered as the wrong one was.
+      assert.equal(readPairing(body.stateDir)?.attempts, 4);
+      assert.equal((await ask("/api/enroll/options", code)).status, 200);
+      assert.deepEqual((await ask("/api/enroll/options", wrong)).body, refused);
       const late = await enroll(body.doorPort, code, mintSoftwarePasskey());
-      assert.deepEqual(late.body, { error: "pairing-refused", reason: "burned" });
+      assert.equal(late.status, 403);
+      assert.deepEqual(late.body, refused);
 
       // Callers who arrive together have five tries between them, not five each.
       const next = beginPairing(body.stateDir).code;
       const miss = next === "00000000" ? "11111111" : "00000000";
-      const together = await Promise.all(
-        Array.from({ length: 12 }, () => call(body.doorPort, "POST", "/api/enroll/options", { body: { code: miss } })),
-      );
-      assert.equal(together.filter((res) => res.body.reason === "mismatch").length, 4);
-      assert.equal(together.filter((res) => res.body.reason === "burned").length, 8);
+      const together = await Promise.all(Array.from({ length: 12 }, () => ask("/api/enroll/options", miss)));
+      for (const res of together) assert.deepEqual(res.body, refused);
       assert.equal(readPairing(body.stateDir)?.attempts, 5);
-      assert.deepEqual((await enroll(body.doorPort, next, mintSoftwarePasskey())).body, {
-        error: "pairing-refused",
-        reason: "burned",
-      });
+      assert.deepEqual((await enroll(body.doorPort, next, mintSoftwarePasskey())).body, refused);
 
+      // The same code and the same passkey, a moment too late and then in time.
+      const passkey = mintSoftwarePasskey();
       writePairing(body.stateDir, { hash: hashPairingCode("12345678"), expiresAtMs: Date.now() - 1, attempts: 0 });
-      const stale = await enroll(body.doorPort, "12345678", mintSoftwarePasskey());
-      assert.deepEqual(stale.body, { error: "pairing-refused", reason: "expired" });
+      assert.deepEqual((await enroll(body.doorPort, "12345678", passkey)).body, refused);
       assert.equal(existsSync(credentialsPath(body.stateDir)), false);
+      writePairing(body.stateDir, { hash: hashPairingCode("12345678"), expiresAtMs: Date.now() + 60_000, attempts: 0 });
+      assert.equal((await enroll(body.doorPort, "12345678", passkey)).status, 200);
     } finally {
       await body.close();
     }
@@ -931,7 +935,7 @@ describe("operator door", () => {
       // The door's clock is the one the code is read against.
       clock += PAIRING_TTL_MS;
       const stale = await call(port, "POST", "/api/enroll/options", { body: { code } });
-      assert.deepEqual(stale.body, { error: "pairing-refused", reason: "expired" });
+      assert.deepEqual(stale.body, { error: "pairing-refused" });
 
       for (const path of ["/api/enroll/options", "/api/enroll"]) {
         const big = await call(port, "POST", path, { body: { code, response: "x".repeat(17 * 1024) } });
@@ -943,6 +947,40 @@ describe("operator door", () => {
         assert.equal((await call(port, "GET", path)).status, 404, path);
       }
       assert.equal(existsSync(credentialsPath(stateDir)), false);
+    } finally {
+      await new Promise<void>((resolve) => door.close(() => resolve()));
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D20 a count of wrong codes that cannot be written still ends the code", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-door-full-"));
+    // A full disk: the right code is read, a wrong one cannot be counted.
+    const door = await openOperatorDoor({
+      door: { origin: DOOR_ORIGIN, rpID: RP_ID, bindHost: "127.0.0.1", bindPort: 0 },
+      stateDir,
+      services: undefined as never,
+      checkPairing: (dir, code, nowMs) => {
+        const open = readPairing(dir);
+        if (open && hashPairingCode(code) !== open.hash) throw new Error("ENOSPC: no space left on device");
+        return checkPairing(dir, code, nowMs);
+      },
+    });
+    const port = (door.address() as AddressInfo).port;
+    try {
+      const { code } = beginPairing(stateDir);
+      const wrong = code === "00000000" ? "11111111" : "00000000";
+      for (let i = 0; i < 5; i += 1) {
+        const res = await call(port, "POST", "/api/enroll/options", { body: { code: wrong } });
+        assert.equal(res.status, 403);
+        assert.deepEqual(res.body, { error: "pairing-refused" });
+      }
+      assert.equal(readPairing(stateDir)?.attempts, 0);
+      const late = await enroll(port, code, mintSoftwarePasskey());
+      assert.deepEqual(late.body, { error: "pairing-refused" });
+      assert.equal(existsSync(credentialsPath(stateDir)), false);
+      // A code asked for afresh starts its own count.
+      assert.equal((await enroll(port, beginPairing(stateDir).code, mintSoftwarePasskey())).status, 200);
     } finally {
       await new Promise<void>((resolve) => door.close(() => resolve()));
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
