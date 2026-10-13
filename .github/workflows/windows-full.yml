@@ -37,6 +37,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
       # The hosted runner's D:\ default lets BUILTIN\Users add files. verax
       # desktop refuses a code path someone else can add to, and that refusal
       # is the right behaviour. This step gives the job the checkout an
