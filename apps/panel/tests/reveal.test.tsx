@@ -73,6 +73,9 @@ function revealButton(): HTMLButtonElement | null {
 describe("records list reveals rows a hundred at a time", () => {
   it(
     "draws the first hundred, reveals the rest on request, and starts over when the filter changes",
+    // jsdom draws hundreds of rows here; the Windows runner took over five
+    // seconds on 17 Sep 2026 where this laptop takes under one.
+    { timeout: 15_000 },
     async () => {
       stubFetch();
       render(<App />);
@@ -100,8 +103,5 @@ describe("records list reveals rows a hundred at a time", () => {
       });
       expect(revealButton()?.textContent).toBe("Daha fazla satır göster (150 satır daha)");
     },
-    // jsdom draws hundreds of rows here; the Windows runner took over five
-    // seconds on 17 Sep 2026 where this laptop takes under one.
-    { timeout: 15_000 },
   );
 });
