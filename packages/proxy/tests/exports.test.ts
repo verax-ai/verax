@@ -89,14 +89,22 @@ describe("B1 exports map", () => {
   it("npm pack --dry-run lists the package and no test fixtures", () => {
     // --ignore-scripts: prepack would rebuild dist while other test files,
     // running at the same time, load it.
-    const packed = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "-w", "@verax-ai/proxy"], {
+    // --json puts the file list on stdout whatever npm's log level is. The
+    // notices carry it too, but under `npm run --silent` there are none, and
+    // a check that reads them has nothing to read.
+    const packed = spawnSync("npm", ["pack", "--dry-run", "--json", "--ignore-scripts", "-w", "@verax-ai/proxy"], {
       cwd: repoRoot,
       encoding: "utf8",
       shell: true,
     });
-    const out = `${packed.stdout ?? ""}\n${packed.stderr ?? ""}`;
-    assert.equal(packed.status, 0, out);
-    assert.match(out, /@verax-ai\/proxy|verax-ai-proxy-0\.0\.0\.tgz/);
-    assert.doesNotMatch(out, /tests\/fixtures/);
+    assert.equal(packed.status, 0, `${packed.stdout ?? ""}\n${packed.stderr ?? ""}`);
+    type Listing = { name: string; files: { path: string }[] };
+    // npm 10 answers with a list, npm 12 with an object keyed by workspace.
+    const parsed = JSON.parse(packed.stdout) as Listing[] | Record<string, Listing>;
+    const listings = Array.isArray(parsed) ? parsed : Object.values(parsed);
+    assert.deepEqual(listings.map((listing) => listing.name), ["@verax-ai/proxy"]);
+    const paths = listings[0]!.files.map((file) => file.path);
+    assert.ok(paths.includes("dist/index.js"), paths.join("\n"));
+    assert.deepEqual(paths.filter((path) => path.includes("tests/")), []);
   });
 });
