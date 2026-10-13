@@ -687,12 +687,16 @@ const server = createServer((req, res) => {
         return;
       }
       const cred = verified.registrationInfo.credential;
-      saveCredential(stateDir, {
+      const saved = saveCredential(stateDir, {
         id: cred.id,
         publicKey: isoBase64URL.fromBuffer(cred.publicKey),
         counter: cred.counter,
         sub: DEFAULT_OPERATOR_SUB,
       });
+      if (!saved) {
+        sendJson(res, 409, { error: "already-enrolled" });
+        return;
+      }
       consumePairing(stateDir);
       sendJson(res, 200, { enrolled: true, sub: DEFAULT_OPERATOR_SUB });
       return;

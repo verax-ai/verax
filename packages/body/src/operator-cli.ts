@@ -1,6 +1,15 @@
 import { lstatSync } from "node:fs";
 import { resolve } from "node:path";
 
+import {
+  credentialsPath,
+  credentialsReadable,
+  readCredentials,
+  readCredentialsAt,
+  readRemoved,
+  removeCredential,
+  removedPath,
+} from "./operator-credentials.ts";
 import { beginPairing } from "./operator-pairing.ts";
 
 type Seen = { uid: number; gid: number; isDirectory: boolean };
@@ -81,15 +90,26 @@ const realSys: OperatorSys = {
   look: lookWithoutFollowing,
 };
 
+const USAGE =
+  "verax operator enroll --state <dir>\n" +
+  "verax operator list --state <dir>\n" +
+  "verax operator remove --state <dir> --id <passkey id>\n";
+
 export async function runOperator(argv: string[], sys: OperatorSys = realSys): Promise<number> {
-  if (argv[1] !== "enroll") {
-    process.stderr.write("verax operator enroll --state <dir>\n");
+  const verb = argv[1];
+  if (verb !== "enroll" && verb !== "list" && verb !== "remove") {
+    process.stderr.write(USAGE);
     return 78;
   }
   let stateDir = "";
+  let id = "";
   for (let i = 2; i < argv.length; i += 1) {
     if (argv[i] === "--state") {
       stateDir = argv[++i] ?? "";
+      continue;
+    }
+    if (argv[i] === "--id" && verb === "remove") {
+      id = argv[++i] ?? "";
       continue;
     }
     if (argv[i]?.startsWith("-")) {
@@ -97,10 +117,13 @@ export async function runOperator(argv: string[], sys: OperatorSys = realSys): P
       return 78;
     }
   }
-  if (!stateDir) {
-    process.stderr.write("verax operator enroll --state <dir>\n");
+  if (!stateDir || (verb === "remove" && !id)) {
+    process.stderr.write(USAGE);
     return 78;
   }
+  // All three go in as the pairing code does. What `remove` writes the body
+  // must be able to read, and nothing here is read or written as root in a
+  // directory another account owns.
   const writer = pairingWriter(stateDir, sys);
   if (writer.kind === "refuse") {
     process.stderr.write(`${writer.reason}\n`);
@@ -114,7 +137,41 @@ export async function runOperator(argv: string[], sys: OperatorSys = realSys): P
       return 78;
     }
   }
-  const { code } = beginPairing(writer.stateDir);
-  process.stdout.write(`${code}\n`);
+  if (verb === "enroll") {
+    const { code } = beginPairing(writer.stateDir);
+    process.stdout.write(`${code}\n`);
+    return 0;
+  }
+  // A credentials file that does not parse lists as nothing. Said here, so
+  // that it is not taken for "nobody is enrolled".
+  if (!credentialsReadable(writer.stateDir)) {
+    process.stderr.write(`credentials-unreadable:${credentialsPath(writer.stateDir)}\n`);
+    return 78;
+  }
+  if (verb === "list") {
+    const removed = readRemoved(writer.stateDir);
+    if (!removed) {
+      process.stderr.write(`removed-list-unreadable:${removedPath(writer.stateDir)}\n`);
+      return 78;
+    }
+    // In the order they were enrolled: the file is only ever added to at its end.
+    for (const row of readCredentialsAt(credentialsPath(writer.stateDir))) {
+      process.stdout.write(`${row.id}\t${row.sub}\t${removed.has(row.id) ? "removed" : "in use"}\n`);
+    }
+    return 0;
+  }
+  const done = removeCredential(writer.stateDir, id);
+  if (done === "unreadable") {
+    process.stderr.write(`removed-list-unreadable:${removedPath(writer.stateDir)}\n`);
+    return 78;
+  }
+  if (done === "unknown") {
+    process.stderr.write("passkey-unknown\n");
+    return 78;
+  }
+  process.stdout.write(`${done}\n`);
+  if (readCredentials(writer.stateDir).length === 0) {
+    process.stdout.write("no passkey is left in use: verax operator enroll --state <dir> gives a code for a new one\n");
+  }
   return 0;
 }

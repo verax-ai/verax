@@ -31,6 +31,7 @@ import { heldSpend } from "./held-spend.ts";
 import { contentLengthOverLimit, readJsonBody, send } from "./http-io.ts";
 import {
   DEFAULT_OPERATOR_SUB,
+  everEnrolled,
   findCredential,
   hasRegisteredOperator,
   readCredentials,
@@ -348,7 +349,9 @@ export async function openOperatorDoor(opts: {
           refuse(enrolled.reason);
           return;
         }
-        if (findCredential(stateDir, enrolled.credentialId)) {
+        // A removed passkey is refused here too: enrolling it again would put
+        // another key under an id that approvals in the ledger were signed by.
+        if (everEnrolled(stateDir, enrolled.credentialId)) {
           refuse("already-enrolled");
           return;
         }
