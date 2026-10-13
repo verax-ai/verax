@@ -7,8 +7,7 @@
 #                 artifact and to code scanning, and never fail the run.
 #
 # The two report-only jobs become blocking once their current findings are
-# triaged. Known non-secrets are listed in .gitleaks.toml and .gitleaksignore;
-# known development-only vulnerabilities, each with an expiry, in osv-scanner.toml.
+# triaged. Known non-secrets are listed in .gitleaks.toml and .gitleaksignore.
 # Every tool is pinned: actions by commit, downloads by SHA-256, the semgrep
 # image by digest. The semgrep rule packs are fetched from the registry at run time.
 name: security-scan
