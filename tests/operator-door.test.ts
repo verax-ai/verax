@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -16,7 +16,15 @@ import { verifyApprovalSignatures } from "../packages/body/src/approval-signatur
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
 import { heldSpend } from "../packages/body/src/held-spend.ts";
 import { lookWithoutFollowing, pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
-import { credentialsPath, readCredentials, saveCredential } from "../packages/body/src/operator-credentials.ts";
+import {
+  credentialsPath,
+  hasRegisteredOperator,
+  readCredentials,
+  readCredentialsAt,
+  readRemoved,
+  removedPath,
+  saveCredential,
+} from "../packages/body/src/operator-credentials.ts";
 import {
   DOOR_CHALLENGE_TTL_MS,
   DOOR_SESSION_TTL_MS,
@@ -159,6 +167,21 @@ function unending(
       if (!socket.destroyed) socket.write(`400\r\n${"x".repeat(1024)}\r\n`);
     }, 20);
   });
+}
+
+/** Runs a CLI entry and hands back what it wrote in place of writing it. */
+async function quiet(run: () => Promise<number>): Promise<{ code: number; out: string; err: string }> {
+  const out: string[] = [];
+  const err: string[] = [];
+  const write = { out: process.stdout.write, err: process.stderr.write };
+  process.stdout.write = ((chunk: string) => (out.push(String(chunk)), true)) as typeof process.stdout.write;
+  process.stderr.write = ((chunk: string) => (err.push(String(chunk)), true)) as typeof process.stderr.write;
+  try {
+    return { code: await run(), out: out.join(""), err: err.join("") };
+  } finally {
+    process.stdout.write = write.out;
+    process.stderr.write = write.err;
+  }
 }
 
 type Waiting = { ref: string; requestHash: string; tool: string; args: Record<string, unknown> };
@@ -1096,7 +1119,7 @@ describe("operator door", () => {
     }
   });
 
-  it("D24 root asks for a pairing code as the owner of the state directory, or not at all", async () => {
+  it("D24 root asks for a pairing code, a list or a removal as the owner of the state directory, or not at all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-enroll-"));
     const service = { uid: 997, gid: 995, isDirectory: true };
     type Disk = Record<string, typeof service | undefined>;
@@ -1124,19 +1147,6 @@ describe("operator door", () => {
       };
       return { sys, calls };
     };
-    const quiet = async (run: () => Promise<number>): Promise<{ code: number; out: string; err: string }> => {
-      const out: string[] = [];
-      const err: string[] = [];
-      const write = { out: process.stdout.write, err: process.stderr.write };
-      process.stdout.write = ((chunk: string) => (out.push(String(chunk)), true)) as typeof process.stdout.write;
-      process.stderr.write = ((chunk: string) => (err.push(String(chunk)), true)) as typeof process.stderr.write;
-      try {
-        return { code: await run(), out: out.join(""), err: err.join("") };
-      } finally {
-        process.stdout.write = write.out;
-        process.stderr.write = write.err;
-      }
-    };
     const enroll = (fake: Fake, dir = stateDir) => quiet(() => runOperator(["operator", "enroll", "--state", dir], fake.sys));
     try {
       // The service's directory: root becomes the service, in this order, and only then writes.
@@ -1147,6 +1157,21 @@ describe("operator door", () => {
       assert.deepEqual(drop.calls, ["setgroups 995", "setgid 995", "setuid 997"]);
       assert.equal(readPairing(stateDir)?.attempts, 0);
       rmSync(pairingPath(stateDir));
+
+      // A list and a removal go in the same way: a file root left here is one the service cannot read.
+      saveCredential(stateDir, { id: "passkey-a", publicKey: "", counter: 0, sub: "operator-1" });
+      saveCredential(stateDir, { id: "passkey-b", publicKey: "", counter: 0, sub: "operator-1" });
+      for (const rest of [["list"], ["remove", "--id", "passkey-a"]]) {
+        const as = root({ [stateDir]: service });
+        const ran = await quiet(() => runOperator(["operator", rest[0]!, "--state", stateDir, ...rest.slice(1)], as.sys));
+        assert.equal(ran.code, 0, ran.err);
+        assert.deepEqual(as.calls, ["setgroups 995", "setgid 995", "setuid 997"], rest[0]);
+      }
+      const held = root({ [stateDir]: service }, { setuid: undefined });
+      const kept = await quiet(() => runOperator(["operator", "remove", "--state", stateDir, "--id", "passkey-b"], held.sys));
+      assert.equal(kept.code, 78);
+      assert.match(kept.err, /cannot-change-account/);
+      assert.deepEqual([...(readRemoved(stateDir) ?? [])], ["passkey-a"]);
 
       // A drop that cannot be made, or that did not take in either half, writes nothing.
       for (const [why, over, said] of [
@@ -1342,6 +1367,130 @@ describe("operator door", () => {
     assert.equal(heldSpend({ ...row, subject: "spend", currency: "EUR", args: { currency: "USD" } })?.currency, "EUR");
     assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: 40 } })?.amountMinor, 40);
     assert.equal(heldSpend({ ...row, subject: "memory.put", amount: 5, payee: "x", args: {} }), null);
+  });
+
+  it("D28 a passkey taken out of use ends its sessions and signs nothing more, and what it signed still verifies", async () => {
+    const phone = mintSoftwarePasskey();
+    const spare = mintSoftwarePasskey();
+    const publicKeyOf = (passkey: SoftwarePasskey) => isoBase64URL.fromBuffer(passkey.publicKeyCose.slice());
+    const body = await openBody(phone);
+    saveCredential(body.stateDir, { id: spare.id, publicKey: publicKeyOf(spare), counter: 0, sub: "operator-1" });
+    let open = true;
+    const shut = async () => {
+      if (!open) return;
+      open = false;
+      await new Promise<void>((resolve) => body.server.close(() => resolve()));
+    };
+    /** Approves the one call waiting, in `token`'s session, with an assertion `signer` makes. */
+    const approve = async (token: string, signer: SoftwarePasskey): Promise<Answer> => {
+      const [row] = await waitingAt(body.doorPort, token);
+      const assertion = await approvalAssertion(body.doorPort, token, signer, row!.ref);
+      return call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: row!.ref, requestHash: row!.requestHash, assertion },
+      });
+    };
+    try {
+      await hold(body, "door-d28-before");
+      const phoneToken = (await signIn(body.doorPort, phone)).body.token as string;
+      assert.equal((await approve(phoneToken, phone)).status, 200);
+      const spareToken = (await signIn(body.doorPort, spare)).body.token as string;
+
+      const gone = await quiet(() => runOperator(["operator", "remove", "--state", body.stateDir, "--id", phone.id]));
+      assert.deepEqual([gone.code, gone.out], [0, "removed\n"], gone.err);
+
+      // The session it opened is over, and it opens no other.
+      assert.equal((await call(body.doorPort, "GET", "/api/waiting", { token: phoneToken })).status, 401);
+      const options = await call(body.doorPort, "POST", "/api/signin/options");
+      assert.deepEqual(options.body.allowCredentials, [{ id: spare.id, type: "public-key" }]);
+      assert.equal((await signIn(body.doorPort, phone)).status, 403);
+
+      // The other passkey goes on as before. Inside its session the removed one still signs for nothing.
+      await hold(body, "door-d28-after");
+      const lent = await approve(spareToken, phone);
+      assert.equal(lent.status, 403, JSON.stringify(lent.body));
+      assert.equal((await approve(spareToken, spare)).status, 200);
+
+      // Its row is where it was. The body has rewritten the file twice since,
+      // for the other passkey's counter and for a new enrolment, and no
+      // enrolment can take the id.
+      const over = await enroll(body.doorPort, beginPairing(body.stateDir).code, phone);
+      assert.deepEqual(over.body, { error: "enroll-refused", reason: "already-enrolled" });
+      assert.equal((await enroll(body.doorPort, beginPairing(body.stateDir).code, mintSoftwarePasskey())).status, 200);
+      const rows = readCredentialsAt(credentialsPath(body.stateDir));
+      assert.equal(rows.length, 3);
+      assert.equal(rows.find((row) => row.id === phone.id)?.publicKey, publicKeyOf(phone));
+
+      // Both approvals read back from the files, the removed passkey's among them.
+      await shut();
+      const report = await verifyApprovalSignatures(body.stateDir);
+      assert.equal(report.signedVerified, 2);
+      assert.equal(report.signedFailed, 0);
+    } finally {
+      await shut();
+      rmSync(body.stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D29 `verax operator` lists and removes by id, and a list of the removed that does not read leaves no passkey in use", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-remove-"));
+    const run = (...rest: string[]) => quiet(() => runOperator(["operator", ...rest]));
+    try {
+      for (const id of ["passkey-a", "passkey-b"]) saveCredential(stateDir, { id, publicKey: "", counter: 0, sub: "operator-1" });
+      const before = readFileSync(credentialsPath(stateDir), "utf8");
+      assert.deepEqual(await run("list", "--state", stateDir), {
+        code: 0,
+        out: "passkey-a\toperator-1\tin use\npasskey-b\toperator-1\tin use\n",
+        err: "",
+      });
+
+      // What it is not asked plainly it does not do, and it removes nothing it was not shown.
+      for (const [rest, said] of [
+        [["remove", "--state", stateDir], /^verax operator enroll/],
+        [["remove", "--id", "passkey-a"], /^verax operator enroll/],
+        [["list", "--state", stateDir, "--id", "passkey-a"], /^flag-unknown:--id\n$/],
+        [["remove", "--state", stateDir, "--all"], /^flag-unknown:--all\n$/],
+        [["remove", "--state", stateDir, "--id", "passkey-c"], /^passkey-unknown\n$/],
+        [["forget", "--state", stateDir], /^verax operator enroll/],
+      ] as const) {
+        const refused = await run(...rest);
+        assert.equal(refused.code, 78, rest.join(" "));
+        assert.match(refused.err, said, rest.join(" "));
+      }
+      assert.equal(existsSync(removedPath(stateDir)), false);
+
+      assert.equal((await run("remove", "--state", stateDir, "--id", "passkey-a")).out, "removed\n");
+      assert.equal((await run("remove", "--state", stateDir, "--id", "passkey-a")).out, "already-removed\n");
+      assert.equal(readFileSync(removedPath(stateDir), "utf8"), '{"removed":["passkey-a"]}\n');
+      assert.deepEqual(readCredentials(stateDir).map((row) => row.id), ["passkey-b"]);
+      assert.equal((await run("list", "--state", stateDir)).out, "passkey-a\toperator-1\tremoved\npasskey-b\toperator-1\tin use\n");
+
+      // The last one out says so. The credentials file is not touched by any
+      // of this, and it is still there: with nobody left, the body does not
+      // go back to approving without a passkey.
+      const last = await run("remove", "--state", stateDir, "--id", "passkey-b");
+      assert.equal(last.code, 0);
+      assert.match(last.out, /^removed\nno passkey is left in use: /);
+      assert.deepEqual(readCredentials(stateDir), []);
+      assert.equal(readFileSync(credentialsPath(stateDir), "utf8"), before);
+      assert.equal(hasRegisteredOperator(stateDir), true);
+
+      // A list that does not read is not an empty list: any passkey might be on it.
+      for (const text of ["", "{", '{"removed":"passkey-a"}', '{"removed":["passkey-a",7]}', "[]"]) {
+        writeFileSync(removedPath(stateDir), text);
+        assert.equal(readRemoved(stateDir), null, text);
+        assert.deepEqual(readCredentials(stateDir), [], text);
+        for (const rest of [["list", "--state", stateDir], ["remove", "--state", stateDir, "--id", "passkey-a"]]) {
+          const stopped = await run(...rest);
+          assert.equal(stopped.code, 78, text);
+          assert.match(stopped.err, /^removed-list-unreadable:/, text);
+          assert.equal(stopped.out, "", text);
+        }
+        assert.equal(readFileSync(removedPath(stateDir), "utf8"), text);
+      }
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 
   it("D12 the origin is a name over HTTPS, and the door binds loopback", () => {

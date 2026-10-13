@@ -35,6 +35,14 @@ used away from the machine, and what would have to be built.
 - `verax operator enroll` prints an eight-digit pairing code that lasts five
   minutes and five attempts; the passkey is created on the device that types
   it.
+- `verax operator list` prints the enrolled passkeys in the order they were
+  enrolled, and `verax operator remove --id <id>` takes one out of use: the
+  sessions it opened end at their next request, no sign-in offers or accepts
+  it, and an approval it signs is refused. Its public key stays in the
+  credentials file, so the approvals it signed before still verify. Both run
+  at the machine, as the account that owns the state directory. With every
+  passkey removed the body does not go back to approving without one; a new
+  pairing code enrols the next.
 
 ## What stops it
 
@@ -149,9 +157,11 @@ way to reach that from another device.
 - A stop from the page is signed when the passkey answers and goes through
   unsigned when it does not: stopping is the safe direction. A resume is
   never taken unsigned.
-- It does not make a lost phone harmless by itself: the passkey's own user
-  verification is what stands between a thief and an approval, and
-  `verax operator` needs a way to remove one credential.
+- It does not make a lost phone harmless by itself: until someone at the
+  machine runs `verax operator remove`, the passkey's own user verification
+  is what stands between a thief and an approval. The list does not say
+  which passkey is on which device, only the order they were enrolled in,
+  and a removal is not written to the ledger.
 
 ## What it would change in the claims
 
