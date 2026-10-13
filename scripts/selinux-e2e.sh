@@ -30,11 +30,15 @@ log "tools"
 sudo dnf -y -q install git tar xz policycoreutils-python-utils audit >/dev/null 2>&1 || true
 arch="$(uname -m)"; case "$arch" in x86_64) a=x64;; aarch64) a=arm64;; esac
 name="node-v${VER}-linux-${a}.tar.xz"
-curl -fsSL "https://nodejs.org/dist/v${VER}/SHASUMS256.txt" -o /tmp/SHASUMS256.txt
-curl -fsSL "https://nodejs.org/dist/v${VER}/${name}" -o "/tmp/${name}"
-(cd /tmp && grep " ${name}$" SHASUMS256.txt | sha256sum -c -) || exit 3
+# A directory of this run's own: a fixed name under /tmp is one another user can
+# create first.
+work="$(mktemp -d)" || exit 3
+trap 'sudo rm -rf "$work"' EXIT
+curl -fsSL "https://nodejs.org/dist/v${VER}/SHASUMS256.txt" -o "$work/SHASUMS256.txt"
+curl -fsSL "https://nodejs.org/dist/v${VER}/${name}" -o "$work/${name}"
+(cd "$work" && grep " ${name}$" SHASUMS256.txt | sha256sum -c -) || exit 3
 sudo mkdir -p /usr/local/lib/nodejs
-sudo tar -C /usr/local/lib/nodejs -xJf "/tmp/${name}"
+sudo tar -C /usr/local/lib/nodejs -xJf "$work/${name}"
 sudo chown -R root:root /usr/local/lib/nodejs && sudo chmod -R go-w /usr/local/lib/nodejs
 export VERAX_NODE="/usr/local/lib/nodejs/node-v${VER}-linux-${a}/bin/node"
 export PATH="$(dirname "$VERAX_NODE"):$PATH"
@@ -44,8 +48,7 @@ log "source at $COMMIT"
 rm -rf ~/verax && git clone -q https://github.com/verax-ai/verax.git ~/verax && cd ~/verax && git checkout -q "$COMMIT"
 git log --oneline -1
 npm ci --silent >/dev/null 2>&1 && npm run build:dist >/dev/null 2>&1 || { echo "FAIL build"; exit 4; }
-dir=/tmp/verax-tarballs
-sudo rm -rf "$dir"
+dir="$work/verax-tarballs"
 mkdir -p "$dir"
 for p in inventory proxy body; do npm pack -w "@verax-ai/$p" --pack-destination "$dir" >/dev/null; done
 sudo chown -R root:root "$dir"; sudo chmod -R a-w,u+rX "$dir"
@@ -53,6 +56,7 @@ export VERAX_TARBALLS="$dir"
 NODE_REAL="$(readlink -f "$VERAX_NODE")"
 fcontext_added=0
 cleanup_label() {
+  sudo rm -rf "$work"
   if [ "${fcontext_added:-0}" != 1 ]; then
     return 0
   fi
@@ -64,7 +68,7 @@ cleanup_label() {
 trap cleanup_label EXIT
 
 log "install refuses a lib_t Node"
-refuse_log=/tmp/verax-selinux-refuse.txt
+refuse_log="$work/verax-selinux-refuse.txt"
 sudo -E env "PATH=$PATH" "$VERAX_NODE" packages/body/dist/cli.js install --from-tarballs "$VERAX_TARBALLS" --port 8801 >"$refuse_log" 2>&1
 refuse_code=$?
 echo "refuse exit=$refuse_code"

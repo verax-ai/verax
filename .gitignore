@@ -12,3 +12,13 @@ packages/proxy/perf/last-*.json
 .shots/
 coverage/
 .codex-logs/
+# Key material stays out. The exceptions are the .pem files under the fixture
+# and test-vector directories. A key file of another kind there, or a fixture
+# directory somewhere else, needs its own line here or is silently left out.
+*.pem
+*.key
+*.p12
+*.pfx
+!test-vectors/**/*.pem
+!tests/fixtures/**/*.pem
+!packages/*/tests/fixtures/**/*.pem
