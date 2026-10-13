@@ -9,6 +9,11 @@ export async function main(
   env: NodeJS.ProcessEnv = process.env,
   argv: readonly string[] = process.argv,
 ): Promise<void> {
+  // stderr can be a file: launchd gives the installed body one. When its disk
+  // stops taking writes, a line written there fails after the write has
+  // returned, as an 'error' on the stream, and with nobody listening Node ends
+  // the process on it. The line is lost; the body is not stopped by that.
+  process.stderr.on("error", () => {});
   watchDesktopParent({ env });
   const overlaid = overlayInventoryArg(env, argv);
   if ("error" in overlaid) {
