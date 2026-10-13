@@ -17,7 +17,6 @@ import { connect, createServer as createNetServer, type AddressInfo, type Socket
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
@@ -1537,7 +1536,13 @@ describe("operator door", () => {
 
   it("D30 removals made at the same moment all hold", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-remove-race-"));
-    const cli = fileURLToPath(new URL("../packages/body/src/cli.ts", import.meta.url));
+    // Each child runs the operator entry itself. Through cli.ts an elevated
+    // process refuses code its user can change, which is every checkout on a
+    // runner that is an administrator, and no removal would be reached.
+    const entry = new URL("../packages/body/src/operator-cli.ts", import.meta.url).href;
+    const script =
+      `const { runOperator } = await import(${JSON.stringify(entry)});` +
+      `process.exit(await runOperator(["operator", "remove", "--state", process.argv[1], "--id", process.argv[2]]));`;
     const ids = Array.from({ length: 12 }, (_, i) => `passkey-${i}`);
     try {
       for (const id of ids) saveCredential(stateDir, { id, publicKey: "", counter: 0, sub: "operator-1" });
@@ -1549,7 +1554,7 @@ describe("operator door", () => {
             new Promise<number | null>((resolve) => {
               const child = spawn(
                 process.execPath,
-                ["--experimental-strip-types", cli, "operator", "remove", "--state", stateDir, "--id", id],
+                ["--experimental-strip-types", "--input-type=module", "-e", script, stateDir, id],
                 { stdio: "ignore" },
               );
               child.once("exit", (code) => resolve(code));
