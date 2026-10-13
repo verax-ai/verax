@@ -12,3 +12,12 @@ packages/proxy/perf/last-*.json
 .shots/
 coverage/
 .codex-logs/
+# Key material stays out unless it is a fixture that says what it is. A new
+# fixture directory needs its own line here, or its keys are silently left out.
+*.pem
+*.key
+*.p12
+*.pfx
+!test-vectors/**/*.pem
+!tests/fixtures/**/*.pem
+!packages/*/tests/fixtures/**/*.pem
