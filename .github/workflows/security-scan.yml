@@ -7,7 +7,10 @@
 #                 artifact and to code scanning, and never fail the run.
 #
 # The two report-only jobs become blocking once their current findings are
-# triaged. Known non-secrets are listed in .gitleaks.toml and .gitleaksignore.
+# triaged. Known non-secrets are listed in .gitleaks.toml and .gitleaksignore;
+# known development-only vulnerabilities, each with an expiry, in osv-scanner.toml.
+# Every tool is pinned: actions by commit, downloads by SHA-256, the semgrep
+# image by digest. The semgrep rule packs are fetched from the registry at run time.
 name: security-scan
 
 on:
@@ -61,12 +64,17 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
+      - name: Install osv-scanner
+        env:
+          OSV_SCANNER_VERSION: "2.7.0"
+          OSV_SCANNER_SHA256: "160c6253e2922e9e0a6a9771c5c4c40a4b3c6090b34a3cdd5e80c96cc2e4218b"
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/osv-scanner" "https://github.com/google/osv-scanner/releases/download/v${OSV_SCANNER_VERSION}/osv-scanner_linux_amd64"
+          echo "${OSV_SCANNER_SHA256}  $RUNNER_TEMP/osv-scanner" | sha256sum --check
+          chmod +x "$RUNNER_TEMP/osv-scanner"
       - name: Scan the lockfiles
-        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
-        with:
-          scan-args: |-
-            --recursive
-            ./
+        run: |
+          "$RUNNER_TEMP/osv-scanner" scan source --recursive ./
 
   workflows:
     name: workflows (report only)
@@ -83,6 +91,7 @@ jobs:
       - name: Audit the workflow files
         uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
+          version: "1.30.1"
           advanced-security: false
           online-audits: false
 
@@ -91,6 +100,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     continue-on-error: true
+    container:
+      # semgrep 1.180.0
+      image: semgrep/semgrep@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
     permissions:
       contents: read
       security-events: write
@@ -100,10 +112,8 @@ jobs:
         with:
           persist-credentials: false
       - name: Run semgrep
-        env:
-          SEMGREP_VERSION: "1.180.0"
         run: |
-          pipx run --spec "semgrep==${SEMGREP_VERSION}" semgrep scan \
+          semgrep scan \
             --metrics=off \
             --config p/security-audit --config p/typescript --config p/secrets \
             --sarif --output semgrep.sarif
