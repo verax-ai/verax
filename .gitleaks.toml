@@ -1,0 +1,15 @@
+# Secret scan configuration for .github/workflows/security-scan.yml.
+# The default gitleaks rules apply. The entries below name the known non-secrets
+# in this tree; anything else that matches fails the scan.
+title = "verax"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Frozen ledger vectors: WebAuthn authenticatorData is public verification data, not a credential"
+paths = ['''^test-vectors/v1/[^/]+/ledger/inputs\.jsonl$''']
+
+[[allowlists]]
+description = "Test signing keys that say so in their file name"
+paths = ['''\.TEST-KEY-NOT-A-SECRET\.pem$''']
