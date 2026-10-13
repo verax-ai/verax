@@ -28,7 +28,7 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@verax-ai/inventory": "^0.5.1",
     "@verax-ai/proxy": "^0.5.1",
-    "jose": "^6.2.11"
+    "jose": "^6.2.12"
   },
   "description": "VERAX body: an MCP server that decides, records and proves what an agent did.",
   "homepage": "https://verax-ai.com",

@@ -29,7 +29,7 @@
     "@cedulon/effect-extract": "0.13.1",
     "@cedulon/x402-adapter": "0.13.1",
     "@simplewebauthn/browser": "^14.0.0",
-    "@simplewebauthn/server": "^14.0.2"
+    "@simplewebauthn/server": "^14.0.3"
   },
   "overrides": {
     "@cedulon/audit": "0.13.1",
