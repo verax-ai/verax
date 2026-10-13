@@ -39,10 +39,12 @@ used away from the machine, and what would have to be built.
   enrolled, and `verax operator remove --id <id>` takes one out of use: the
   sessions it opened end at their next request, no sign-in offers or accepts
   it, and an approval it signs is refused. Its public key stays in the
-  credentials file, so the approvals it signed before still verify. Both run
-  at the machine, as the account that owns the state directory. With every
-  passkey removed the body does not go back to approving without one; a new
-  pairing code enrols the next.
+  credentials file, so the approvals it signed before still verify, and no
+  later enrolment can put another key under its id. Both run at the machine;
+  root runs them as the account that owns the state directory. Removals made
+  at the same moment all hold: each is a file of its own. With every passkey
+  removed the body does not go back to approving without one; a new pairing
+  code enrols the next.
 
 ## What stops it
 

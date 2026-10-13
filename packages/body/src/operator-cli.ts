@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import {
   credentialsPath,
+  credentialsReadable,
   readCredentials,
   readCredentialsAt,
   readRemoved,
@@ -140,6 +141,12 @@ export async function runOperator(argv: string[], sys: OperatorSys = realSys): P
     const { code } = beginPairing(writer.stateDir);
     process.stdout.write(`${code}\n`);
     return 0;
+  }
+  // A credentials file that does not parse lists as nothing. Said here, so
+  // that it is not taken for "nobody is enrolled".
+  if (!credentialsReadable(writer.stateDir)) {
+    process.stderr.write(`credentials-unreadable:${credentialsPath(writer.stateDir)}\n`);
+    return 78;
   }
   if (verb === "list") {
     const removed = readRemoved(writer.stateDir);

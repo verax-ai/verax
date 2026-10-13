@@ -1,11 +1,23 @@
 import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { request } from "node:http";
 import { connect, createServer as createNetServer, type AddressInfo, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Script } from "node:vm";
 
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
@@ -1171,7 +1183,8 @@ describe("operator door", () => {
       const kept = await quiet(() => runOperator(["operator", "remove", "--state", stateDir, "--id", "passkey-b"], held.sys));
       assert.equal(kept.code, 78);
       assert.match(kept.err, /cannot-change-account/);
-      assert.deepEqual([...(readRemoved(stateDir) ?? [])], ["passkey-a"]);
+      const marked = readRemoved(stateDir);
+      assert.deepEqual([marked?.has("passkey-a"), marked?.has("passkey-b")], [true, false]);
 
       // A drop that cannot be made, or that did not take in either half, writes nothing.
       for (const [why, over, said] of [
@@ -1461,33 +1474,91 @@ describe("operator door", () => {
 
       assert.equal((await run("remove", "--state", stateDir, "--id", "passkey-a")).out, "removed\n");
       assert.equal((await run("remove", "--state", stateDir, "--id", "passkey-a")).out, "already-removed\n");
-      assert.equal(readFileSync(removedPath(stateDir), "utf8"), '{"removed":["passkey-a"]}\n');
+      const marks = () => readdirSync(removedPath(stateDir)).sort();
+      const first = marks();
+      assert.equal(first.length, 1);
       assert.deepEqual(readCredentials(stateDir).map((row) => row.id), ["passkey-b"]);
       assert.equal((await run("list", "--state", stateDir)).out, "passkey-a\toperator-1\tremoved\npasskey-b\toperator-1\tin use\n");
 
-      // The last one out says so. The credentials file is not touched by any
-      // of this, and it is still there: with nobody left, the body does not
-      // go back to approving without a passkey.
+      // The last one out says so. Its removal adds a mark and leaves the
+      // first where it was: nothing two removals share is written twice.
+      const stamp = statSync(join(removedPath(stateDir), first[0]!)).mtimeMs;
       const last = await run("remove", "--state", stateDir, "--id", "passkey-b");
       assert.equal(last.code, 0);
       assert.match(last.out, /^removed\nno passkey is left in use: /);
+      assert.equal(marks().length, 2);
+      assert.ok(marks().includes(first[0]!));
+      assert.equal(statSync(join(removedPath(stateDir), first[0]!)).mtimeMs, stamp);
       assert.deepEqual(readCredentials(stateDir), []);
+
+      // The credentials file is not touched by any of this, and it is still
+      // there: with nobody left, the body does not go back to approving
+      // without a passkey. An id it holds keeps the key it has.
+      assert.equal(saveCredential(stateDir, { id: "passkey-a", publicKey: "another", counter: 0, sub: "operator-1" }), false);
       assert.equal(readFileSync(credentialsPath(stateDir), "utf8"), before);
       assert.equal(hasRegisteredOperator(stateDir), true);
 
-      // A list that does not read is not an empty list: any passkey might be on it.
-      for (const text of ["", "{", '{"removed":"passkey-a"}', '{"removed":["passkey-a",7]}', "[]"]) {
-        writeFileSync(removedPath(stateDir), text);
-        assert.equal(readRemoved(stateDir), null, text);
-        assert.deepEqual(readCredentials(stateDir), [], text);
+      // A name in the directory that is no passkey's mark removes nobody.
+      rmSync(removedPath(stateDir), { recursive: true });
+      mkdirSync(removedPath(stateDir));
+      writeFileSync(join(removedPath(stateDir), "passkey-a"), "");
+      assert.deepEqual(readCredentials(stateDir).map((row) => row.id), ["passkey-a", "passkey-b"]);
+
+      // Something at the path that cannot be listed is not "none removed":
+      // any passkey might have a mark there.
+      rmSync(removedPath(stateDir), { recursive: true });
+      writeFileSync(removedPath(stateDir), "");
+      assert.equal(readRemoved(stateDir), null);
+      assert.deepEqual(readCredentials(stateDir), []);
+      for (const rest of [["list", "--state", stateDir], ["remove", "--state", stateDir, "--id", "passkey-a"]]) {
+        const stopped = await run(...rest);
+        assert.equal(stopped.code, 78);
+        assert.match(stopped.err, /^removed-list-unreadable:/);
+        assert.equal(stopped.out, "");
+      }
+      assert.equal(statSync(removedPath(stateDir)).isFile(), true);
+      rmSync(removedPath(stateDir));
+
+      // A credentials file that does not parse is said to be that, not listed as empty.
+      for (const text of ["", "{", "[]", '{"credentials":"none"}']) {
+        writeFileSync(credentialsPath(stateDir), text);
         for (const rest of [["list", "--state", stateDir], ["remove", "--state", stateDir, "--id", "passkey-a"]]) {
           const stopped = await run(...rest);
           assert.equal(stopped.code, 78, text);
-          assert.match(stopped.err, /^removed-list-unreadable:/, text);
+          assert.match(stopped.err, /^credentials-unreadable:/, text);
           assert.equal(stopped.out, "", text);
         }
-        assert.equal(readFileSync(removedPath(stateDir), "utf8"), text);
+        assert.equal(existsSync(removedPath(stateDir)), false, text);
       }
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D30 removals made at the same moment all hold", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-operator-remove-race-"));
+    const cli = fileURLToPath(new URL("../packages/body/src/cli.ts", import.meta.url));
+    const ids = Array.from({ length: 12 }, (_, i) => `passkey-${i}`);
+    try {
+      for (const id of ids) saveCredential(stateDir, { id, publicKey: "", counter: 0, sub: "operator-1" });
+      // Twelve processes, one passkey each, started together. With one list
+      // read, changed and written back, the later writers undid the earlier.
+      const codes = await Promise.all(
+        ids.map(
+          (id) =>
+            new Promise<number | null>((resolve) => {
+              const child = spawn(
+                process.execPath,
+                ["--experimental-strip-types", cli, "operator", "remove", "--state", stateDir, "--id", id],
+                { stdio: "ignore" },
+              );
+              child.once("exit", (code) => resolve(code));
+            }),
+        ),
+      );
+      assert.deepEqual(codes, ids.map(() => 0));
+      assert.equal(readdirSync(removedPath(stateDir)).length, ids.length);
+      assert.deepEqual(readCredentials(stateDir), []);
     } finally {
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }

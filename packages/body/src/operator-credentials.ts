@@ -1,9 +1,10 @@
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileAtomic } from "./atomic-write.ts";
 
 export const CREDENTIALS_FILE = "operator-credentials.json";
-export const REMOVED_FILE = "operator-removed.json";
+export const REMOVED_DIR = "operator-removed";
 export const DEFAULT_OPERATOR_SUB = "operator-1";
 
 export type StoredCredential = {
@@ -39,30 +40,38 @@ export function readCredentialsAt(path: string): StoredCredential[] {
 }
 
 export function removedPath(stateDir: string): string {
-  return join(stateDir, REMOVED_FILE);
+  return join(stateDir, REMOVED_DIR);
 }
 
+/** The name a removed passkey's mark is filed under. An id can be longer than a file name may be. */
+function markOf(id: string): string {
+  return createHash("sha256").update(id, "utf8").digest("hex");
+}
+
+export type Removed = { has: (id: string) => boolean };
+
 /**
- * The ids of the passkeys an administrator has taken away. A removed passkey
- * keeps its row in the credentials file: the approvals it signed are in the
- * ledger, and `verax verify` reads them back under that key. This file is
- * what stops it being used again. `verax operator remove` is its one writer,
- * as the body is the one writer of the credentials file; neither rewrites the
- * other's, so a removal cannot be undone by a counter written a moment later.
+ * The passkeys an administrator has taken away. A removed passkey keeps its
+ * row in the credentials file: the approvals it signed are in the ledger, and
+ * `verax verify` reads them back under that key. What stops it being used
+ * again is a mark in this directory, one file per passkey.
  *
- * Null when the file is there and does not read as a list of ids. That is not
- * an empty list: see `readCredentials`.
+ * A removal creates a file and changes none. Nothing here is read, altered
+ * and written back, so two removals at once cannot undo each other, and a
+ * counter the body writes a moment later is to another file altogether.
+ *
+ * Null when something is at the path and cannot be listed. That is not "none
+ * removed": see `readCredentials`.
  */
-export function readRemoved(stateDir: string): Set<string> | null {
-  const path = removedPath(stateDir);
-  if (!existsSync(path)) return new Set();
+export function readRemoved(stateDir: string): Removed | null {
+  let marks: Set<string>;
   try {
-    const row = JSON.parse(readFileSync(path, "utf8")) as { removed?: unknown };
-    if (!Array.isArray(row.removed) || !row.removed.every((id) => typeof id === "string")) return null;
-    return new Set(row.removed as string[]);
-  } catch {
-    return null;
+    marks = new Set(readdirSync(removedPath(stateDir)));
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
+    marks = new Set();
   }
+  return { has: (id) => marks.has(markOf(id)) };
 }
 
 /** Every row in the file, the removed among them: for rewriting the file, and for asking whether an id was ever enrolled. */
@@ -100,11 +109,32 @@ export function findCredential(stateDir: string, id: string): StoredCredential |
   return readCredentials(stateDir).find((c) => c.id === id) ?? null;
 }
 
-export function saveCredential(stateDir: string, credential: StoredCredential): void {
+/**
+ * Adds a passkey. An id the file already holds keeps the row it has, removed
+ * or not: approvals in the ledger were signed under that key, and a second
+ * enrolment must not put another in its place. False when nothing was written.
+ */
+export function saveCredential(stateDir: string, credential: StoredCredential): boolean {
   const credentials = everyCredential(stateDir);
-  const next = credentials.filter((c) => c.id !== credential.id);
-  next.push(credential);
-  writeFileAtomic(credentialsPath(stateDir), `${JSON.stringify({ credentials: next })}\n`);
+  if (credentials.some((c) => c.id === credential.id)) return false;
+  credentials.push(credential);
+  writeFileAtomic(credentialsPath(stateDir), `${JSON.stringify({ credentials })}\n`);
+  return true;
+}
+
+/**
+ * Whether the credentials file can be listed from. `readCredentialsAt` gives
+ * no rows for a file that does not parse, which is what a caller deciding
+ * whom to let in wants, and not what someone reading a list wants to be told.
+ */
+export function credentialsReadable(stateDir: string): boolean {
+  const path = credentialsPath(stateDir);
+  if (!existsSync(path)) return true;
+  try {
+    return Array.isArray((JSON.parse(readFileSync(path, "utf8")) as Partial<CredentialStore>).credentials);
+  } catch {
+    return false;
+  }
 }
 
 export function updateCounter(stateDir: string, id: string, counter: number): boolean {
@@ -126,6 +156,14 @@ export function removeCredential(stateDir: string, id: string): Removal {
   if (!removed) return "unreadable";
   if (!everEnrolled(stateDir, id)) return "unknown";
   if (removed.has(id)) return "already-removed";
-  writeFileAtomic(removedPath(stateDir), `${JSON.stringify({ removed: [...removed, id] })}\n`);
+  mkdirSync(removedPath(stateDir), { recursive: true, mode: 0o700 });
+  try {
+    // The name is the mark. The id inside is for whoever reads the directory.
+    writeFileSync(join(removedPath(stateDir), markOf(id)), `${id}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch (err) {
+    // Another removal of the same passkey got there between the look and the write.
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return "already-removed";
+    throw err;
+  }
   return "removed";
 }
