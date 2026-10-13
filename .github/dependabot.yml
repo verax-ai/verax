@@ -1,5 +1,6 @@
-# Version updates, once a month, one pull request per ecosystem. Security
-# updates are separate and come as soon as an advisory is published; this file
+# Version updates, once a month, grouped: one pull request per ecosystem, and
+# one more for each npm major version. Security updates are separate and come
+# as soon as an advisory is published; this file
 # does not slow them down. A release has to be a week old before it is
 # proposed, so one that turns out bad has time to be withdrawn. Nothing merges
 # by itself: every pull request runs the required checks and waits for a
