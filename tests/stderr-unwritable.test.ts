@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
-import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -70,8 +70,14 @@ describe("a stderr that cannot be written", () => {
       assert.equal(res.status, 200);
       assert.equal(readFileSync(errFile, "utf8"), "", "the line was not supposed to arrive");
     } finally {
-      child.kill();
+      // The body holds its ledger lock until it is gone; the directory goes after it.
+      if (child.exitCode === null && child.signalCode === null) {
+        const gone = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+        child.kill();
+        await gone;
+      }
       await issuer.close();
+      rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 });
