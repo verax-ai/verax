@@ -1,0 +1,6 @@
+# Findings in history that are not secrets, by gitleaks fingerprint.
+# A test signing key was once embedded in these two test files; it is the same key as
+# packages/proxy/tests/fixtures/keys/record-signer.TEST-KEY-NOT-A-SECRET.pem, and the
+# tests now generate their key at run time.
+93023c2a1c55aa90b6a7fb8ab9c805243d5c0a72:packages/body/tests/memory-id.test.ts:private-key:20
+047bcae39342ab5564549cfc2cd301d7e1b4a8b8:packages/body/tests/stale-memory.test.ts:private-key:20

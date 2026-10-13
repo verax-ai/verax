@@ -1,0 +1,22 @@
+# Dependency scan configuration for .github/workflows/security-scan.yml.
+#
+# The entries below are known vulnerabilities in the panel's test runner
+# (vitest 3 and its tinypool and @vitest/mocker). They are development
+# dependencies of apps/panel and are not part of any published package.
+# The fix is the move to vitest 4, a major version. Each entry expires, so
+# the scan fails again if the upgrade has not happened by then.
+
+[[IgnoredVulns]]
+id = "GHSA-82fw-gwwq-j7x9"
+ignoreUntil = 2026-11-30T00:00:00Z
+reason = "vitest and @vitest/mocker 3.2.7, development only; fixed in vitest 4.1.11"
+
+[[IgnoredVulns]]
+id = "GHSA-5gmw-xhrv-c9v3"
+ignoreUntil = 2026-11-30T00:00:00Z
+reason = "tinypool 1.1.1 via vitest 3, development only; fixed in tinypool 2.1.1"
+
+[[IgnoredVulns]]
+id = "GHSA-85c8-ppgw-ccpr"
+ignoreUntil = 2026-11-30T00:00:00Z
+reason = "tinypool 1.1.1 via vitest 3, development only; fixed in tinypool 2.1.2"
