@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
+import { sha256Canonical } from "../src/hash.ts";
 import { FileLedger } from "../src/ledger.ts";
 import { OPERATOR_REMOVED_DIR, operatorRemovalMark } from "../src/operator-removal-sync.ts";
 import { loadPolicy } from "../src/policy.ts";
@@ -59,10 +60,11 @@ function open(dir: string, ledger = new FileLedger(dir)) {
   return { ledger, proxy };
 }
 
-/** A ledger that counts how often its decisions are read whole. */
-function counted(dir: string): { ledger: FileLedger; reads: () => number } {
+/** A ledger that counts how often its decisions are read whole, and how often the control sync takes its lock. */
+function counted(dir: string): { ledger: FileLedger; reads: () => number; locks: () => number } {
   const ledger = new FileLedger(dir);
   let reads = 0;
+  let locks = 0;
   const counting = new Proxy(ledger, {
     get(target, prop) {
       if (prop === "decisions") {
@@ -71,11 +73,18 @@ function counted(dir: string): { ledger: FileLedger; reads: () => number } {
           return target.decisions();
         };
       }
+      // Only the control sync asks the ledger for its lock from outside.
+      if (prop === "exclusive") {
+        return async (fn: Parameters<FileLedger["exclusive"]>[0]) => {
+          locks += 1;
+          return target.exclusive(fn);
+        };
+      }
       const value = Reflect.get(target, prop, target);
       return typeof value === "function" ? value.bind(target) : value;
     },
   }) as FileLedger;
-  return { ledger: counting, reads: () => reads };
+  return { ledger: counting, reads: () => reads, locks: () => locks };
 }
 
 async function removals(ledger: FileLedger, dir: string) {
@@ -111,6 +120,11 @@ describe("passkey removals in the ledger", () => {
       assert.equal(record?.claims.effectClass, "verax.control");
       assert.equal(record?.claims.effectHash, null);
       assert.equal(record?.claims.decider, "verax-proxy");
+      // The record is bound to the row it stands for, and carries the row's time.
+      const row = inputsFor(dir, record?.claims.ref ?? "").operatorRemoval;
+      assert.ok(row);
+      assert.equal(record?.claims.requestHash, sha256Canonical(row));
+      assert.equal(record?.claims.timestampMs, row.atMs);
     } finally {
       ledger.close();
     }
@@ -212,7 +226,7 @@ describe("passkey removals in the ledger", () => {
   it("O6 twenty calls with marks read decisions once, and a mark added on the way is recorded", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-removal-o6-"));
     mark(dir, "first");
-    const { ledger, reads } = counted(dir);
+    const { ledger, reads, locks } = counted(dir);
     const { proxy } = open(dir, ledger);
     try {
       for (let i = 0; i < 20; i += 1) {
@@ -220,6 +234,8 @@ describe("passkey removals in the ledger", () => {
         await proxy.call({ name: "memory.get", arguments: { id: `o6-${i}` } }, reader);
       }
       assert.equal(reads(), 1);
+      // The lock is taken when the account is first read and when a mark appears, not on the calls between.
+      assert.equal(locks(), 2);
       assert.deepEqual(
         (await removals(ledger, dir)).map((row) => row.mark),
         [markOf("first"), markOf("second")],
@@ -259,12 +275,13 @@ describe("passkey removals in the ledger", () => {
   it("O8 marks that cannot be listed are not read as marks taken away, and do not make every call read the ledger again", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-removal-o8-"));
     mark(dir, "passkey-a");
-    const { ledger, reads } = counted(dir);
+    const { ledger, reads, locks } = counted(dir);
     const { proxy } = open(dir, ledger);
     try {
       await proxy.call({ name: "memory.get", arguments: { id: "before" } }, reader);
       assert.equal((await removals(ledger, dir)).length, 1);
       const readsBefore = reads();
+      const locksBefore = locks();
 
       // A file where the directory was. The body leaves no passkey in use then;
       // the ledger must not say the removal was undone, because it was not.
@@ -283,6 +300,8 @@ describe("passkey removals in the ledger", () => {
       assert.deepEqual((await removals(ledger, dir)).map((row) => row.reason), ["passkey-removed"]);
       // `removals` reads the decisions itself, twice since the count was taken; the proxy must not have read them again at all.
       assert.equal(reads() - readsBefore, 2);
+      // One look that finds the marks cannot be listed and one that finds them back; the calls between take no lock.
+      assert.equal(locks() - locksBefore, 2);
     } finally {
       ledger.close();
     }
@@ -305,5 +324,35 @@ describe("passkey removals in the ledger", () => {
     } finally {
       ledger.close();
     }
+  });
+
+  it("O10 a revocation list that cannot be read does not keep a removal out of the ledger, nor make every call read it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-removal-o10-"));
+    // A directory where the revocation file belongs: the revoke sync fails on every call.
+    mkdirSync(join(dir, "revoked-jti.jsonl"));
+    mark(dir, "passkey-a");
+    const { ledger, reads } = counted(dir);
+    const { proxy } = open(dir, ledger);
+    try {
+      for (let i = 0; i < 10; i += 1) {
+        const result = await proxy.call({ name: "memory.get", arguments: { id: `o10-${i}` } }, reader);
+        assert.equal(result.isError, false);
+      }
+      assert.equal(reads(), 1);
+      assert.deepEqual((await removals(ledger, dir)).map((row) => row.reason), ["passkey-removed"]);
+      mark(dir, "passkey-b");
+      await proxy.call({ name: "memory.get", arguments: { id: "o10-after" } }, reader);
+      assert.deepEqual(
+        (await removals(ledger, dir)).map((row) => [row.reason, row.mark]),
+        [
+          ["passkey-removed", markOf("passkey-a")],
+          ["passkey-removed", markOf("passkey-b")],
+        ],
+      );
+    } finally {
+      ledger.close();
+    }
+    const verified = await verifyLedger(dir);
+    assert.equal(verified.ok, true, verified.problems.join("\n"));
   });
 });

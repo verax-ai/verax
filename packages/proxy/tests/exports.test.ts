@@ -62,6 +62,10 @@ const ALLOWED = new Set([
   "verifyReceipt",
   "lockState",
   "lockBeatOf",
+  // The body files a removed passkey's mark and the proxy reads the marks
+  // into the ledger: one name for the directory and one for the mark.
+  "OPERATOR_REMOVED_DIR",
+  "operatorRemovalMark",
 ]);
 
 describe("B1 exports map", () => {
