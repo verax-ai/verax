@@ -146,10 +146,10 @@ Printed next to the entry; never a decision.
 - Start row with `downstream` verifies; old v1/v2 rows verify; a changed
   `manifest` value in a signed row → signature failure; a manifest file
   edited → `verify` names it.
-- Pin command: a description containing `\u001b[2J` and `‮` is
+- Pin command: a description containing `\u001b[2J` and `\u202e` is
   printed escaped; no write without typed `yes`; the manifest equals the
   displayed snapshot when the child answers differently on a second list;
-  the document changed during the prompt → no write.
+  the downstream document is never written.
 - Manifest edited after pinning (document unchanged) → `manifest-invalid`;
   manifest missing → `manifest-invalid`; document `tools` narrowed from
   `[a,b]` to `[a]` with the old manifest → `manifest-mismatch`; manifest of

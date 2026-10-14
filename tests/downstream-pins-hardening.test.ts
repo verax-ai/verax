@@ -120,8 +120,8 @@ describe("a definition that cannot be encoded", { timeout: 60_000 }, () => {
 
 describe("the pin command, hardened", { timeout: 60_000 }, () => {
   it("shows DEL, 8-bit CSI and line separators escaped", () => {
-    const shown = renderToolEntry(tool("a", { description: "a\u007fb\u009b2Jc d e" }));
-    for (const raw of ["\u007f", "\u009b", " ", " "]) assert.equal(shown.includes(raw), false, JSON.stringify(raw));
+    const shown = renderToolEntry(tool("a", { description: "a\u007fb\u009b2Jc\u2028d\u2029e" }));
+    for (const raw of ["\u007f", "\u009b", "\u2028", "\u2029"]) assert.equal(shown.includes(raw), false, JSON.stringify(raw));
     for (const esc of ["\\u007f", "\\u009b", "\\u2028", "\\u2029"]) assert.ok(shown.includes(esc), esc);
   });
 

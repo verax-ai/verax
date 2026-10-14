@@ -89,10 +89,10 @@ function io(answer: string) {
 describe("verax downstream pin", { timeout: 60_000 }, () => {
   it("shows control, bidirectional and zero-width characters escaped, and the whole description", () => {
     const long = "x".repeat(5000);
-    const shown = renderToolEntry(tool("a", `clear\u001b[2J\u001b]52;c;Zm9v\u0007 ‮ ​ ${long}`));
+    const shown = renderToolEntry(tool("a", `clear\u001b[2J\u001b]52;c;Zm9v\u0007 \u202e \u200b ${long}`));
     assert.equal(shown.includes("\u001b"), false);
-    assert.equal(shown.includes("‮"), false);
-    assert.equal(shown.includes("​"), false);
+    assert.equal(shown.includes("\u202e"), false);
+    assert.equal(shown.includes("\u200b"), false);
     assert.ok(shown.includes("\\u001b"), shown.slice(0, 200));
     assert.ok(shown.includes("\\u202e"), shown.slice(0, 200));
     assert.ok(shown.includes(long), "the description is not cut");
