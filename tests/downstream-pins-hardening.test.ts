@@ -106,16 +106,25 @@ describe("every field of a tool entry is pinned", { timeout: 60_000 }, () => {
 });
 
 describe("a definition that cannot be encoded", { timeout: 60_000 }, () => {
-  for (const [what, body] of [
-    ["a non-finite number", '{"tools":[{"name":"a","description":"x","inputSchema":{"type":"object","maximum":1e400}}]}'],
-    ["a lone surrogate", '{"tools":[{"name":"a","description":"x\\ud800","inputSchema":{"type":"object"}}]}'],
-  ] as const) {
-    it(`with ${what} stops the attach with its own code`, async () => {
-      const { dir, pins } = pin("rea", [tool("a")]);
-      const url = await rawChild(body);
-      await assert.rejects(() => attach(url, pins, dir), /downstream-definition-unencodable:rea\.a/);
-    });
-  }
+  it("with a non-finite number stops the attach with its own code", async () => {
+    const { dir, pins } = pin("rea", [tool("a")]);
+    const url = await rawChild('{"tools":[{"name":"a","description":"x","inputSchema":{"type":"object","maximum":1e400}}]}');
+    await assert.rejects(() => attach(url, pins, dir), /downstream-definition-unencodable:rea\.a/);
+  });
+
+  it("with a non-finite number outside the schema stops the attach with its own code", async () => {
+    const { dir, pins } = pin("rea", [tool("a")]);
+    const url = await rawChild('{"tools":[{"name":"a","description":"x","inputSchema":{"type":"object"},"_meta":{"weight":1e400}}]}');
+    await assert.rejects(() => attach(url, pins, dir), /downstream-definition-unencodable:rea\.a/);
+  });
+
+  // canonical() writes a lone surrogate as the escape \ud800 rather than
+  // throwing, so the entry is encodable: it is compared, and refused as changed.
+  it("with a lone surrogate is compared like any other text, and refused as changed", async () => {
+    const { dir, pins } = pin("rea", [tool("a")]);
+    const url = await rawChild('{"tools":[{"name":"a","description":"x\\ud800","inputSchema":{"type":"object"}}]}');
+    await assert.rejects(() => attach(url, pins, dir), /downstream-definition-changed:rea\.a/);
+  });
 });
 
 describe("the pin command, hardened", { timeout: 60_000 }, () => {
