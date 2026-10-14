@@ -127,6 +127,19 @@ describe("verax downstream pin", { timeout: 60_000 }, () => {
     assert.equal(readFileSync(join(dir, "definitions", written[0]!), "utf8"), canonical(manifest));
     assert.ok(lines.some((l) => l.includes(`"pins": "sha256:${digest}"`)), lines.join("\n"));
   });
+
+  it("does not overwrite a different file already under the manifest's name", async () => {
+    const dir = temp();
+    const file = join(dir, "downstream.json");
+    writeFileSync(file, JSON.stringify({ prefix: "rea", url: await child([[tool("a")]]) }), "utf8");
+    const digest = sha256Canonical({ v: 1, prefix: "rea", selected: null, tools: { a: tool("a") } });
+    mkdirSync(join(dir, "definitions"));
+    writeFileSync(join(dir, "definitions", `${digest}.json`), "not the manifest", "utf8");
+    const { io: x } = io("yes");
+    const code = await runDownstreamPin({ file, prefix: "rea" }, x);
+    assert.notEqual(code, 0);
+    assert.equal(readFileSync(join(dir, "definitions", `${digest}.json`), "utf8"), "not the manifest");
+  });
 });
 
 describe("a start with pins", { timeout: 60_000 }, () => {
@@ -214,6 +227,16 @@ describe("doctor on pins", () => {
     }
     const u = checks({ prefix: "rea", command: "uvx", args: ["some-mcp"], trust: "same-user" });
     assert.equal(u.find((x) => x.id === "downstream-unversioned:rea")?.level, "warn");
+  });
+
+  it("reads the package from --package / --from, not from the command after it", () => {
+    for (const [command, args] of [
+      ["npx", ["some-mcp@1.2.3", "--package", "other-mcp"]],
+      ["uvx", ["some-mcp==1.2.3", "--from", "other-mcp"]],
+    ] as const) {
+      const c = checks({ prefix: "rea", command, args, trust: "same-user", pins: `sha256:${"a".repeat(64)}` });
+      assert.equal(c.find((x) => x.id === "downstream-unversioned:rea")?.level, "warn", `${command} ${args.join(" ")}`);
+    }
   });
 
   it("does not name a command whose package carries a version", () => {
