@@ -44,7 +44,10 @@ used away from the machine, and what would have to be built.
   root runs them as the account that owns the state directory. Removals made
   at the same moment all hold: each is a file of its own. With every passkey
   removed the body does not go back to approving without one; a new pairing
-  code enrols the next.
+  code enrols the next. The body writes each removal it finds into the ledger
+  as a signed deny, and a mark that has since been taken away as another. It
+  does so when it opens or when the next call reaches it, not at the moment of
+  the command, and the record names the mark, not who ran the command.
 
 ## What stops it
 
@@ -163,7 +166,7 @@ way to reach that from another device.
   machine runs `verax operator remove`, the passkey's own user verification
   is what stands between a thief and an approval. The list does not say
   which passkey is on which device, only the order they were enrolled in,
-  and a removal is not written to the ledger.
+  and the ledger's record of a removal does not say who made it.
 
 ## What it would change in the claims
 

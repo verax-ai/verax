@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+
+import { OPERATOR_REMOVED_DIR, operatorRemovalMark } from "@verax-ai/proxy";
+
 import { writeFileAtomic } from "./atomic-write.ts";
 
 export const CREDENTIALS_FILE = "operator-credentials.json";
-export const REMOVED_DIR = "operator-removed";
 export const DEFAULT_OPERATOR_SUB = "operator-1";
 
 export type StoredCredential = {
@@ -40,12 +41,7 @@ export function readCredentialsAt(path: string): StoredCredential[] {
 }
 
 export function removedPath(stateDir: string): string {
-  return join(stateDir, REMOVED_DIR);
-}
-
-/** The name a removed passkey's mark is filed under. An id can be longer than a file name may be. */
-function markOf(id: string): string {
-  return createHash("sha256").update(id, "utf8").digest("hex");
+  return join(stateDir, OPERATOR_REMOVED_DIR);
 }
 
 export type Removed = { has: (id: string) => boolean };
@@ -71,7 +67,7 @@ export function readRemoved(stateDir: string): Removed | null {
     if ((err as NodeJS.ErrnoException).code !== "ENOENT") return null;
     marks = new Set();
   }
-  return { has: (id) => marks.has(markOf(id)) };
+  return { has: (id) => marks.has(operatorRemovalMark(id)) };
 }
 
 /** Every row in the file, the removed among them: for rewriting the file, and for asking whether an id was ever enrolled. */
@@ -159,7 +155,7 @@ export function removeCredential(stateDir: string, id: string): Removal {
   mkdirSync(removedPath(stateDir), { recursive: true, mode: 0o700 });
   try {
     // The name is the mark. The id inside is for whoever reads the directory.
-    writeFileSync(join(removedPath(stateDir), markOf(id)), `${id}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    writeFileSync(join(removedPath(stateDir), operatorRemovalMark(id)), `${id}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
   } catch (err) {
     // Another removal of the same passkey got there between the look and the write.
     if ((err as NodeJS.ErrnoException).code === "EEXIST") return "already-removed";
