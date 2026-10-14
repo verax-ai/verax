@@ -167,6 +167,20 @@ export type RevokeInput = {
 };
 
 /**
+ * One change to the `operator-removed` directory copied into the ledger.
+ * `remove` is a mark that appeared there; `restore` is one that was in the
+ * ledger's list and is gone from the directory, which lets that passkey in
+ * again.
+ */
+export type OperatorRemovalInput = {
+  action: "remove" | "restore";
+  mark: string;
+  by: string;
+  via: "file";
+  atMs: number;
+};
+
+/**
  * The operator's own WebAuthn assertion for one HTTP approval.
  * `authenticatorData`, `clientDataJSON` and `signature` are base64url.
  * The challenge is not stored: it is rebuilt as the hash of a canonical
@@ -195,6 +209,7 @@ export type DecisionInputs = {
   };
   control?: ControlInput;
   revoke?: RevokeInput;
+  operatorRemoval?: OperatorRemovalInput;
 };
 
 /** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */

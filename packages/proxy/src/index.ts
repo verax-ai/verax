@@ -25,10 +25,11 @@ export { diskProbe } from "./disk.ts";
 export { checkpointsPath, readCheckpointFile } from "./checkpoints.ts";
 export { signEffectAttestation } from "./ledger.ts";
 export { spokenReason } from "./spoken-reason.ts";
+export { OPERATOR_REMOVED_DIR, operatorRemovalMark } from "./operator-removal-sync.ts";
 export type { ApprovalRow, ApproveResult } from "./approvals.ts";
 export type { CardCsvOpts, ChannelRow, ReconcileReport } from "./reconcile.ts";
 export type { FileLedgerOpts, LedgerCounts, LockHolder } from "./ledger.ts";
-export type { ApprovalSignature, ControlSignature, RevokeInput } from "./types.ts";
+export type { ApprovalSignature, ControlSignature, OperatorRemovalInput, RevokeInput } from "./types.ts";
 export type {
   EffectSigner,
   ExplainChain,

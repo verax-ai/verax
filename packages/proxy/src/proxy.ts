@@ -16,6 +16,7 @@ import { markEnded, markStarted, startedWithoutEnd } from "./in-flight-log.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { controlUnchanged, createControlMemory, syncHaltControl } from "./control-sync.ts";
+import { createOperatorRemovalMemory, operatorRemovalUnchanged, syncOperatorRemovalControl } from "./operator-removal-sync.ts";
 import { createRevokeMemory, revokeUnchanged, syncRevokeControl } from "./revoke-sync.ts";
 import {
   countedWork,
@@ -232,6 +233,7 @@ export function createProxy(deps: ProxyDeps) {
   // sync reads control records once; this snapshot is updated in place.
   const controlMemory = createControlMemory();
   const revokeMemory = createRevokeMemory();
+  const operatorRemovalMemory = createOperatorRemovalMemory();
   let controlSyncReported = false;
   if (stateDir === null) {
     process.stderr.write("verax-proxy: halt and disk limits are inactive without a ledger directory\n");
@@ -552,13 +554,20 @@ export function createProxy(deps: ProxyDeps) {
   async function syncControlRecords(): Promise<void> {
     if (stateDir === null) return;
     // A revocation list that cannot be read must not throw away the halt
-    // snapshot too, or every call would read the whole ledger again.
+    // snapshot too, or every call would read the whole ledger again. It must
+    // not keep a passkey removal out of the ledger either, so removal sync
+    // runs before revoke.
     let haltSynced = false;
     try {
-      if (controlUnchanged(stateDir, controlMemory) && revokeUnchanged(stateDir, revokeMemory)) return;
+      if (
+        controlUnchanged(stateDir, controlMemory) &&
+        revokeUnchanged(stateDir, revokeMemory) &&
+        operatorRemovalUnchanged(stateDir, operatorRemovalMemory)
+      ) return;
       const run = async (writer: LedgerWriter) => {
-        // Both snapshots load from one read. The halt sync writes only halt
-        // and resume records, which the revoke replay does not read.
+        // The snapshots load from one read. Halt runs, then removal, then
+        // revoke. Halt writes only halt and resume records, which the
+        // removal and revoke replays do not read.
         let read: Promise<Awaited<ReturnType<typeof deps.ledger.decisions>>> | null = null;
         const shared = {
           stateDir,
@@ -572,6 +581,7 @@ export function createProxy(deps: ProxyDeps) {
         };
         await syncHaltControl({ ...shared, memory: controlMemory });
         haltSynced = true;
+        await syncOperatorRemovalControl({ ...shared, memory: operatorRemovalMemory });
         await syncRevokeControl({ ...shared, memory: revokeMemory });
       };
       const host = deps.ledger as { exclusive?: <T>(fn: (writer: LedgerWriter) => Promise<T>) => Promise<T> };
@@ -591,6 +601,9 @@ export function createProxy(deps: ProxyDeps) {
       // unloaded so the next call reads again, and keep going: the halt switch
       // and the rate limit still fail closed on their own path. One line per
       // failure streak, so the admission retry in the same call does not repeat it.
+      // A finished removal sync stays valid after a later revoke failure, and
+      // an unfinished one either never loaded or cleared itself, so this catch
+      // leaves removal memory alone.
       if (!haltSynced) controlMemory.loaded = false;
       revokeMemory.loaded = false;
       if (controlSyncReported) return;
