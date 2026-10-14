@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -338,7 +338,9 @@ async function attachDownstream(
   const sessions: DownstreamSession[] = [];
   for (const spec of specs) {
     try {
-      sessions.push(await openDownstream(spec));
+      // The manifest sits beside the operator's document. An installed body
+      // cannot write the state directory, so the pin is read from here.
+      sessions.push(await openDownstream(spec, { definitionsDir: dirname(file) }));
     } catch (err) {
       await closeAll(sessions);
       const detail = err instanceof Error ? err.message : "attach-failed";

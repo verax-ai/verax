@@ -1,5 +1,8 @@
+import { createHash, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable } from "node:stream";
-import { createPublicKey } from "node:crypto";
+import { canonical } from "@cedulon/core";
 import type { SignedEffectExtract } from "@cedulon/effect-extract";
 import { effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptRejection } from "@verax-ai/proxy";
 
@@ -47,13 +50,19 @@ export type DownstreamSpec = {
    * stops the attach. Absent means every tool the child lists.
    */
   tools?: string[];
+  /**
+   * Content address of the manifest the operator approved: `sha256:` and 64
+   * lowercase hex digits. Absent means the child is attached without
+   * comparing definitions.
+   */
+  pins?: string;
 };
 
 export type DownstreamTool = {
   name: string;
   /** The child's own description, as `tools/list` gave it. */
   description?: string;
-  /** The child's own input schema, republished unchanged. */
+  /** The child's input schema, object keys in canonical order. */
   inputSchema?: unknown;
   fn: DownstreamToolFn;
 };
@@ -65,6 +74,8 @@ export type DownstreamSession = {
 };
 
 const PREFIX_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+/** `sha256:` plus 64 lowercase hex digits. The capture is the file name. */
+const PINS_RE = /^sha256:([0-9a-f]{64})$/;
 const CHILD_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 /** Prefixed name a caller may put on extraTools: `prefix.childName`. */
 const EXTRA_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63}$/;
@@ -239,6 +250,12 @@ export function parseDownstreamJson(raw: string, bodyPublicKeyPems: readonly str
       throw new Error("downstream-tools-invalid");
     }
     spec.tools = [...(names as string[])];
+  }
+  if (rec.pins !== undefined) {
+    if (typeof rec.pins !== "string" || !PINS_RE.test(rec.pins)) {
+      throw new Error(`downstream-pins-invalid:${spec.prefix}`);
+    }
+    spec.pins = rec.pins;
   }
   assertStdioTrusted(spec);
   return spec;
@@ -425,6 +442,100 @@ async function connectWithDeadline(
   }
 }
 
+/**
+ * Object keys in the order `canonical` uses. Array order stays: it can carry
+ * meaning. Two schemas that differ only by key order are then published the same.
+ */
+function sortedObject(value: unknown): unknown {
+  return JSON.parse(canonical(value)) as unknown;
+}
+
+type PinnedManifest = {
+  prefix: unknown;
+  selected: unknown;
+  tools: Record<string, unknown>;
+};
+
+function manifestInvalid(prefix: string): never {
+  throw new Error(`downstream-manifest-invalid:${prefix}`);
+}
+
+/** One read. The digest is of those bytes, not of a re-encoded document. */
+function readPinnedManifest(prefix: string, pins: string, definitionsDir: string | undefined): PinnedManifest {
+  const digest = PINS_RE.exec(pins)?.[1];
+  if (digest === undefined) throw new Error(`downstream-pins-invalid:${prefix}`);
+  if (definitionsDir === undefined || definitionsDir === "") manifestInvalid(prefix);
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(join(definitionsDir, "definitions", `${digest}.json`));
+  } catch {
+    manifestInvalid(prefix);
+  }
+  if (createHash("sha256").update(bytes).digest("hex") !== digest) manifestInvalid(prefix);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    manifestInvalid(prefix);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) manifestInvalid(prefix);
+  const rec = parsed as Record<string, unknown>;
+  if (rec.v !== 1) manifestInvalid(prefix);
+  if (rec.tools === null || typeof rec.tools !== "object" || Array.isArray(rec.tools)) manifestInvalid(prefix);
+  return { prefix: rec.prefix, selected: rec.selected, tools: rec.tools as Record<string, unknown> };
+}
+
+/** Both absent (no `tools`, and `selected` null or missing) is the same selection. */
+function sameSelection(specTools: string[] | undefined, selected: unknown): boolean {
+  const left = specTools === undefined ? null : specTools;
+  const right = selected === undefined || selected === null ? null : selected;
+  if (left === null || right === null) return left === null && right === null;
+  if (!Array.isArray(right) || right.some((name) => typeof name !== "string")) return false;
+  const wanted = new Set(left);
+  const pinned = new Set(right);
+  if (wanted.size !== pinned.size) return false;
+  for (const name of wanted) if (!pinned.has(name)) return false;
+  return true;
+}
+
+/**
+ * With no selection the listed names and the pinned names are one set.
+ * With a selection only those names are compared; a selected name with no
+ * pin is unpinned. The digest is the whole parsed entry, not a list of fields.
+ */
+function assertPinnedDefinitions(
+  spec: DownstreamSpec,
+  offered: readonly { name: string }[],
+  manifestTools: Record<string, unknown>,
+): void {
+  const listedNames = offered.map((tool) => tool.name);
+  if (spec.tools === undefined) {
+    for (const name of listedNames) {
+      if (!Object.hasOwn(manifestTools, name)) {
+        throw new Error(`downstream-tool-unpinned:${spec.prefix}.${name}`);
+      }
+    }
+    const listed = new Set(listedNames);
+    for (const name of Object.keys(manifestTools)) {
+      if (!listed.has(name)) throw new Error(`downstream-tool-unlisted:${spec.prefix}.${name}`);
+    }
+  } else {
+    for (const name of spec.tools) {
+      if (!Object.hasOwn(manifestTools, name)) {
+        throw new Error(`downstream-tool-unpinned:${spec.prefix}.${name}`);
+      }
+    }
+  }
+  const byName = new Map(offered.map((tool) => [tool.name, tool]));
+  for (const name of spec.tools ?? listedNames) {
+    const listed = byName.get(name);
+    if (listed === undefined || !Object.hasOwn(manifestTools, name)) continue;
+    if (sha256Canonical(listed) !== sha256Canonical(manifestTools[name])) {
+      throw new Error(`downstream-definition-changed:${spec.prefix}.${name}`);
+    }
+  }
+}
+
 function attachTimeoutError(err: unknown, prefix: string): Error {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.startsWith("downstream-attach-timeout:")) {
@@ -436,7 +547,10 @@ function attachTimeoutError(err: unknown, prefix: string): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
-export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSession> {
+export async function openDownstream(
+  spec: DownstreamSpec,
+  opts?: { definitionsDir?: string },
+): Promise<DownstreamSession> {
   if (spec.effectKeyPem !== undefined) assertEffectKey(spec.effectKeyPem);
   if (!PREFIX_RE.test(spec.prefix)) {
     throw new Error("downstream-prefix-invalid");
@@ -513,7 +627,7 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
     tools.push({
       name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
-      ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
+      ...(tool.inputSchema !== undefined ? { inputSchema: sortedObject(tool.inputSchema) } : {}),
       fn: async (call, _principal, ref) => {
         // A child that sent one message over the bound is not asked again.
         if (overflow.hit) throw new DownstreamCallError(spec.prefix, childName, new Error(MESSAGE_TOO_LARGE));
@@ -548,6 +662,24 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
       },
     });
   }
+  // A child can keep a tool's name and change what that name means. The pin
+  // names the manifest of the definitions the operator read; the bytes of
+  // that file, its prefix and selection, and each listed entry are compared
+  // with what this child just returned, so a changed definition cannot attach
+  // under the same name.
+  if (spec.pins !== undefined) {
+    try {
+      const manifest = readPinnedManifest(spec.prefix, spec.pins, opts?.definitionsDir);
+      if (manifest.prefix !== spec.prefix || !sameSelection(spec.tools, manifest.selected)) {
+        throw new Error(`downstream-manifest-mismatch:${spec.prefix}`);
+      }
+      assertPinnedDefinitions(spec, offered, manifest.tools);
+    } catch (err) {
+      await shut(client, transport);
+      throw err;
+    }
+  }
+  tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   let closed = false;
   return {
     prefix: spec.prefix,
