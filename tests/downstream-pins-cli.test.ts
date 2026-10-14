@@ -146,7 +146,8 @@ describe("a start with pins", { timeout: 60_000 }, () => {
   it("copies the manifest into the state directory and names it in the start row", async () => {
     const work = temp();
     const stateDir = join(work, "state");
-    mkdirSync(stateDir);
+    // The body refuses a state directory others can list (ledger-dir-not-private on POSIX).
+    mkdirSync(stateDir, { mode: 0o700 });
     const docs = join(work, "docs");
     mkdirSync(join(docs, "definitions"), { recursive: true });
     const ping = {
