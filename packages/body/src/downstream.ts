@@ -76,7 +76,7 @@ export type DownstreamSession = {
 const PREFIX_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
 /** `sha256:` plus 64 lowercase hex digits. The capture is the file name. */
 const PINS_RE = /^sha256:([0-9a-f]{64})$/;
-const CHILD_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+export const CHILD_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 /** Prefixed name a caller may put on extraTools: `prefix.childName`. */
 const EXTRA_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 // Sanity bound, not a capacity claim. A child that lists more than this is
@@ -468,7 +468,11 @@ function readPinnedManifest(prefix: string, pins: string, definitionsDir: string
   let bytes: Buffer;
   try {
     bytes = readFileSync(join(definitionsDir, "definitions", `${digest}.json`));
-  } catch {
+  } catch (err) {
+    // A missing or corrupt file is not the same fact as a file this account
+    // is not allowed to read.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") throw new Error(`downstream-manifest-unreadable:${prefix}`);
     manifestInvalid(prefix);
   }
   if (createHash("sha256").update(bytes).digest("hex") !== digest) manifestInvalid(prefix);
@@ -530,7 +534,15 @@ function assertPinnedDefinitions(
   for (const name of spec.tools ?? listedNames) {
     const listed = byName.get(name);
     if (listed === undefined || !Object.hasOwn(manifestTools, name)) continue;
-    if (sha256Canonical(listed) !== sha256Canonical(manifestTools[name])) {
+    let listedDigest: string;
+    let pinnedDigest: string;
+    try {
+      listedDigest = sha256Canonical(listed);
+      pinnedDigest = sha256Canonical(manifestTools[name]);
+    } catch {
+      throw new Error(`downstream-definition-unencodable:${spec.prefix}.${name}`);
+    }
+    if (listedDigest !== pinnedDigest) {
       throw new Error(`downstream-definition-changed:${spec.prefix}.${name}`);
     }
   }
@@ -624,10 +636,20 @@ export async function openDownstream(
     }
     seen.add(name);
     const childName = tool.name;
+    // Canonical JSON refuses a non-finite number and a lone surrogate. That
+    // entry cannot be pinned or republished; close the child before leaving.
+    let inputSchema: unknown;
+    try {
+      canonical(tool);
+      if (tool.inputSchema !== undefined) inputSchema = sortedObject(tool.inputSchema);
+    } catch {
+      await shut(client, transport);
+      throw new Error(`downstream-definition-unencodable:${spec.prefix}.${childName}`);
+    }
     tools.push({
       name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
-      ...(tool.inputSchema !== undefined ? { inputSchema: sortedObject(tool.inputSchema) } : {}),
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
       fn: async (call, _principal, ref) => {
         // A child that sent one message over the bound is not asked again.
         if (overflow.hit) throw new DownstreamCallError(spec.prefix, childName, new Error(MESSAGE_TOO_LARGE));

@@ -147,6 +147,11 @@ export type StartSummary = {
   /** Problems that make the ledger not verify: a bad signature, a broken chain, an unsigned row after a signed one. */
   problems: string[];
   warnings: string[];
+  /**
+   * Children recorded on each start, in the order the rows were read. A
+   * start that named none is an empty list.
+   */
+  downstream: StartDownstream[][];
 };
 
 const MANIFEST_RE = /^[0-9a-f]{64}$/;
@@ -193,6 +198,23 @@ function downstreamManifestProblems(stateDir: string, row: StartRow): string[] {
     }
     if (createHash("sha256").update(bytes).digest("hex") !== entry.manifest) {
       problems.push(`downstream-manifest-invalid:${entry.prefix}:${entry.manifest}`);
+      continue;
+    }
+    // The digest names these bytes. They still have to be the manifest of
+    // the child this row recorded, not another prefix under the same hash.
+    let recorded: unknown;
+    try {
+      recorded = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      problems.push(`downstream-manifest-invalid:${entry.prefix}:${entry.manifest}`);
+      continue;
+    }
+    const recordedPrefix =
+      recorded !== null && typeof recorded === "object" && !Array.isArray(recorded)
+        ? (recorded as { prefix?: unknown }).prefix
+        : undefined;
+    if (recordedPrefix !== entry.prefix) {
+      problems.push(`downstream-manifest-mismatch:${entry.prefix}:${entry.manifest}`);
     }
   }
   return problems;
@@ -240,6 +262,7 @@ export function readStartSummary(
     startKey: publicKeyPem ? keySource : "none",
     problems: [],
     warnings: [],
+    downstream: [],
   };
   let raw: string;
   try {
@@ -284,6 +307,7 @@ export function readStartSummary(
       continue;
     }
     result.count += 1;
+    result.downstream.push(row.downstream ?? []);
     if (row.prevBeatAtMs === null) result.missingPreviousBeat.push(row.atMs);
     if (row.gapMs !== null) {
       result.largestGapMs = result.largestGapMs === null ? row.gapMs : Math.max(result.largestGapMs, row.gapMs);
@@ -349,7 +373,14 @@ export function renderStarts(summary: StartSummary): string {
       : summary.startKey === "none"
         ? `${summary.signed} signed, not checked (no record key)${summary.unsigned ? "; older rows unsigned" : ""}`
         : `${summary.signedVerified} of ${summary.signed} signed verify under the ${summary.startKey === "pinned" ? "pinned" : "in-ledger"} record key${summary.unsigned ? "; older rows unsigned" : ""}`;
+  const definitions = summary.downstream.flatMap((listed) =>
+    listed.map(
+      (entry) =>
+        `downstream    ${entry.prefix} ${entry.manifest === null ? "unpinned" : `sha256:${entry.manifest}`}`,
+    ),
+  );
   return `starts        ${summary.count}; largest gap ${summary.largestGapMs === null ? "none" : `${summary.largestGapMs} ms`}; previous beat missing at ${summary.missingPreviousBeat.join(", ") || "none"}; ${signedPart}`
+    + definitions.map((line) => `\n${line}`).join("")
     + summary.problems.map((p) => `\nproblem       ${p}`).join("")
     + summary.warnings.map((warning) => `\nwarning       ${warning}`).join("");
 }

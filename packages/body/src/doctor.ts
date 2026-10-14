@@ -317,16 +317,21 @@ function positionalSpec(args: readonly string[]): string | undefined {
   return undefined;
 }
 
+/** major.minor.patch, with an optional prerelease or build. A dist-tag or a range is not this. */
+const FULL_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
 /** `name@1.2.3`. A scoped name's leading `@` is not a version. */
 function npxVersioned(spec: string): boolean {
   const at = spec.startsWith("@") ? spec.indexOf("@", 1) : spec.indexOf("@");
-  return at > 0 && spec.slice(at + 1).length > 0;
+  return at > 0 && FULL_VERSION.test(spec.slice(at + 1));
 }
 
-/** `name==1.2.3`. */
+/** `name==1.2.3`. `>=`, `~=` and `*` leave the package unversioned. */
 function uvxVersioned(spec: string): boolean {
   const at = spec.indexOf("==");
-  return at > 0 && spec.slice(at + 2).length > 0;
+  if (at <= 0) return false;
+  const version = spec.slice(at + 2);
+  return FULL_VERSION.test(version);
 }
 
 /**

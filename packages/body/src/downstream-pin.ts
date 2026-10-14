@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -10,7 +10,7 @@ import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotoc
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { defaultElevated } from "./install.ts";
-import { parseDownstreamDocument, type DownstreamSpec } from "./downstream.ts";
+import { CHILD_TOOL_RE, parseDownstreamDocument, prefixedName, type DownstreamSpec } from "./downstream.ts";
 
 /**
  * `verax downstream pin` lists one child's tools a single time, shows each
@@ -44,12 +44,13 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Control characters (C0, DEL, C1) and format characters, including ESC,
- * bidi marks and zero-width characters, are written as `\uXXXX` so a child
- * cannot hide text or drive the terminal. The entry itself is not shortened.
+ * Control characters (C0, DEL, C1), format characters (ESC, bidi marks,
+ * zero-width characters) and line and paragraph separators are written as
+ * `\uXXXX` so a child cannot hide text or drive the terminal. The entry
+ * itself is not shortened.
  */
 function escapeVisible(text: string): string {
-  return text.replace(/\p{Cc}|\p{Cf}/gu, (ch) => {
+  return text.replace(/\p{Cc}|\p{Cf}|\p{Zl}|\p{Zp}/gu, (ch) => {
     const cp = ch.codePointAt(0) ?? 0;
     if (cp <= 0xffff) return `\\u${cp.toString(16).padStart(4, "0")}`;
     const rest = cp - 0x10000;
@@ -256,7 +257,10 @@ function plainTool(tool: unknown): Record<string, unknown> {
 
 function snapshotOf(spec: DownstreamSpec, listed: readonly unknown[]): Record<string, unknown> {
   const wanted = spec.tools === undefined ? null : new Set(spec.tools);
-  const tools: Record<string, unknown> = {};
+  // A null prototype keeps `__proto__` and `constructor` as ordinary keys.
+  // The bytes `canonical` writes are the same as for a plain object.
+  const tools: Record<string, unknown> = Object.create(null);
+  const seen = new Set<string>();
   for (const tool of listed) {
     const name =
       tool !== null && typeof tool === "object" && typeof (tool as { name?: unknown }).name === "string"
@@ -264,7 +268,10 @@ function snapshotOf(spec: DownstreamSpec, listed: readonly unknown[]): Record<st
         : undefined;
     if (name === undefined) throw new Error("downstream-child-name-invalid");
     if (wanted !== null && !wanted.has(name)) continue;
-    if (Object.hasOwn(tools, name)) throw new Error(`downstream-name-collision:${name}`);
+    if (!CHILD_TOOL_RE.test(name)) throw new Error(`downstream-child-name-invalid:${name}`);
+    const published = prefixedName(spec.prefix, name);
+    if (seen.has(published)) throw new Error(`downstream-name-collision:${published}`);
+    seen.add(published);
     const bytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
     if (bytes > MAX_TOOL_BYTES) throw new Error(`downstream-tool-too-large:${spec.prefix}.${name}:${bytes}`);
     tools[name] = plainTool(tool);
@@ -358,9 +365,15 @@ function writeManifest(docDir: string, manifest: unknown): { ok: true; digest: s
   const digest = sha256Canonical(manifest);
   const folder = join(docDir, "definitions");
   const dest = join(folder, `${digest}.json`);
-  mkdirSync(folder, { recursive: true, mode: 0o700 });
+  // The file is named by its digest, and the operator's document names that
+  // digest, so the manifest is not a secret. 0755 and 0644 let the account
+  // that runs the body read a manifest an operator account wrote. chmod
+  // follows the create because the process umask would otherwise clear
+  // the other-read and other-execute bits.
+  mkdirSync(folder, { recursive: true, mode: 0o755 });
+  chmodSync(folder, 0o755);
   try {
-    writeFileSync(dest, bytes, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    writeFileSync(dest, bytes, { encoding: "utf8", flag: "wx", mode: 0o644 });
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") return { ok: false, reason: errorText(err) };
     let existing: Buffer;
@@ -373,6 +386,7 @@ function writeManifest(docDir: string, manifest: unknown): { ok: true; digest: s
       return { ok: false, reason: `downstream-manifest-conflict:${digest}` };
     }
   }
+  chmodSync(dest, 0o644);
   return { ok: true, digest };
 }
 
