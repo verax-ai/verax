@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { readFileSync, realpathSync } from "node:fs";
 import path, { dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { runApprove } from "./approve-cli.ts";
 import { attachBodyLog } from "./body-log.ts";
 import { bodyVersion } from "./body-version.ts";
 import { runDemo } from "./demo.ts";
 import { doctorBodyLog, doctorExit, runDoctor } from "./doctor.ts";
+import { runDownstreamPin } from "./downstream-pin.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
 import { runHalt, runResume } from "./halt.ts";
@@ -39,6 +41,9 @@ Usage: verax <command> [options]
                        stop that body and remove its code. Needs an elevated shell
                        and the same administrator-owned copy.
   doctor [--json]      check the configuration this process would run with
+  downstream pin --file <file> --prefix <prefix>
+                       list that child's tools once and, after a typed yes,
+                       write a manifest beside the document. The document is not edited.
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
        [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
   approve <args>       approve a waiting request from this machine.
@@ -150,6 +155,48 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
   } finally {
     clearCliCodeCheckPassed();
   }
+}
+
+function option(argv: readonly string[], name: string): string | null {
+  const i = argv.indexOf(name);
+  if (i < 0) return null;
+  const value = argv[i + 1];
+  if (value === undefined || value.startsWith("-")) return null;
+  return value;
+}
+
+function readTerminalLine(): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  return new Promise((resolve) => {
+    rl.once("line", (line) => {
+      rl.close();
+      resolve(line);
+    });
+  });
+}
+
+/** `verax downstream pin` reads one line from a terminal. A pipe is not a person typing yes. */
+async function runDownstreamCli(
+  argv: string[],
+  stdout: { write(s: string): unknown },
+  stderr: { write(s: string): unknown },
+): Promise<number> {
+  const usage = "verax downstream pin --file <file> --prefix <prefix>\n";
+  if (argv[0] !== "pin") {
+    stderr.write(usage);
+    return 64;
+  }
+  const file = option(argv.slice(1), "--file");
+  const prefix = option(argv.slice(1), "--prefix");
+  if (file === null || prefix === null) {
+    stderr.write(usage);
+    return 64;
+  }
+  if (!process.stdin.isTTY) {
+    stderr.write("refusing: downstream pin reads the confirmation from a terminal\n");
+    return 78;
+  }
+  return runDownstreamPin({ file, prefix }, { out: (s) => stdout.write(s), ask: readTerminalLine });
 }
 
 async function dispatchCli(
@@ -294,6 +341,9 @@ async function dispatchCli(
   if (argv[0] === "desktop") {
     stderr.write("desktop-not-released: the desktop panel is not in this release\n");
     return 64;
+  }
+  if (argv[0] === "downstream") {
+    return runDownstreamCli(argv.slice(1), stdout, stderr);
   }
   if (argv[0] === "witness") {
     const stateDir = argv[1];
