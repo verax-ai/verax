@@ -2,15 +2,10 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
-import { Readable } from "node:stream";
 import { canonical } from "@cedulon/core";
 import { sha256Canonical } from "@verax-ai/proxy";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { defaultElevated } from "./install.ts";
-import { CHILD_TOOL_RE, parseDownstreamDocument, prefixedName, type DownstreamSpec } from "./downstream.ts";
+import { listDownstreamOnce, parseDownstreamDocument, type DownstreamSpec } from "./downstream.ts";
 
 /**
  * `verax downstream pin` lists one child's tools a single time, shows each
@@ -22,13 +17,6 @@ import { CHILD_TOOL_RE, parseDownstreamDocument, prefixedName, type DownstreamSp
  */
 
 const PINS_RE = /^sha256:([0-9a-f]{64})$/;
-const MAX_CHILD_TOOLS = 256;
-const MAX_TOOL_BYTES = 64 * 1024;
-const MAX_CHILD_MESSAGE_BYTES = 10 * 1024 * 1024;
-const MESSAGE_TOO_LARGE = "downstream-message-too-large";
-
-type ChildTransport = StdioClientTransport | StreamableHTTPClientTransport;
-type Overflow = { hit: boolean; detach: () => void };
 
 export type DownstreamPinIO = {
   out: (s: string) => void;
@@ -100,188 +88,6 @@ function stdioElevationRefusal(prefix: string): string | null {
     return `refusing: this process is uid 0, so stdio child ${prefix} was not started`;
   }
   return null;
-}
-
-function tripOverflow(overflow: Overflow): void {
-  if (overflow.hit) return;
-  overflow.hit = true;
-  overflow.detach();
-}
-
-function boundedFetch(overflow: Overflow): (url: string | URL, init?: RequestInit) => Promise<Response> {
-  return async (url, init) => {
-    const res = await fetch(url, init);
-    if (res.body === null) return res;
-    const mediaType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
-    const events = res.ok && mediaType === "text/event-stream";
-    let count = 0;
-    let lineEmpty = true;
-    const counted = res.body.pipeThrough(
-      new TransformStream<Uint8Array, Uint8Array>({
-        transform(chunk, controller) {
-          if (!events) {
-            count += chunk.byteLength;
-          } else {
-            let at = 0;
-            while (at < chunk.byteLength && count <= MAX_CHILD_MESSAGE_BYTES) {
-              const newline = chunk.indexOf(0x0a, at);
-              const end = newline === -1 ? chunk.byteLength : newline;
-              const length = end - at;
-              if (length > 1 || (length === 1 && chunk[at] !== 0x0d)) lineEmpty = false;
-              count += length;
-              if (newline === -1) break;
-              count += 1;
-              if (lineEmpty) count = 0;
-              lineEmpty = true;
-              at = newline + 1;
-            }
-          }
-          if (count > MAX_CHILD_MESSAGE_BYTES) {
-            tripOverflow(overflow);
-            controller.error(new Error(MESSAGE_TOO_LARGE));
-            return;
-          }
-          controller.enqueue(chunk);
-        },
-      }),
-    );
-    return new Response(counted, { status: res.status, statusText: res.statusText, headers: res.headers });
-  };
-}
-
-async function shut(client: Client, transport: ChildTransport): Promise<void> {
-  await client.close().catch(() => undefined);
-  await transport.close().catch(() => undefined);
-}
-
-async function connectWithDeadline(
-  client: Client,
-  transport: ChildTransport,
-  timeoutMs: number,
-  prefix: string,
-): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await new Promise<void>((resolve, reject) => {
-      timer = setTimeout(() => {
-        void shut(client, transport);
-        reject(new Error(`downstream-attach-timeout:${prefix}`));
-      }, timeoutMs);
-      client.connect(transport).then(resolve, reject);
-    });
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
-function attachStderr(transport: StdioClientTransport, chunks: Buffer[]): void {
-  const stderr = transport.stderr;
-  if (!(stderr instanceof Readable)) return;
-  stderr.on("data", (chunk: Buffer | string) => {
-    if (chunks.reduce((n, c) => n + c.length, 0) >= MAX_CHILD_MESSAGE_BYTES) return;
-    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  });
-}
-
-/**
- * One `tools/list`. The snapshot returned here is what is shown and, after
- * yes, what is written. Connecting again would let the child answer differently
- * from the text the operator read.
- */
-async function listOnce(spec: DownstreamSpec): Promise<{ tools: unknown[]; stderr: string }> {
-  const timeoutMs = spec.timeoutMs ?? 10_000;
-  const overflow: Overflow = { hit: false, detach: () => undefined };
-  const stderrChunks: Buffer[] = [];
-  const transport =
-    spec.url !== undefined
-      ? new StreamableHTTPClientTransport(new URL(spec.url), {
-          fetch: boundedFetch(overflow),
-          requestInit: {
-            redirect: "error",
-            ...(spec.headers ? { headers: spec.headers } : {}),
-          },
-        })
-      : new StdioClientTransport({
-          command: spec.command ?? "",
-          args: spec.args,
-          cwd: spec.cwd,
-          // Safe inherit plus the operator's overlay. Not process.env: that would
-          // hand the child VERAX_* tokens this process already holds.
-          env: { ...getDefaultEnvironment(), ...(spec.env ?? {}) },
-          // "inherit" would print the child's bytes on this terminal. The pipe
-          // is shown only after the same escaping as a tool entry.
-          stderr: "pipe",
-          maxBufferSize: MAX_CHILD_MESSAGE_BYTES,
-        });
-  if (transport instanceof StdioClientTransport) attachStderr(transport, stderrChunks);
-  const client = new Client({ name: "verax-downstream-pin", version: "0.0.0" });
-  overflow.detach = () => void transport.close().catch(() => undefined);
-  client.onerror = (err) => {
-    if (/ReadBuffer exceeded maximum size/.test(err.message)) overflow.hit = true;
-  };
-  try {
-    await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
-    // Plain request, not client.listTools: that call compiles every outputSchema
-    // the child lists into a validator in this process.
-    const listed = await client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
-    if (listed.tools.length > MAX_CHILD_TOOLS) {
-      throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.tools.length}`);
-    }
-    return { tools: [...listed.tools], stderr: Buffer.concat(stderrChunks).toString("utf8") };
-  } catch (err) {
-    const stderr = Buffer.concat(stderrChunks).toString("utf8");
-    if (overflow.hit) {
-      const tooLarge = new Error(`${MESSAGE_TOO_LARGE}:${spec.prefix}`) as Error & { stderr?: string };
-      tooLarge.stderr = stderr;
-      throw tooLarge;
-    }
-    if (err instanceof Error) {
-      (err as Error & { stderr?: string }).stderr = stderr;
-      throw err;
-    }
-    const wrapped = new Error(errorText(err)) as Error & { stderr?: string };
-    wrapped.stderr = stderr;
-    throw wrapped;
-  } finally {
-    await shut(client, transport);
-  }
-}
-
-function plainTool(tool: unknown): Record<string, unknown> {
-  const parsed = JSON.parse(canonical(tool)) as unknown;
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("downstream-child-name-invalid");
-  }
-  return parsed as Record<string, unknown>;
-}
-
-function snapshotOf(spec: DownstreamSpec, listed: readonly unknown[]): Record<string, unknown> {
-  const wanted = spec.tools === undefined ? null : new Set(spec.tools);
-  // A null prototype keeps `__proto__` and `constructor` as ordinary keys.
-  // The bytes `canonical` writes are the same as for a plain object.
-  const tools: Record<string, unknown> = Object.create(null);
-  const seen = new Set<string>();
-  for (const tool of listed) {
-    const name =
-      tool !== null && typeof tool === "object" && typeof (tool as { name?: unknown }).name === "string"
-        ? (tool as { name: string }).name
-        : undefined;
-    if (name === undefined) throw new Error("downstream-child-name-invalid");
-    if (wanted !== null && !wanted.has(name)) continue;
-    if (!CHILD_TOOL_RE.test(name)) throw new Error(`downstream-child-name-invalid:${name}`);
-    const published = prefixedName(spec.prefix, name);
-    if (seen.has(published)) throw new Error(`downstream-name-collision:${published}`);
-    seen.add(published);
-    const bytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
-    if (bytes > MAX_TOOL_BYTES) throw new Error(`downstream-tool-too-large:${spec.prefix}.${name}:${bytes}`);
-    tools[name] = plainTool(tool);
-  }
-  if (wanted !== null) {
-    for (const name of wanted) {
-      if (!Object.hasOwn(tools, name)) throw new Error(`downstream-tool-missing:${spec.prefix}.${name}`);
-    }
-  }
-  return tools;
 }
 
 function showDifference(
@@ -414,9 +220,11 @@ export async function runDownstreamPin(
       return 1;
     }
   }
-  let listed: { tools: unknown[]; stderr: string };
+  // Elevation was refused above, before this call. The tools returned here are
+  // the snapshot that is shown and, after yes, written. There is no second list.
+  let listed: { tools: Record<string, unknown>; stderr: string };
   try {
-    listed = await listOnce(spec);
+    listed = await listDownstreamOnce(spec);
   } catch (err) {
     const stderr = (err as { stderr?: unknown }).stderr;
     if (typeof stderr === "string" && stderr !== "") {
@@ -430,13 +238,7 @@ export async function runDownstreamPin(
     say(io.out, "child stderr:");
     say(io.out, escapeVisible(listed.stderr));
   }
-  let tools: Record<string, unknown>;
-  try {
-    tools = snapshotOf(spec, listed.tools);
-  } catch (err) {
-    say(io.out, escapeVisible(errorText(err)));
-    return 1;
-  }
+  const tools = listed.tools;
   for (const name of Object.keys(tools).sort()) say(io.out, renderToolEntry(tools[name]));
   showDifference(io.out, spec, tools, dirname(input.file));
   let answer: string;

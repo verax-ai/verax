@@ -319,8 +319,12 @@ async function shut(client: Client, transport: ChildTransport): Promise<void> {
   await transport.close().catch(() => undefined);
 }
 
-/** Spawns the child. Its stderr is drained so a chatty child cannot block it. */
-function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
+/**
+ * Spawns the child. Stderr is drained so a chatty child cannot block it.
+ * Pass `stderrChunks` to keep the bytes instead (the pin command shows them);
+ * the same cap, and collection stops at the cap instead of growing without bound.
+ */
+function stdioTransport(spec: DownstreamSpec, stderrChunks?: Buffer[]): StdioClientTransport {
   if (spec.command === undefined || spec.command.trim() === "") {
     throw new Error("downstream-command-invalid");
   }
@@ -341,8 +345,18 @@ function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
   });
   // The SDK types the pipe as Stream; only a Readable can be drained.
   const stderr = transport.stderr;
-  if (stderr instanceof Readable) stderr.resume();
+  if (stderr instanceof Readable) {
+    if (stderrChunks === undefined) stderr.resume();
+    else collectStderr(stderr, stderrChunks);
+  }
   return transport;
+}
+
+function collectStderr(stderr: Readable, chunks: Buffer[]): void {
+  stderr.on("data", (chunk: Buffer | string) => {
+    if (chunks.reduce((n, c) => n + c.length, 0) >= MAX_CHILD_MESSAGE_BYTES) return;
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  });
 }
 
 /**
@@ -559,6 +573,119 @@ function attachTimeoutError(err: unknown, prefix: string): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
+/**
+ * The child's `tools/list`, held to one set of bounds. A `tools` selection
+ * is applied first: anything not selected is never read past its name (no
+ * size check, no collision check). Both attach and the pin command use this,
+ * so a name, a size, or a collision the body would refuse is refused here too.
+ */
+function acceptedTools<T extends { name: string }>(spec: DownstreamSpec, listed: readonly T[]): T[] {
+  if (listed.length > MAX_CHILD_TOOLS) {
+    throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.length}`);
+  }
+  const wanted = spec.tools === undefined ? null : new Set(spec.tools);
+  const offered = wanted === null ? [...listed] : listed.filter((tool) => wanted.has(tool.name));
+  if (wanted !== null) {
+    for (const name of wanted) {
+      if (!offered.some((tool) => tool.name === name)) {
+        throw new Error(`downstream-tool-missing:${spec.prefix}.${name}`);
+      }
+    }
+  }
+  const seen = new Set<string>();
+  for (const tool of offered) {
+    if (!CHILD_TOOL_RE.test(tool.name)) {
+      throw new Error(`downstream-child-name-invalid:${tool.name}`);
+    }
+    const toolBytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
+    if (toolBytes > MAX_TOOL_BYTES) {
+      throw new Error(`downstream-tool-too-large:${spec.prefix}.${tool.name}:${toolBytes}`);
+    }
+    const published = prefixedName(spec.prefix, tool.name);
+    if (seen.has(published)) {
+      throw new Error(`downstream-name-collision:${published}`);
+    }
+    seen.add(published);
+    // Canonical JSON refuses a non-finite number. That entry cannot be pinned
+    // or republished. A lone surrogate is left as text and compared as such.
+    try {
+      canonical(tool);
+    } catch {
+      throw new Error(`downstream-definition-unencodable:${spec.prefix}.${tool.name}`);
+    }
+  }
+  return offered;
+}
+
+function plainTool(tool: unknown): Record<string, unknown> {
+  const parsed = JSON.parse(canonical(tool)) as unknown;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("downstream-child-name-invalid");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Entries keyed by the child's own name. A null prototype keeps `__proto__` and `constructor` ordinary. */
+function snapshotRecord(offered: readonly { name: string }[]): Record<string, unknown> {
+  const tools: Record<string, unknown> = Object.create(null);
+  for (const tool of offered) tools[tool.name] = plainTool(tool);
+  return tools;
+}
+
+// Asked as a plain request, not through client.listTools: that call compiles every
+// outputSchema the child lists into a validator, and client.callTool then runs it
+// on the child's own result inside this process. A child's schema is the child's
+// input; a backtracking pattern in it held the body for seconds per call.
+function requestToolList(client: Client, timeoutMs: number): ReturnType<Client["listTools"]> {
+  return client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
+}
+
+/**
+ * Connects the child once, takes `tools/list` under the same bounds as
+ * `openDownstream`, collects stderr, and closes. The returned tools are the
+ * snapshot that is shown and, after the operator types yes, written. Listing
+ * again would let the child answer differently from the text that was read.
+ * On failure the error carries `stderr` when the child wrote any.
+ */
+export async function listDownstreamOnce(
+  spec: DownstreamSpec,
+): Promise<{ tools: Record<string, unknown>; stderr: string }> {
+  const timeoutMs = spec.timeoutMs ?? 10_000;
+  const overflow: Overflow = { hit: false, detach: () => undefined };
+  const stderrChunks: Buffer[] = [];
+  const transport = spec.url !== undefined ? httpTransport(spec, overflow) : stdioTransport(spec, stderrChunks);
+  const client = new Client({ name: "verax-downstream-pin", version: "0.0.0" });
+  overflow.detach = () => void transport.close().catch(() => undefined);
+  // On stdio the client's read buffer enforces the bound and closes the child.
+  // This is where it says so; the text is the client's.
+  client.onerror = (err) => {
+    if (/ReadBuffer exceeded maximum size/.test(err.message)) overflow.hit = true;
+  };
+  const stderrNow = () => Buffer.concat(stderrChunks).toString("utf8");
+  try {
+    await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
+    const listed = await requestToolList(client, timeoutMs);
+    return { tools: snapshotRecord(acceptedTools(spec, listed.tools)), stderr: stderrNow() };
+  } catch (err) {
+    const stderr = stderrNow();
+    const message = err instanceof Error ? err.message : "";
+    if (overflow.hit && !message.startsWith("downstream-")) {
+      const tooLarge = new Error(`${MESSAGE_TOO_LARGE}:${spec.prefix}`) as Error & { stderr?: string };
+      tooLarge.stderr = stderr;
+      throw tooLarge;
+    }
+    if (err instanceof Error) {
+      (err as Error & { stderr?: string }).stderr = stderr;
+      throw err;
+    }
+    const wrapped = new Error("downstream-pin-failed") as Error & { stderr?: string };
+    wrapped.stderr = stderr;
+    throw wrapped;
+  } finally {
+    await shut(client, transport);
+  }
+}
+
 export async function openDownstream(
   spec: DownstreamSpec,
   opts?: { definitionsDir?: string },
@@ -589,58 +716,29 @@ export async function openDownstream(
   let listed: Awaited<ReturnType<Client["listTools"]>>;
   try {
     await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
-    // Asked as a plain request, not through client.listTools: that call compiles every
-        // outputSchema the child lists into a validator, and client.callTool then runs it
-        // on the child's own result inside this process. A child's schema is the child's
-        // input; a backtracking pattern in it held the body for seconds per call.
-        listed = await client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
+    listed = await requestToolList(client, timeoutMs);
   } catch (err) {
     await shut(client, transport);
     if (overflow.hit) throw new Error(`${MESSAGE_TOO_LARGE}:${spec.prefix}`);
     throw attachTimeoutError(err, spec.prefix);
   }
-  if (listed.tools.length > MAX_CHILD_TOOLS) {
-    await shut(client, transport);
-    throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.tools.length}`);
-  }
   // With a `tools` list the rest of the child's list is never read past its
   // name: no size check, no registry entry, nothing republished.
-  const wanted = spec.tools === undefined ? null : new Set(spec.tools);
-  const offered = wanted === null ? listed.tools : listed.tools.filter((t) => wanted.has(t.name));
-  if (wanted !== null) {
-    for (const name of wanted) {
-      if (!offered.some((t) => t.name === name)) {
-        await shut(client, transport);
-        throw new Error(`downstream-tool-missing:${spec.prefix}.${name}`);
-      }
-    }
+  let offered: Awaited<ReturnType<Client["listTools"]>>["tools"];
+  try {
+    offered = acceptedTools(spec, listed.tools);
+  } catch (err) {
+    await shut(client, transport);
+    throw err;
   }
   const tools: DownstreamTool[] = [];
-  const seen = new Set<string>();
   for (const tool of offered) {
-    if (!CHILD_TOOL_RE.test(tool.name)) {
-      await shut(client, transport);
-      throw new Error(`downstream-child-name-invalid:${tool.name}`);
-    }
-    // The whole entry as the child sent it, in bytes: a description in three-byte
-    // characters, or megabytes in outputSchema or title, count against the bound too.
-    const toolBytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
-    if (toolBytes > MAX_TOOL_BYTES) {
-      await shut(client, transport);
-      throw new Error(`downstream-tool-too-large:${spec.prefix}.${tool.name}:${toolBytes}`);
-    }
     const name = prefixedName(spec.prefix, tool.name);
-    if (seen.has(name)) {
-      await shut(client, transport);
-      throw new Error(`downstream-name-collision:${name}`);
-    }
-    seen.add(name);
     const childName = tool.name;
-    // Canonical JSON refuses a non-finite number and a lone surrogate. That
-    // entry cannot be pinned or republished; close the child before leaving.
+    // Key order is published sorted. The encodability of the whole entry was
+    // already refused above; a schema that still cannot be written closes the child.
     let inputSchema: unknown;
     try {
-      canonical(tool);
       if (tool.inputSchema !== undefined) inputSchema = sortedObject(tool.inputSchema);
     } catch {
       await shut(client, transport);
