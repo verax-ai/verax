@@ -262,6 +262,22 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
           detail: `stdio child ${spec.prefix} runs as the same user as the body and can read the body's signing keys (keys/*.pem). An untrusted child should be reached over HTTP, ideally on a separate machine or under a separate operating-system user.`,
         });
       }
+      for (const spec of specs) {
+        if (spec.pins === undefined) {
+          checks.push({
+            id: `downstream-unpinned:${spec.prefix}`,
+            level: "warn",
+            detail: `child ${spec.prefix} has no pins; tool definitions are not compared at start`,
+          });
+        }
+        if (spec.command !== undefined && fetchesUnversionedPackage(spec.command, spec.args ?? [])) {
+          checks.push({
+            id: `downstream-unversioned:${spec.prefix}`,
+            level: "warn",
+            detail: `child ${spec.prefix} fetches a package with no version. A version is a name for the code, not proof of its integrity.`,
+          });
+        }
+      }
     } catch (err) {
       checks.push({
         id: "downstream-document",
@@ -274,6 +290,63 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
   checks.push(...jwksFileChecks(env, stateDir));
 
   return checks;
+}
+
+function commandBase(command: string): string {
+  const slash = Math.max(command.lastIndexOf("/"), command.lastIndexOf("\\"));
+  const base = (slash === -1 ? command : command.slice(slash + 1)).toLowerCase();
+  return base.replace(/\.(cmd|exe|bat)$/, "");
+}
+
+/** The package named by `--package` / `--from`, when that flag is present. */
+function flaggedSpec(args: readonly string[], flag: string): { present: boolean; value?: string } {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i]!;
+    if (arg === flag) return { present: true, value: args[i + 1] };
+    if (arg.startsWith(`${flag}=`)) return { present: true, value: arg.slice(flag.length + 1) };
+  }
+  return { present: false };
+}
+
+/** First argument that is not a flag. `-y` and `--yes` are flags and are skipped. */
+function positionalSpec(args: readonly string[]): string | undefined {
+  for (const arg of args) {
+    if (arg === "-y" || arg === "--yes" || arg.startsWith("-")) continue;
+    return arg;
+  }
+  return undefined;
+}
+
+/** major.minor.patch, with an optional prerelease or build. A dist-tag or a range is not this. */
+const FULL_VERSION = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
+/** `name@1.2.3`. A scoped name's leading `@` is not a version. */
+function npxVersioned(spec: string): boolean {
+  const at = spec.startsWith("@") ? spec.indexOf("@", 1) : spec.indexOf("@");
+  return at > 0 && FULL_VERSION.test(spec.slice(at + 1));
+}
+
+/** `name==1.2.3`. `>=`, `~=` and `*` leave the package unversioned. */
+function uvxVersioned(spec: string): boolean {
+  const at = spec.indexOf("==");
+  if (at <= 0) return false;
+  const version = spec.slice(at + 2);
+  return FULL_VERSION.test(version);
+}
+
+/**
+ * True when `npx` or `uvx` fetches a package that carries no version.
+ * `npx name@1.2.3`, `npx --package name@1.2.3`, `uvx name==1.2.3` and
+ * `uvx --from name==1.2.3` are versioned. Any other command is not this check.
+ */
+function fetchesUnversionedPackage(command: string, args: readonly string[]): boolean {
+  const base = commandBase(command);
+  if (base !== "npx" && base !== "uvx") return false;
+  const flag = base === "npx" ? "--package" : "--from";
+  const named = flaggedSpec(args, flag);
+  const spec = named.present ? named.value : positionalSpec(args);
+  if (spec === undefined || spec === "" || spec.startsWith("-")) return true;
+  return base === "npx" ? !npxVersioned(spec) : !uvxVersioned(spec);
 }
 
 function jwksFileChecks(env: NodeJS.ProcessEnv, stateDir: string): DoctorCheck[] {

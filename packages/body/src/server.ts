@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
@@ -20,6 +20,7 @@ import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
 import { agentsWindow } from "./agents.ts";
+import { copyDefinition } from "./definitions.ts";
 import { recordBodyStart, startHeartbeat } from "./heartbeat.ts";
 import { inventoryHealth, readInventoryFile } from "./inventory-file.ts";
 import { createBodyServices, TOOL_NAMES } from "./wiring.ts";
@@ -338,7 +339,9 @@ async function attachDownstream(
   const sessions: DownstreamSession[] = [];
   for (const spec of specs) {
     try {
-      sessions.push(await openDownstream(spec));
+      // The manifest sits beside the operator's document. An installed body
+      // cannot write the state directory, so the pin is read from here.
+      sessions.push(await openDownstream(spec, { definitionsDir: dirname(file) }));
     } catch (err) {
       await closeAll(sessions);
       const detail = err instanceof Error ? err.message : "attach-failed";
@@ -346,6 +349,31 @@ async function attachDownstream(
     }
   }
   return { sessions, specs };
+}
+
+function pinDigest(prefix: string, pins: string): string {
+  const digest = /^sha256:([0-9a-f]{64})$/.exec(pins)?.[1];
+  if (digest === undefined) throw new Error(`downstream-manifest-invalid:${prefix}`);
+  return digest;
+}
+
+/**
+ * One entry per child, in document order. Pinned manifests are copied into
+ * the state directory before the caller writes the start row that names them.
+ */
+function definitionsForStart(
+  stateDir: string,
+  definitionsDir: string,
+  specs: readonly DownstreamSpec[],
+): { prefix: string; manifest: string | null }[] {
+  const downstream = specs.map((spec) => ({
+    prefix: spec.prefix,
+    manifest: spec.pins === undefined ? null : pinDigest(spec.prefix, spec.pins),
+  }));
+  for (const child of downstream) {
+    if (child.manifest !== null) copyDefinition(stateDir, definitionsDir, child.manifest);
+  }
+  return downstream;
 }
 
 export async function listen(config: BodyConfig): Promise<Server> {
@@ -378,7 +406,18 @@ export async function listen(config: BodyConfig): Promise<Server> {
   }
   try {
     // This must precede syncControlRecords: those records pulse too.
-    recordBodyStart(config.stateDir, services.ledger.startedAtMs, signers.recordSigner);
+    // The state copy is written first: the start row names those bytes, and
+    // a copy that cannot be made stops the start. No children, no field.
+    const downstream =
+      downstreamSpecs.length === 0
+        ? undefined
+        : definitionsForStart(config.stateDir, dirname(config.downstreamFile ?? ""), downstreamSpecs);
+    recordBodyStart(
+      config.stateDir,
+      services.ledger.startedAtMs,
+      signers.recordSigner,
+      downstream === undefined ? undefined : { downstream },
+    );
   } catch (err) {
     services.ledger.close();
     await closeAll(sessions);

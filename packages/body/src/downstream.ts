@@ -1,5 +1,8 @@
+import { createHash, createPublicKey } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable } from "node:stream";
-import { createPublicKey } from "node:crypto";
+import { canonical } from "@cedulon/core";
 import type { SignedEffectExtract } from "@cedulon/effect-extract";
 import { effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptRejection } from "@verax-ai/proxy";
 
@@ -47,13 +50,19 @@ export type DownstreamSpec = {
    * stops the attach. Absent means every tool the child lists.
    */
   tools?: string[];
+  /**
+   * Content address of the manifest the operator approved: `sha256:` and 64
+   * lowercase hex digits. Absent means the child is attached without
+   * comparing definitions.
+   */
+  pins?: string;
 };
 
 export type DownstreamTool = {
   name: string;
   /** The child's own description, as `tools/list` gave it. */
   description?: string;
-  /** The child's own input schema, republished unchanged. */
+  /** The child's input schema, object keys in canonical order. */
   inputSchema?: unknown;
   fn: DownstreamToolFn;
 };
@@ -65,7 +74,9 @@ export type DownstreamSession = {
 };
 
 const PREFIX_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
-const CHILD_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
+/** `sha256:` plus 64 lowercase hex digits. The capture is the file name. */
+const PINS_RE = /^sha256:([0-9a-f]{64})$/;
+export const CHILD_TOOL_RE = /^[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 /** Prefixed name a caller may put on extraTools: `prefix.childName`. */
 const EXTRA_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}\.[A-Za-z][A-Za-z0-9._-]{0,63}$/;
 // Sanity bound, not a capacity claim. A child that lists more than this is
@@ -240,6 +251,12 @@ export function parseDownstreamJson(raw: string, bodyPublicKeyPems: readonly str
     }
     spec.tools = [...(names as string[])];
   }
+  if (rec.pins !== undefined) {
+    if (typeof rec.pins !== "string" || !PINS_RE.test(rec.pins)) {
+      throw new Error(`downstream-pins-invalid:${spec.prefix}`);
+    }
+    spec.pins = rec.pins;
+  }
   assertStdioTrusted(spec);
   return spec;
 }
@@ -302,8 +319,12 @@ async function shut(client: Client, transport: ChildTransport): Promise<void> {
   await transport.close().catch(() => undefined);
 }
 
-/** Spawns the child. Its stderr is drained so a chatty child cannot block it. */
-function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
+/**
+ * Spawns the child. Stderr is drained so a chatty child cannot block it.
+ * Pass `stderrChunks` to keep the bytes instead (the pin command shows them);
+ * the same cap, and collection stops at the cap instead of growing without bound.
+ */
+function stdioTransport(spec: DownstreamSpec, stderrChunks?: Buffer[]): StdioClientTransport {
   if (spec.command === undefined || spec.command.trim() === "") {
     throw new Error("downstream-command-invalid");
   }
@@ -324,8 +345,18 @@ function stdioTransport(spec: DownstreamSpec): StdioClientTransport {
   });
   // The SDK types the pipe as Stream; only a Readable can be drained.
   const stderr = transport.stderr;
-  if (stderr instanceof Readable) stderr.resume();
+  if (stderr instanceof Readable) {
+    if (stderrChunks === undefined) stderr.resume();
+    else collectStderr(stderr, stderrChunks);
+  }
   return transport;
+}
+
+function collectStderr(stderr: Readable, chunks: Buffer[]): void {
+  stderr.on("data", (chunk: Buffer | string) => {
+    if (chunks.reduce((n, c) => n + c.length, 0) >= MAX_CHILD_MESSAGE_BYTES) return;
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  });
 }
 
 /**
@@ -425,6 +456,112 @@ async function connectWithDeadline(
   }
 }
 
+/**
+ * Object keys in the order `canonical` uses. Array order stays: it can carry
+ * meaning. Two schemas that differ only by key order are then published the same.
+ */
+function sortedObject(value: unknown): unknown {
+  return JSON.parse(canonical(value)) as unknown;
+}
+
+type PinnedManifest = {
+  prefix: unknown;
+  selected: unknown;
+  tools: Record<string, unknown>;
+};
+
+function manifestInvalid(prefix: string): never {
+  throw new Error(`downstream-manifest-invalid:${prefix}`);
+}
+
+/** One read. The digest is of those bytes, not of a re-encoded document. */
+function readPinnedManifest(prefix: string, pins: string, definitionsDir: string | undefined): PinnedManifest {
+  const digest = PINS_RE.exec(pins)?.[1];
+  if (digest === undefined) throw new Error(`downstream-pins-invalid:${prefix}`);
+  if (definitionsDir === undefined || definitionsDir === "") manifestInvalid(prefix);
+  let bytes: Buffer;
+  try {
+    bytes = readFileSync(join(definitionsDir, "definitions", `${digest}.json`));
+  } catch (err) {
+    // A missing or corrupt file is not the same fact as a file this account
+    // is not allowed to read.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") throw new Error(`downstream-manifest-unreadable:${prefix}`);
+    manifestInvalid(prefix);
+  }
+  if (createHash("sha256").update(bytes).digest("hex") !== digest) manifestInvalid(prefix);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(bytes.toString("utf8"));
+  } catch {
+    manifestInvalid(prefix);
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) manifestInvalid(prefix);
+  const rec = parsed as Record<string, unknown>;
+  if (rec.v !== 1) manifestInvalid(prefix);
+  if (rec.tools === null || typeof rec.tools !== "object" || Array.isArray(rec.tools)) manifestInvalid(prefix);
+  return { prefix: rec.prefix, selected: rec.selected, tools: rec.tools as Record<string, unknown> };
+}
+
+/** Both absent (no `tools`, and `selected` null or missing) is the same selection. */
+function sameSelection(specTools: string[] | undefined, selected: unknown): boolean {
+  const left = specTools === undefined ? null : specTools;
+  const right = selected === undefined || selected === null ? null : selected;
+  if (left === null || right === null) return left === null && right === null;
+  if (!Array.isArray(right) || right.some((name) => typeof name !== "string")) return false;
+  const wanted = new Set(left);
+  const pinned = new Set(right);
+  if (wanted.size !== pinned.size) return false;
+  for (const name of wanted) if (!pinned.has(name)) return false;
+  return true;
+}
+
+/**
+ * With no selection the listed names and the pinned names are one set.
+ * With a selection only those names are compared; a selected name with no
+ * pin is unpinned. The digest is the whole parsed entry, not a list of fields.
+ */
+function assertPinnedDefinitions(
+  spec: DownstreamSpec,
+  offered: readonly { name: string }[],
+  manifestTools: Record<string, unknown>,
+): void {
+  const listedNames = offered.map((tool) => tool.name);
+  if (spec.tools === undefined) {
+    for (const name of listedNames) {
+      if (!Object.hasOwn(manifestTools, name)) {
+        throw new Error(`downstream-tool-unpinned:${spec.prefix}.${name}`);
+      }
+    }
+    const listed = new Set(listedNames);
+    for (const name of Object.keys(manifestTools)) {
+      if (!listed.has(name)) throw new Error(`downstream-tool-unlisted:${spec.prefix}.${name}`);
+    }
+  } else {
+    for (const name of spec.tools) {
+      if (!Object.hasOwn(manifestTools, name)) {
+        throw new Error(`downstream-tool-unpinned:${spec.prefix}.${name}`);
+      }
+    }
+  }
+  const byName = new Map(offered.map((tool) => [tool.name, tool]));
+  for (const name of spec.tools ?? listedNames) {
+    const listed = byName.get(name);
+    if (listed === undefined || !Object.hasOwn(manifestTools, name)) continue;
+    let listedDigest: string;
+    let pinnedDigest: string;
+    try {
+      listedDigest = sha256Canonical(listed);
+      pinnedDigest = sha256Canonical(manifestTools[name]);
+    } catch {
+      throw new Error(`downstream-definition-unencodable:${spec.prefix}.${name}`);
+    }
+    if (listedDigest !== pinnedDigest) {
+      throw new Error(`downstream-definition-changed:${spec.prefix}.${name}`);
+    }
+  }
+}
+
 function attachTimeoutError(err: unknown, prefix: string): Error {
   const msg = err instanceof Error ? err.message : String(err);
   if (msg.startsWith("downstream-attach-timeout:")) {
@@ -436,7 +573,123 @@ function attachTimeoutError(err: unknown, prefix: string): Error {
   return err instanceof Error ? err : new Error(msg);
 }
 
-export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSession> {
+/**
+ * The child's `tools/list`, held to one set of bounds. A `tools` selection
+ * is applied first: anything not selected is never read past its name (no
+ * size check, no collision check). Both attach and the pin command use this,
+ * so a name, a size, or a collision the body would refuse is refused here too.
+ */
+function acceptedTools<T extends { name: string }>(spec: DownstreamSpec, listed: readonly T[]): T[] {
+  if (listed.length > MAX_CHILD_TOOLS) {
+    throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.length}`);
+  }
+  const wanted = spec.tools === undefined ? null : new Set(spec.tools);
+  const offered = wanted === null ? [...listed] : listed.filter((tool) => wanted.has(tool.name));
+  if (wanted !== null) {
+    for (const name of wanted) {
+      if (!offered.some((tool) => tool.name === name)) {
+        throw new Error(`downstream-tool-missing:${spec.prefix}.${name}`);
+      }
+    }
+  }
+  const seen = new Set<string>();
+  for (const tool of offered) {
+    if (!CHILD_TOOL_RE.test(tool.name)) {
+      throw new Error(`downstream-child-name-invalid:${tool.name}`);
+    }
+    const toolBytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
+    if (toolBytes > MAX_TOOL_BYTES) {
+      throw new Error(`downstream-tool-too-large:${spec.prefix}.${tool.name}:${toolBytes}`);
+    }
+    const published = prefixedName(spec.prefix, tool.name);
+    if (seen.has(published)) {
+      throw new Error(`downstream-name-collision:${published}`);
+    }
+    seen.add(published);
+    // Canonical JSON refuses a non-finite number. That entry cannot be pinned
+    // or republished. A lone surrogate is left as text and compared as such.
+    try {
+      canonical(tool);
+    } catch {
+      throw new Error(`downstream-definition-unencodable:${spec.prefix}.${tool.name}`);
+    }
+  }
+  return offered;
+}
+
+function plainTool(tool: unknown): Record<string, unknown> {
+  const parsed = JSON.parse(canonical(tool)) as unknown;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("downstream-child-name-invalid");
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Entries keyed by the child's own name. A null prototype keeps `__proto__` and `constructor` ordinary. */
+function snapshotRecord(offered: readonly { name: string }[]): Record<string, unknown> {
+  const tools: Record<string, unknown> = Object.create(null);
+  for (const tool of offered) tools[tool.name] = plainTool(tool);
+  return tools;
+}
+
+// Asked as a plain request, not through client.listTools: that call compiles every
+// outputSchema the child lists into a validator, and client.callTool then runs it
+// on the child's own result inside this process. A child's schema is the child's
+// input; a backtracking pattern in it held the body for seconds per call.
+function requestToolList(client: Client, timeoutMs: number): ReturnType<Client["listTools"]> {
+  return client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
+}
+
+/**
+ * Connects the child once, takes `tools/list` under the same bounds as
+ * `openDownstream`, collects stderr, and closes. The returned tools are the
+ * snapshot that is shown and, after the operator types yes, written. Listing
+ * again would let the child answer differently from the text that was read.
+ * On failure the error carries `stderr` when the child wrote any.
+ */
+export async function listDownstreamOnce(
+  spec: DownstreamSpec,
+): Promise<{ tools: Record<string, unknown>; stderr: string }> {
+  const timeoutMs = spec.timeoutMs ?? 10_000;
+  const overflow: Overflow = { hit: false, detach: () => undefined };
+  const stderrChunks: Buffer[] = [];
+  const transport = spec.url !== undefined ? httpTransport(spec, overflow) : stdioTransport(spec, stderrChunks);
+  const client = new Client({ name: "verax-downstream-pin", version: "0.0.0" });
+  overflow.detach = () => void transport.close().catch(() => undefined);
+  // On stdio the client's read buffer enforces the bound and closes the child.
+  // This is where it says so; the text is the client's.
+  client.onerror = (err) => {
+    if (/ReadBuffer exceeded maximum size/.test(err.message)) overflow.hit = true;
+  };
+  const stderrNow = () => Buffer.concat(stderrChunks).toString("utf8");
+  try {
+    await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
+    const listed = await requestToolList(client, timeoutMs);
+    return { tools: snapshotRecord(acceptedTools(spec, listed.tools)), stderr: stderrNow() };
+  } catch (err) {
+    const stderr = stderrNow();
+    const message = err instanceof Error ? err.message : "";
+    if (overflow.hit && !message.startsWith("downstream-")) {
+      const tooLarge = new Error(`${MESSAGE_TOO_LARGE}:${spec.prefix}`) as Error & { stderr?: string };
+      tooLarge.stderr = stderr;
+      throw tooLarge;
+    }
+    if (err instanceof Error) {
+      (err as Error & { stderr?: string }).stderr = stderr;
+      throw err;
+    }
+    const wrapped = new Error("downstream-pin-failed") as Error & { stderr?: string };
+    wrapped.stderr = stderr;
+    throw wrapped;
+  } finally {
+    await shut(client, transport);
+  }
+}
+
+export async function openDownstream(
+  spec: DownstreamSpec,
+  opts?: { definitionsDir?: string },
+): Promise<DownstreamSession> {
   if (spec.effectKeyPem !== undefined) assertEffectKey(spec.effectKeyPem);
   if (!PREFIX_RE.test(spec.prefix)) {
     throw new Error("downstream-prefix-invalid");
@@ -463,57 +716,38 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
   let listed: Awaited<ReturnType<Client["listTools"]>>;
   try {
     await connectWithDeadline(client, transport, timeoutMs, spec.prefix);
-    // Asked as a plain request, not through client.listTools: that call compiles every
-        // outputSchema the child lists into a validator, and client.callTool then runs it
-        // on the child's own result inside this process. A child's schema is the child's
-        // input; a backtracking pattern in it held the body for seconds per call.
-        listed = await client.request({ method: "tools/list" }, ListToolsResultSchema, { timeout: timeoutMs });
+    listed = await requestToolList(client, timeoutMs);
   } catch (err) {
     await shut(client, transport);
     if (overflow.hit) throw new Error(`${MESSAGE_TOO_LARGE}:${spec.prefix}`);
     throw attachTimeoutError(err, spec.prefix);
   }
-  if (listed.tools.length > MAX_CHILD_TOOLS) {
-    await shut(client, transport);
-    throw new Error(`downstream-too-many-tools:${spec.prefix}:${listed.tools.length}`);
-  }
   // With a `tools` list the rest of the child's list is never read past its
   // name: no size check, no registry entry, nothing republished.
-  const wanted = spec.tools === undefined ? null : new Set(spec.tools);
-  const offered = wanted === null ? listed.tools : listed.tools.filter((t) => wanted.has(t.name));
-  if (wanted !== null) {
-    for (const name of wanted) {
-      if (!offered.some((t) => t.name === name)) {
-        await shut(client, transport);
-        throw new Error(`downstream-tool-missing:${spec.prefix}.${name}`);
-      }
-    }
+  let offered: Awaited<ReturnType<Client["listTools"]>>["tools"];
+  try {
+    offered = acceptedTools(spec, listed.tools);
+  } catch (err) {
+    await shut(client, transport);
+    throw err;
   }
   const tools: DownstreamTool[] = [];
-  const seen = new Set<string>();
   for (const tool of offered) {
-    if (!CHILD_TOOL_RE.test(tool.name)) {
-      await shut(client, transport);
-      throw new Error(`downstream-child-name-invalid:${tool.name}`);
-    }
-    // The whole entry as the child sent it, in bytes: a description in three-byte
-    // characters, or megabytes in outputSchema or title, count against the bound too.
-    const toolBytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
-    if (toolBytes > MAX_TOOL_BYTES) {
-      await shut(client, transport);
-      throw new Error(`downstream-tool-too-large:${spec.prefix}.${tool.name}:${toolBytes}`);
-    }
     const name = prefixedName(spec.prefix, tool.name);
-    if (seen.has(name)) {
-      await shut(client, transport);
-      throw new Error(`downstream-name-collision:${name}`);
-    }
-    seen.add(name);
     const childName = tool.name;
+    // Key order is published sorted. The encodability of the whole entry was
+    // already refused above; a schema that still cannot be written closes the child.
+    let inputSchema: unknown;
+    try {
+      if (tool.inputSchema !== undefined) inputSchema = sortedObject(tool.inputSchema);
+    } catch {
+      await shut(client, transport);
+      throw new Error(`downstream-definition-unencodable:${spec.prefix}.${childName}`);
+    }
     tools.push({
       name,
       ...(typeof tool.description === "string" ? { description: tool.description } : {}),
-      ...(tool.inputSchema !== undefined ? { inputSchema: tool.inputSchema } : {}),
+      ...(inputSchema !== undefined ? { inputSchema } : {}),
       fn: async (call, _principal, ref) => {
         // A child that sent one message over the bound is not asked again.
         if (overflow.hit) throw new DownstreamCallError(spec.prefix, childName, new Error(MESSAGE_TOO_LARGE));
@@ -548,6 +782,24 @@ export async function openDownstream(spec: DownstreamSpec): Promise<DownstreamSe
       },
     });
   }
+  // A child can keep a tool's name and change what that name means. The pin
+  // names the manifest of the definitions the operator read; the bytes of
+  // that file, its prefix and selection, and each listed entry are compared
+  // with what this child just returned, so a changed definition cannot attach
+  // under the same name.
+  if (spec.pins !== undefined) {
+    try {
+      const manifest = readPinnedManifest(spec.prefix, spec.pins, opts?.definitionsDir);
+      if (manifest.prefix !== spec.prefix || !sameSelection(spec.tools, manifest.selected)) {
+        throw new Error(`downstream-manifest-mismatch:${spec.prefix}`);
+      }
+      assertPinnedDefinitions(spec, offered, manifest.tools);
+    } catch (err) {
+      await shut(client, transport);
+      throw err;
+    }
+  }
+  tools.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   let closed = false;
   return {
     prefix: spec.prefix,

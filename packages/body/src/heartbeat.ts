@@ -5,6 +5,9 @@ import type { FileLedger, RecordSigner } from "@verax-ai/proxy";
 import { canonical } from "@cedulon/core";
 import { readHeartbeat } from "./health-extras.ts";
 
+/** One child named on a start: the digest of its pinned manifest, or null when it has no pins. */
+export type StartDownstream = { prefix: string; manifest: string | null };
+
 /** v1 rows carry no `v` and no signature. */
 export type StartRow = {
   action: "start";
@@ -12,6 +15,11 @@ export type StartRow = {
   prevBeatAtMs: number | null;
   gapMs: number | null;
   pid: number;
+  /**
+   * Children in force at this start. Absent when the body had none, so a row
+   * written before this field still verifies.
+   */
+  downstream?: StartDownstream[];
 };
 
 /**
@@ -80,17 +88,26 @@ export function heartbeatEveryMs(env: NodeJS.ProcessEnv = process.env): number {
 /**
  * Separate from halt history: a start is an observation, not a control.
  * With a signer the row is v2 and signed by the record key; without one it
- * stays an unsigned v1 row.
+ * stays an unsigned v1 row. A non-empty `downstream` list is part of the row
+ * and of the bytes the record key signs. When it is absent the field is not
+ * written, so older v1 and v2 rows verify unchanged.
  */
-export function recordBodyStart(stateDir: string, atMs: number, signer?: RecordSigner): void {
+export function recordBodyStart(
+  stateDir: string,
+  atMs: number,
+  signer?: RecordSigner,
+  extra?: { downstream?: StartDownstream[] },
+): void {
   const path = join(stateDir, "starts.jsonl");
   const prevBeatAtMs = readHeartbeat(stateDir)?.atMs ?? null;
+  const listed = extra?.downstream;
   const base: StartRow = {
     action: "start",
     atMs,
     prevBeatAtMs,
     gapMs: prevBeatAtMs === null ? null : atMs - prevBeatAtMs,
     pid: process.pid,
+    ...(listed !== undefined && listed.length > 0 ? { downstream: listed } : {}),
   };
   let row: StartRow | SignedStartRow = base;
   if (signer) {
@@ -130,7 +147,24 @@ export type StartSummary = {
   /** Problems that make the ledger not verify: a bad signature, a broken chain, an unsigned row after a signed one. */
   problems: string[];
   warnings: string[];
+  /**
+   * Children recorded on each start, in the order the rows were read. A
+   * start that named none is an empty list.
+   */
+  downstream: StartDownstream[][];
 };
+
+const MANIFEST_RE = /^[0-9a-f]{64}$/;
+
+function isDownstreamList(value: unknown): value is StartDownstream[] {
+  if (!Array.isArray(value)) return false;
+  return value.every((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.prefix !== "string") return false;
+    return rec.manifest === null || (typeof rec.manifest === "string" && MANIFEST_RE.test(rec.manifest));
+  });
+}
 
 function isStartRow(row: StartRow): boolean {
   return (
@@ -140,8 +174,50 @@ function isStartRow(row: StartRow): boolean {
     Number.isInteger(row.pid) &&
     (row.prevBeatAtMs === null || Number.isFinite(row.prevBeatAtMs)) &&
     (row.gapMs === null || Number.isFinite(row.gapMs)) &&
-    (row.prevBeatAtMs === null) === (row.gapMs === null)
+    (row.prevBeatAtMs === null) === (row.gapMs === null) &&
+    ((row as { downstream?: unknown }).downstream === undefined ||
+      isDownstreamList((row as { downstream?: unknown }).downstream))
   );
+}
+
+function downstreamManifestProblems(stateDir: string, row: StartRow): string[] {
+  if (row.downstream === undefined) return [];
+  const problems: string[] = [];
+  for (const entry of row.downstream) {
+    if (entry.manifest === null) continue;
+    const file = join(stateDir, "definitions", `${entry.manifest}.json`);
+    let bytes: Buffer;
+    try {
+      bytes = readFileSync(file);
+    } catch (err) {
+      const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+      problems.push(
+        `${missing ? "downstream-manifest-missing" : "downstream-manifest-invalid"}:${entry.prefix}:${entry.manifest}`,
+      );
+      continue;
+    }
+    if (createHash("sha256").update(bytes).digest("hex") !== entry.manifest) {
+      problems.push(`downstream-manifest-invalid:${entry.prefix}:${entry.manifest}`);
+      continue;
+    }
+    // The digest names these bytes. They still have to be the manifest of
+    // the child this row recorded, not another prefix under the same hash.
+    let recorded: unknown;
+    try {
+      recorded = JSON.parse(bytes.toString("utf8"));
+    } catch {
+      problems.push(`downstream-manifest-invalid:${entry.prefix}:${entry.manifest}`);
+      continue;
+    }
+    const recordedPrefix =
+      recorded !== null && typeof recorded === "object" && !Array.isArray(recorded)
+        ? (recorded as { prefix?: unknown }).prefix
+        : undefined;
+    if (recordedPrefix !== entry.prefix) {
+      problems.push(`downstream-manifest-mismatch:${entry.prefix}:${entry.manifest}`);
+    }
+  }
+  return problems;
 }
 
 /**
@@ -186,6 +262,7 @@ export function readStartSummary(
     startKey: publicKeyPem ? keySource : "none",
     problems: [],
     warnings: [],
+    downstream: [],
   };
   let raw: string;
   try {
@@ -230,6 +307,7 @@ export function readStartSummary(
       continue;
     }
     result.count += 1;
+    result.downstream.push(row.downstream ?? []);
     if (row.prevBeatAtMs === null) result.missingPreviousBeat.push(row.atMs);
     if (row.gapMs !== null) {
       result.largestGapMs = result.largestGapMs === null ? row.gapMs : Math.max(result.largestGapMs, row.gapMs);
@@ -272,6 +350,11 @@ export function readStartSummary(
       // Only a reader who knows the ledger was written signed can refuse it.
       else if (opts.requireSigned) result.problems.push(`start-row-unsigned: starts.jsonl line ${n}`);
     }
+    // Each named manifest must be the file under that digest. What this shows,
+    // and no more: the body that held a trusted record key recorded these
+    // definitions at that start. It does not prove that a person read them or
+    // that the child's code behaves as described.
+    result.problems.push(...downstreamManifestProblems(stateDir, row));
     prevLine = line;
   }
   if (opts.requireSigned) {
@@ -290,7 +373,14 @@ export function renderStarts(summary: StartSummary): string {
       : summary.startKey === "none"
         ? `${summary.signed} signed, not checked (no record key)${summary.unsigned ? "; older rows unsigned" : ""}`
         : `${summary.signedVerified} of ${summary.signed} signed verify under the ${summary.startKey === "pinned" ? "pinned" : "in-ledger"} record key${summary.unsigned ? "; older rows unsigned" : ""}`;
+  const definitions = summary.downstream.flatMap((listed) =>
+    listed.map(
+      (entry) =>
+        `downstream    ${entry.prefix} ${entry.manifest === null ? "unpinned" : `sha256:${entry.manifest}`}`,
+    ),
+  );
   return `starts        ${summary.count}; largest gap ${summary.largestGapMs === null ? "none" : `${summary.largestGapMs} ms`}; previous beat missing at ${summary.missingPreviousBeat.join(", ") || "none"}; ${signedPart}`
+    + definitions.map((line) => `\n${line}`).join("")
     + summary.problems.map((p) => `\nproblem       ${p}`).join("")
     + summary.warnings.map((warning) => `\nwarning       ${warning}`).join("");
 }
