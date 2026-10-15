@@ -161,8 +161,8 @@ describe("the pin command, hardened", { timeout: 60_000 }, () => {
   // private-use code point has no glyph the operator can rely on. Shown as
   // they are, they change what the operator reads.
   it("shows combining marks, unassigned and private-use code points escaped", () => {
-    const shown = renderToolEntry(tool("a", { description: "4̸ẋ̇y᲻z" }));
-    for (const raw of ["̸", "̇", "᲻", ""]) {
+    const shown = renderToolEntry(tool("a", { description: "4\u0338x\u0307\u0307y\u1cbbz\ue000" }));
+    for (const raw of ["\u0338", "\u0307", "\u1cbb", "\ue000"]) {
       assert.equal(shown.includes(raw), false, `left as it is: U+${raw.codePointAt(0)!.toString(16)}`);
     }
     for (const esc of ["\\u0338", "\\u0307", "\\u1cbb", "\\ue000"]) assert.ok(shown.includes(esc), esc);
@@ -178,7 +178,7 @@ describe("the pin command, hardened", { timeout: 60_000 }, () => {
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         assert.match(message, /^downstream-child-name-invalid:/);
-        for (const raw of ["\u001b", "\u009b", "‮"]) {
+        for (const raw of ["\u001b", "\u009b", "\u202e"]) {
           assert.equal(message.includes(raw), false, `reached the message: U+${raw.codePointAt(0)!.toString(16)}`);
         }
         for (const esc of ["\\u001b", "\\u009b", "\\u202e"]) assert.ok(message.includes(esc), `${esc} in ${message}`);

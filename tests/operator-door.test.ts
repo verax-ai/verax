@@ -1343,22 +1343,22 @@ describe("operator door", () => {
     assert.ok(start >= 0 && end > start, "plain() not found in door.js");
     const plain = new Script(`${DOOR_JS.slice(start, end)}; plain;`).runInNewContext({}) as (t: string, k?: boolean) => string;
     for (const [raw, esc] of [
-      ["️", "\\ufe0f"],
+      ["\ufe0f", "\\ufe0f"],
       ["\u{e0101}", "\\udb40\\udd01"],
-      ["ㅤ", "\\u3164"],
-      ["⠀", "\\u2800"],
-      ["̸", "\\u0338"],
-      ["᲻", "\\u1cbb"],
-      ["", "\\ue000"],
+      ["\u3164", "\\u3164"],
+      ["\u2800", "\\u2800"],
+      ["\u0338", "\\u0338"],
+      ["\u1cbb", "\\u1cbb"],
+      ["\ue000", "\\ue000"],
     ]) {
       const shown = plain(`inv${raw}`);
       assert.equal(shown.includes(raw), false, `left as it is: ${esc}`);
       assert.ok(shown.includes(esc), esc);
     }
-    assert.notEqual(plain("inv\\u3164"), plain("invㅤ"));
+    assert.notEqual(plain("inv\\u3164"), plain("inv\u3164"));
     // The argument block is JSON, shown with line breaks kept; the class is escaped there too.
-    const block = plain(JSON.stringify({ reference: "inv-4̸️" }, null, 2), true);
-    assert.equal(block.includes("̸") || block.includes("️"), false, block);
+    const block = plain(JSON.stringify({ reference: "inv-4\u0338\ufe0f" }, null, 2), true);
+    assert.equal(block.includes("\u0338") || block.includes("\ufe0f"), false, block);
     assert.ok(block.includes("\\u0338") && block.includes("\\ufe0f") && block.includes("\n"), block);
     assert.equal(plain("inv-7"), "inv-7");
     assert.equal(plain("Ünlü ışık"), "Ünlü ışık");
