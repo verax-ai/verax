@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a vulnerability privately
+    url: https://github.com/verax-ai/verax/security/advisories/new
+    about: For anything exploitable. Terms and the reward are in SECURITY.md.

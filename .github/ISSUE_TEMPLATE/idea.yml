@@ -1,0 +1,19 @@
+name: Idea or missing piece
+description: Something you need Verax to do, or a limit in docs/STATUS.md that is in your way.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: What you are trying to do
+      description: The task, not the solution.
+    validations:
+      required: true
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today instead
+  - type: input
+    id: status
+    attributes:
+      label: Row of docs/STATUS.md it touches, if any

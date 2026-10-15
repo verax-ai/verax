@@ -1,0 +1,49 @@
+name: Bug report
+description: Something Verax did that it should not have, or did not do that it should.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If this is exploitable, stop here and use SECURITY.md instead of a public issue.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `verax --version`, or the commit you built.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and Node
+      description: For example "Ubuntu 24.04 x64, Node 22.12".
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: What you ran
+      description: The commands, in order. Leave tokens and keys out.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened
+      description: The output, pasted as text.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: verax verify output (if a ledger is involved)
+      render: text

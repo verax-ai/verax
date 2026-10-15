@@ -25,6 +25,11 @@ By [VERAX Teknoloji](https://verax-ai.com). Sister projects:
 [Cedulon](https://github.com/dogrucanemek-alt/cedulon). Decision records use
 the Cedulon record format.
 
+How Verax compares, dated 15 October 2026: of 40 projects that gate, log or
+approve an agent's tool calls, nine are compared on four questions with a
+source for every cell, and the page says where Verax falls short:
+[verax-ai.com/compare.html](https://verax-ai.com/compare.html).
+
 ## See it run
 
 ```sh
@@ -399,7 +404,7 @@ vulnerability is in [`SECURITY.md`](SECURITY.md).
 
 ```sh
 npm ci
-npm test            # guards, typecheck, build, unit and cost suites, panel
+npm test            # guards, build, typecheck, unit and cost suites, panel
 npm run pack:smoke  # pack the three packages and install them elsewhere
 ```
 
@@ -410,6 +415,9 @@ provenance attestation, then `mcp-registry.yml` updates the registry record
 once npm answers for the new version. Neither runs on push.
 
 Tested on every release on the platforms listed in docs/PLATFORMS.md, each row linked to its CI run.
+
+To contribute, or to report a run on a platform that is not listed, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
