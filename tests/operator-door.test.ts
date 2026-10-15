@@ -1356,6 +1356,10 @@ describe("operator door", () => {
       assert.ok(shown.includes(esc), esc);
     }
     assert.notEqual(plain("inv\\u3164"), plain("invㅤ"));
+    // The argument block is JSON, shown with line breaks kept; the class is escaped there too.
+    const block = plain(JSON.stringify({ reference: "inv-4̸️" }, null, 2), true);
+    assert.equal(block.includes("̸") || block.includes("️"), false, block);
+    assert.ok(block.includes("\\u0338") && block.includes("\\ufe0f") && block.includes("\n"), block);
     assert.equal(plain("inv-7"), "inv-7");
     assert.equal(plain("Ünlü ışık"), "Ünlü ışık");
   });

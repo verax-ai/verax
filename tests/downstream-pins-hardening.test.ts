@@ -170,14 +170,18 @@ describe("the pin command, hardened", { timeout: 60_000 }, () => {
 
   it("names an invalid child tool without passing its bytes to the terminal", async () => {
     const dir = temp();
-    const url = await rawChild('{"tools":[{"name":"bad\\u001b[2J\\u001b[HOK","description":"x","inputSchema":{"type":"object"}}]}');
+    // JSON already writes U+001B as \u001b; U+009B (8-bit CSI) and U+202E (bidi
+    // override) are left alone by JSON and must still be escaped by the class.
+    const url = await rawChild('{"tools":[{"name":"bad\\u001b[2J\\u009b2J\\u202eKO","description":"x","inputSchema":{"type":"object"}}]}');
     await assert.rejects(
       () => openDownstream({ prefix: "rea", url, timeoutMs: 5000 } as never, { definitionsDir: dir } as never),
       (err: unknown) => {
         const message = err instanceof Error ? err.message : String(err);
         assert.match(message, /^downstream-child-name-invalid:/);
-        assert.equal(message.includes("\u001b"), false, "an escape character reached the message");
-        assert.ok(message.includes("\\u001b"), message);
+        for (const raw of ["\u001b", "\u009b", "‮"]) {
+          assert.equal(message.includes(raw), false, `reached the message: U+${raw.codePointAt(0)!.toString(16)}`);
+        }
+        for (const esc of ["\\u001b", "\\u009b", "\\u202e"]) assert.ok(message.includes(esc), `${esc} in ${message}`);
         return true;
       },
     );
