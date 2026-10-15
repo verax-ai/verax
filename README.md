@@ -404,7 +404,7 @@ vulnerability is in [`SECURITY.md`](SECURITY.md).
 
 ```sh
 npm ci
-npm test            # guards, typecheck, build, unit and cost suites, panel
+npm test            # guards, build, typecheck, unit and cost suites, panel
 npm run pack:smoke  # pack the three packages and install them elsewhere
 ```
 

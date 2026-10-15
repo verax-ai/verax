@@ -20,7 +20,7 @@ Node 22.6 or newer.
 
 ```sh
 npm ci
-npm test            # guards, typecheck, build, unit and cost suites, panel
+npm test            # guards, build, typecheck, unit and cost suites, panel
 npm run pack:smoke  # pack the three packages and install them elsewhere
 ```
 
@@ -33,9 +33,9 @@ to pass the same suite locally first.
 
 - **A run on a platform we have not checked.** [docs/PLATFORMS.md](docs/PLATFORMS.md)
   lists only the CI runners. If you try `npx @verax-ai/body demo`, then
-  `verax init --local`, `verax serve`, one tool call and `verax verify` on
-  another platform, open a *Platform report* issue with what you ran and
-  what it printed.
+  `verax init --local <dir>`, `verax serve --env-file <dir>/verax.env`, one
+  tool call and `verax verify <state dir>` on another platform, open a
+  *Platform report* issue with what you ran and what it printed.
 - **A verifier that is not ours.** The ledger can be read back without the
   body ([Read the ledger back without us](README.md#read-the-ledger-back-without-us)).
   A second implementation in another language is the strongest check of that
