@@ -20,7 +20,7 @@ import { describe, it } from "node:test";
 import { Script } from "node:vm";
 
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
-import { TERMINAL_CONTROL_CLASS } from "@verax-ai/proxy";
+import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
 import { exportJWK, generateKeyPair } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
@@ -1295,7 +1295,7 @@ describe("operator door", () => {
     // The script compiles. Nothing here runs it.
     new Script(DOOR_JS, { filename: "door.js" });
     // What it escapes before it shows a held call is the class the terminal escapes, not a copy of it.
-    assert.ok(DOOR_JS.includes(`new RegExp("[" + ${JSON.stringify(TERMINAL_CONTROL_CLASS)} + "]", "gu")`));
+    assert.ok(DOOR_JS.includes(`new RegExp("[" + ${JSON.stringify(DISPLAY_ESCAPE_CLASS)} + "]", "gu")`));
     assert.equal(DOOR_JS.includes("@@"), false);
     for (const banned of [
       /innerHTML/,

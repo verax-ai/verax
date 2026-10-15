@@ -230,11 +230,23 @@ function asSpend(raw: unknown, id: string, options: PolicyParseOptions): PolicyS
 }
 
 /**
- * One class for the spend gate and the approve prompt: every control (Cc,
- * C0 and C1), every format character (Cf: bidi, ZWJ/ZWNJ, U+FEFF), and the
- * line and paragraph separators (Zl, Zp).
+ * What the spend gate refuses in payee, reference and currency: every
+ * control (Cc, C0 and C1), every format character (Cf: bidi, ZWJ/ZWNJ,
+ * U+FEFF), and the line and paragraph separators (Zl, Zp).
  */
 export const TERMINAL_CONTROL_CLASS = "\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}";
+
+/**
+ * What an operator is shown before approving. Past control and format
+ * characters, some code points draw nothing and can carry a sentence one
+ * byte at a time. The operator must not approve text they cannot see.
+ * Text for the inside of a character class: the spend-gate class, plus
+ * default-ignorable code points, variation selectors, the braille blank
+ * (U+2800), and every space separator except U+0020.
+ */
+export const DISPLAY_ESCAPE_CLASS =
+  `${TERMINAL_CONTROL_CLASS}\\p{Default_Ignorable_Code_Point}\\p{Variation_Selector}` +
+  "\\u2800\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000";
 
 const SPEND_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
 

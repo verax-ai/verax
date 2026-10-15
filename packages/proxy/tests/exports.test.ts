@@ -18,9 +18,11 @@ const ALLOWED = new Set([
   "samePublicKey",
   "LedgerDenyUnrecorded",
   "loadPolicy",
-  // approve-cli escapes the same marks the spend gate refuses. The class
-  // lives here so body does not grow a second copy or a new dependency.
+  // The spend gate refuses this class. The display class adds the characters
+  // that draw nothing; approve-cli, the operator door and the pin command
+  // escape it. Both live here so body does not grow a second copy.
   "TERMINAL_CONTROL_CLASS",
+  "DISPLAY_ESCAPE_CLASS",
   "FileLedger",
   "MemoryLedger",
   "explain",

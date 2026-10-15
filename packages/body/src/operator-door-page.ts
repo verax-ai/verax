@@ -8,11 +8,11 @@
  * of its own: nothing a later page could read, and gone on reload.
  *
  * What a held call says comes from the agent. The terminal escapes every
- * control and format character before it prints one; the script escapes the
+ * code point that draws nothing before it prints one; the script escapes the
  * same class, read from the same place, and gives each value its own
  * direction, so text that runs right to left cannot rearrange what is beside it.
  */
-import { TERMINAL_CONTROL_CLASS } from "@verax-ai/proxy";
+import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
 
 export const DOOR_HTML: string = `<!doctype html>
 <html lang="en" dir="ltr">
@@ -274,7 +274,8 @@ const SCRIPT: string = String.raw`(function () {
     }
   }
 
-  // The class the terminal escapes in a held call. A character from it is shown as
+  // The class the terminal escapes in a held call: controls, format characters,
+  // and the other code points that draw nothing. A character from it is shown as
   // its escape, one per UTF-16 unit, which is also how JSON would write it.
   var CONTROL = new RegExp("[" + "@@CONTROL_CLASS@@" + "]", "gu");
 
@@ -808,4 +809,4 @@ const SCRIPT: string = String.raw`(function () {
 })();
 `;
 
-export const DOOR_JS: string = SCRIPT.replace('"@@CONTROL_CLASS@@"', () => JSON.stringify(TERMINAL_CONTROL_CLASS));
+export const DOOR_JS: string = SCRIPT.replace('"@@CONTROL_CLASS@@"', () => JSON.stringify(DISPLAY_ESCAPE_CLASS));
