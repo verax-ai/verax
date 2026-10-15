@@ -8,9 +8,13 @@
  * of its own: nothing a later page could read, and gone on reload.
  *
  * What a held call says comes from the agent. The terminal escapes every
- * code point that draws nothing before it prints one; the script escapes the
- * same class, read from the same place, and gives each value its own
- * direction, so text that runs right to left cannot rearrange what is beside it.
+ * code point that draws nothing, draws over its neighbour, or has no glyph
+ * to rely on, before it prints one; the script escapes the same class, read
+ * from the same place. A real backslash is written as two characters first,
+ * so a written escape and the character it names do not look the same.
+ * Turkish and Latin letters, one code point each (NFC), stay as they are.
+ * Each value has its own direction, so text that runs right to left cannot
+ * rearrange what is beside it.
  */
 import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
 
@@ -275,12 +279,19 @@ const SCRIPT: string = String.raw`(function () {
   }
 
   // The class the terminal escapes in a held call: controls, format characters,
-  // and the other code points that draw nothing. A character from it is shown as
-  // its escape, one per UTF-16 unit, which is also how JSON would write it.
+  // combining marks, unassigned and private-use code points, surrogates, and
+  // the other code points that draw nothing or draw over a neighbour. One
+  // escape per UTF-16 unit. A real backslash is written as two characters
+  // first, so a written escape and the character it names do not look the
+  // same. Arguments arrive as JSON, which has already doubled every
+  // backslash; doubling those again would change the value, so that call
+  // passes keepLineBreaks and only the class is escaped.
   var CONTROL = new RegExp("[" + "@@CONTROL_CLASS@@" + "]", "gu");
 
   function plain(text, keepLineBreaks) {
-    return String(text).replace(CONTROL, function (ch) {
+    var source = String(text);
+    if (!keepLineBreaks) source = source.replace(/\\/g, "\\\\");
+    return source.replace(CONTROL, function (ch) {
       if (keepLineBreaks && ch === "\n") return ch;
       var out = "";
       for (var i = 0; i < ch.length; i += 1) out += "\\u" + ("000" + ch.charCodeAt(i).toString(16)).slice(-4);

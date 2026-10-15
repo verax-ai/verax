@@ -237,16 +237,23 @@ function asSpend(raw: unknown, id: string, options: PolicyParseOptions): PolicyS
 export const TERMINAL_CONTROL_CLASS = "\\p{Cc}\\p{Cf}\\p{Zl}\\p{Zp}";
 
 /**
- * What an operator is shown before approving. Past control and format
- * characters, some code points draw nothing and can carry a sentence one
- * byte at a time. The operator must not approve text they cannot see.
- * Text for the inside of a character class: the spend-gate class, plus
- * default-ignorable code points, variation selectors, the braille blank
- * (U+2800), and every space separator except U+0020.
+ * What the three operator screens show as the text itself: the approve
+ * prompt, the pin listing, and the door page. Past control and format
+ * characters, a combining mark draws over the character before it, and an
+ * unassigned or private-use code point has no glyph to rely on. A surrogate
+ * is not a character. Text for the inside of a character class: the
+ * spend-gate class, plus default-ignorable code points, variation selectors,
+ * the braille blank (U+2800), every space separator except U+0020, combining
+ * marks (M), unassigned code points (Cn), private-use code points (Co), and
+ * surrogates (Cs).
+ * Turkish and Latin letters arrive as one code point (NFC) and are left as
+ * they are. Writing that uses combining marks (Hindi, Thai, and the like)
+ * is shown escaped on these screens. The bytes that were recorded do not
+ * change.
  */
 export const DISPLAY_ESCAPE_CLASS =
   `${TERMINAL_CONTROL_CLASS}\\p{Default_Ignorable_Code_Point}\\p{Variation_Selector}` +
-  "\\u2800\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000";
+  "\\u2800\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\p{M}\\p{Cn}\\p{Co}\\p{Cs}";
 
 const SPEND_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
 
