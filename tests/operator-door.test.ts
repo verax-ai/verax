@@ -1333,6 +1333,33 @@ describe("operator door", () => {
     }
   });
 
+  // D26 checks the class is the one the terminal uses; this runs the page's own
+  // plain() on the characters that draw nothing or draw over their neighbour,
+  // and on a backslash, so a written escape and the character it stands for
+  // read differently on the page.
+  it("D26b the page's plain() shows what the terminal escapes, and a written escape differs from the character", () => {
+    const start = DOOR_JS.indexOf("var CONTROL");
+    const end = DOOR_JS.indexOf("function clock");
+    assert.ok(start >= 0 && end > start, "plain() not found in door.js");
+    const plain = new Script(`${DOOR_JS.slice(start, end)}; plain;`).runInNewContext({}) as (t: string, k?: boolean) => string;
+    for (const [raw, esc] of [
+      ["️", "\\ufe0f"],
+      ["\u{e0101}", "\\udb40\\udd01"],
+      ["ㅤ", "\\u3164"],
+      ["⠀", "\\u2800"],
+      ["̸", "\\u0338"],
+      ["᲻", "\\u1cbb"],
+      ["", "\\ue000"],
+    ]) {
+      const shown = plain(`inv${raw}`);
+      assert.equal(shown.includes(raw), false, `left as it is: ${esc}`);
+      assert.ok(shown.includes(esc), esc);
+    }
+    assert.notEqual(plain("inv\\u3164"), plain("invㅤ"));
+    assert.equal(plain("inv-7"), "inv-7");
+    assert.equal(plain("Ünlü ışık"), "Ünlü ışık");
+  });
+
   it("D27 a held spend is listed with the payee and the amount `verax approve` prints, and no other call is", async () => {
     const passkey = mintSoftwarePasskey();
     const body = await openBody(passkey);

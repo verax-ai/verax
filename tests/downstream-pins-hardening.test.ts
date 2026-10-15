@@ -156,6 +156,33 @@ describe("the pin command, hardened", { timeout: 60_000 }, () => {
     assert.equal(shown.match(/\\udb40\\ud[d-f][0-9a-f]{2}|\\ufe0[0-9a-f]/g)?.length, [...carried].length);
   });
 
+  // A combining mark draws over the character before it (U+0338 strikes a
+  // digit, a run of U+0307 piles up over its neighbours); an unassigned or
+  // private-use code point has no glyph the operator can rely on. Shown as
+  // they are, they change what the operator reads.
+  it("shows combining marks, unassigned and private-use code points escaped", () => {
+    const shown = renderToolEntry(tool("a", { description: "4̸ẋ̇y᲻z" }));
+    for (const raw of ["̸", "̇", "᲻", ""]) {
+      assert.equal(shown.includes(raw), false, `left as it is: U+${raw.codePointAt(0)!.toString(16)}`);
+    }
+    for (const esc of ["\\u0338", "\\u0307", "\\u1cbb", "\\ue000"]) assert.ok(shown.includes(esc), esc);
+  });
+
+  it("names an invalid child tool without passing its bytes to the terminal", async () => {
+    const dir = temp();
+    const url = await rawChild('{"tools":[{"name":"bad\\u001b[2J\\u001b[HOK","description":"x","inputSchema":{"type":"object"}}]}');
+    await assert.rejects(
+      () => openDownstream({ prefix: "rea", url, timeoutMs: 5000 } as never, { definitionsDir: dir } as never),
+      (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        assert.match(message, /^downstream-child-name-invalid:/);
+        assert.equal(message.includes("\u001b"), false, "an escape character reached the message");
+        assert.ok(message.includes("\\u001b"), message);
+        return true;
+      },
+    );
+  });
+
   it("leaves ordinary text, an ordinary space and an emoji's visible part as they are", () => {
     const shown = renderToolEntry(tool("a", { description: "Read files, then write a summary. \u00dcnl\u00fc \u0131\u015f\u0131k \ud83d\ude42" }));
     assert.ok(shown.includes("Read files, then write a summary. \u00dcnl\u00fc \u0131\u015f\u0131k \ud83d\ude42"));

@@ -144,7 +144,7 @@ describe("attack R6", () => {
   // not refused, so a held reference can carry them; the operator must still
   // see that they are there before typing the amount back.
   it("R6-1b characters that draw nothing are shown escaped in the approve prompt", async () => {
-    const hidden = ["️", "\u{e0101}", "ㅤ", "ᅟ", "⠀", "͏", " "];
+    const hidden = ["️", "\u{e0101}", "ㅤ", "ᅟ", "⠀", "͏", " ", "̸", "᲻", ""];
     const reference = `inv-42${hidden.join("")}`;
     const stateDir = mkdtempSync(join(tmpdir(), "verax-r6-invisible-"));
     try {
@@ -174,7 +174,7 @@ describe("attack R6", () => {
       for (const mark of hidden) {
         assert.equal(held.includes(mark), false, `left as it is: U+${mark.codePointAt(0)!.toString(16)}`);
       }
-      for (const esc of ["\\ufe0f", "\\udb40\\udd01", "\\u3164", "\\u115f", "\\u2800", "\\u034f", "\\u00a0"]) {
+      for (const esc of ["\\ufe0f", "\\udb40\\udd01", "\\u3164", "\\u115f", "\\u2800", "\\u034f", "\\u00a0", "\\u0338", "\\u1cbb", "\\ue000"]) {
         assert.ok(held.includes(esc), esc);
       }
       assert.match(held, /^"payee": "true-ads"$/m);
