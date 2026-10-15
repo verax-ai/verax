@@ -20,7 +20,7 @@ import { describe, it } from "node:test";
 import { Script } from "node:vm";
 
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
-import { TERMINAL_CONTROL_CLASS } from "@verax-ai/proxy";
+import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
 import { exportJWK, generateKeyPair } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
@@ -1295,7 +1295,7 @@ describe("operator door", () => {
     // The script compiles. Nothing here runs it.
     new Script(DOOR_JS, { filename: "door.js" });
     // What it escapes before it shows a held call is the class the terminal escapes, not a copy of it.
-    assert.ok(DOOR_JS.includes(`new RegExp("[" + ${JSON.stringify(TERMINAL_CONTROL_CLASS)} + "]", "gu")`));
+    assert.ok(DOOR_JS.includes(`new RegExp("[" + ${JSON.stringify(DISPLAY_ESCAPE_CLASS)} + "]", "gu")`));
     assert.equal(DOOR_JS.includes("@@"), false);
     for (const banned of [
       /innerHTML/,
@@ -1331,6 +1331,37 @@ describe("operator door", () => {
     for (const banned of [/url\s*\(/i, /@import/i, /expression\s*\(/i, /https?:\/\//i]) {
       assert.equal(banned.test(DOOR_CSS), false, `door.css: ${banned}`);
     }
+  });
+
+  // D26 checks the class is the one the terminal uses; this runs the page's own
+  // plain() on the characters that draw nothing or draw over their neighbour,
+  // and on a backslash, so a written escape and the character it stands for
+  // read differently on the page.
+  it("D26b the page's plain() shows what the terminal escapes, and a written escape differs from the character", () => {
+    const start = DOOR_JS.indexOf("var CONTROL");
+    const end = DOOR_JS.indexOf("function clock");
+    assert.ok(start >= 0 && end > start, "plain() not found in door.js");
+    const plain = new Script(`${DOOR_JS.slice(start, end)}; plain;`).runInNewContext({}) as (t: string, k?: boolean) => string;
+    for (const [raw, esc] of [
+      ["\ufe0f", "\\ufe0f"],
+      ["\u{e0101}", "\\udb40\\udd01"],
+      ["\u3164", "\\u3164"],
+      ["\u2800", "\\u2800"],
+      ["\u0338", "\\u0338"],
+      ["\u1cbb", "\\u1cbb"],
+      ["\ue000", "\\ue000"],
+    ]) {
+      const shown = plain(`inv${raw}`);
+      assert.equal(shown.includes(raw), false, `left as it is: ${esc}`);
+      assert.ok(shown.includes(esc), esc);
+    }
+    assert.notEqual(plain("inv\\u3164"), plain("inv\u3164"));
+    // The argument block is JSON, shown with line breaks kept; the class is escaped there too.
+    const block = plain(JSON.stringify({ reference: "inv-4\u0338\ufe0f" }, null, 2), true);
+    assert.equal(block.includes("\u0338") || block.includes("\ufe0f"), false, block);
+    assert.ok(block.includes("\\u0338") && block.includes("\\ufe0f") && block.includes("\n"), block);
+    assert.equal(plain("inv-7"), "inv-7");
+    assert.equal(plain("Ünlü ışık"), "Ünlü ışık");
   });
 
   it("D27 a held spend is listed with the payee and the amount `verax approve` prints, and no other call is", async () => {

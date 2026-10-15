@@ -3,13 +3,13 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { canonical } from "@cedulon/core";
-import { sha256Canonical } from "@verax-ai/proxy";
+import { DISPLAY_ESCAPE_CLASS, sha256Canonical } from "@verax-ai/proxy";
 import { defaultElevated } from "./install.ts";
 import { listDownstreamOnce, parseDownstreamDocument, type DownstreamSpec } from "./downstream.ts";
 
 /**
  * `verax downstream pin` lists one child's tools a single time, shows each
- * entry with control and format characters visible, and writes a
+ * entry with characters that draw nothing visible as escapes, and writes a
  * content-addressed manifest beside the downstream document only after the
  * operator types yes. The document is never edited. The operator copies the
  * printed pins line into it, so this command cannot race another editor on
@@ -32,13 +32,14 @@ function errorText(err: unknown): string {
 }
 
 /**
- * Control characters (C0, DEL, C1), format characters (ESC, bidi marks,
- * zero-width characters) and line and paragraph separators are written as
- * `\uXXXX` so a child cannot hide text or drive the terminal. The entry
- * itself is not shortened.
+ * Control and format characters, and the other code points that draw nothing
+ * (default-ignorable code points, variation selectors, the braille blank,
+ * every space separator except U+0020), are written as `\uXXXX` so a child
+ * cannot hide text or drive the terminal. A supplementary-plane code point
+ * is two escapes, one per UTF-16 unit. The entry itself is not shortened.
  */
 function escapeVisible(text: string): string {
-  return text.replace(/\p{Cc}|\p{Cf}|\p{Zl}|\p{Zp}/gu, (ch) => {
+  return text.replace(new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "gu"), (ch) => {
     const cp = ch.codePointAt(0) ?? 0;
     if (cp <= 0xffff) return `\\u${cp.toString(16).padStart(4, "0")}`;
     const rest = cp - 0x10000;

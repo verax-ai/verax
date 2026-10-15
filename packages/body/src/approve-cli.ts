@@ -10,7 +10,7 @@ import {
   FileLedger,
   loadApprovalsFromDir,
   loadPolicy,
-  TERMINAL_CONTROL_CLASS,
+  DISPLAY_ESCAPE_CLASS,
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
@@ -80,15 +80,20 @@ export function resolveApproveRef(
 const NEEDS_TERMINAL =
   "verax approve needs a terminal: it shows what is waiting and asks you to type the amount back\n";
 
-const HELD_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "gu");
+const HELD_CONTROL = new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "gu");
 
 /**
  * One argument per line, name and value both JSON-quoted, so neither can look like another field.
- * JSON leaves U+0085, U+FEFF, U+2028 and U+2029 as they are, so every terminal-control code point
- * is written as a \u escape as well.
+ * JSON leaves U+007F, the C1 controls, format characters, separators and the other code points
+ * that draw nothing as they are, so every remaining code point of DISPLAY_ESCAPE_CLASS is
+ * written as a \u escape, one per UTF-16 unit.
  */
 function escapeHeld(text: string): string {
-  return text.replace(HELD_CONTROL, (ch) => `\\u${ch.codePointAt(0)!.toString(16).padStart(4, "0")}`);
+  return text.replace(HELD_CONTROL, (ch) => {
+    let out = "";
+    for (let i = 0; i < ch.length; i += 1) out += `\\u${ch.charCodeAt(i).toString(16).padStart(4, "0")}`;
+    return out;
+  });
 }
 
 function quotedField(name: string, value: unknown): string {

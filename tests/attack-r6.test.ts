@@ -138,6 +138,51 @@ describe("attack R6", () => {
     }
   });
 
+  // The terminal classes above are refused by the spend gate. Characters that
+  // draw nothing but are none of those (variation selectors, Hangul fillers,
+  // the braille blank, the combining grapheme joiner, the no-break space) are
+  // not refused, so a held reference can carry them; the operator must still
+  // see that they are there before typing the amount back.
+  it("R6-1b characters that draw nothing are shown escaped in the approve prompt", async () => {
+    const hidden = ["\ufe0f", "\u{e0101}", "\u3164", "\u115f", "\u2800", "\u034f", "\u00a0", "\u0338", "\u1cbb", "\ue000"];
+    const reference = `inv-42${hidden.join("")}`;
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-r6-invisible-"));
+    try {
+      const ref = "spend-ref-2";
+      const pending = {
+        ref,
+        requestHash: "abc123abc123deadbeef",
+        subject: "spend",
+        args: { amountMinor: 100, currency: "TRY", payee: "true-ads", reference },
+        ruleId: "spend-true",
+        ruleText: "Spends need operator approval.",
+        inputsSummary: { count: 0, ids: [] },
+        amount: 100,
+        payee: "true-ads",
+        currency: "TRY",
+        expiresAtMs: Date.now() + 60_000,
+        status: "pending",
+        brain: "brain-1",
+      };
+      writeFileSync(join(stateDir, "approvals.jsonl"), `${JSON.stringify(pending)}\n`, "utf8");
+      const out: string[] = [];
+      await runApprove(["approve", stateDir, ref], () => {}, (line) => out.push(line), {
+        isTTY: true,
+        ask: async () => "100",
+      }, { elevated: () => false });
+      const held = out.join("");
+      for (const mark of hidden) {
+        assert.equal(held.includes(mark), false, `left as it is: U+${mark.codePointAt(0)!.toString(16)}`);
+      }
+      for (const esc of ["\\ufe0f", "\\udb40\\udd01", "\\u3164", "\\u115f", "\\u2800", "\\u034f", "\\u00a0", "\\u0338", "\\u1cbb", "\\ue000"]) {
+        assert.ok(held.includes(esc), esc);
+      }
+      assert.match(held, /^"payee": "true-ads"$/m);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   it("R6-2 an approved retry does not run after the cited input has expired", async () => {
     const ledger = new MemoryLedger();
     const versionHash = "ab".repeat(32);

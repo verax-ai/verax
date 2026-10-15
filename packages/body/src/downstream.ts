@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { canonical } from "@cedulon/core";
 import type { SignedEffectExtract } from "@cedulon/effect-extract";
-import { effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptRejection } from "@verax-ai/proxy";
+import { DISPLAY_ESCAPE_CLASS, effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptRejection } from "@verax-ai/proxy";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -574,6 +574,25 @@ function attachTimeoutError(err: unknown, prefix: string): Error {
 }
 
 /**
+ * A child string that has not passed the name pattern, as it may be printed.
+ * JSON quotes it and writes controls, quotes and backslashes as escapes; the
+ * display class then writes every remaining mark, unassigned, private-use or
+ * surrogate code point as `\uXXXX`, one escape per UTF-16 unit, the same
+ * shape the pin command uses. A name that already matched the pattern is not
+ * passed through here.
+ */
+function shown(text: string): string {
+  return JSON.stringify(text).replace(new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "gu"), (ch) => {
+    const cp = ch.codePointAt(0) ?? 0;
+    if (cp <= 0xffff) return `\\u${cp.toString(16).padStart(4, "0")}`;
+    const rest = cp - 0x10000;
+    const high = 0xd800 + (rest >> 10);
+    const low = 0xdc00 + (rest & 0x3ff);
+    return `\\u${high.toString(16).padStart(4, "0")}\\u${low.toString(16).padStart(4, "0")}`;
+  });
+}
+
+/**
  * The child's `tools/list`, held to one set of bounds. A `tools` selection
  * is applied first: anything not selected is never read past its name (no
  * size check, no collision check). Both attach and the pin command use this,
@@ -595,7 +614,7 @@ function acceptedTools<T extends { name: string }>(spec: DownstreamSpec, listed:
   const seen = new Set<string>();
   for (const tool of offered) {
     if (!CHILD_TOOL_RE.test(tool.name)) {
-      throw new Error(`downstream-child-name-invalid:${tool.name}`);
+      throw new Error(`downstream-child-name-invalid:${shown(tool.name)}`);
     }
     const toolBytes = Buffer.byteLength(JSON.stringify(tool), "utf8");
     if (toolBytes > MAX_TOOL_BYTES) {
