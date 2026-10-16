@@ -172,7 +172,7 @@ async function serveAgainst(url: string): Promise<{ code: number | null; signal:
 async function serveWith(
   patch: (dir: string) => NodeJS.ProcessEnv,
 ): Promise<{ code: number | null; signal: string | null; stderr: string }> {
-  const dir = ownerDir("verax-a1-serve-");
+  const dir = ownerDir("verax-stderr-serve-");
   const initCode = await runInitLocal(["--local", dir], { stdout: sink, stderr: sink }, { quiet: true, noOwnerGrant: true });
   assert.equal(initCode, 0);
   const env = { ...envFromFile(dir), ...patch(dir) };
@@ -260,7 +260,7 @@ describe("an error thrown out of the CLI", () => {
     // verax witness binds, then fails to write its listen file: here the file's
     // name is taken by a directory. Before the last-resort catch the uncaught
     // error ended the process; a catch that only sets exitCode leaves it up.
-    const dir = ownerDir("verax-a1-witness-");
+    const dir = ownerDir("verax-stderr-witness-");
     mkdirSync(join(dir, "witness.listen.json"));
     const child = spawn(process.execPath, ["--experimental-strip-types", cli, "witness", dir], {
       stdio: ["ignore", "ignore", "pipe"],
@@ -293,7 +293,7 @@ describe("verax demo --with-conarium with a child whose error carries controls",
     };
     const code = await runDemo(["demo", "--with-conarium"], {}, io, {
       conariumChild: { command: process.execPath, args: [hostileStdioChild] },
-      statePrefix: "verax-a1-demo-",
+      statePrefix: "verax-stderr-demo-",
     });
     const err = stderr.join("");
     const shown = JSON.stringify(err.slice(0, 600));
@@ -314,7 +314,7 @@ describe("verax demo --with-conarium with a child whose error carries controls",
     };
     await runDemo(["demo", "--with-conarium"], {}, io, {
       conariumChild: { command: process.execPath, args: [conariumStub, "--forged-deny"] },
-      statePrefix: "verax-a1-demo-",
+      statePrefix: "verax-stderr-demo-",
     });
     const out = stdout.join("");
     const shown = JSON.stringify(out.slice(0, 900));

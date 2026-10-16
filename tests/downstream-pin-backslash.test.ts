@@ -45,7 +45,7 @@ function failingChild(message: string): Promise<string> {
 }
 
 async function pinScreen(message: string): Promise<string> {
-  const dir = mkdtempSync(join(tmpdir(), "verax-a2-pin-"));
+  const dir = mkdtempSync(join(tmpdir(), "verax-pin-backslash-"));
   dirs.push(dir);
   const file = join(dir, "downstream.json");
   writeFileSync(file, JSON.stringify({ prefix: "rea", url: await failingChild(message), timeoutMs: 5000 }), "utf8");

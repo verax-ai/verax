@@ -26,7 +26,7 @@ after(() => {
 });
 
 function tamperedLedger(ref: string = HOSTILE_REF): string {
-  const dir = mkdtempSync(join(tmpdir(), "verax-a1-verify-"));
+  const dir = mkdtempSync(join(tmpdir(), "verax-verify-text-"));
   dirs.push(dir);
   cpSync(join(root, "test-vectors", "v1", "valid-full", "ledger"), dir, { recursive: true });
   const first = JSON.parse(readFileSync(join(dir, "index.jsonl"), "utf8").split("\n")[0]!) as Record<string, unknown>;
