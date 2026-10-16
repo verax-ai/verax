@@ -374,20 +374,71 @@ async function dispatchCli(
   return 0;
 }
 
-// First line is the name and the whole message. Frames are only the `    at `
-// lines after that head in err.stack, so a forged frame inside the message
-// stays on the first line.
+// First line is the name and the whole message. Frames are the `    at ` lines
+// after the first copy of that message in err.stack, or after the first line
+// when the message is empty or missing, so a forged frame inside the message
+// stays on the first line. name, message, stack, and String(value) are read in
+// their own try; a read that throws uses a fixed stand-in. This never throws.
 export function uncaughtText(err: unknown): string {
-  const name = err instanceof Error ? err.name : "Error";
-  const message = err instanceof Error ? err.message : String(err);
+  const unread = "unprintable thrown value";
+  let error: Error | undefined;
+  try {
+    if (err instanceof Error) error = err;
+  } catch {
+    error = undefined;
+  }
+
+  let name = "Error";
+  let message = unread;
+  let messageKnown = false;
+  if (error !== undefined) {
+    try {
+      const read = error.name;
+      if (typeof read === "string") name = read;
+    } catch {
+      name = "Error";
+    }
+    try {
+      const read = error.message;
+      if (typeof read === "string") {
+        message = read;
+        messageKnown = true;
+      }
+    } catch {
+      message = unread;
+      messageKnown = false;
+    }
+  } else {
+    try {
+      message = String(err);
+      messageKnown = true;
+    } catch {
+      message = unread;
+      messageKnown = false;
+    }
+  }
+
   const lines = [terminalText(`${name}: ${message}`)];
-  const stack = err instanceof Error ? err.stack : undefined;
-  if (typeof stack === "string") {
-    const head = `${name}: ${message}`;
-    const nl = stack.indexOf("\n");
-    const rest = stack.startsWith(head) ? stack.slice(head.length) : nl === -1 ? "" : stack.slice(nl + 1);
-    for (const line of rest.split("\n")) {
-      if (line.startsWith("    at ")) lines.push(terminalText(line));
+  if (error !== undefined) {
+    let stack: string | undefined;
+    try {
+      const read = error.stack;
+      if (typeof read === "string") stack = read;
+    } catch {
+      stack = undefined;
+    }
+    if (stack !== undefined) {
+      const at = messageKnown && message !== "" ? stack.indexOf(message) : -1;
+      let rest: string;
+      if (at === -1) {
+        const nl = stack.indexOf("\n");
+        rest = nl === -1 ? "" : stack.slice(nl + 1);
+      } else {
+        rest = stack.slice(at + message.length);
+      }
+      for (const line of rest.split("\n")) {
+        if (line.startsWith("    at ")) lines.push(terminalText(line));
+      }
     }
   }
   return `${lines.join("\n")}\n`;
