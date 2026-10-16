@@ -28,7 +28,7 @@ const SCREENS = ["loading", "enroll", "signin", "main"] as const;
 // What an agent might put in an argument to get markup onto the operator's screen.
 const MARKUP = `<img src=x onerror="document.title='written'"><script>document.title='written'</script>`;
 // And what it might put there to turn a line around, break it in two, or hide in it.
-const TRICK = "pay ‮ecalper‬ Rule: none​\u{E0001}";
+const TRICK = "pay \u202eecalper\u202c\u2028Rule: none\u200b\u{E0001}";
 const RTL = "אבג 100";
 
 /** A body whose door answers for the port it listens on. A taken port is tried again elsewhere. */
