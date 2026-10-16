@@ -25,6 +25,7 @@ import { skipIfElevated } from "./elevated-refusal.ts";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
 const hostileStdioChild = join(root, "tests", "fixtures", "hostile-error-child.mjs");
+const conariumStub = join(root, "tests", "fixtures", "conarium-demo-stub.mjs");
 
 const cp = (...points: number[]) => String.fromCodePoint(...points);
 const HOSTILE =
@@ -160,12 +161,20 @@ function envFromFile(stateDir: string): NodeJS.ProcessEnv {
 }
 
 async function serveAgainst(url: string): Promise<{ code: number | null; signal: string | null; stderr: string }> {
+  return serveWith((dir) => {
+    const doc = join(dir, "downstream.json");
+    writeFileSync(doc, JSON.stringify([{ prefix: "rea", url, timeoutMs: 5000 }]), "utf8");
+    return { VERAX_DOWNSTREAM: doc };
+  });
+}
+
+async function serveWith(
+  patch: (dir: string) => NodeJS.ProcessEnv,
+): Promise<{ code: number | null; signal: string | null; stderr: string }> {
   const dir = ownerDir("verax-a1-serve-");
   const initCode = await runInitLocal(["--local", dir], { stdout: sink, stderr: sink }, { quiet: true, noOwnerGrant: true });
   assert.equal(initCode, 0);
-  const doc = join(dir, "downstream.json");
-  writeFileSync(doc, JSON.stringify([{ prefix: "rea", url, timeoutMs: 5000 }]), "utf8");
-  const env = { ...envFromFile(dir), VERAX_DOWNSTREAM: doc };
+  const env = { ...envFromFile(dir), ...patch(dir) };
   const child = spawn(process.execPath, ["--experimental-strip-types", cli, "serve"], {
     env,
     stdio: ["ignore", "ignore", "pipe"],
@@ -198,6 +207,38 @@ describe("verax serve with a downstream child whose error carries controls", () 
       assert.equal(run.code, 78, `exit ${run.code}: ${shown}`);
     });
   }
+
+  it("a downstream document that cannot be read: one escaped line, exit 78", { timeout: 45_000 }, async (t) => {
+    if (skipIfElevated(t)) return;
+    // A file name may carry U+202E on every platform; Windows refuses C0 controls in names.
+    const run = await serveWith((dir) => ({ VERAX_DOWNSTREAM: join(dir, `no${cp(0x202e)}pe.json`) }));
+    const shown = JSON.stringify(run.stderr.slice(0, 600));
+    assert.deepEqual(rawCodePointsIn(run.stderr), [], `raw on the terminal: ${shown}`);
+    const lines = linesOf(run.stderr);
+    assert.equal(lines.length, 1, `expected one line: ${shown}`);
+    assert.match(lines[0]!, /^downstream-document-unreadable:/);
+    assert.ok(lines[0]!.includes("\\u202e"), shown);
+    assert.equal(run.signal, null, `ended by signal ${run.signal}`);
+    assert.equal(run.code, 78, `exit ${run.code}: ${shown}`);
+  });
+
+  it("any other start error: escaped, no source excerpt, exit 1", { timeout: 45_000 }, async (t) => {
+    if (skipIfElevated(t)) return;
+    // A state directory that is a file, named with a bidi override: mkdir fails with ENOTDIR.
+    const run = await serveWith((dir) => {
+      const file = join(dir, `st${cp(0x202e)}ate`);
+      writeFileSync(file, "not a directory\n", "utf8");
+      return { VERAX_STATE_DIR: file };
+    });
+    const shown = JSON.stringify(run.stderr.slice(0, 600));
+    assert.deepEqual(rawCodePointsIn(run.stderr), [], `raw on the terminal: ${shown}`);
+    const lines = linesOf(run.stderr);
+    assert.ok(lines.length >= 1 && lines[0]!.includes("ENOTDIR"), `the first line names the error: ${shown}`);
+    assert.ok(lines[0]!.includes("\\u202e"), shown);
+    assert.equal(lines.some((line) => /^\s*\^+\s*$/.test(line)), false, `Node's source excerpt was printed: ${shown}`);
+    assert.equal(run.signal, null, `ended by signal ${run.signal}`);
+    assert.equal(run.code, 1, `exit ${run.code}: ${shown}`);
+  });
 });
 
 describe("verax demo --with-conarium with a child whose error carries controls", () => {
@@ -221,6 +262,26 @@ describe("verax demo --with-conarium with a child whose error carries controls",
     assert.deepEqual(rawCodePointsIn(`${stdout.join("")}${err}`), [], `raw on the terminal: ${shown}`);
     for (const esc of ["\\u001b", "\\u202e", "\\u000a"]) assert.ok(err.includes(esc), `${esc} missing from ${shown}`);
   });
+
+  it("prints a refusal code the child wrote with its controls escaped", { timeout: 30_000 }, async () => {
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    const io = {
+      stdout: { write: (s: string) => stdout.push(s) },
+      stderr: { write: (s: string) => stderr.push(s) },
+      stdin: new Readable({ read() { this.push(null); } }),
+      isTTY: false,
+    };
+    await runDemo(["demo", "--with-conarium"], {}, io, {
+      conariumChild: { command: process.execPath, args: [conariumStub, "--forged-deny"] },
+      statePrefix: "verax-a1-demo-",
+    });
+    const out = stdout.join("");
+    const shown = JSON.stringify(out.slice(0, 900));
+    assert.ok(out.includes("conarium.query public.secrets"), shown);
+    assert.deepEqual(rawCodePointsIn(`${out}${stderr.join("")}`), [], `raw on the terminal: ${shown}`);
+    assert.ok(out.includes("\\u202e"), shown);
+  });
 });
 
 // The serve process, the start path and the demo. Every value a stderr write
@@ -243,6 +304,11 @@ const ALLOWED_VALUES: Record<string, string[]> = {
     "loaded.value.operatorDoor.origin",
   ],
   "packages/proxy/src/approvals.ts": ["code", "drainMetrics.renameBusy"],
+  // The demo's stdout: its own constants, counts and the temporary directory it made.
+  "packages/body/src/demo.ts": [
+    "DENY_HOST", "SPEND.amountMinor", "SPEND.currency", "SPEND.payee", "counted.decisions", "counted.effects",
+    "stateDir", "withConarium ? NOT_SHOWN_WITH_CONARIUM : NOT_SHOWN",
+  ],
 };
 // A whole argument that is a fixed text, or the pass-through of a write hook.
 const ALLOWED_ARGUMENTS: Record<string, string[]> = {
@@ -342,7 +408,8 @@ describe("stderr writes in the serve process escape what they did not write", ()
     const unescaped: string[] = [];
     for (const file of GUARDED) {
       const src = readFileSync(join(root, file), "utf8");
-      const call = /\b(?:stderr\.write|writeErr)\(/g;
+      // writeOut is the demo's stdout, which prints what the Conarium child answered.
+      const call = /\b(?:stderr\.write|writeErr|writeOut)\(/g;
       let m: RegExpExecArray | null;
       while ((m = call.exec(src)) !== null) {
         const open = m.index + m[0].length - 1;
