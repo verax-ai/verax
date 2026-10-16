@@ -18,7 +18,7 @@
  */
 import { readFileSync } from "node:fs";
 
-import { verifyLedger, type VerifyResult } from "@verax-ai/proxy";
+import { terminalLines, terminalText, verifyLedger, type VerifyResult } from "@verax-ai/proxy";
 import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
 import { verifyControlSignatures, type ControlSignatureReport } from "./control-signature.ts";
 import { directoryAccess, unreadableSentence } from "./install.ts";
@@ -242,7 +242,7 @@ export async function runVerify(
       args.splice(at, 2);
       return { ok: true, pem };
     } catch {
-      out(`verify: cannot read key file ${path}`);
+      out(terminalText(`verify: cannot read key file ${path}`));
       return { ok: false };
     }
   };
@@ -307,7 +307,7 @@ export async function runVerify(
         return EX_VERIFY_FAILED;
       }
     } catch {
-      out(`verify: cannot read operator credentials file ${path}`);
+      out(terminalText(`verify: cannot read operator credentials file ${path}`));
       return EX_VERIFY_FAILED;
     }
     args.splice(credentialsAt, 2);
@@ -319,7 +319,7 @@ export async function runVerify(
   const rest = args.filter((a) => a !== "--json");
   const unknown = rest.find((a) => a.startsWith("-"));
   if (unknown !== undefined) {
-    out(`verify: unknown option ${unknown}`);
+    out(terminalText(`verify: unknown option ${unknown}`));
     return EX_VERIFY_FAILED;
   }
   if (rest.length > 1) {
@@ -332,7 +332,7 @@ export async function runVerify(
     return EX_VERIFY_FAILED;
   }
   if (directoryAccess(dir) === "unreadable") {
-    out(unreadableSentence(dir, "verify"));
+    out(terminalText(unreadableSentence(dir, "verify")));
     return 77;
   }
 
@@ -380,7 +380,8 @@ export async function runVerify(
       requireSigned: requireSignedStarts,
     });
     const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
-    out(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
+    // Escape only the printed form: verify reads a ledger someone else wrote.
+    out(terminalLines(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts)));
     return EX_VERIFY_FAILED;
   }
   let approval: ApprovalSignatureReport;
@@ -422,6 +423,7 @@ export async function runVerify(
     result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
   }
   const reported = { ...result, approvalSignatures: approval, controlSignatures: control, starts };
-  out(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control, reported.starts));
+  // Escape only the printed form: verify reads a ledger someone else wrote.
+  out(terminalLines(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control, reported.starts)));
   return reported.ok ? 0 : EX_VERIFY_FAILED;
 }
