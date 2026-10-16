@@ -50,6 +50,8 @@ describe("crlf-guard refuses code points that draw nothing", () => {
     for (let point = 0; point <= 0x10ffff; point += 1) {
       if (point >= 0xd800 && point <= 0xdfff) continue;
       if (point === 0x09 || point === 0x0a || point === 0x0d) continue;
+      // A NUL byte marks a blob as binary, and a binary blob is not scanned.
+      if (point === 0x00) continue;
       const ch = cp(point);
       if (!klass.test(ch)) continue;
       expected.push(hexOf(point));
