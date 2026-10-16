@@ -304,10 +304,11 @@ const ALLOWED_VALUES: Record<string, string[]> = {
     "loaded.value.operatorDoor.origin",
   ],
   "packages/proxy/src/approvals.ts": ["code", "drainMetrics.renameBusy"],
-  // The demo's stdout: its own constants, counts and the temporary directory it made.
+  // The demo's stdout: its own constants and counts. The temporary directory
+  // is not here: its path starts with TMPDIR, which the environment names.
   "packages/body/src/demo.ts": [
     "DENY_HOST", "SPEND.amountMinor", "SPEND.currency", "SPEND.payee", "counted.decisions", "counted.effects",
-    "stateDir", "withConarium ? NOT_SHOWN_WITH_CONARIUM : NOT_SHOWN",
+    "withConarium ? NOT_SHOWN_WITH_CONARIUM : NOT_SHOWN",
   ],
 };
 // A whole argument that is a fixed text, or the pass-through of a write hook.

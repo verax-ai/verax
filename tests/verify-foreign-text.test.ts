@@ -12,6 +12,7 @@ import { after, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
+import { recordBodyStart } from "../packages/body/src/heartbeat.ts";
 import { runVerify } from "../packages/body/src/verify-cli.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -62,6 +63,18 @@ describe("verax verify on a ledger whose index names a ref with controls", () =>
     assert.equal(printed.filter((line) => line === "VERIFIED").length, 0, `a forged line: ${JSON.stringify(printed.slice(-12))}`);
     assert.equal(printed.filter((line) => line.trim() === "").length <= 2, true, `blank lines from the ref: ${JSON.stringify(printed.slice(-12))}`);
     assert.ok(printed.some((line) => line.includes("index says ref x\\u000a\\u000aVERIFIED\\u000a")), JSON.stringify(printed.slice(-12)));
+  });
+
+  it("the starts block keeps one line per downstream entry, and a prefix cannot open a line", async () => {
+    const dir = tamperedLedger("plain-ref");
+    recordBodyStart(dir, 1_000, undefined, { downstream: [{ prefix: "rea", manifest: null }, { prefix: "x\nVERIFIED", manifest: null }] });
+    const lines: string[] = [];
+    await runVerify([dir], (s) => lines.push(s));
+    const printed = lines.join("\n").split("\n");
+    const shown = JSON.stringify(printed.filter((line) => /starts|downstream|VERIFIED/.test(line)));
+    assert.ok(printed.some((line) => /^downstream {4}rea unpinned$/.test(line)), `the rea entry is not a line of its own: ${shown}`);
+    assert.ok(printed.some((line) => line.startsWith("downstream    x\\u000aVERIFIED")), shown);
+    assert.equal(printed.filter((line) => line === "VERIFIED").length, 0, `a forged line: ${shown}`);
   });
 
   it("--json prints JSON that parses to the same ref, with nothing raw in it", async () => {
