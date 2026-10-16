@@ -4,7 +4,8 @@
 // archive. Each publish is a separate step, so one can be skipped and every
 // file in the tree still agrees with every other file. 0.4.8 reached npm and
 // the registry while Docker Hub stayed at 0.4.7 and Zenodo never archived it.
-// This compares what each of them holds against the version in the tree.
+// This compares what each of them holds against the version in the tree, and
+// the text on the Docker Hub page against the files it is sent from.
 
 export type ReleaseFacts = {
   /** packages/body/package.json */
@@ -27,7 +28,21 @@ export type ReleaseFacts = {
   zenodoLatestVersion: string | null;
   /** version the MCP registry marks isLatest */
   registryLatestVersion: string | null;
+  /** packages/body/package.json `description` */
+  bodyDescription: string;
+  /** docs/dockerhub.md */
+  dockerOverviewInTree: string;
+  /** the repository's short description on Docker Hub, null when Docker Hub did not answer */
+  dockerDescription: string | null;
+  /** the repository's overview on Docker Hub */
+  dockerOverview: string | null;
 };
+
+/** Docker Hub returns the text it was given; only line endings and trailing space are not compared. */
+function sameText(a: string, b: string): boolean {
+  const norm = (s: string) => s.replace(/\r\n/g, "\n").trimEnd();
+  return norm(a) === norm(b);
+}
 
 export function releaseProblems(f: ReleaseFacts): string[] {
   const v = f.version;
@@ -55,6 +70,12 @@ export function releaseProblems(f: ReleaseFacts): string[] {
   }
   if (f.registryLatestVersion !== v) {
     problems.push(`the MCP registry marks ${f.registryLatestVersion ?? "nothing"} as latest, not ${v}`);
+  }
+  if (f.dockerDescription === null || !sameText(f.dockerDescription, f.bodyDescription)) {
+    problems.push("Docker Hub's short description is not the body package's description");
+  }
+  if (f.dockerOverview === null || !sameText(f.dockerOverview, f.dockerOverviewInTree)) {
+    problems.push("Docker Hub's overview is not docs/dockerhub.md");
   }
   return problems;
 }

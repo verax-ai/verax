@@ -18,6 +18,10 @@ function agreed(): ReleaseFacts {
     dockerLatestDigest: "sha256:b0d5",
     zenodoLatestVersion: "0.4.8",
     registryLatestVersion: "0.4.8",
+    bodyDescription: "VERAX body: an MCP server that decides, records and proves what an agent did.",
+    dockerOverviewInTree: "# Verax body\n\nThe body an agent asks before it acts.\n",
+    dockerDescription: "VERAX body: an MCP server that decides, records and proves what an agent did.",
+    dockerOverview: "# Verax body\r\n\r\nThe body an agent asks before it acts.",
   };
 }
 
@@ -70,6 +74,29 @@ describe("release facts", () => {
     f.packages["@verax-ai/inventory"] = "0.4.7";
     f.npmLatest["@verax-ai/inventory"] = "0.4.7";
     assert.deepEqual(releaseProblems(f), ["@verax-ai/inventory is 0.4.7 in the tree, body is 0.4.8"]);
+  });
+
+  it("names an empty Docker Hub page (the overview was blank until 16 October 2026)", () => {
+    const f = agreed();
+    f.dockerDescription = "";
+    f.dockerOverview = "";
+    assert.deepEqual(releaseProblems(f), [
+      "Docker Hub's short description is not the body package's description",
+      "Docker Hub's overview is not docs/dockerhub.md",
+    ]);
+  });
+
+  it("names an overview edited on Docker Hub and not in the tree", () => {
+    const f = agreed();
+    f.dockerOverview = "# Verax body\n\nThe body an agent asks before it acts. Edited by hand.\n";
+    assert.deepEqual(releaseProblems(f), ["Docker Hub's overview is not docs/dockerhub.md"]);
+  });
+
+  it("names a Docker Hub page it could not read", () => {
+    const f = agreed();
+    f.dockerDescription = null;
+    f.dockerOverview = null;
+    assert.equal(releaseProblems(f).length, 2);
   });
 
   it("reads the capability matrix heading", () => {

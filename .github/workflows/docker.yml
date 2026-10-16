@@ -4,7 +4,8 @@ name: docker
 # the message names the missing variables), it opens its ledger on a fresh
 # volume once configured, and it does not run as root.
 # confirm=publish then pushes veraxai/verax:<version> and :latest to Docker Hub
-# with the DOCKERHUB_TOKEN repository secret. Nothing is pushed on a pull request.
+# with the DOCKERHUB_TOKEN repository secret, and sends the page text from the
+# tree. Nothing is pushed on a pull request.
 on:
   pull_request:
     paths:
@@ -81,3 +82,28 @@ jobs:
           docker tag "veraxai/verax:$VERSION" veraxai/verax:latest
           docker push "veraxai/verax:$VERSION"
           docker push veraxai/verax:latest
+
+      # The page text lives in the tree: docs/dockerhub.md is the overview and
+      # the body package's description is the short line. `npm run
+      # release:check` compares both with what Docker Hub shows. The token goes
+      # to curl on stdin, not on its command line.
+      - name: Page text on Docker Hub
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.confirm == 'publish' }}
+        env:
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          body="$RUNNER_TEMP/dockerhub-repository.json"
+          node -e '
+            const fs = require("node:fs");
+            const { description } = JSON.parse(fs.readFileSync("packages/body/package.json", "utf8"));
+            const full_description = fs.readFileSync("docs/dockerhub.md", "utf8");
+            fs.writeFileSync(process.argv[1], JSON.stringify({ description, full_description }));
+          ' "$body"
+          jwt=$(node -e 'process.stdout.write(JSON.stringify({ identifier: "veraxai", secret: process.env.DOCKERHUB_TOKEN }))' \
+            | curl -fsS -X POST https://hub.docker.com/v2/auth/token -H 'Content-Type: application/json' --data @- \
+            | node -e 'let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => process.stdout.write(JSON.parse(s || "{}").access_token ?? ""))')
+          test -n "$jwt" || { echo "Docker Hub returned no access token"; exit 1; }
+          echo "::add-mask::$jwt"
+          printf 'header = "Authorization: Bearer %s"\n' "$jwt" \
+            | curl -fsS -o /dev/null -X PATCH https://hub.docker.com/v2/namespaces/veraxai/repositories/verax \
+                -H 'Content-Type: application/json' --data @"$body" --config -
