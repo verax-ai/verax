@@ -1190,7 +1190,9 @@ describe("verax install plan", () => {
       assert.match(printed, /Claude Code:/);
       assert.match(printed, /mcp\.json/);
       if (platform === "win32") {
-        assert.match(printed, /panel with a passkey/);
+        // The panel behind `verax desktop` is not released; the passkey route is the operator door.
+        assert.equal(printed.includes("panel"), false, printed);
+        assert.match(printed, /passkey through the operator door/);
         assert.match(printed, /separate administrator account/);
         assert.match(printed, /& "\$env:ProgramFiles\\verax-cli\\verax\.cmd" approve/);
       }
