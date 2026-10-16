@@ -256,7 +256,32 @@ describe("an error thrown out of the CLI", () => {
     assert.equal(uncaughtText!("plain").split("\n")[0], "Error: plain");
   });
 
-  it("ends the process even when a server it opened is still listening", { timeout: 45_000 }, async () => {
+  it("finds the frames where V8 starts them, whatever the error's name", () => {
+    assert.equal(typeof uncaughtText, "function");
+    for (const name of ["", "Custom"]) {
+      const err = new Error("boom\n    at forged (x:1:1)");
+      err.name = name;
+      const lines = uncaughtText!(err).split("\n").filter((line) => line !== "");
+      assert.ok(lines[0]!.includes("boom\\u000a    at forged (x:1:1)"), `name ${JSON.stringify(name)}: ${JSON.stringify(lines)}`);
+      assert.equal(lines.slice(1).some((line) => line.includes("forged")), false, `name ${JSON.stringify(name)}: ${JSON.stringify(lines)}`);
+    }
+  });
+
+  it("does not throw for a thrown value that cannot be printed", () => {
+    assert.equal(typeof uncaughtText, "function");
+    const hostile = { toString() { throw new Error(`${cp(0x1b)}[2J`); } };
+    const getter = new Error("x");
+    Object.defineProperty(getter, "name", { get() { throw new Error(`${cp(0x1b)}[2J`); } });
+    for (const value of [hostile, getter, Object.create(null)]) {
+      let out = "";
+      assert.doesNotThrow(() => { out = uncaughtText!(value); });
+      assert.deepEqual(rawCodePointsIn(out), [], JSON.stringify(out));
+      assert.ok(out.endsWith("\n") && out.trim() !== "", JSON.stringify(out));
+    }
+  });
+
+  it("ends the process even when a server it opened is still listening", { timeout: 45_000 }, async (t) => {
+    if (skipIfElevated(t)) return;
     // verax witness binds, then fails to write its listen file: here the file's
     // name is taken by a directory. Before the last-resort catch the uncaught
     // error ended the process; a catch that only sets exitCode leaves it up.
