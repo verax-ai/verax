@@ -19,11 +19,15 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { Script } from "node:vm";
 
+import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
-import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
+import { approvalsLogFor, approvePending, DISPLAY_ESCAPE_CLASS, FileLedger, listPieceFiles, verifyLedger } from "@verax-ai/proxy";
 import { exportJWK, generateKeyPair } from "jose";
 
 import { verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
+import { nextControlChallenge, verifyControlSignatures } from "../packages/body/src/control-signature.ts";
+import { haltBody } from "../packages/body/src/halt.ts";
+import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
 import { heldSpend } from "../packages/body/src/held-spend.ts";
 import { lookWithoutFollowing, pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
@@ -1597,6 +1601,145 @@ describe("operator door", () => {
       assert.deepEqual(readCredentials(stateDir), []);
     } finally {
       rmSync(stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  /** The ledger's decisions in chain order, read from the files. */
+  const decisionsIn = (stateDir: string): SignedDecisionRecord[] =>
+    listPieceFiles(stateDir).flatMap((piece) =>
+      existsSync(piece.decisions)
+        ? readFileSync(piece.decisions, "utf8").split("\n").filter((line) => line !== "").map((line) => JSON.parse(line) as SignedDecisionRecord)
+        : [],
+    );
+
+  it("D33 a removal the CLI filed is in the ledger before the next approval over the door", async () => {
+    const phone = mintSoftwarePasskey();
+    const spare = mintSoftwarePasskey();
+    const body = await openBody(phone);
+    saveCredential(body.stateDir, { id: spare.id, publicKey: isoBase64URL.fromBuffer(spare.publicKeyCose.slice()), counter: 0, sub: "operator-1" });
+    let open = true;
+    const shut = async () => {
+      if (!open) return;
+      open = false;
+      await new Promise<void>((resolve) => body.server.close(() => resolve()));
+    };
+    try {
+      // The call is held before the removal; nothing reaches the proxy between the removal and the approval.
+      await hold(body, "door-d33");
+      const spareToken = (await signIn(body.doorPort, spare)).body.token as string;
+      const gone = await quiet(() => runOperator(["operator", "remove", "--state", body.stateDir, "--id", phone.id]));
+      assert.equal(gone.code, 0, gone.err);
+      const [row] = await waitingAt(body.doorPort, spareToken);
+      const assertion = await approvalAssertion(body.doorPort, spareToken, spare, row!.ref);
+      const approved = await call(body.doorPort, "POST", "/api/approve", {
+        token: spareToken,
+        body: { ref: row!.ref, requestHash: row!.requestHash, assertion },
+      });
+      assert.equal(approved.status, 200, JSON.stringify(approved.body));
+      await shut();
+      const order = decisionsIn(body.stateDir)
+        .map((record) => (record.claims.subject === "verax.operator" ? "removed" : record.claims.decision === "allow" ? "allow" : null))
+        .filter((kind) => kind !== null);
+      assert.deepEqual(order, ["removed", "allow"]);
+    } finally {
+      await shut();
+      rmSync(body.stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("D34 verify does not count an approval or a halt a passkey signed after the ledger recorded its removal", async () => {
+    const phone = mintSoftwarePasskey();
+    const spare = mintSoftwarePasskey();
+    const body = await openBody(phone);
+    saveCredential(body.stateDir, { id: spare.id, publicKey: isoBase64URL.fromBuffer(spare.publicKeyCose.slice()), counter: 0, sub: "operator-1" });
+    let open = true;
+    const shut = async () => {
+      if (!open) return;
+      open = false;
+      await new Promise<void>((resolve) => body.server.close(() => resolve()));
+    };
+    try {
+      // Signed while the passkey was in use: an approval for the call already held.
+      await hold(body, "door-d34");
+      const phoneToken = (await signIn(body.doorPort, phone)).body.token as string;
+      const [row] = await waitingAt(body.doorPort, phoneToken);
+      const approval = await approvalAssertion(body.doorPort, phoneToken, phone, row!.ref);
+      const gone = await quiet(() => runOperator(["operator", "remove", "--state", body.stateDir, "--id", phone.id]));
+      assert.equal(gone.code, 0, gone.err);
+      await hold(body, "door-d34-sync");
+      assert.ok(decisionsIn(body.stateDir).some((record) => record.claims.reasonCode === "passkey-removed"));
+
+      // What a body would write if the removal landed between its signature check
+      // and its ledger write: the same signature objects the gates return.
+      const { challenge, prev } = nextControlChallenge(body.stateDir, "halt");
+      const halt = assertWithSoftwarePasskey(phone, { challenge, rpID: RP_ID, origin: DOOR_ORIGIN, counter: 7 });
+      haltBody(body.stateDir, "operator-1", "http", Date.now(), {
+        credentialId: phone.id,
+        sub: "operator-1",
+        authenticatorData: halt.response.authenticatorData,
+        clientDataJSON: halt.response.clientDataJSON,
+        signature: halt.response.signature,
+        rpId: RP_ID,
+        prev,
+      });
+      // A second halt writes no line (the body is already halted) and copies the history into the ledger.
+      const spareToken = (await signIn(body.doorPort, spare)).body.token as string;
+      const again = await call(body.doorPort, "POST", "/api/halt", { token: spareToken, body: {} });
+      assert.equal(again.status, 200, JSON.stringify(again.body));
+      assert.ok(decisionsIn(body.stateDir).some((record) => record.claims.subject === "verax.halt"));
+      // The passkey still in use resumes, signed, so the approval below is not refused for a halt.
+      const resumeChallenge = await call(body.doorPort, "GET", "/api/resume/challenge", { token: spareToken });
+      assert.equal(resumeChallenge.status, 200);
+      const resumeAssertion = assertWithSoftwarePasskey(spare, {
+        challenge: resumeChallenge.body.challenge as string,
+        rpID: RP_ID,
+        origin: DOOR_ORIGIN,
+      });
+      const resumed = await call(body.doorPort, "POST", "/api/resume", { token: spareToken, body: { assertion: resumeAssertion } });
+      assert.equal(resumed.status, 200, JSON.stringify(resumed.body));
+      await shut();
+
+      const defer = decisionsIn(body.stateDir).find((record) => record.claims.ref === row!.ref && record.claims.decision === "defer")!;
+      const ledger = new FileLedger(body.stateDir);
+      try {
+        const outcome = await approvePending({
+          ledger,
+          recordSigner: loadOrCreateSigners(body.stateDir).recordSigner,
+          now: () => Date.now(),
+          nonce: () => crypto.randomUUID(),
+          ref: row!.ref,
+          approverId: "operator-1",
+          via: "http",
+          policyHash: defer.claims.policyHash,
+          approvals: approvalsLogFor(ledger),
+          signature: {
+            credentialId: phone.id,
+            sub: "operator-1",
+            authenticatorData: approval.response.authenticatorData,
+            clientDataJSON: approval.response.clientDataJSON,
+            signature: approval.response.signature,
+            deferRecordHash: decisionRecordHash(defer),
+            rpId: RP_ID,
+          },
+        });
+        assert.equal(outcome.ok, true, JSON.stringify(outcome));
+      } finally {
+        ledger.close();
+      }
+
+      // The chain is whole: only the order of the removal and the signatures speaks.
+      const chain = await verifyLedger(body.stateDir);
+      assert.equal(chain.ok, true, chain.problems.join("\n"));
+      const approvals = await verifyApprovalSignatures(body.stateDir);
+      assert.equal(approvals.signedVerified, 0, approvals.line);
+      assert.equal(approvals.ok, false, approvals.line);
+      assert.match(approvals.line, /signed-after-removal 1/);
+      const controls = await verifyControlSignatures(body.stateDir);
+      assert.equal(controls.ok, false, controls.line);
+      assert.match(controls.line, /signed-after-removal 1/);
+    } finally {
+      await shut();
+      rmSync(body.stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
 
