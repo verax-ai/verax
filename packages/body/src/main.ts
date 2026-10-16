@@ -7,11 +7,12 @@ import { watchDesktopParent } from "./desktop-parent.ts";
 import { KeyAlgorithmError, KeysPartialError } from "./keys.ts";
 import { listen, operatorDoorOf } from "./server.ts";
 
-// exitCode alone leaves a listening server up (measurement 1). process.exit
-// while a handle is still closing aborts on Windows; a natural drain is clean
-// (measurement 3). Set the code so an empty loop ends at once, and force the
-// exit after 3s if a handle still holds the process. unref: the timer does not
-// keep the loop alive, and by 3s a closing handle is gone.
+// exitCode alone leaves a listening server up (for example `verax witness`).
+// On Windows, process.exit while a handle is still closing crashes in libuv;
+// letting the loop drain on its own exits cleanly. Set the code immediately so
+// an empty loop ends at once, and after 3s an unref'd timer forces the exit.
+// unref: the timer does not keep the loop alive, and by 3s a closing handle is
+// gone.
 export function endProcess(code: number): void {
   process.exitCode = code;
   setTimeout(() => process.exit(code), 3000).unref();
