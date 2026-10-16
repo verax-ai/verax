@@ -310,6 +310,11 @@ describe("verax install plan", () => {
       assert.ok(text.includes(`operator enroll --state '${on.stateDir}'`), `${platform}: ${text}`);
       // Where the code is typed: the door's own name, which is where its page is.
       assert.match(text, /^Type the code at https:\/\/approve\.example\.com\/ on the device whose passkey it is for\./m, platform);
+      // With the door on, the approve line names it as the passkey route, and never the unreleased panel.
+      if (platform === "win32") {
+        assert.match(text, /passkey through the operator door/, text);
+        assert.equal(text.includes("panel"), false, text);
+      }
     }
   });
 
@@ -1190,9 +1195,9 @@ describe("verax install plan", () => {
       assert.match(printed, /Claude Code:/);
       assert.match(printed, /mcp\.json/);
       if (platform === "win32") {
-        // The panel behind `verax desktop` is not released; the passkey route is the operator door.
+        // The panel behind `verax desktop` is not released. Without the door the
+        // summary does not name it (see the --operator-door test): the CLI is the way.
         assert.equal(printed.includes("panel"), false, printed);
-        assert.match(printed, /passkey through the operator door/);
         assert.match(printed, /separate administrator account/);
         assert.match(printed, /& "\$env:ProgramFiles\\verax-cli\\verax\.cmd" approve/);
       }
