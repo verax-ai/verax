@@ -106,8 +106,9 @@ auditor they do not have yet.
 They can lose a phone that holds a passkey. Until someone at the machine
 runs `verax operator remove`, the passkey's own user verification is what
 stands between a finder and an approval. After the removal the body refuses
-that passkey, and `verax verify` does not count a signature it made after
-the ledger recorded the removal.
+that passkey, and `verax verify` does not count an approval or a halt or
+resume signed with it whose record comes after the removal record in the
+ledger.
 
 ## the ledger can be silenced
 

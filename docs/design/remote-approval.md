@@ -2,10 +2,11 @@
 
 Status: released in 0.6.0 (`docs/STATUS.md`, Operator door and Operator
 passkeys). The door's listener, the passkey sign-in, the list of what is
-waiting, the approval, halt and enrolment with a pairing code, and
-`verax operator list` and `remove`, are off unless `VERAX_OPERATOR_DOOR`
-names an origin, which `verax install --operator-door <origin>` and
-`verax init --local --operator-door <origin>` write for the service. The
+waiting, the approval, halt and enrolment with a pairing code are off
+unless `VERAX_OPERATOR_DOOR` names an origin, which `verax install
+--operator-door <origin>` and `verax init --local --operator-door <origin>`
+write for the service. `verax operator list` and `remove` work on the
+state directory whether the door is on or not. The
 door serves one page that does all of this from a browser. It has been
 driven in Chromium with a virtual authenticator, and not yet on a phone.
 It has had code reviews; it has not had an independent attack round.
