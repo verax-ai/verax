@@ -28,6 +28,7 @@ import { verifyApprovalSignatures } from "../packages/body/src/approval-signatur
 import { nextControlChallenge, verifyControlSignatures } from "../packages/body/src/control-signature.ts";
 import { haltBody } from "../packages/body/src/halt.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
+import { runVerify } from "../packages/body/src/verify-cli.ts";
 import { readOperatorDoor, type OperatorDoorConfig } from "../packages/body/src/config.ts";
 import { heldSpend } from "../packages/body/src/held-spend.ts";
 import { lookWithoutFollowing, pairingWriter, runOperator, type OperatorSys } from "../packages/body/src/operator-cli.ts";
@@ -1737,6 +1738,13 @@ describe("operator door", () => {
       const controls = await verifyControlSignatures(body.stateDir);
       assert.equal(controls.ok, false, controls.line);
       assert.match(controls.line, /signed-after-removal 1/);
+      // And `verax verify` says so: the whole result is not verified.
+      const printed: string[] = [];
+      const code = await runVerify([body.stateDir], (s) => printed.push(s));
+      const out = printed.join("\n");
+      assert.notEqual(code, 0, out);
+      assert.match(out, /signed-after-removal 1/);
+      assert.match(out, /\nNOT VERIFIED$/);
     } finally {
       await shut();
       rmSync(body.stateDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
