@@ -27,6 +27,17 @@ describe("Docker Hub page", () => {
     assert.ok(bind && page.includes(`\`${bind}\` (\`VERAX_BIND\`)`), `docs/dockerhub.md does not name ${bind}`);
   });
 
+  it("runs the image with the settings the body refuses to start without", () => {
+    const run = /```sh\n(docker volume create[\s\S]*?)```/.exec(page)?.[1] ?? "";
+    assert.match(run, /-p 8787:8787 /, "the example does not publish the port the image listens on");
+    for (const name of ["VERAX_ISSUER", "VERAX_JWKS_URL", "VERAX_AUDIENCE", "VERAX_POLICY_FILE"]) {
+      assert.match(run, new RegExp(`-e ${name}=\\S`), `the example does not set ${name}`);
+    }
+    assert.match(run, /-e VERAX_TLS_TERMINATED=1 /, "a bind other than loopback needs VERAX_TLS_TERMINATED=1");
+    assert.match(run, /-v verax-state:\/var\/lib\/verax /, "the example does not keep the ledger in a volume");
+    assert.match(run, /\n {2}veraxai\/verax serve\n/, "the example does not start the body with serve");
+  });
+
   it("is sent by the publish path only, with the token kept off command lines", () => {
     const yml = read(".github", "workflows", "docker.yml");
     const start = yml.indexOf("- name: Page text on Docker Hub");

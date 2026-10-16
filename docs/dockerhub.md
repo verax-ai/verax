@@ -34,7 +34,7 @@ docker run -d --name verax -p 8787:8787 \
 docker logs verax    # ends with: listening 0.0.0.0:8787
 ```
 
-- A request without a valid token gets `401`.
+- An MCP request to `/mcp` without a valid token gets `401`.
 - The default policy is [`packages/proxy/policy/default.json`](https://github.com/verax-ai/verax/blob/main/packages/proxy/policy/default.json) in the repository; it denies what it does not name.
 - Any bind other than loopback needs `VERAX_TLS_TERMINATED=1`. Set it only with a TLS-terminating proxy in front of the container.
 - The token must carry `iss`, `aud`, `sub`, `iat`, `exp` and `jti`. The other variables are listed in the [package README](https://github.com/verax-ai/verax/blob/main/packages/body/README.md#configure).
