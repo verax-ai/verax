@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Reads what npm, Docker Hub, GitHub, Zenodo and the MCP registry hold for
-// the version in this tree and fails if any of them disagrees. It needs the
+// the version in this tree, and the text on the Docker Hub page, and fails
+// if any of them disagrees. It needs the
 // network, so it is not part of `npm test`; the comparison itself is
 // scripts/release-facts.ts and is tested offline.
 //
@@ -45,6 +46,17 @@ async function dockerDigest(tag: string): Promise<string | null> {
   return typeof doc?.digest === "string" ? doc.digest : null;
 }
 
+async function dockerTexts(): Promise<{ description: string | null; overview: string | null }> {
+  const doc = (await getJson(`https://hub.docker.com/v2/repositories/${IMAGE}/`)) as {
+    description?: unknown;
+    full_description?: unknown;
+  } | null;
+  return {
+    description: typeof doc?.description === "string" ? doc.description : null,
+    overview: typeof doc?.full_description === "string" ? doc.full_description : null,
+  };
+}
+
 async function tagCommit(version: string): Promise<string | null> {
   const token = process.env.GITHUB_TOKEN;
   const doc = (await getJson(
@@ -80,6 +92,7 @@ const version = String(readJson("packages/body/package.json").version);
 
 const npm: Record<string, string | null> = {};
 for (const name of Object.keys(packages)) npm[name] = await npmLatest(name);
+const docker = await dockerTexts();
 
 const facts: ReleaseFacts = {
   version,
@@ -92,6 +105,10 @@ const facts: ReleaseFacts = {
   dockerLatestDigest: await dockerDigest("latest"),
   zenodoLatestVersion: await zenodoLatest(),
   registryLatestVersion: await registryLatest(),
+  bodyDescription: String(readJson("packages/body/package.json").description),
+  dockerOverviewInTree: readFileSync(join(root, "docs", "dockerhub.md"), "utf8"),
+  dockerDescription: docker.description,
+  dockerOverview: docker.overview,
 };
 
 const problems = releaseProblems(facts);
