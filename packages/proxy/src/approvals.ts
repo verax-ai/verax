@@ -24,6 +24,7 @@ import { join } from "node:path";
 import { signDecisionRecord } from "@cedulon/core";
 import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
+import { terminalText } from "./policy.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { SerialQueue } from "./serial-queue.ts";
 import type { ApprovalChannel, ApprovalSignature, DecisionInputs, InputsLog, Ledger, Policy, RecordSigner } from "./types.ts";
@@ -586,7 +587,7 @@ export async function drainApprovalCommands(
         // Leave the processing name in place. The bytes stay either way.
       }
       const message = err instanceof Error ? err.message : String(err);
-      process.stderr.write(`verax-drain: unreadable ${file}: ${message}\n`);
+      process.stderr.write(`verax-drain: unreadable ${terminalText(file)}: ${terminalText(message)}\n`);
       continue;
     }
     try {

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { verifyLedger } from "@verax-ai/proxy";
+import { terminalText, verifyLedger } from "@verax-ai/proxy";
 import { runApprove } from "./approve-cli.ts";
 import { listen } from "./server.ts";
 import { shippedPolicyPath } from "./shipped-policy.ts";
@@ -388,8 +388,8 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     const denied = parseTagged(toolText(sent), "denied");
     if (!denied) throw new Error(`demo: message.send ${toolText(sent)}`);
     writeOut(`message.send -> ops@${DENY_HOST}\n`);
-    writeOut(`  refused ${denied.code} (signed)\n`);
-    writeOut(`  ref ${denied.ref}\n`);
+    writeOut(`  refused ${terminalText(denied.code)} (signed)\n`);
+    writeOut(`  ref ${terminalText(denied.ref)}\n`);
     writeOut("\n");
 
     const spent = await client.callTool({
@@ -443,7 +443,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       const secretsDenied = parseTagged(secrets.text, "denied");
       writeOut("conarium.query public.secrets\n");
       if (secretsDenied) {
-        writeOut(`  refused ${secretsDenied.code} (signed)\n`);
+        writeOut(`  refused ${terminalText(secretsDenied.code)} (signed)\n`);
         failed = true;
       } else if (childAnsweredWithError(secrets.text, "conarium.query")) {
         writeOut("  allowed by this gate; Conarium answered with an error and no rows\n");
@@ -461,7 +461,7 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       const listedDenied = parseTagged(listed.text, "denied");
       writeOut("conarium.list_tables\n");
       if (!listedDenied) throw new Error(`demo: conarium.list_tables ${listed.text}`);
-      writeOut(`  refused ${listedDenied.code} (signed)\n`);
+      writeOut(`  refused ${terminalText(listedDenied.code)} (signed)\n`);
       writeOut("  refused by this gate; the downstream server never saw the call\n");
       writeOut("\n");
     }
@@ -484,8 +484,8 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
       findingCode = "unparsed";
     }
     writeOut("audit.explain of the refuse\n");
-    writeOut(`  finding ${findingCode}\n`);
-    writeOut(`  trust-root ${trust}\n`);
+    writeOut(`  finding ${terminalText(findingCode)}\n`);
+    writeOut(`  trust-root ${terminalText(trust)}\n`);
     if (findingCode === "none" && trust !== "unread") {
       writeOut("  chain and signatures read back\n");
     } else {
@@ -504,8 +504,8 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     writeOut(`records  ${counted.decisions}\n`);
     writeOut(`effects  ${counted.effects}\n`);
     if (keep) {
-      writeOut(`ledger   ${stateDir}\n`);
-      writeOut(`verax verify ${stateDir}\n`);
+      writeOut(`ledger   ${terminalText(stateDir)}\n`);
+      writeOut(`verax verify ${terminalText(stateDir)}\n`);
     } else {
       writeOut("ledger   removed on exit (run with --keep to keep it and check it with verax verify)\n");
     }
@@ -518,9 +518,9 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     const detail = err instanceof Error ? err.message : "fault";
     if (withConarium && attachFailedDetail(detail)) {
       discardState = true;
-      writeErr(`could not start the Conarium child (${detail}). run without --with-conarium\n`);
+      writeErr(`could not start the Conarium child (${terminalText(detail)}). run without --with-conarium\n`);
     } else {
-      writeErr(`demo: ${detail.replace(/^demo: /, "")}\n`);
+      writeErr(`demo: ${terminalText(detail.replace(/^demo: /, ""))}\n`);
     }
     await cleanup();
     return 1;

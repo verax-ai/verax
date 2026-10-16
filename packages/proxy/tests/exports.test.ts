@@ -23,6 +23,10 @@ const ALLOWED = new Set([
   // escape it. Both live here so body does not grow a second copy.
   "TERMINAL_CONTROL_CLASS",
   "DISPLAY_ESCAPE_CLASS",
+  // The printed form of text the process did not write: body's stderr lines
+  // and the proxy's own both go through it.
+  "terminalText",
+  "terminalLines",
   "FileLedger",
   "MemoryLedger",
   "explain",

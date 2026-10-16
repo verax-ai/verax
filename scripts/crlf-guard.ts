@@ -10,11 +10,23 @@
 // that uses it measures nothing, and it stays green. That happened here. The
 // same slip in the other direction leaves a replacement character behind.
 //
+// The check now also refuses every code point the operator screens escape.
+// A C0-only scan stayed green after an edit tool wrote raw characters that
+// draw nothing or turn a line around (bidi overrides, zero-width spaces,
+// line separators, combining marks, variation selectors, C1, private use,
+// unassigned). The class is DISPLAY_ESCAPE_CLASS, taken from
+// packages/proxy/src/policy.ts and not copied here. This script runs in
+// `npm test` before `build:dist`, so the package distribution may not exist
+// yet and the import is the source file. Tab, newline and CR stay allowed;
+// CR is the check above.
+//
 // This script never writes.
 
 import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { DISPLAY_ESCAPE_CLASS } from "../packages/proxy/src/policy.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -121,10 +133,13 @@ export type ControlHit = {
   codePoints: string[];
 };
 
+/** DISPLAY_ESCAPE_CLASS, excluding tab, newline and CR at the call. */
+const DRAWS_NOTHING = new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "u");
+
 /**
- * Control characters that have no business in tracked text: everything below
- * space except newline and tab (CR is the check above), and the replacement
- * character, which means the bytes were not the encoding they claimed.
+ * Code points that have no business in tracked text: C0 controls other than
+ * newline and tab (CR is the check above), the replacement character, and
+ * every code point of DISPLAY_ESCAPE_CLASS except tab, newline and CR.
  */
 export function findStrayControls(
   base = root,
@@ -138,7 +153,9 @@ export function findStrayControls(
     for (const ch of decoder.decode(bytes)) {
       const code = ch.codePointAt(0) ?? 0;
       const stray =
-        (code < 0x20 && code !== 0x0a && code !== 0x09 && code !== 0x0d) || code === 0xfffd;
+        (code < 0x20 && code !== 0x0a && code !== 0x09 && code !== 0x0d) ||
+        code === 0xfffd ||
+        (code !== 0x09 && code !== 0x0a && code !== 0x0d && DRAWS_NOTHING.test(ch));
       if (stray) seen.add(`0x${code.toString(16)}`);
     }
     if (seen.size > 0) hits.push({ file, codePoints: [...seen] });

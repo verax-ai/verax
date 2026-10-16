@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
-import { approvalsLogFor, approvePending, createApprovalBudgetGuard, loadApprovalsFromDir } from "@verax-ai/proxy";
+import { approvalsLogFor, approvePending, createApprovalBudgetGuard, loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
 
 import { approvalChallenge, gateApprovalSignature } from "./approval-signature.ts";
 import { gateControlSignature, nextControlChallenge } from "./control-signature.ts";
@@ -106,7 +106,7 @@ export async function handleControl(ctx: OperatorRequest, what: { resuming: bool
   } catch (err) {
     // The switch is already on disk. A sync miss must not turn this into a 500.
     const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
-    process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
+    process.stderr.write(`verax-proxy: control sync failed: ${terminalText(message)}\n`);
   }
   send(res, 200, state);
 }

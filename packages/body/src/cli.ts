@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import path, { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { terminalLines, terminalText } from "@verax-ai/proxy";
 import { runApprove } from "./approve-cli.ts";
 import { attachBodyLog } from "./body-log.ts";
 import { bodyVersion } from "./body-version.ts";
@@ -12,7 +13,7 @@ import { runDownstreamPin } from "./downstream-pin.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
 import { runHalt, runResume } from "./halt.ts";
-import { main } from "./main.ts";
+import { endProcess, main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
 import { runAnchor } from "./anchor-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
@@ -128,7 +129,7 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
     isElevated = hooks.elevated ? hooks.elevated() : defaultElevated(platform);
   } catch (err) {
     if (err instanceof SystemToolError) {
-      stderr.write(`${err.message}\n`);
+      stderr.write(`${terminalText(err.message)}\n`);
       return 78;
     }
     throw err;
@@ -139,7 +140,7 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
       execArgv: hooks.execArgv,
     });
     if (refusal) {
-      stderr.write(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
+      stderr.write(`${terminalLines(refusal.replace(/\n+$/, ""))}\n`);
       return 78;
     }
     markCliCodeCheckPassed();
@@ -275,7 +276,7 @@ async function dispatchCli(
       }
       const attached = attachBodyLog(logPath);
       if (!attached.ok) {
-        stderr.write(`${attached.reason}\n`);
+        stderr.write(`${terminalText(attached.reason)}\n`);
         return 78;
       }
       stderr.write("verax serve starting\n");
@@ -290,12 +291,12 @@ async function dispatchCli(
       clearVeraxEnv(process.env);
       const loaded = loadEnvFile(file);
       if (!loaded.ok) {
-        stderr.write(`${loaded.reason}\n`);
+        stderr.write(`${terminalText(loaded.reason)}\n`);
         return 78;
       }
       const missingJwks = envFileJwksMissing(process.env);
       if (missingJwks) {
-        stderr.write(`${missingJwks}\n`);
+        stderr.write(`${terminalText(missingJwks)}\n`);
         return 78;
       }
     }
@@ -308,7 +309,7 @@ async function dispatchCli(
     const json = argv.includes("--json");
     const target = doctorStateTarget(env);
     if (target && directoryAccess(target) === "unreadable") {
-      stderr.write(`${unreadableSentence(target, "doctor")}\n`);
+      stderr.write(`${terminalText(unreadableSentence(target, "doctor"))}\n`);
       return 77;
     }
     const nodeLabel = process.platform === "linux" ? linuxNodeLabelCheck() : null;
@@ -356,13 +357,13 @@ async function dispatchCli(
   }
   const head = argv[0];
   if (head !== undefined && !head.startsWith("--")) {
-    stderr.write(`unknown command: ${head}\n`);
+    stderr.write(`unknown command: ${terminalText(head)}\n`);
     stderr.write(HELP);
     return 64;
   }
   // `main()` reads `--inventory`. Any other leading flag is not a serve option.
   if (head !== undefined && head.startsWith("--") && head !== "--inventory") {
-    stderr.write(`unknown option: ${head}\n`);
+    stderr.write(`unknown option: ${terminalText(head)}\n`);
     stderr.write(HELP);
     return 64;
   }
@@ -373,6 +374,82 @@ async function dispatchCli(
   return 0;
 }
 
+// First line is the name and the whole message. Frames are the `    at ` lines
+// after the first copy of that message in err.stack, or after the first line
+// when the message is empty or missing, so a forged frame inside the message
+// stays on the first line. name, message, stack, and String(value) are read in
+// their own try; a read that throws uses a fixed stand-in. This never throws.
+export function uncaughtText(err: unknown): string {
+  const unread = "unprintable thrown value";
+  let error: Error | undefined;
+  try {
+    if (err instanceof Error) error = err;
+  } catch {
+    error = undefined;
+  }
+
+  let name = "Error";
+  let message = unread;
+  let messageKnown = false;
+  if (error !== undefined) {
+    try {
+      const read = error.name;
+      if (typeof read === "string") name = read;
+    } catch {
+      name = "Error";
+    }
+    try {
+      const read = error.message;
+      if (typeof read === "string") {
+        message = read;
+        messageKnown = true;
+      }
+    } catch {
+      message = unread;
+      messageKnown = false;
+    }
+  } else {
+    try {
+      message = String(err);
+      messageKnown = true;
+    } catch {
+      message = unread;
+      messageKnown = false;
+    }
+  }
+
+  const lines = [terminalText(`${name}: ${message}`)];
+  if (error !== undefined) {
+    let stack: string | undefined;
+    try {
+      const read = error.stack;
+      if (typeof read === "string") stack = read;
+    } catch {
+      stack = undefined;
+    }
+    if (stack !== undefined) {
+      const at = messageKnown && message !== "" ? stack.indexOf(message) : -1;
+      let rest: string;
+      if (at === -1) {
+        const nl = stack.indexOf("\n");
+        rest = nl === -1 ? "" : stack.slice(nl + 1);
+      } else {
+        rest = stack.slice(at + message.length);
+      }
+      for (const line of rest.split("\n")) {
+        if (line.startsWith("    at ")) lines.push(terminalText(line));
+      }
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 if (isCliEntry()) {
-  process.exit(await runCli(process.argv.slice(2)));
+  try {
+    process.exit(await runCli(process.argv.slice(2)));
+  } catch (err) {
+    // Replaces Node's printer, which would write the path raw and a source excerpt.
+    process.stderr.write(terminalLines(uncaughtText(err)));
+    endProcess(1);
+  }
 }
