@@ -1,17 +1,19 @@
-# Remote approval — design, partly built, not released
+# Remote approval — design, released in 0.6.0
 
-Status: not in a release. The door's listener, the passkey sign-in, the list
-of what is waiting, the approval, halt and enrolment with a pairing code are
-in the tree, off unless `VERAX_OPERATOR_DOOR` names an origin, which
-`verax install --operator-door <origin>` and `verax init --local
---operator-door <origin>` write for the service. The door serves one page
-that does all of this from a browser. It has been driven in Chromium with a
-virtual authenticator, and not yet on a phone.
+Status: released in 0.6.0 (`docs/STATUS.md`, Operator door and Operator
+passkeys). The door's listener, the passkey sign-in, the list of what is
+waiting, the approval, halt and enrolment with a pairing code are off
+unless `VERAX_OPERATOR_DOOR` names an origin, which `verax install
+--operator-door <origin>` and `verax init --local --operator-door <origin>`
+write for the service. `verax operator list` and `remove` work on the
+state directory whether the door is on or not. The
+door serves one page that does all of this from a browser. It has been
+driven in Chromium with a virtual authenticator, and not yet on a phone.
+It has had code reviews; it has not had an independent attack round.
 
-The capability matrix says there is no remote approver, and on a released
-install that is true: a held call is approved with `verax approve` at the
-machine. This document says what is already there, what stops it from being
-used away from the machine, and what would have to be built.
+This document was written before the door was built. It says what was
+there, what stopped it from being used away from the machine, and what had
+to be built; where it and STATUS differ, STATUS is the record.
 
 ## What exists
 
@@ -194,4 +196,6 @@ way to reach that from another device.
 - `verax verify` checks an approval made through the door with no body
   running, and names the approver.
 - A red-team round on the door before it is released: it is the first
-  listener meant to face a network.
+  listener meant to face a network. Not done before 0.6.0: the door was
+  read by two independent code reviews, and STATUS says it has had no
+  independent attack round.

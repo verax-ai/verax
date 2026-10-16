@@ -48,8 +48,9 @@ Usage: verax <command> [options]
   demo [--keep]        run a loopback body against a temporary ledger and print what it recorded
        [--with-conarium]  also fetch Conarium with npx, attach it as a child, and put a masked read through the gate
   approve <args>       approve a waiting request from this machine.
-                       On Windows the panel with a passkey is how a held call is approved.
-                       An elevated CLI approve is a fallback from a separate administrator
+                       On Windows, approve held calls with a passkey through the operator door
+                       when the install named an origin with --operator-door; without it,
+                       an elevated CLI approve from a separate administrator
                        account, not this account elevated:
                        "%ProgramFiles%\\verax-cli\\verax.cmd" approve.
                        Linux and macOS the root-owned Node, for example

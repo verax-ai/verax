@@ -20,7 +20,20 @@ directory: the keys, the local issuer key, the policy and the ledger. It
 can then mint tokens, edit the policy and rewrite the ledger with the
 body's own keys. Local mode does not honour `verax:approve` or
 `verax:audit` over HTTP, and `verax approve` asks for a terminal, but
-neither is a boundary.
+neither is a boundary. With the operator door on (0.6.0), such a shell can
+also add its own passkey to `operator-credentials.json` and approve through
+the door: in local mode the door is not a boundary either.
+
+Since 0.6.0 the operator door is a second listener, off unless the operator
+names an origin for it, bound to loopback (`127.0.0.1:8788` unless moved),
+with the TLS endpoint in front of it the operator's. A shell on the same
+host reaches it like any local port. It cannot sign in, approve or resume
+without an assertion from an enrolled passkey's authenticator, and it
+cannot enrol without the pairing code `verax operator enroll` prints at the
+machine; the pairing file holds only the code's hash. What it can do there
+is spend an open code's five tries, so the operator asks for another, and
+keep the door's 32 sign-in slots busy, which delays a sign-in. Whoever
+terminates TLS in front of the door can read the summaries it serves.
 
 `verax install` puts the code and the state directory out of that shell's
 reach on Windows, Linux, and macOS. The body runs as the dedicated local
@@ -32,7 +45,8 @@ the elevated install does not write, chown, or chmod anything under the
 invoking user's home; a child with that user's uid and gid writes
 `~/.verax/agent.token`. Elevated commands refuse to run when the verax
 code they loaded can be changed by that user. On Windows the supported way
-to approve is the panel with a passkey. An elevated CLI `approve` stays as a
+to approve is a passkey: through the operator door (0.6.0) when an origin
+is named for it, or the panel. An elevated CLI `approve` stays as a
 fallback and has to be run from a separate administrator account, not the
 agent's own account elevated, because a same-user elevated shell inherits
 that user's environment variables and PowerShell profile, which the agent
@@ -71,12 +85,30 @@ Code behind `inner` may lie, hang, or write outside the declared effect.
 The decision record is the intent; the effect row is what came back.
 Reconciliation exists to notice a mismatch, not to prevent the call.
 
+A downstream child can also change a tool's description or schema after the
+operator has looked at it, and the brain reads a description as
+instructions. Since 0.6.0 the operator can pin a child's definitions; with
+pins, a definition that is not the pinned one stops the body at its next
+start. A pinned description can still carry an instruction: the operator
+saw it when pinning. Tool results and error text are not pinned and reach
+the brain on every call. Text a child sends that reaches the operator's
+terminal (an error when it attaches, the pin listing) is written with
+controls and the characters that draw nothing as escapes; in 0.5.1 an
+error at attach reached the terminal of `verax serve` as it was.
+
 ## the operator is honest but forgetful
 
 The person who wrote the policy text is not assumed malicious. They are
 assumed to forget which rule was in force, which scope was granted, and
 which call was denied. The ledger is for that person, not for an
 auditor they do not have yet.
+
+They can lose a phone that holds a passkey. Until someone at the machine
+runs `verax operator remove`, the passkey's own user verification is what
+stands between a finder and an approval. After the removal the body refuses
+that passkey, and `verax verify` does not count an approval or a halt or
+resume signed with it whose record comes after the removal record in the
+ledger, while no record undoes the removal.
 
 ## the ledger can be silenced
 
@@ -123,9 +155,9 @@ Exception: `src/install.ts` may import `node:child_process` to install and remov
 
 Exception: `src/watch.ts` may import `node:child_process` to run an operator-configured isolation command once per silence episode. It passes a parsed executable and argv with `shell: false`; heartbeat content is never command input. That file is still scanned for `import(`, `require(`, `eval`, and `tools/` imports.
 
-The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process. A live pid alone does not make a lock held (unreleased): a lock that names this process but was written before it started, or that records another Linux boot id, is stale. That is the case of a container restarted on the same volume, where the body is PID 1 again. A held lock also beats (unreleased): it is touched every 2 seconds, and the body, `verax unlock` and `verax doctor` call a lock held when they see it move, so a second container that shares the pid cannot have a running body's lock removed. A lock that stays still for five beats is then judged by its pid and start time, and is stale only when that says so too. A lock written by 0.4.8 or earlier does not beat and is judged by its pid alone.
+The directory lock detects an accidental second body on the same state directory. It is not a distributed lock: a lock is never taken over automatically; an operator removes a dead lock with `verax unlock`. A multi-process ledger belongs to the phase 4 witness process. A live pid alone does not make a lock held (since 0.5.0): a lock that names this process but was written before it started, or that records another Linux boot id, is stale. That is the case of a container restarted on the same volume, where the body is PID 1 again. A held lock also beats (since 0.5.0): it is touched every 2 seconds, and the body, `verax unlock` and `verax doctor` call a lock held when they see it move, so a second container that shares the pid cannot have a running body's lock removed. A lock that stays still for five beats is then judged by its pid and start time, and is stale only when that says so too. A lock written by 0.4.8 or earlier does not beat and is judged by its pid alone.
 
-A spike stdio attach lives in `packages/body/src/downstream.ts` and starts a child through the SDK stdio transport. That source does not write the `child_process` name, so the scan names the transport itself. `listen()` does not open the attach. A tool that enters through `extraTools` still goes through `createProxy`.
+The stdio attach in `packages/body/src/downstream.ts` starts a child through the SDK stdio transport. That source does not write the `child_process` name, so the scan names the transport itself. `listen()` opens it when `VERAX_DOWNSTREAM` names a document, and a stdio child opens only when the document says `"trust": "same-user"` (STATUS, Downstream MCP). A tool that enters through `extraTools` still goes through `createProxy`.
 
 Exception: `src/downstream.ts` may import the SDK stdio client transport (`client/stdio.js`) to start one downstream MCP server. The scan names that import, and the `StdioClientTransport` name, anywhere else in packages/body.
 

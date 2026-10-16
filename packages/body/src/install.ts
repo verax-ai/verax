@@ -46,7 +46,7 @@ export function posixRootOwnedCommand(platform: "linux" | "darwin", command: str
 /** Names the administrator-owned copy. A same-user elevated shell is not that copy. */
 export function unreadableSentence(dir: string, command = "verax"): string {
   if (process.platform === "win32" && command === "approve") {
-    return `cannot read ${dir}: approve from the panel with a passkey. An elevated CLI approve is a fallback from a separate administrator account, not this account elevated: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve`;
+    return `cannot read ${dir}: approve held calls with a passkey through the operator door when the install named an origin with --operator-door; without it, an elevated CLI approve from a separate administrator account, not this account elevated: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve`;
   }
   const copy =
     process.platform === "win32"
@@ -2270,7 +2270,9 @@ export function successText(
   ].join("\n");
   const approve =
     platform === "win32"
-      ? 'Approve held calls from the panel with a passkey. An elevated CLI approve is a fallback from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
+      ? info.operatorDoor
+        ? 'Approve held calls with a passkey through the operator door (below); at the machine, an elevated CLI approve from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
+        : 'Approve held calls with an elevated CLI approve from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
       : `Approve held calls from the root-owned Node: ${posixRootOwnedCommand(platform, "approve")}`;
   const uninstall =
     platform === "win32"

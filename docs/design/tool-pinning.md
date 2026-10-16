@@ -1,7 +1,9 @@
-# Tool definition pinning — design, not built
+# Tool definition pinning — design, built in 0.6.0
 
 
-Status: design only. Nothing in this document is in the tree.
+Status: released in 0.6.0 (`docs/STATUS.md`, Downstream MCP). This is the
+design as it was written before the code; where the two differ, STATUS is
+the record. The "today" sections describe the tree before pinning.
 
 ## What exists
 
