@@ -8,7 +8,7 @@
 
 import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { createServer, type Server as HttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import * as proxy from "@verax-ai/proxy";
 import { DISPLAY_ESCAPE_CLASS } from "@verax-ai/proxy";
+import * as cliModule from "../packages/body/src/cli.ts";
 import { runDemo } from "../packages/body/src/demo.ts";
 import { runInitLocal } from "../packages/body/src/init-local.ts";
 import { skipIfElevated } from "./elevated-refusal.ts";
@@ -238,6 +239,45 @@ describe("verax serve with a downstream child whose error carries controls", () 
     assert.equal(lines.some((line) => /^\s*\^+\s*$/.test(line)), false, `Node's source excerpt was printed: ${shown}`);
     assert.equal(run.signal, null, `ended by signal ${run.signal}`);
     assert.equal(run.code, 1, `exit ${run.code}: ${shown}`);
+  });
+});
+
+describe("an error thrown out of the CLI", () => {
+  const uncaughtText = (cliModule as Record<string, unknown>).uncaughtText as ((err: unknown) => string) | undefined;
+
+  it("is written by uncaughtText (packages/body/src/cli.ts): a frame inside the message stays in the first line", () => {
+    assert.equal(typeof uncaughtText, "function", "uncaughtText is not exported from packages/body/src/cli.ts");
+    const err = new Error("boom\n    at forged (x:1:1)");
+    const lines = uncaughtText!(err).split("\n").filter((line) => line !== "");
+    assert.equal(lines[0], "Error: boom\\u000a    at forged (x:1:1)");
+    assert.equal(lines.some((line) => line.includes("forged") && line !== lines[0]), false, JSON.stringify(lines));
+    assert.ok(lines.slice(1).length > 0 && lines.slice(1).every((line) => line.startsWith("    at ")), JSON.stringify(lines));
+    assert.deepEqual(rawCodePointsIn(uncaughtText!(new Error(`a${cp(0x1b)}[2J${cp(0x202e)}b`))), []);
+    assert.equal(uncaughtText!("plain").split("\n")[0], "Error: plain");
+  });
+
+  it("ends the process even when a server it opened is still listening", { timeout: 45_000 }, async () => {
+    // verax witness binds, then fails to write its listen file: here the file's
+    // name is taken by a directory. Before the last-resort catch the uncaught
+    // error ended the process; a catch that only sets exitCode leaves it up.
+    const dir = ownerDir("verax-a1-witness-");
+    mkdirSync(join(dir, "witness.listen.json"));
+    const child = spawn(process.execPath, ["--experimental-strip-types", cli, "witness", dir], {
+      stdio: ["ignore", "ignore", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk: Buffer | string) => {
+      stderr += String(chunk);
+    });
+    const timer = setTimeout(() => child.kill(), 30_000);
+    const [code, signal] = await new Promise<[number | null, string | null]>((resolve) =>
+      child.once("exit", (c, s) => resolve([c, s])));
+    clearTimeout(timer);
+    const shown = JSON.stringify(stderr.slice(0, 400));
+    assert.equal(signal, null, `still running after 30 s, killed: ${shown}`);
+    assert.equal(code, 1, `exit ${code}: ${shown}`);
+    assert.equal(linesOf(stderr).some((line) => /^\s*\^+\s*$/.test(line)), false, `Node's source excerpt was printed: ${shown}`);
   });
 });
 
