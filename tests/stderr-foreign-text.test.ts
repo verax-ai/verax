@@ -337,6 +337,11 @@ function closeOf(src: string, open: number): number {
       while (i < src.length && src[i] !== "\n") i += 1;
       continue;
     }
+    if (ch === "/" && src[i + 1] === "*") {
+      const end = src.indexOf("*/", i + 2);
+      i = end < 0 ? src.length : end + 2;
+      continue;
+    }
     if (ch in pairs) stack.push(pairs[ch]!);
     else if (ch === stack[stack.length - 1]) stack.pop();
     i += 1;
@@ -432,5 +437,10 @@ describe("stderr writes in the serve process escape what they did not write", ()
     assert.deepEqual(unescapedParts("`${terminalText(x) + y}\\n`", []), ["${terminalText(x) + y}"]);
     assert.deepEqual(unescapedParts("\n      \"fixed text\\n\",\n    ", []), []);
     assert.deepEqual(unescapedParts("a ? b : `${terminalText(b)}\\n`", []), ["a ? b : `${terminalText(b)}\\n`"]);
+    // A parenthesis inside a block comment does not end the argument early.
+    const src = "process.stderr.write(raw /* ) */);";
+    const open = src.indexOf("(");
+    assert.equal(src.slice(open + 1, closeOf(src, open) - 1), "raw /* ) */");
+    assert.deepEqual(unescapedParts("raw /* ) */", []), ["raw /* ) */"]);
   });
 });
