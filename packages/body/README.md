@@ -58,10 +58,11 @@ Point an MCP client at `http://127.0.0.1:8787/mcp` with a Bearer token from
 your issuer. The tools the body offers are `memory.get`, `memory.put`,
 `audit.explain`, `message.read`, `message.send` and `spend`. The policy
 decides which of them a token's scopes may call, and a call can be held
-until an operator on this machine approves it.
+until an operator approves it, on this machine or, with the operator door
+set up, from another device with a passkey.
 
-Other commands: `install`, `uninstall`, `approve`, `operator`, `reconcile`,
-`witness`, `halt`, `unlock`, `desktop`. `verax install` and an elevated
+Other commands: `install`, `uninstall`, `approve`, `operator`, `downstream`,
+`reconcile`, `witness`, `halt`, `unlock`, `desktop`. `verax install` and an elevated
 `verax approve` need an administrator-owned copy of this program (Windows,
 Administrator PowerShell: `npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body`;
 Linux and macOS: `sudo npm install -g --prefix /opt/verax-cli @verax-ai/body`). That

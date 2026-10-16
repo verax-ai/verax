@@ -10,8 +10,9 @@ Verax is an MCP server that sits between an agent and its tools. Every tool
 call passes a policy gate and leaves a signed decision record before anything
 runs; every call that ran leaves an effect row that is reconciled against its
 record afterwards. A refusal is recorded the same way as an approval. A call
-the policy will not decide alone is held until an operator on this machine
-approves it. The ledger stays on the machine the body runs on, and the body
+the policy will not decide alone is held until an operator approves it, at
+this machine or, with the operator door set up, from another device with a
+passkey. The ledger stays on the machine the body runs on, and the body
 opens only when its authorization is configured: there is no default token.
 
 **Break it, and we pay.** USD 100 for each valid report of a way for the
@@ -109,7 +110,7 @@ https://github.com/user-attachments/assets/0b8aade4-a970-4b63-835e-4837e2a39cc9
 
 ## Connect your agent
 
-Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows an elevated CLI `approve` is the way to approve until the passkey panel is released. It has to be run from a separate administrator account, not this account elevated, because a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`). Start that other account's PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
+Elevated `verax install` and `verax approve` run a copy of this program that only an administrator can change; a copy your account can change is refused. On Windows a passkey through the operator door (`verax install --operator-door <origin>`) approves without an elevated shell; without the door, an elevated CLI `approve` is the way. It has to be run from a separate administrator account, not this account elevated, because a same-user elevated shell inherits that user's environment variables and PowerShell profile, which the agent can set. Clear `NODE_OPTIONS` in that shell (`Remove-Item Env:NODE_OPTIONS`). Start that other account's PowerShell with `-NoProfile` (an elevated shell otherwise runs your `$PROFILE`, which your account can change):
 
 ```powershell
 npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body
@@ -125,7 +126,7 @@ sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js in
 
 The command installs `@verax-ai/body` from the npm registry into an administrator-owned directory after signature checks, runs that Node, and keeps the ledger under a service account. On Windows the agent token is `%ProgramData%\Verax\agent-token\<your SID>\agent.token` (Administrators and SYSTEM have full control, your SID can read the file and read-execute the directory). On Linux and macOS a child process running as your uid writes `~/.verax/agent.token` from its stdin. It prints the Claude Code line that reads that file. Port 8787 taken? `verax install --port 8797`. Node must be the all-users installer from nodejs.org on Windows; a Node your account can rewrite is refused. On macOS the remedy extracts the official tarball as root into `/opt/verax-node` (root:wheel, not group- or other-writable). On Linux the same place, `/opt/verax-node` (root:root), which SELinux labels `usr_t`. On SELinux systems install requires Node labelled `bin_t` or `usr_t` (distribution Node is; a tarball under `/usr/local/lib` is not) and prints the one-line fix. The service then runs in `unconfined_service_t`. The service account and the file permissions are the boundary.
 
-Approve a held call with `verax approve`. The passkey panel (`verax desktop`) is not released yet. On Windows run the approve from a separate administrator account, not this account elevated, in a `-NoProfile` PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
+Approve a held call with `verax approve`, or, when the install named an origin with `--operator-door`, from another device through the operator door with a passkey enrolled by a pairing code from `verax operator enroll`. The passkey panel (`verax desktop`) is not released yet. On Windows run the approve from a separate administrator account, not this account elevated, in a `-NoProfile` PowerShell after `Remove-Item Env:NODE_OPTIONS`: `& "$env:ProgramFiles\verax-cli\verax.cmd" approve`. Linux and macOS, naming the root-owned Node: `sudo /usr/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve` or `sudo /opt/verax-node/<dir>/bin/node /opt/verax-cli/lib/node_modules/@verax-ai/body/dist/cli.js approve`. Uninstall the same way, with `uninstall` in place of `approve`.
 
 To try it in your own user, which is not a boundary:
 
@@ -138,7 +139,7 @@ verax serve --env-file ~/.verax/verax.env
 claude mcp add --transport http verax http://127.0.0.1:8787/mcp --header "Authorization: Bearer $(cat ~/.verax/local-issuer/agent.token)"
 ```
 
-The token can read and write memory through the gate; it cannot approve. The shipped policy refuses `spend` until you add a rule for it; a call your policy holds waits for `verax approve` on this machine. See docs/THREAT_MODEL.md.
+The token can read and write memory through the gate; it cannot approve. The shipped policy refuses `spend` until you add a rule for it; a call your policy holds waits for `verax approve` on this machine, or for an approval through the operator door when one is set up. See docs/THREAT_MODEL.md.
 
 ### With Conarium
 
@@ -196,7 +197,7 @@ Not shown here: a real database (these are Conarium's sample rows); statement re
 
 | Package | What it is |
 | --- | --- |
-| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `reconcile`, `witness`, `halt`, `resume`, `unlock` (`desktop` is not released yet). |
+| [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) | The MCP server and the `verax` command: serve, `install`, `uninstall`, `init`, `doctor`, `approve`, `operator`, `downstream`, `reconcile`, `witness`, `halt`, `resume`, `unlock` (`desktop` is not released yet). |
 | [`@verax-ai/proxy`](https://www.npmjs.com/package/@verax-ai/proxy) | The decision proxy the body is built on: policy, signed records, ledger, `explain`, reconcile. |
 | [`@verax-ai/inventory`](https://www.npmjs.com/package/@verax-ai/inventory) | The roster document a body serves and the panel lists, with its strict parser. |
 
@@ -312,9 +313,12 @@ with what it does not do and the test that fails when it stops being
 true.
 
 - Approval: a held call is approved with `verax approve` on this
-  machine. On Windows that runs from a separate administrator account. The
-  passkey panel (`verax operator`, `verax desktop`) is not released yet. The
-  approver's operator id is bound into the signed record by hash.
+  machine, or through the operator door from another device with a passkey
+  and an assertion for that request; the door is off unless an origin is
+  named for it. On Windows the CLI approve runs from a separate
+  administrator account. The passkey panel behind `verax desktop` is not
+  released yet. The approver's operator id is bound into the signed record
+  by hash.
 - Witness: `verax witness` signs effect rows from a second process and writes
   durable checkpoints; without it the witness class stays `self`.
 - Halt and revoke: `verax halt` turns every further call into a signed deny;
@@ -331,12 +335,12 @@ true.
 - Doctor and heartbeat: `verax doctor` names what is missing or stale before
   the first call finds out.
 
-### Watch for silence (unreleased tree)
+### Watch for silence
 
 The running body pulses even while idle (10 s by default;
 `VERAX_HEARTBEAT_EVERY_MS`, minimum 1,000 ms). Start rows in `starts.jsonl`
 record gaps from the previous beat; `verax verify <stateDir>` summarizes
-them offline. Start rows are unsigned in v1.
+them offline. Since 0.5.0 start rows are signed by the record key.
 
 ```sh
 verax watch ./verax-state --max-silence 30s
