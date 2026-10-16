@@ -375,5 +375,21 @@ async function dispatchCli(
 }
 
 if (isCliEntry()) {
-  process.exit(await runCli(process.argv.slice(2)));
+  try {
+    process.exit(await runCli(process.argv.slice(2)));
+  } catch (err) {
+    // Replaces Node's printer, which would write the path raw and a source excerpt.
+    const name = err instanceof Error ? err.name : "Error";
+    const message = err instanceof Error ? err.message : String(err);
+    process.stderr.write(`${terminalText(`${name}: ${message}`)}\n`);
+    const stack = err instanceof Error ? err.stack : undefined;
+    if (stack !== undefined) {
+      for (const line of stack.split("\n")) {
+        if (line.startsWith("    at ")) process.stderr.write(`${terminalText(line)}\n`);
+      }
+    }
+    // Not process.exit: on Windows that races a handle already closing and
+    // aborts. Set the code and return; the loop drains and the process ends.
+    process.exitCode = 1;
+  }
 }

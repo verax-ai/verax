@@ -335,7 +335,14 @@ async function attachDownstream(
   bodyPublicKeyPems: readonly string[],
 ): Promise<{ sessions: DownstreamSession[]; specs: DownstreamSpec[] }> {
   if (file === null || file.trim() === "") return { sessions: [], specs: [] };
-  const specs = parseDownstreamDocument(readFileSync(file, "utf8"), bodyPublicKeyPems);
+  let text: string;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    // The path stays raw. main() prints a downstream- refusal as one escaped line.
+    throw new Error(`downstream-document-unreadable:${file}`);
+  }
+  const specs = parseDownstreamDocument(text, bodyPublicKeyPems);
   const sessions: DownstreamSession[] = [];
   for (const spec of specs) {
     try {

@@ -208,7 +208,9 @@ export function renderVerify(
   }
   lines.push("");
   lines.push(r.ok ? "VERIFIED" : "NOT VERIFIED");
-  return lines.join("\n");
+  // Escape before the join. verify reads a ledger someone else wrote, and a
+  // line break in that text must not become a line of its own.
+  return lines.map((line) => terminalText(line)).join("\n");
 }
 
 export async function runVerify(
@@ -380,8 +382,8 @@ export async function runVerify(
       requireSigned: requireSignedStarts,
     });
     const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
-    // Escape only the printed form: verify reads a ledger someone else wrote.
-    out(terminalLines(json ? JSON.stringify(failedReport, null, 2) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts)));
+    // Human lines are escaped in renderVerify. JSON keeps the breaks it wrote.
+    out(json ? terminalLines(JSON.stringify(failedReport, null, 2)) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
     return EX_VERIFY_FAILED;
   }
   let approval: ApprovalSignatureReport;
@@ -423,7 +425,7 @@ export async function runVerify(
     result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
   }
   const reported = { ...result, approvalSignatures: approval, controlSignatures: control, starts };
-  // Escape only the printed form: verify reads a ledger someone else wrote.
-  out(terminalLines(json ? JSON.stringify(reported, null, 2) : renderVerify(reported, approval, control, reported.starts)));
+  // Human lines are escaped in renderVerify. JSON keeps the breaks it wrote.
+  out(json ? terminalLines(JSON.stringify(reported, null, 2)) : renderVerify(reported, approval, control, reported.starts));
   return reported.ok ? 0 : EX_VERIFY_FAILED;
 }
