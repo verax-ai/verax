@@ -34,6 +34,8 @@ const ESCAPED = ["\\u001b", "\\u0007", "\\u009b", "\\u202e", "\\u0338", "\\ufe0f
 const DRAWS_NOTHING = new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "u");
 
 const terminalText = (proxy as Record<string, unknown>).terminalText as ((text: string) => string) | undefined;
+const terminalLines = (proxy as Record<string, unknown>).terminalLines as ((text: string) => string) | undefined;
+const WRAPPERS = ["terminalText(", "terminalLines("];
 
 const servers: HttpServer[] = [];
 const dirs: string[] = [];
@@ -91,6 +93,15 @@ describe("terminalText (@verax-ai/proxy)", () => {
       assert.equal(DRAWS_NOTHING.test(out), false, `a code point of the class is left in block U+${hex(start)}`);
       assert.equal(terminalText!(out), out, `not stable on its own output in block U+${hex(start)}`);
     }
+  });
+});
+
+describe("terminalLines (@verax-ai/proxy)", () => {
+  it("keeps the line breaks a message the body wrote on purpose has, and escapes everything else", () => {
+    assert.equal(typeof terminalLines, "function", "terminalLines is not exported from @verax-ai/proxy");
+    assert.equal(terminalLines!(`refusing: x\nfix it${cp(0x1b)}[2J${cp(0x0d)}\n${cp(0x202e)}y`), "refusing: x\nfix it\\u001b[2J\\u000d\n\\u202ey");
+    assert.equal(terminalLines!("one line"), "one line");
+    assert.equal(terminalLines!("ends\n"), "ends\n");
   });
 });
 
@@ -284,8 +295,9 @@ function unescapedParts(arg: string, allowedValues: readonly string[]): string[]
   let rest = "";
   let i = 0;
   while (i < arg.length) {
-    if (arg.startsWith("terminalText(", i)) {
-      i = closeOf(arg, i + "terminalText".length);
+    const wrapper = WRAPPERS.find((w) => arg.startsWith(w, i));
+    if (wrapper !== undefined) {
+      i = closeOf(arg, i + wrapper.length - 1);
       rest += " ";
       continue;
     }
@@ -305,7 +317,8 @@ function unescapedParts(arg: string, allowedValues: readonly string[]): string[]
         if (arg[j] === "$" && arg[j + 1] === "{") {
           const close = closeOf(arg, j + 1);
           const expr = arg.slice(j + 2, close - 1).trim();
-          const wrapped = expr.startsWith("terminalText(") && closeOf(expr, "terminalText".length) === expr.length;
+          const wrapper = WRAPPERS.find((w) => expr.startsWith(w));
+          const wrapped = wrapper !== undefined && closeOf(expr, wrapper.length - 1) === expr.length;
           if (!wrapped && !allowedValues.includes(expr)) bad.push(`\${${expr}}`);
           j = close;
           continue;
@@ -347,6 +360,8 @@ describe("stderr writes in the serve process escape what they did not write", ()
     assert.deepEqual(unescapedParts("message", []), ["message"]);
     assert.deepEqual(unescapedParts("`a ${terminalText(x)} ${terminalText(y)}\\n`", []), []);
     assert.deepEqual(unescapedParts("terminalText(x) + \"\\n\"", []), []);
+    assert.deepEqual(unescapedParts("`${terminalLines(refusal.replace(/\\n+$/, \"\"))}\\n`", []), []);
+    assert.deepEqual(unescapedParts("`${terminalTextual(x)}`", []), ["${terminalTextual(x)}"]);
     assert.deepEqual(unescapedParts("`${terminalText(x) + y}\\n`", []), ["${terminalText(x) + y}"]);
     assert.deepEqual(unescapedParts("\n      \"fixed text\\n\",\n    ", []), []);
     assert.deepEqual(unescapedParts("a ? b : `${terminalText(b)}\\n`", []), ["a ? b : `${terminalText(b)}\\n`"]);
