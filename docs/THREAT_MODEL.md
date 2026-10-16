@@ -108,7 +108,7 @@ runs `verax operator remove`, the passkey's own user verification is what
 stands between a finder and an approval. After the removal the body refuses
 that passkey, and `verax verify` does not count an approval or a halt or
 resume signed with it whose record comes after the removal record in the
-ledger.
+ledger, while no record undoes the removal.
 
 ## the ledger can be silenced
 
