@@ -366,21 +366,32 @@ export function readStartSummary(
   return result;
 }
 
-export function renderStarts(summary: StartSummary): string {
+/**
+ * One printed line of the starts block. A newline inside a prefix stays in
+ * that line, so a reader that escapes each line cannot be given a second one.
+ */
+export function startLines(summary: StartSummary): string[] {
   const signedPart =
     summary.signed === 0
       ? "unsigned (not verified)"
       : summary.startKey === "none"
         ? `${summary.signed} signed, not checked (no record key)${summary.unsigned ? "; older rows unsigned" : ""}`
         : `${summary.signedVerified} of ${summary.signed} signed verify under the ${summary.startKey === "pinned" ? "pinned" : "in-ledger"} record key${summary.unsigned ? "; older rows unsigned" : ""}`;
-  const definitions = summary.downstream.flatMap((listed) =>
-    listed.map(
-      (entry) =>
+  const lines = [
+    `starts        ${summary.count}; largest gap ${summary.largestGapMs === null ? "none" : `${summary.largestGapMs} ms`}; previous beat missing at ${summary.missingPreviousBeat.join(", ") || "none"}; ${signedPart}`,
+  ];
+  for (const listed of summary.downstream) {
+    for (const entry of listed) {
+      lines.push(
         `downstream    ${entry.prefix} ${entry.manifest === null ? "unpinned" : `sha256:${entry.manifest}`}`,
-    ),
-  );
-  return `starts        ${summary.count}; largest gap ${summary.largestGapMs === null ? "none" : `${summary.largestGapMs} ms`}; previous beat missing at ${summary.missingPreviousBeat.join(", ") || "none"}; ${signedPart}`
-    + definitions.map((line) => `\n${line}`).join("")
-    + summary.problems.map((p) => `\nproblem       ${p}`).join("")
-    + summary.warnings.map((warning) => `\nwarning       ${warning}`).join("");
+      );
+    }
+  }
+  for (const problem of summary.problems) lines.push(`problem       ${problem}`);
+  for (const warning of summary.warnings) lines.push(`warning       ${warning}`);
+  return lines;
+}
+
+export function renderStarts(summary: StartSummary): string {
+  return startLines(summary).join("\n");
 }

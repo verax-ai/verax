@@ -22,7 +22,7 @@ import { terminalLines, terminalText, verifyLedger, type VerifyResult } from "@v
 import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
 import { verifyControlSignatures, type ControlSignatureReport } from "./control-signature.ts";
 import { directoryAccess, unreadableSentence } from "./install.ts";
-import { readStartSummary, renderStarts, type StartSummary } from "./heartbeat.ts";
+import { readStartSummary, startLines, type StartSummary } from "./heartbeat.ts";
 
 export const EX_VERIFY_FAILED = 1;
 
@@ -199,7 +199,7 @@ export function renderVerify(
   lines.push(`              ${approval.trustNote}`);
   // Halt and resume signatures are checked under the same operator key.
   lines.push(control.line);
-  if (starts) lines.push(renderStarts(starts));
+  if (starts) lines.push(...startLines(starts));
   if (r.problems.length > 0) {
     lines.push("");
     lines.push("problems:");

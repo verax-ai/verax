@@ -504,8 +504,8 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     writeOut(`records  ${counted.decisions}\n`);
     writeOut(`effects  ${counted.effects}\n`);
     if (keep) {
-      writeOut(`ledger   ${stateDir}\n`);
-      writeOut(`verax verify ${stateDir}\n`);
+      writeOut(`ledger   ${terminalText(stateDir)}\n`);
+      writeOut(`verax verify ${terminalText(stateDir)}\n`);
     } else {
       writeOut("ledger   removed on exit (run with --keep to keep it and check it with verax verify)\n");
     }
