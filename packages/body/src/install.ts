@@ -2270,7 +2270,9 @@ export function successText(
   ].join("\n");
   const approve =
     platform === "win32"
-      ? 'Approve held calls with a passkey through the operator door when the install named an origin with --operator-door; without it, an elevated CLI approve from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
+      ? info.operatorDoor
+        ? 'Approve held calls with a passkey through the operator door (below); at the machine, an elevated CLI approve from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
+        : 'Approve held calls with an elevated CLI approve from a separate administrator account, not this account elevated, because that shell inherits environment variables and the PowerShell profile: & "$env:ProgramFiles\\verax-cli\\verax.cmd" approve'
       : `Approve held calls from the root-owned Node: ${posixRootOwnedCommand(platform, "approve")}`;
   const uninstall =
     platform === "win32"
