@@ -37,6 +37,12 @@ function errorText(err: unknown): string {
  * every space separator except U+0020), are written as `\uXXXX` so a child
  * cannot hide text or drive the terminal. A supplementary-plane code point
  * is two escapes, one per UTF-16 unit. The entry itself is not shortened.
+ *
+ * A written escape and the character it names must not look the same. A real
+ * backslash is written as two characters first, then the class is escaped:
+ * the same rule as `plain()` on the door page. A JSON line has already
+ * doubled every backslash, so it uses `escapeVisible` alone; doubling it
+ * again would change the value. Every other line uses `escapeLine`.
  */
 function escapeVisible(text: string): string {
   return text.replace(new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "gu"), (ch) => {
@@ -47,6 +53,10 @@ function escapeVisible(text: string): string {
     const low = 0xdc00 + (rest & 0x3ff);
     return `\\u${high.toString(16).padStart(4, "0")}\\u${low.toString(16).padStart(4, "0")}`;
   });
+}
+
+function escapeLine(text: string): string {
+  return escapeVisible(text.replace(/\\/g, "\\\\"));
 }
 
 export function renderToolEntry(entry: unknown): string {
@@ -100,7 +110,7 @@ function showDifference(
   if (spec.pins === undefined) return;
   const digest = PINS_RE.exec(spec.pins)?.[1];
   if (digest === undefined) {
-    say(out, escapeVisible(`pins ${spec.pins} is not a digest`));
+    say(out, escapeLine(`pins ${spec.pins} is not a digest`));
     return;
   }
   const path = join(docDir, "definitions", `${digest}.json`);
@@ -108,37 +118,37 @@ function showDifference(
   try {
     bytes = readFileSync(path);
   } catch (err) {
-    say(out, escapeVisible(`named manifest sha256:${digest} could not be read: ${errorText(err)}`));
+    say(out, escapeLine(`named manifest sha256:${digest} could not be read: ${errorText(err)}`));
     return;
   }
   if (createHash("sha256").update(bytes).digest("hex") !== digest) {
-    say(out, escapeVisible(`named manifest sha256:${digest} does not hash to its name`));
+    say(out, escapeLine(`named manifest sha256:${digest} does not hash to its name`));
     return;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(bytes.toString("utf8"));
   } catch {
-    say(out, escapeVisible(`named manifest sha256:${digest} is not json`));
+    say(out, escapeLine(`named manifest sha256:${digest} is not json`));
     return;
   }
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
-    say(out, escapeVisible(`named manifest sha256:${digest} is not an object`));
+    say(out, escapeLine(`named manifest sha256:${digest} is not an object`));
     return;
   }
   const rec = parsed as { prefix?: unknown; selected?: unknown; tools?: unknown };
   if (rec.prefix !== spec.prefix) {
-    say(out, escapeVisible(`manifest prefix differs from ${spec.prefix}`));
+    say(out, escapeLine(`manifest prefix differs from ${spec.prefix}`));
   }
   try {
     if (canonical(rec.selected ?? null) !== canonical(spec.tools ?? null)) {
-      say(out, escapeVisible("manifest selection differs from the document"));
+      say(out, escapeLine("manifest selection differs from the document"));
     }
   } catch {
-    say(out, escapeVisible("manifest selection could not be compared"));
+    say(out, escapeLine("manifest selection could not be compared"));
   }
   if (rec.tools === null || typeof rec.tools !== "object" || Array.isArray(rec.tools)) {
-    say(out, escapeVisible("manifest tools are not an object"));
+    say(out, escapeLine("manifest tools are not an object"));
     return;
   }
   const previous = rec.tools as Record<string, unknown>;
@@ -149,22 +159,22 @@ function showDifference(
     const after = Object.hasOwn(tools, name) ? tools[name] : undefined;
     if (before === undefined) {
       differed = true;
-      say(out, escapeVisible(`added ${name}`));
+      say(out, escapeLine(`added ${name}`));
       continue;
     }
     if (after === undefined) {
       differed = true;
-      say(out, escapeVisible(`removed ${name}`));
+      say(out, escapeLine(`removed ${name}`));
       say(out, renderToolEntry(before));
       continue;
     }
     if (sha256Canonical(before) !== sha256Canonical(after)) {
       differed = true;
-      say(out, escapeVisible(`changed ${name}`));
+      say(out, escapeLine(`changed ${name}`));
       say(out, renderToolEntry(before));
     }
   }
-  if (!differed) say(out, escapeVisible(`listed definitions match sha256:${digest}`));
+  if (!differed) say(out, escapeLine(`listed definitions match sha256:${digest}`));
 }
 
 function writeManifest(docDir: string, manifest: unknown): { ok: true; digest: string } | { ok: false; reason: string } {
@@ -205,19 +215,19 @@ export async function runDownstreamPin(
   try {
     specs = parseDownstreamDocument(readFileSync(input.file, "utf8"));
   } catch (err) {
-    say(io.out, escapeVisible(errorText(err)));
+    say(io.out, escapeLine(errorText(err)));
     return 1;
   }
   const spec = specs.find((item) => item.prefix === input.prefix);
   if (spec === undefined) {
-    say(io.out, escapeVisible(`no downstream child with prefix ${input.prefix}`));
+    say(io.out, escapeLine(`no downstream child with prefix ${input.prefix}`));
     return 1;
   }
   if (spec.command !== undefined) {
-    say(io.out, escapeVisible(`stdio child ${spec.prefix} will run as ${runningAccount()}`));
+    say(io.out, escapeLine(`stdio child ${spec.prefix} will run as ${runningAccount()}`));
     const refusal = stdioElevationRefusal(spec.prefix);
     if (refusal !== null) {
-      say(io.out, escapeVisible(refusal));
+      say(io.out, escapeLine(refusal));
       return 1;
     }
   }
@@ -230,14 +240,14 @@ export async function runDownstreamPin(
     const stderr = (err as { stderr?: unknown }).stderr;
     if (typeof stderr === "string" && stderr !== "") {
       say(io.out, "child stderr:");
-      say(io.out, escapeVisible(stderr));
+      say(io.out, escapeLine(stderr));
     }
-    say(io.out, escapeVisible(errorText(err)));
+    say(io.out, escapeLine(errorText(err)));
     return 1;
   }
   if (listed.stderr !== "") {
     say(io.out, "child stderr:");
-    say(io.out, escapeVisible(listed.stderr));
+    say(io.out, escapeLine(listed.stderr));
   }
   const tools = listed.tools;
   for (const name of Object.keys(tools).sort()) say(io.out, renderToolEntry(tools[name]));
@@ -246,7 +256,7 @@ export async function runDownstreamPin(
   try {
     answer = await io.ask();
   } catch (err) {
-    say(io.out, escapeVisible(errorText(err)));
+    say(io.out, escapeLine(errorText(err)));
     return 1;
   }
   if (answer !== "yes") return 1;
@@ -255,11 +265,11 @@ export async function runDownstreamPin(
   try {
     written = writeManifest(dirname(input.file), manifest);
   } catch (err) {
-    say(io.out, escapeVisible(errorText(err)));
+    say(io.out, escapeLine(errorText(err)));
     return 1;
   }
   if (!written.ok) {
-    say(io.out, escapeVisible(written.reason));
+    say(io.out, escapeLine(written.reason));
     return 1;
   }
   say(io.out, `"pins": "sha256:${written.digest}"`);
