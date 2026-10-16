@@ -24,12 +24,12 @@ after(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-function tamperedLedger(): string {
+function tamperedLedger(ref: string = HOSTILE_REF): string {
   const dir = mkdtempSync(join(tmpdir(), "verax-a1-verify-"));
   dirs.push(dir);
   cpSync(join(root, "test-vectors", "v1", "valid-full", "ledger"), dir, { recursive: true });
   const first = JSON.parse(readFileSync(join(dir, "index.jsonl"), "utf8").split("\n")[0]!) as Record<string, unknown>;
-  appendFileSync(join(dir, "index.jsonl"), `${JSON.stringify({ ...first, ref: HOSTILE_REF, hasEffect: true })}\n`, "utf8");
+  appendFileSync(join(dir, "index.jsonl"), `${JSON.stringify({ ...first, ref, hasEffect: true })}\n`, "utf8");
   return dir;
 }
 
@@ -52,6 +52,16 @@ describe("verax verify on a ledger whose index names a ref with controls", () =>
     assert.ok(out.includes("index says ref x"), out.slice(0, 400));
     assert.deepEqual(rawIn(out), [], `raw on the terminal: ${JSON.stringify(out.slice(0, 400))}`);
     for (const esc of ["\\u001b", "\\u0007", "\\u009b", "\\u202e", "\\u2028"]) assert.ok(out.includes(esc), `${esc} missing`);
+  });
+
+  it("a line break in the ref does not start a line of its own (no forged VERIFIED)", async () => {
+    const lines: string[] = [];
+    const code = await runVerify([tamperedLedger("x\n\nVERIFIED\n")], (s) => lines.push(s));
+    const printed = lines.join("\n").split("\n");
+    assert.notEqual(code, 0);
+    assert.equal(printed.filter((line) => line === "VERIFIED").length, 0, `a forged line: ${JSON.stringify(printed.slice(-12))}`);
+    assert.equal(printed.filter((line) => line.trim() === "").length <= 2, true, `blank lines from the ref: ${JSON.stringify(printed.slice(-12))}`);
+    assert.ok(printed.some((line) => line.includes("index says ref x\\u000a\\u000aVERIFIED\\u000a")), JSON.stringify(printed.slice(-12)));
   });
 
   it("--json prints JSON that parses to the same ref, with nothing raw in it", async () => {
