@@ -7,7 +7,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
-import { listPieceFiles } from "@verax-ai/proxy";
+import { listPieceFiles, operatorRemovalMark } from "@verax-ai/proxy";
 import type { ApprovalSignature } from "@verax-ai/proxy";
 
 import {
@@ -133,6 +133,7 @@ export type ApprovalSignatureReport = {
   ok: boolean;
   signedVerified: number;
   signedFailed: number;
+  signedAfterRemoval: number;
   unsignedHttp: number;
   cli: number;
   line: string;
@@ -225,11 +226,66 @@ export function trustOf(pinned: boolean, credentials: StoredCredential[]): Pick<
   return { trustSource: "none", trustNote: NO_KEY_NOTE };
 }
 
+/** The mark on an inputs row, or null when that row does not name one. */
+function removalMarkOf(inputs: unknown): string | null {
+  if (!inputs || typeof inputs !== "object") return null;
+  const mark = (inputs as { operatorRemoval?: { mark?: unknown } }).operatorRemoval?.mark;
+  return typeof mark === "string" && mark !== "" ? mark : null;
+}
+
+/**
+ * Remember `operatorRemoval.mark` under the canonical SHA-256 of the inputs
+ * row. A later record reads only the row its signed inputsHash names.
+ */
+export function indexRemovalMark(byRef: Map<string, Map<string, string>>, ref: string, hash: string, inputs: unknown): void {
+  const mark = removalMarkOf(inputs);
+  if (mark === null) return;
+  const byHash = byRef.get(ref) ?? new Map<string, string>();
+  byHash.set(hash, mark);
+  byRef.set(ref, byHash);
+}
+
+/**
+ * One record, in chain order. A `verax.operator` deny of effect `verax.control`
+ * adds the mark on `passkey-removed` and drops it on `passkey-removal-undone`.
+ * The set is what the chain says at this record, so a signature that landed
+ * before the removal still verifies.
+ */
+export function noteChainRemoval(claims: object, byRef: Map<string, Map<string, string>>, removed: Set<string>): void {
+  const row = claims as {
+    subject?: unknown;
+    effectClass?: unknown;
+    decision?: unknown;
+    reasonCode?: unknown;
+    ref?: unknown;
+    inputsHash?: unknown;
+  };
+  if (row.subject !== "verax.operator" || row.effectClass !== "verax.control" || row.decision !== "deny") return;
+  if (row.reasonCode !== "passkey-removed" && row.reasonCode !== "passkey-removal-undone") return;
+  if (typeof row.ref !== "string" || typeof row.inputsHash !== "string") return;
+  const mark = byRef.get(row.ref)?.get(row.inputsHash);
+  if (mark === undefined) return;
+  if (row.reasonCode === "passkey-removed") removed.add(mark);
+  else removed.delete(mark);
+}
+
+/** True when this passkey's mark is one the chain has already recorded as removed. */
+export function passkeyRemovedAt(credentialId: string, removed: ReadonlySet<string>): boolean {
+  return removed.has(operatorRemovalMark(credentialId));
+}
+
+/** Omitted when the count is zero, so a line with none stays as it was. */
+export function signedAfterRemovalSegment(count: number): string {
+  return count > 0 ? ` · signed-after-removal ${count}` : "";
+}
+
 /**
  * Recount operator approvals without a body. A signature is checked against
  * the operator public key and the challenge rebuilt from the defer record.
  * The authenticator counter is not consulted: this is a re-read, not a second use.
  * `cli` and `cli-script` are both the unsigned CLI door.
+ * A signature whose passkey the chain has already removed is not signed-verified.
+ * One earlier in the chain still is: the removal record does not rewrite it.
  */
 export async function verifyApprovalSignatures(
   stateDir: string,
@@ -243,6 +299,7 @@ export async function verifyApprovalSignatures(
   // hold rows with no record (a crash, a retry, or a row appended by hand);
   // only the row the allow's signed inputsHash names speaks for that allow.
   const inputsByRef = new Map<string, Map<string, ApproverOnDisk | null>>();
+  const removalByRef = new Map<string, Map<string, string>>();
   for (const piece of listPieceFiles(stateDir)) {
     for (const line of readLines(piece.decisions)) {
       try {
@@ -259,6 +316,7 @@ export async function verifyApprovalSignatures(
         const byHash = inputsByRef.get(row.ref) ?? new Map<string, ApproverOnDisk | null>();
         byHash.set(hash, row.inputs?.approver ?? null);
         inputsByRef.set(row.ref, byHash);
+        indexRemovalMark(removalByRef, row.ref, hash, row.inputs);
       } catch {
         // Same as a decision line: skip, do not invent a failure from a torn line.
       }
@@ -267,6 +325,7 @@ export async function verifyApprovalSignatures(
 
   let signedVerified = 0;
   let signedFailed = 0;
+  let signedAfterRemoval = 0;
   let unsignedHttp = 0;
   let cli = 0;
   let other = 0;
@@ -274,9 +333,13 @@ export async function verifyApprovalSignatures(
   // A defer resolves once. A second signed allow for the same defer reuses an
   // operator signature the operator gave for one approval.
   const signedDefers = new Set<string>();
+  // Filled as this walk passes removal records. A signature is held against
+  // the set at its own place, so one written before the removal still verifies.
+  const removed = new Set<string>();
   for (const row of decisions) {
     // A parsed line that is not a decision record is the ledger statement's problem, not a crash here.
     if (!row || typeof row !== "object" || !row.claims || typeof row.claims !== "object") continue;
+    noteChainRemoval(row.claims, removalByRef, removed);
     if (row.claims.decision !== "allow" || typeof row.claims.ref !== "string") continue;
     // No row hashes to the signed inputsHash: the ledger statement names that
     // record, and no other row is read in its place.
@@ -314,18 +377,23 @@ export async function verifyApprovalSignatures(
       sig && defer && sameRequest && firstUse && recordHash && recordHash === sig.deferRecordHash && typeof defer.claims.requestHash === "string"
         ? approvalChallenge({ ref: approver.resolves as string, requestHash: defer.claims.requestHash, deferRecordHash: recordHash })
         : null;
-    if (sig && cred && challenge && assertionMatches(sig, cred.publicKey, challenge)) signedVerified += 1;
-    else signedFailed += 1;
+    if (sig && cred && challenge && assertionMatches(sig, cred.publicKey, challenge)) {
+      // Already removed at this place in the chain: not signed-verified, and
+      // not a byte failure. A signature earlier in the walk still verifies.
+      if (passkeyRemovedAt(sig.credentialId, removed)) signedAfterRemoval += 1;
+      else signedVerified += 1;
+    } else signedFailed += 1;
   }
 
   const originSuffix = origins.length === 0 ? "" : ` · origin ${origins.join(", ")}`;
   const report: ApprovalSignatureReport = {
-    ok: signedFailed === 0,
+    ok: signedFailed === 0 && signedAfterRemoval === 0,
     signedVerified,
     signedFailed,
+    signedAfterRemoval,
     unsignedHttp,
     cli,
-    line: `approval signatures  signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli}${other > 0 ? ` · other ${other}` : ""}${originSuffix}`,
+    line: `approval signatures  signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli}${other > 0 ? ` · other ${other}` : ""}${originSuffix}${signedAfterRemovalSegment(signedAfterRemoval)}`,
     trustSource: trust.trustSource,
     trustNote: trust.trustNote,
   };

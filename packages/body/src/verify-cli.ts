@@ -93,6 +93,7 @@ const APPROVAL_NOT_CHECKED: ApprovalSignatureReport = {
   ok: true,
   signedVerified: 0,
   signedFailed: 0,
+  signedAfterRemoval: 0,
   unsignedHttp: 0,
   cli: 0,
   line: "approval signatures  not checked",
@@ -104,6 +105,7 @@ const CONTROL_NOT_CHECKED: ControlSignatureReport = {
   ok: true,
   signedVerified: 0,
   signedFailed: 0,
+  signedAfterRemoval: 0,
   unsignedHttp: 0,
   cli: 0,
   file: 0,
@@ -401,6 +403,13 @@ export async function runVerify(
       problems: [...result.problems, `approval signatures: ${approval.signedFailed} did not verify`],
     };
   }
+  if (approval.signedAfterRemoval > 0) {
+    result = {
+      ...result,
+      ok: false,
+      problems: [...result.problems, `approval signatures: ${approval.signedAfterRemoval} signed after removal`],
+    };
+  }
   let control: ControlSignatureReport;
   try {
     control = await verifyControlSignatures(dir, credentialsFile ? { credentialsFile } : {});
@@ -414,6 +423,13 @@ export async function runVerify(
       ...result,
       ok: false,
       problems: [...result.problems, `control signatures: ${control.signedFailed} did not verify`],
+    };
+  }
+  if (control.signedAfterRemoval > 0) {
+    result = {
+      ...result,
+      ok: false,
+      problems: [...result.problems, `control signatures: ${control.signedAfterRemoval} signed after removal`],
     };
   }
   // Start rows are signed by the record key: the pinned one, else the one the records carry.

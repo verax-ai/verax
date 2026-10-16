@@ -15,7 +15,16 @@ import { canonical, type SignedDecisionRecord } from "@cedulon/core";
 import { listPieceFiles } from "@verax-ai/proxy";
 import type { ControlSignature } from "@verax-ai/proxy";
 
-import { asAssertion, assertionMatches, readLines, trustOf } from "./approval-signature.ts";
+import {
+  asAssertion,
+  assertionMatches,
+  indexRemovalMark,
+  noteChainRemoval,
+  passkeyRemovedAt,
+  readLines,
+  signedAfterRemovalSegment,
+  trustOf,
+} from "./approval-signature.ts";
 import { historyTail } from "./halt.ts";
 import {
   credentialsPath,
@@ -107,6 +116,7 @@ export type ControlSignatureReport = {
   ok: boolean;
   signedVerified: number;
   signedFailed: number;
+  signedAfterRemoval: number;
   unsignedHttp: number;
   cli: number;
   file: number;
@@ -139,6 +149,9 @@ function controlSignatureOf(value: unknown): ControlSignature | null {
  * just before its own (`null` for line 0), and verify under the operator key
  * over the challenge rebuilt from that and the record's subject. A challenge
  * counts once. The authenticator counter is not consulted.
+ * Removal marks advance in this same walk. They are not history lines:
+ * `prev` still names the history line before this record. A signature whose
+ * passkey is already in the set is not signed-verified; one earlier still is.
  */
 export async function verifyControlSignatures(
   stateDir: string,
@@ -149,6 +162,7 @@ export async function verifyControlSignatures(
   const trust = trustOf(pinned, credentials);
   const decisions: SignedDecisionRecord[] = [];
   const inputsByRef = new Map<string, Map<string, ControlOnDisk | null>>();
+  const removalByRef = new Map<string, Map<string, string>>();
   for (const piece of listPieceFiles(stateDir)) {
     for (const line of readLines(piece.decisions)) {
       try {
@@ -165,6 +179,7 @@ export async function verifyControlSignatures(
         const byHash = inputsByRef.get(row.ref) ?? new Map<string, ControlOnDisk | null>();
         byHash.set(hash, row.inputs?.control ?? null);
         inputsByRef.set(row.ref, byHash);
+        indexRemovalMark(removalByRef, row.ref, hash, row.inputs);
       } catch {
         // Same as a decision line.
       }
@@ -173,13 +188,18 @@ export async function verifyControlSignatures(
 
   let signedVerified = 0;
   let signedFailed = 0;
+  let signedAfterRemoval = 0;
   let unsignedHttp = 0;
   let cli = 0;
   let file = 0;
   const lineHashByLine = new Map<number, string>();
   const used = new Set<string>();
+  // Ledger order, not history-line order. A removal between two control
+  // records updates this set and leaves `lineHashByLine` where it was.
+  const removed = new Set<string>();
   for (const row of decisions) {
     if (!row || typeof row !== "object" || !row.claims || typeof row.claims !== "object") continue;
+    noteChainRemoval(row.claims, removalByRef, removed);
     const claims = row.claims;
     if (claims.effectClass !== "verax.control" || claims.decision !== "allow") continue;
     if (claims.subject !== "verax.halt" && claims.subject !== "verax.resume") continue;
@@ -203,20 +223,23 @@ export async function verifyControlSignatures(
       const firstUse = challenge !== null && !used.has(challenge);
       if (challenge !== null) used.add(challenge);
       const cred = sig ? credentials.find((c) => c.id === sig.credentialId && c.sub === sig.sub) : undefined;
-      if (sig && cred && challenge && firstUse && assertionMatches(sig, cred.publicKey, challenge)) signedVerified += 1;
-      else signedFailed += 1;
+      if (sig && cred && challenge && firstUse && assertionMatches(sig, cred.publicKey, challenge)) {
+        if (passkeyRemovedAt(sig.credentialId, removed)) signedAfterRemoval += 1;
+        else signedVerified += 1;
+      } else signedFailed += 1;
     }
     if (at >= 0 && typeof control.lineHash === "string") lineHashByLine.set(at, control.lineHash);
   }
 
   return {
-    ok: signedFailed === 0,
+    ok: signedFailed === 0 && signedAfterRemoval === 0,
     signedVerified,
     signedFailed,
+    signedAfterRemoval,
     unsignedHttp,
     cli,
     file,
-    line: `control signatures   signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli} · file ${file}`,
+    line: `control signatures   signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli} · file ${file}${signedAfterRemovalSegment(signedAfterRemoval)}`,
     trustSource: trust.trustSource,
     trustNote: trust.trustNote,
   };

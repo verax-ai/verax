@@ -182,6 +182,16 @@ export async function handleApprove(ctx: OperatorRequest): Promise<void> {
   }
   const deferRecordHash = decisionRecordHash(deferRecord);
   // The challenge is rebuilt from the defer on disk, not from anything the client sent.
+  // A removal the command wrote is only a mark on disk until this copies it
+  // into the ledger. The copy has to land before the signature check, or the
+  // allow is appended in the window with no removal record ahead of it. A
+  // sync miss is one stderr line and is not turned into a 500.
+  try {
+    await services.proxy.syncControlRecords();
+  } catch (err) {
+    const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
+    process.stderr.write(`verax-proxy: control sync failed: ${terminalText(message)}\n`);
+  }
   const gated = await gateApprovalSignature({
     stateDir,
     env: ctx.env,
