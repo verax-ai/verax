@@ -1,10 +1,21 @@
 import { type AddressInfo } from "node:net";
+import { setTimeout } from "node:timers";
 import { terminalText } from "@verax-ai/proxy";
 import { JwksFileError } from "./auth.ts";
 import { EX_CONFIG, loadConfig, overlayInventoryArg } from "./config.ts";
 import { watchDesktopParent } from "./desktop-parent.ts";
 import { KeyAlgorithmError, KeysPartialError } from "./keys.ts";
 import { listen, operatorDoorOf } from "./server.ts";
+
+// exitCode alone leaves a listening server up (measurement 1). process.exit
+// while a handle is still closing aborts on Windows; a natural drain is clean
+// (measurement 3). Set the code so an empty loop ends at once, and force the
+// exit after 3s if a handle still holds the process. unref: the timer does not
+// keep the loop alive, and by 3s a closing handle is gone.
+export function endProcess(code: number): void {
+  process.exitCode = code;
+  setTimeout(() => process.exit(code), 3000).unref();
+}
 
 export async function main(
   env: NodeJS.ProcessEnv = process.env,
@@ -61,9 +72,7 @@ export async function main(
     }
     if (err instanceof Error && err.message.startsWith("downstream-")) {
       process.stderr.write(`${terminalText(err.message)}\n`);
-      // Not process.exit: on Windows that races a handle already closing and
-      // aborts. Set the code and return; the loop drains and the process ends.
-      process.exitCode = EX_CONFIG;
+      endProcess(EX_CONFIG);
       return;
     }
     throw err;

@@ -13,7 +13,7 @@ import { runDownstreamPin } from "./downstream-pin.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
 import { runHalt, runResume } from "./halt.ts";
-import { main } from "./main.ts";
+import { endProcess, main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
 import { runAnchor } from "./anchor-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
@@ -374,22 +374,31 @@ async function dispatchCli(
   return 0;
 }
 
+// First line is the name and the whole message. Frames are only the `    at `
+// lines after that head in err.stack, so a forged frame inside the message
+// stays on the first line.
+export function uncaughtText(err: unknown): string {
+  const name = err instanceof Error ? err.name : "Error";
+  const message = err instanceof Error ? err.message : String(err);
+  const lines = [terminalText(`${name}: ${message}`)];
+  const stack = err instanceof Error ? err.stack : undefined;
+  if (typeof stack === "string") {
+    const head = `${name}: ${message}`;
+    const nl = stack.indexOf("\n");
+    const rest = stack.startsWith(head) ? stack.slice(head.length) : nl === -1 ? "" : stack.slice(nl + 1);
+    for (const line of rest.split("\n")) {
+      if (line.startsWith("    at ")) lines.push(terminalText(line));
+    }
+  }
+  return `${lines.join("\n")}\n`;
+}
+
 if (isCliEntry()) {
   try {
     process.exit(await runCli(process.argv.slice(2)));
   } catch (err) {
     // Replaces Node's printer, which would write the path raw and a source excerpt.
-    const name = err instanceof Error ? err.name : "Error";
-    const message = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`${terminalText(`${name}: ${message}`)}\n`);
-    const stack = err instanceof Error ? err.stack : undefined;
-    if (stack !== undefined) {
-      for (const line of stack.split("\n")) {
-        if (line.startsWith("    at ")) process.stderr.write(`${terminalText(line)}\n`);
-      }
-    }
-    // Not process.exit: on Windows that races a handle already closing and
-    // aborts. Set the code and return; the loop drains and the process ends.
-    process.exitCode = 1;
+    process.stderr.write(terminalLines(uncaughtText(err)));
+    endProcess(1);
   }
 }
