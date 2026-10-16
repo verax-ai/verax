@@ -22,7 +22,7 @@ import { rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { loadApprovalsFromDir } from "@verax-ai/proxy";
+import { loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
 
 import { asAssertion } from "./approval-signature.ts";
 import { readBearer } from "./auth.ts";
@@ -231,7 +231,7 @@ export async function openOperatorDoor(opts: {
     try {
       return pairingCheck(stateDir, code, now()).ok;
     } catch (err) {
-      process.stderr.write(`verax-door: pairing check: ${err instanceof Error ? err.message : "fault"}\n`);
+      process.stderr.write(`verax-door: pairing check: ${terminalText(err instanceof Error ? err.message : "fault")}\n`);
       if (open) uncountable.add(open.hash);
       try {
         rmSync(pairingPath(stateDir), { force: true });
@@ -491,7 +491,7 @@ export async function openOperatorDoor(opts: {
         send(res, 400, { error: "bad-request" });
         return;
       }
-      process.stderr.write(`verax-door: ${err instanceof Error ? err.message : "fault"}\n`);
+      process.stderr.write(`verax-door: ${terminalText(err instanceof Error ? err.message : "fault")}\n`);
       send(res, 500, { error: "fault" });
     }
   });

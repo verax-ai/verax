@@ -1,4 +1,5 @@
 import { type AddressInfo } from "node:net";
+import { terminalText } from "@verax-ai/proxy";
 import { JwksFileError } from "./auth.ts";
 import { EX_CONFIG, loadConfig, overlayInventoryArg } from "./config.ts";
 import { watchDesktopParent } from "./desktop-parent.ts";
@@ -17,12 +18,12 @@ export async function main(
   watchDesktopParent({ env });
   const overlaid = overlayInventoryArg(env, argv);
   if ("error" in overlaid) {
-    process.stderr.write(`${overlaid.error}\n`);
+    process.stderr.write(`${terminalText(overlaid.error)}\n`);
     process.exit(EX_CONFIG);
   }
   const loaded = loadConfig(overlaid);
   if (!loaded.ok) {
-    process.stderr.write(`${loaded.reason}\n`);
+    process.stderr.write(`${terminalText(loaded.reason)}\n`);
     process.exit(loaded.code);
   }
   try {
@@ -48,12 +49,16 @@ export async function main(
       process.exit(err.code);
     }
     if (err instanceof KeyAlgorithmError) {
-      process.stderr.write(`${err.message}\n`);
+      process.stderr.write(`${terminalText(err.message)}\n`);
       process.exit(err.code);
     }
     if (err instanceof JwksFileError) {
-      process.stderr.write(`${err.message}\n`);
+      process.stderr.write(`${terminalText(err.message)}\n`);
       process.exit(err.code);
+    }
+    if (err instanceof Error && err.message.startsWith("downstream-")) {
+      process.stderr.write(`${terminalText(err.message)}\n`);
+      process.exit(EX_CONFIG);
     }
     throw err;
   }

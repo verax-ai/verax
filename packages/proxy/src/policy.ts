@@ -255,6 +255,32 @@ export const DISPLAY_ESCAPE_CLASS =
   `${TERMINAL_CONTROL_CLASS}\\p{Default_Ignorable_Code_Point}\\p{Variation_Selector}` +
   "\\u2800\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\p{M}\\p{Cn}\\p{Co}\\p{Cs}";
 
+/**
+ * Printed form of text this process did not write. Same `\uXXXX` per UTF-16
+ * unit as the pin listing, but no added quotes and no doubled backslash: a
+ * Windows path in a diagnostic line stays readable. Escape only at the
+ * write. The thrown message is what the ledger and the agent still receive.
+ */
+const DISPLAY_ESCAPE = new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "gu");
+
+function escapeDisplayUnit(ch: string): string {
+  const cp = ch.codePointAt(0) ?? 0;
+  if (cp <= 0xffff) return `\\u${cp.toString(16).padStart(4, "0")}`;
+  const rest = cp - 0x10000;
+  const high = 0xd800 + (rest >> 10);
+  const low = 0xdc00 + (rest & 0x3ff);
+  return `\\u${high.toString(16).padStart(4, "0")}\\u${low.toString(16).padStart(4, "0")}`;
+}
+
+export function terminalText(text: string): string {
+  return text.replace(DISPLAY_ESCAPE, escapeDisplayUnit);
+}
+
+/** Line breaks the body wrote on purpose stay; every other class member is escaped. */
+export function terminalLines(text: string): string {
+  return text.split("\n").map((line) => terminalText(line)).join("\n");
+}
+
 const SPEND_CONTROL = new RegExp(`[${TERMINAL_CONTROL_CLASS}]`, "u");
 
 function spendArgsInvalid(args: Record<string, unknown>): boolean {

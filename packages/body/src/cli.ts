@@ -3,6 +3,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import path, { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
+import { terminalLines, terminalText } from "@verax-ai/proxy";
 import { runApprove } from "./approve-cli.ts";
 import { attachBodyLog } from "./body-log.ts";
 import { bodyVersion } from "./body-version.ts";
@@ -128,7 +129,7 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
     isElevated = hooks.elevated ? hooks.elevated() : defaultElevated(platform);
   } catch (err) {
     if (err instanceof SystemToolError) {
-      stderr.write(`${err.message}\n`);
+      stderr.write(`${terminalText(err.message)}\n`);
       return 78;
     }
     throw err;
@@ -139,7 +140,7 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
       execArgv: hooks.execArgv,
     });
     if (refusal) {
-      stderr.write(refusal.endsWith("\n") ? refusal : `${refusal}\n`);
+      stderr.write(`${terminalLines(refusal.replace(/\n+$/, ""))}\n`);
       return 78;
     }
     markCliCodeCheckPassed();
@@ -275,7 +276,7 @@ async function dispatchCli(
       }
       const attached = attachBodyLog(logPath);
       if (!attached.ok) {
-        stderr.write(`${attached.reason}\n`);
+        stderr.write(`${terminalText(attached.reason)}\n`);
         return 78;
       }
       stderr.write("verax serve starting\n");
@@ -290,12 +291,12 @@ async function dispatchCli(
       clearVeraxEnv(process.env);
       const loaded = loadEnvFile(file);
       if (!loaded.ok) {
-        stderr.write(`${loaded.reason}\n`);
+        stderr.write(`${terminalText(loaded.reason)}\n`);
         return 78;
       }
       const missingJwks = envFileJwksMissing(process.env);
       if (missingJwks) {
-        stderr.write(`${missingJwks}\n`);
+        stderr.write(`${terminalText(missingJwks)}\n`);
         return 78;
       }
     }
@@ -308,7 +309,7 @@ async function dispatchCli(
     const json = argv.includes("--json");
     const target = doctorStateTarget(env);
     if (target && directoryAccess(target) === "unreadable") {
-      stderr.write(`${unreadableSentence(target, "doctor")}\n`);
+      stderr.write(`${terminalText(unreadableSentence(target, "doctor"))}\n`);
       return 77;
     }
     const nodeLabel = process.platform === "linux" ? linuxNodeLabelCheck() : null;
@@ -356,13 +357,13 @@ async function dispatchCli(
   }
   const head = argv[0];
   if (head !== undefined && !head.startsWith("--")) {
-    stderr.write(`unknown command: ${head}\n`);
+    stderr.write(`unknown command: ${terminalText(head)}\n`);
     stderr.write(HELP);
     return 64;
   }
   // `main()` reads `--inventory`. Any other leading flag is not a serve option.
   if (head !== undefined && head.startsWith("--") && head !== "--inventory") {
-    stderr.write(`unknown option: ${head}\n`);
+    stderr.write(`unknown option: ${terminalText(head)}\n`);
     stderr.write(HELP);
     return 64;
   }

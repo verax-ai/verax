@@ -11,7 +11,7 @@ import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
 import { openOperatorDoor } from "./operator-door.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
-import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir, type LedgerCounts } from "@verax-ai/proxy";
+import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir, terminalText, type LedgerCounts } from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
 import { isRevokedJti } from "./revoke.ts";
@@ -429,7 +429,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     // syncControlRecords reports its own failure and does not throw. This
     // catch is the door: a sync miss must not close the ledger or refuse to listen.
     const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
-    process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
+    process.stderr.write(`verax-proxy: control sync failed: ${terminalText(message)}\n`);
   }
   const toolMeta = [...TOOL_META, ...extraTools.map(downstreamMeta)];
   const verify = createVerifier(config.jwksUrl, config.issuer, config.audience, config.jwksFile, config.jwksPin);
@@ -811,7 +811,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
           return;
         }
         const detail = err instanceof Error ? err.message : "fault";
-        process.stderr.write(`verax-transport: ${detail}\n`);
+        process.stderr.write(`verax-transport: ${terminalText(detail)}\n`);
         if (!res.headersSent) {
             send(res, 500, { error: "transport" });
         }
@@ -829,7 +829,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         send(res, 400, { error: "bad-request" });
         return;
       }
-      process.stderr.write(`verax-handler: ${msg || "fault"}\n`);
+      process.stderr.write(`verax-handler: ${terminalText(msg || "fault")}\n`);
       send(res, 500, { error: "fault" });
     }
     } catch (err) {
@@ -838,7 +838,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
         send(res, 400, { error: "bad-request" });
         return;
       }
-      process.stderr.write(`verax-handler: ${err instanceof Error ? err.message : "fault"}\n`);
+      process.stderr.write(`verax-handler: ${terminalText(err instanceof Error ? err.message : "fault")}\n`);
       send(res, 500, { error: "fault" });
     } finally {
       // Swallow so a bad Host cannot reject the request listener.
@@ -856,7 +856,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
     try {
       services.ledger.close();
     } catch (err) {
-      process.stderr.write(`verax: ledger close: ${err instanceof Error ? err.message : "fault"}\n`);
+      process.stderr.write(`verax: ledger close: ${terminalText(err instanceof Error ? err.message : "fault")}\n`);
     }
   };
   server.on("close", () => {

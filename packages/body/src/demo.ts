@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { verifyLedger } from "@verax-ai/proxy";
+import { terminalText, verifyLedger } from "@verax-ai/proxy";
 import { runApprove } from "./approve-cli.ts";
 import { listen } from "./server.ts";
 import { shippedPolicyPath } from "./shipped-policy.ts";
@@ -518,9 +518,9 @@ export async function runDemo(argv: string[], env: NodeJS.ProcessEnv, io: DemoIo
     const detail = err instanceof Error ? err.message : "fault";
     if (withConarium && attachFailedDetail(detail)) {
       discardState = true;
-      writeErr(`could not start the Conarium child (${detail}). run without --with-conarium\n`);
+      writeErr(`could not start the Conarium child (${terminalText(detail)}). run without --with-conarium\n`);
     } else {
-      writeErr(`demo: ${detail.replace(/^demo: /, "")}\n`);
+      writeErr(`demo: ${terminalText(detail.replace(/^demo: /, ""))}\n`);
     }
     await cleanup();
     return 1;

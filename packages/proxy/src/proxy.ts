@@ -28,6 +28,7 @@ import {
   noteTenantRef,
   type LedgerWriter,
 } from "./ledger.ts";
+import { terminalText } from "./policy.ts";
 import { spokenReason } from "./spoken-reason.ts";
 import { tenantKey } from "./tenant.ts";
 import type { DecisionInputRow, DecisionInputs, Ledger, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
@@ -609,7 +610,7 @@ export function createProxy(deps: ProxyDeps) {
       if (controlSyncReported) return;
       controlSyncReported = true;
       const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
-      process.stderr.write(`verax-proxy: control sync failed: ${message}\n`);
+      process.stderr.write(`verax-proxy: control sync failed: ${terminalText(message)}\n`);
     }
   }
 

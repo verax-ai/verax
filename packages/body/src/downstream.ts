@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { canonical } from "@cedulon/core";
 import type { SignedEffectExtract } from "@cedulon/effect-extract";
-import { DISPLAY_ESCAPE_CLASS, effectDescriptor, samePublicKey, sha256Canonical, thirdPartyReceiptRejection } from "@verax-ai/proxy";
+import { DISPLAY_ESCAPE_CLASS, effectDescriptor, samePublicKey, sha256Canonical, terminalText, thirdPartyReceiptRejection } from "@verax-ai/proxy";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -794,7 +794,7 @@ export async function openDownstream(
           const receipt = raw._meta?.["io.cedulon/effect-extract"];
           const reason = thirdPartyReceiptRejection(receipt, spec.effectKeyPem, ref, name,
             sha256Canonical(effectDescriptor(name, call.arguments)));
-          if (reason) process.stderr.write(`verax-body: third-party receipt rejected: ${reason}\n`);
+          if (reason) process.stderr.write(`verax-body: third-party receipt rejected: ${terminalText(reason)}\n`);
           else result.effectReceipt = receipt as SignedEffectExtract;
         }
         return result;
