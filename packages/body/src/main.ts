@@ -18,7 +18,10 @@ export async function main(
   watchDesktopParent({ env });
   const overlaid = overlayInventoryArg(env, argv);
   if ("error" in overlaid) {
-    process.stderr.write(`${terminalText(overlaid.error)}\n`);
+    // ProcessEnv's index makes `error` look optional. The overlay's own
+    // failure is always a string; the same sentence is the stand-in.
+    const reason = overlaid.error ?? "missing --inventory path";
+    process.stderr.write(`${terminalText(reason)}\n`);
     process.exit(EX_CONFIG);
   }
   const loaded = loadConfig(overlaid);
@@ -58,7 +61,10 @@ export async function main(
     }
     if (err instanceof Error && err.message.startsWith("downstream-")) {
       process.stderr.write(`${terminalText(err.message)}\n`);
-      process.exit(EX_CONFIG);
+      // Not process.exit: on Windows that races a handle already closing and
+      // aborts. Set the code and return; the loop drains and the process ends.
+      process.exitCode = EX_CONFIG;
+      return;
     }
     throw err;
   }

@@ -255,12 +255,6 @@ export const DISPLAY_ESCAPE_CLASS =
   `${TERMINAL_CONTROL_CLASS}\\p{Default_Ignorable_Code_Point}\\p{Variation_Selector}` +
   "\\u2800\\u00A0\\u1680\\u2000-\\u200A\\u202F\\u205F\\u3000\\p{M}\\p{Cn}\\p{Co}\\p{Cs}";
 
-/**
- * Printed form of text this process did not write. Same `\uXXXX` per UTF-16
- * unit as the pin listing, but no added quotes and no doubled backslash: a
- * Windows path in a diagnostic line stays readable. Escape only at the
- * write. The thrown message is what the ledger and the agent still receive.
- */
 const DISPLAY_ESCAPE = new RegExp(`[${DISPLAY_ESCAPE_CLASS}]`, "gu");
 
 function escapeDisplayUnit(ch: string): string {
@@ -272,6 +266,12 @@ function escapeDisplayUnit(ch: string): string {
   return `\\u${high.toString(16).padStart(4, "0")}\\u${low.toString(16).padStart(4, "0")}`;
 }
 
+/**
+ * Printed form of text this process did not write. Same `\uXXXX` per UTF-16
+ * unit as the pin listing, but no added quotes and no doubled backslash: a
+ * Windows path in a diagnostic line stays readable. Escape only at the
+ * write. The thrown message is what the ledger and the agent still receive.
+ */
 export function terminalText(text: string): string {
   return text.replace(DISPLAY_ESCAPE, escapeDisplayUnit);
 }
