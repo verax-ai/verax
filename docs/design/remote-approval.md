@@ -8,7 +8,12 @@ unless `VERAX_OPERATOR_DOOR` names an origin, which `verax install
 write for the service. `verax operator list` and `remove` work on the
 state directory whether the door is on or not. The
 door serves one page that does all of this from a browser. It has been
-driven in Chromium with a virtual authenticator, and not yet on a phone.
+driven in Chromium with a virtual authenticator, and used from one Android
+phone: on 17 October 2026, with the released 0.6.0 package behind a
+Tailscale Serve HTTPS endpoint, the phone enrolled a passkey with a
+pairing code and approved one held spend, and `verax verify` counted that
+approval's passkey signature as verified. It has not been opened on an
+iPhone.
 It has had code reviews; it has not had an independent attack round.
 
 This document was written before the door was built. It says what was
