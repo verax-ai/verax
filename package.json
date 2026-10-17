@@ -4,7 +4,7 @@
   "type": "module",
   "license": "Apache-2.0",
   "engines": {
-    "node": ">=22.6"
+    "node": ">=22.12"
   },
   "workspaces": [
     "packages/*",
@@ -41,6 +41,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "vite": "^8.3.4"
   }
 }
