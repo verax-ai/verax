@@ -219,8 +219,8 @@ of [`docs/STATUS.md`](docs/STATUS.md).
 A ledger only the vendor's running service can read is evidence a buyer
 rents, not evidence they hold. `verax verify` reads a state directory on
 its own — no body listening, nothing on the network — and states each
-check on its own line, because they fail separately. On the ledger
-`npx @verax-ai/body demo --keep` leaves behind, 0.6.0 prints:
+check on its own line, because they fail separately. On a copy of the
+ledger `npx @verax-ai/body demo --keep` leaves behind, 0.6.0 prints:
 
 ```
 $ verax verify ./verax-state
