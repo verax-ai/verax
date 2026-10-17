@@ -75,6 +75,9 @@ export type PendingApproval = {
   amount?: unknown;
   payee?: unknown;
   currency?: unknown;
+  /** Set by the ledger API after it checks the row against the signed request. */
+  bound?: boolean;
+  args?: Record<string, unknown>;
   expiresAtMs: number;
   status: "pending" | "approved" | "expired";
   brain: string;

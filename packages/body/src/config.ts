@@ -1,6 +1,9 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
 export const EX_CONFIG = 78;
+
+/** A start error whose message begins with this is one stderr line and exit 78. */
+export const POLICY_FILE_ERROR_PREFIX = "VERAX_POLICY_FILE ";
 
 export type BodyConfig = {
   issuer: string;
@@ -110,6 +113,26 @@ function jwksPinParses(raw: string): { keys: Record<string, unknown>[] } | null 
   }
 }
 
+/** A directory or an unreadable file. A path that is not there is left to the read. */
+export function policyFileRefusal(path: string): string | null {
+  let st: ReturnType<typeof statSync>;
+  try {
+    st = statSync(path);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return null;
+    return `${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${path}`;
+  }
+  if (st.isDirectory()) return `${POLICY_FILE_ERROR_PREFIX}is a directory: ${path}`;
+  if (!st.isFile()) return `${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${path}`;
+  try {
+    readFileSync(path);
+  } catch {
+    return `${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${path}`;
+  }
+  return null;
+}
+
 function jwksFileParses(path: string): boolean {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8")) as { keys?: unknown };
@@ -214,6 +237,10 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   const policyFile = env.VERAX_POLICY_FILE?.trim() ?? "";
   if (policyFile === "") {
     return { ok: false, code: EX_CONFIG, reason: "missing VERAX_POLICY_FILE" };
+  }
+  const policyRefusal = policyFileRefusal(policyFile);
+  if (policyRefusal) {
+    return { ok: false, code: EX_CONFIG, reason: policyRefusal };
   }
   const door = readOperatorDoor(env);
   if (!door.ok) {

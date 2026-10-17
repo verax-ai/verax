@@ -21,6 +21,16 @@ function approvalFor(action: RailAction, approvals: readonly PendingApproval[]):
   );
 }
 
+function shownSpend(snap: PendingApproval): { amount: unknown; currency: unknown; payee: unknown } | null {
+  if (snap.bound === false) return null;
+  if (snap.bound === true) {
+    const args = snap.args;
+    if (args === undefined) return null;
+    return { amount: args.amountMinor, currency: args.currency, payee: args.payee };
+  }
+  return { amount: snap.amount, currency: snap.currency, payee: snap.payee };
+}
+
 function statementLine(copy: Copy, action: RailAction, reconcile: ReconcileCardReport | null): string {
   if (reconcile === null) return copy["spend.statement.unbound"];
   const ref = action.effect?.row.ref ?? action.record.claims.ref;
@@ -43,14 +53,16 @@ export function spendFields(
 ): SpendFields | null {
   if (action.record.claims.subject !== "spend") return null;
   const snap = approvalFor(action, approvals);
-  // Minor units in, a spendable amount out. When either side is unreadable
-  // the field says so; it never shows the raw stored number.
-  const money = snap ? formatMinor(snap.amount, snap.currency, lang) : null;
+  // A bound row is read from its arguments. An unbound row is not measured,
+  // even when the unsigned copies still carry a number. Rows from before
+  // that check keep the copies on the snapshot.
+  const shown = snap ? shownSpend(snap) : null;
+  const money = shown ? formatMinor(shown.amount, shown.currency, lang) : null;
   const amount =
     money !== null ? copy["spend.amount"].replace("{amount}", money) : copy["spend.amount.unmeasured"];
   const payee =
-    snap && snap.payee !== undefined
-      ? copy["spend.payee"].replace("{payee}", String(snap.payee))
+    shown && shown.payee !== undefined
+      ? copy["spend.payee"].replace("{payee}", String(shown.payee))
       : copy["spend.payee.unmeasured"];
   const approverId = action.inputs?.approver?.id;
   const via = action.inputs?.approver?.via;

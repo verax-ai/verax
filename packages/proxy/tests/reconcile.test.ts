@@ -5,8 +5,22 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import type { ApprovalRow } from "../src/approvals.ts";
+import { sha256Canonical } from "../src/hash.ts";
 import { parseCardCsv, parseChannelJsonl, reconcile } from "../src/reconcile.ts";
 import type { LedgerEffect } from "../src/types.ts";
+
+function signedApproval(row: Omit<ApprovalRow, "requestHash">): ApprovalRow {
+  return { ...row, requestHash: sha256Canonical({ name: row.subject, arguments: row.args }) };
+}
+
+/** The allow record carries the hash of the queue row's subject and arguments. */
+function requestHashesOf(approvals: readonly ApprovalRow[] | undefined): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const row of approvals ?? []) {
+    if (row.allowRef) map.set(row.allowRef, sha256Canonical({ name: row.subject, arguments: row.args }));
+  }
+  return map;
+}
 
 /** These fixtures name the effect ref as its decision. The attack test does not. */
 function reconcileDecided(
@@ -17,6 +31,7 @@ function reconcileDecided(
   return reconcile(channelRows, effects, {
     ...opts,
     decisionRefs: opts?.decisionRefs ?? new Set(effects.map((e) => e.row.ref)),
+    decisionRequestHashes: opts?.decisionRequestHashes ?? requestHashesOf(opts?.approvals),
   });
 }
 
@@ -131,9 +146,8 @@ describe("card:", () => {
         },
         witnessClass: "self",
       },
-      approval: {
+      approval: signedApproval({
         ref,
-        requestHash: "00".repeat(32),
         subject: "spend",
         args: { amountMinor, currency: "TRY", payee: "true-ads", reference: `verax:${ref}` },
         ruleId: "spend-true",
@@ -147,7 +161,7 @@ describe("card:", () => {
         status: "approved",
         brain: "brain-1",
         allowRef,
-      },
+      }),
     });
     const d1 = spend("d1", "a1", 125_050);
     const d2 = spend("d2", "a2", 10_000);
@@ -171,9 +185,8 @@ describe("card:", () => {
     const channel = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;TRUE REKLAM verax:d1;-2.000,00\n", {
       currency: "TRY",
     });
-    const approval: ApprovalRow = {
+    const approval = signedApproval({
       ref: "d1",
-      requestHash: "00".repeat(32),
       subject: "spend",
       args: { amountMinor: 125_050, currency: "TRY", payee: "true-ads", reference: "verax:d1" },
       ruleId: "spend-true",
@@ -185,7 +198,7 @@ describe("card:", () => {
       status: "approved",
       brain: "brain-1",
       allowRef: "g1",
-    };
+    });
     const effect: LedgerEffect = {
       row: { ref: "g1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
@@ -257,9 +270,8 @@ describe("card:", () => {
     const channel = parseCardCsv("Tarih;Açıklama;Tutar\n06.09.2026;ACME STORE;-10,00\n", {
       currency: "TRY",
     });
-    const approval: ApprovalRow = {
+    const approval = signedApproval({
       ref: "d1",
-      requestHash: "00".repeat(32),
       subject: "spend",
       args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
       ruleId: "spend-true",
@@ -273,7 +285,7 @@ describe("card:", () => {
       status: "approved",
       brain: "brain-1",
       allowRef: "a1",
-    };
+    });
     const effect: LedgerEffect = {
       row: { ref: "a1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
@@ -294,9 +306,8 @@ describe("card:", () => {
       "Tarih;Açıklama;Tutar\n06.09.2026;Facebk *Heb3r4jdd4 Fb.Me/Ads;-10,00\n",
       { currency: "TRY" },
     );
-    const approval: ApprovalRow = {
+    const approval = signedApproval({
       ref: "d1",
-      requestHash: "00".repeat(32),
       subject: "spend",
       args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
       ruleId: "spend-true",
@@ -310,7 +321,7 @@ describe("card:", () => {
       status: "approved",
       brain: "brain-1",
       allowRef: "a1",
-    };
+    });
     const effect: LedgerEffect = {
       row: { ref: "a1", effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
@@ -355,9 +366,8 @@ describe("card:", () => {
       },
       witnessClass: "self",
     };
-    const approval: ApprovalRow = {
+    const approval = signedApproval({
       ref: "d1",
-      requestHash: "00".repeat(32),
       subject: "spend",
       args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
       ruleId: "s",
@@ -371,7 +381,7 @@ describe("card:", () => {
       status: "approved",
       brain: "brain-1",
       allowRef: "a1",
-    };
+    });
     const dayReport = reconcileDecided(day, [farEffect], {
       toleranceMs: 3 * 86_400_000,
       approvals: [approval],
@@ -404,9 +414,8 @@ describe("card:", () => {
       },
       witnessClass: "self",
     };
-    const approval: ApprovalRow = {
+    const approval = signedApproval({
       ref: "d1",
-      requestHash: "00".repeat(32),
       subject: "spend",
       args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
       ruleId: "s",
@@ -420,7 +429,7 @@ describe("card:", () => {
       status: "approved",
       brain: "brain-1",
       allowRef: "a1",
-    };
+    });
     const report = reconcileDecided(timed, [effect], { toleranceMs: 3 * 86_400_000, approvals: [approval] });
     assert.equal(report.matched.length, 1);
     assert.equal(report.matched[0]!.datePrecision, "minute");

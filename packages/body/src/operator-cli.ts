@@ -10,7 +10,7 @@ import {
   removeCredential,
   removedPath,
 } from "./operator-credentials.ts";
-import { beginPairing } from "./operator-pairing.ts";
+import { beginPairing, livePairing } from "./operator-pairing.ts";
 
 type Seen = { uid: number; gid: number; isDirectory: boolean };
 
@@ -138,7 +138,9 @@ export async function runOperator(argv: string[], sys: OperatorSys = realSys): P
     }
   }
   if (verb === "enroll") {
+    const replaced = livePairing(writer.stateDir);
     const { code } = beginPairing(writer.stateDir);
+    if (replaced) process.stderr.write("the earlier pairing code no longer works\n");
     process.stdout.write(`${code}\n`);
     return 0;
   }

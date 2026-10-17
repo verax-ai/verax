@@ -5,6 +5,7 @@ import { join } from "node:path";
 import type { EffectRow } from "@cedulon/effect-extract";
 
 import type { ApprovalRow } from "./approvals.ts";
+import { sha256Canonical } from "./hash.ts";
 import { readLedgerManifest, requireLedgerPiecePath } from "./ledger-manifest.ts";
 import type { LedgerEffect } from "./types.ts";
 
@@ -286,9 +287,8 @@ function decisionPaths(dir: string): string[] {
   return existsSync(tek) ? [tek] : [];
 }
 
-/** Decision refs, read the same way `verifyLedger` lists decision files. */
-export function loadDecisionRefsFromDir(stateDir: string): Set<string> {
-  const refs = new Set<string>();
+function readDecisionLines(stateDir: string): { ref?: unknown; requestHash?: unknown }[] {
+  const claims: { ref?: unknown; requestHash?: unknown }[] = [];
   for (const path of decisionPaths(stateDir)) {
     let text = "";
     try {
@@ -299,11 +299,34 @@ export function loadDecisionRefsFromDir(stateDir: string): Set<string> {
     }
     for (const line of text.split("\n")) {
       if (line === "") continue;
-      const row = JSON.parse(line) as { claims?: { ref?: unknown } };
-      if (typeof row.claims?.ref === "string") refs.add(row.claims.ref);
+      const row = JSON.parse(line) as { claims?: { ref?: unknown; requestHash?: unknown } };
+      claims.push(row.claims ?? {});
     }
   }
+  return claims;
+}
+
+/** Decision refs, read the same way `verifyLedger` lists decision files. */
+export function loadDecisionRefsFromDir(stateDir: string): Set<string> {
+  const refs = new Set<string>();
+  for (const claims of readDecisionLines(stateDir)) {
+    if (typeof claims.ref === "string") refs.add(claims.ref);
+  }
   return refs;
+}
+
+/**
+ * requestHash on each decision, keyed by that decision's ref.
+ * Same files as `loadDecisionRefsFromDir`, still without the ledger lock.
+ */
+export function loadDecisionRequestHashesFromDir(stateDir: string): Map<string, string> {
+  const hashes = new Map<string, string>();
+  for (const claims of readDecisionLines(stateDir)) {
+    if (typeof claims.ref !== "string") continue;
+    if (typeof claims.requestHash !== "string" || claims.requestHash === "") continue;
+    hashes.set(claims.ref, claims.requestHash);
+  }
+  return hashes;
 }
 
 export function loadEffectsFromDir(stateDir: string): LedgerEffect[] {
@@ -348,11 +371,28 @@ function approvalForEffect(approvals: readonly ApprovalRow[] | undefined, effect
   return approvals.find((r) => r.allowRef === effectRef || r.ref === effectRef);
 }
 
+/** The row may lend amount, currency and payee only when it still hashes to the signed request. */
+function boundApproval(
+  effect: LedgerEffect,
+  approvals: readonly ApprovalRow[] | undefined,
+  requestHashes: ReadonlyMap<string, string> | undefined,
+): ApprovalRow | undefined {
+  if (!requestHashes) return undefined;
+  const signed = requestHashes.get(effect.row.ref);
+  if (typeof signed !== "string" || signed === "") return undefined;
+  const snap = approvalForEffect(approvals, effect.row.ref);
+  if (!snap) return undefined;
+  const rowHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
+  if (rowHash !== signed) return undefined;
+  return snap;
+}
+
 function effectAmount(
   effect: LedgerEffect,
   approvals: readonly ApprovalRow[] | undefined,
+  requestHashes: ReadonlyMap<string, string> | undefined,
 ): { amountMinor?: number; currency?: string } {
-  const snap = approvalForEffect(approvals, effect.row.ref);
+  const snap = boundApproval(effect, approvals, requestHashes);
   const amountMinor = snap && typeof snap.args.amountMinor === "number" ? snap.args.amountMinor : undefined;
   const currency = snap && typeof snap.args.currency === "string" ? snap.args.currency : undefined;
   return { amountMinor, currency };
@@ -383,9 +423,10 @@ function descriptorsFor(
   effect: LedgerEffect,
   approvals: readonly ApprovalRow[] | undefined,
   byPayee: Readonly<Record<string, readonly string[]>> | undefined,
+  requestHashes: ReadonlyMap<string, string> | undefined,
 ): readonly string[] | undefined {
   if (!byPayee) return undefined;
-  const snap = approvalForEffect(approvals, effect.row.ref);
+  const snap = boundApproval(effect, approvals, requestHashes);
   const payee = snap && typeof snap.args.payee === "string" ? snap.args.payee : undefined;
   if (!payee) return undefined;
   const stamps = byPayee[payee];
@@ -403,6 +444,8 @@ export function reconcile(
     descriptorsByPayee?: Readonly<Record<string, readonly string[]>>;
     /** Effect refs that have a decision. Absent means none: an effect is not a match. */
     decisionRefs?: ReadonlySet<string>;
+    /** Effect ref to the requestHash on the signed decision of that ref. */
+    decisionRequestHashes?: ReadonlyMap<string, string>;
   },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;
@@ -477,7 +520,7 @@ export function reconcile(
         ghost.push(asGhost(marked, effects));
         continue;
       }
-      const fromSnap = effectAmount(effects[idx]!, opts?.approvals);
+      const fromSnap = effectAmount(effects[idx]!, opts?.approvals, opts?.decisionRequestHashes);
       const gate = amountGate(row, fromSnap);
       if (gate === "unknown") {
         ghost.push(asGhost(marked, effects, "amount-unknown"));
@@ -501,7 +544,7 @@ export function reconcile(
     const near = effects.findIndex((e, i) => {
       if (used.has(i) || !decided(e) || e.row.effectClass !== row.subject) return false;
       if (Math.abs(row.occurredAtMs - e.row.timestampMs) > rowTol) return false;
-      const stamps = descriptorsFor(e, opts?.approvals, opts?.descriptorsByPayee);
+      const stamps = descriptorsFor(e, opts?.approvals, opts?.descriptorsByPayee, opts?.decisionRequestHashes);
       if (stamps) {
         const text = row.descriptor ?? "";
         if (!descriptorHits(text, stamps)) {
@@ -509,7 +552,7 @@ export function reconcile(
           return false;
         }
       }
-      const fromSnap = effectAmount(e, opts?.approvals);
+      const fromSnap = effectAmount(e, opts?.approvals, opts?.decisionRequestHashes);
       const gate = amountGate(row, fromSnap);
       if (gate === "unknown") {
         unknownNear = true;

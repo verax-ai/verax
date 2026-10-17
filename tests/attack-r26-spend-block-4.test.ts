@@ -8,6 +8,7 @@ import { loadPolicy } from "@verax-ai/proxy";
 
 import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
 import { runReconcile } from "../packages/body/src/reconcile-cli.ts";
+import { sha256Canonical } from "../packages/proxy/src/hash.ts";
 
 /**
  * R26 (E-4). `verax reconcile --channel card` takes the statement descriptors
@@ -30,6 +31,9 @@ const spendRule = {
   spend: { maxAmountMinor: 200_000, currency: "TRY", payees: ["ads-platform"], descriptors: ["REAL.STAMP"] },
 };
 const readRule = { id: "read", tool: "fs.read", requires: [], text: "read files" };
+
+const spendArgs = { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" };
+const spendHash = sha256Canonical({ name: "spend", arguments: spendArgs });
 
 const cleanText = JSON.stringify({ version: 1, default: "deny", rules: [spendRule, readRule] });
 const shadowText = JSON.stringify({
@@ -56,14 +60,18 @@ function stateFor(policyText: string): { dir: string; hash: string } | null {
     })}\n`,
     "utf8",
   );
-  writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
+  writeFileSync(
+    join(dir, "decisions.jsonl"),
+    `${JSON.stringify({ claims: { ref: "a1", requestHash: spendHash } })}\n`,
+    "utf8",
+  );
   writeFileSync(
     join(dir, "approvals.jsonl"),
     `${JSON.stringify({
       ref: "d1",
-      requestHash: "00".repeat(32),
+      requestHash: spendHash,
       subject: "spend",
-      args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+      args: spendArgs,
       ruleId: "spend-true",
       ruleText: "Spends need operator approval.",
       inputsSummary: { count: 0, ids: [] },

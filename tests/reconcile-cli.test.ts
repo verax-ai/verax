@@ -6,7 +6,11 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { sha256Canonical } from "../packages/proxy/src/hash.ts";
 import { refusedAsElevated } from "./elevated-refusal.ts";
+
+const cardArgs = { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" };
+const cardHash = sha256Canonical({ name: "spend", arguments: cardArgs });
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(root, "packages", "body", "src", "cli.ts");
@@ -131,14 +135,18 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
-    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
+    writeFileSync(
+      join(dir, "decisions.jsonl"),
+      `${JSON.stringify({ claims: { ref: "a1", requestHash: cardHash } })}\n`,
+      "utf8",
+    );
     writeFileSync(
       join(dir, "approvals.jsonl"),
       `${JSON.stringify({
         ref: "d1",
-        requestHash: "00".repeat(32),
+        requestHash: cardHash,
         subject: "spend",
-        args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+        args: cardArgs,
         ruleId: "spend-true",
         ruleText: "Spends need operator approval.",
         inputsSummary: { count: 0, ids: [] },
@@ -265,14 +273,18 @@ describe("verax reconcile CLI", () => {
       })}\n`,
       "utf8",
     );
-    writeFileSync(join(dir, "decisions.jsonl"), `${JSON.stringify({ claims: { ref: "a1" } })}\n`, "utf8");
+    writeFileSync(
+      join(dir, "decisions.jsonl"),
+      `${JSON.stringify({ claims: { ref: "a1", requestHash: cardHash } })}\n`,
+      "utf8",
+    );
     writeFileSync(
       join(dir, "approvals.jsonl"),
       `${JSON.stringify({
         ref: "d1",
-        requestHash: "00".repeat(32),
+        requestHash: cardHash,
         subject: "spend",
-        args: { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d1" },
+        args: cardArgs,
         ruleId: "spend-true",
         ruleText: "Spends need operator approval.",
         inputsSummary: { count: 0, ids: [] },
