@@ -11,7 +11,16 @@ import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
 import { openOperatorDoor } from "./operator-door.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
-import { explain, LedgerDenyUnrecorded, loadApprovalsFromDir, terminalText, type LedgerCounts } from "@verax-ai/proxy";
+import {
+  explain,
+  LedgerDenyUnrecorded,
+  loadApprovalsFromDir,
+  loadDecisionRequestHashesFromDir,
+  sha256Canonical,
+  terminalText,
+  type ApprovalRow,
+  type LedgerCounts,
+} from "@verax-ai/proxy";
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
 import { isRevokedJti } from "./revoke.ts";
@@ -208,6 +217,36 @@ export const TOOL_META = [
 // authorised until that default. Headers are bounded tighter than the body.
 const REQUEST_TIMEOUT_MS = 30_000;
 const HEADERS_TIMEOUT_MS = 20_000;
+/**
+ * Amount, currency and payee on a ledger approval are the arguments only when
+ * those arguments still hash to the signed request on the defer. Otherwise
+ * the copies are left off and the row is marked unbound.
+ */
+function approvalsForLedger(stateDir: string): Array<Omit<ApprovalRow, "amount" | "currency" | "payee"> & {
+  bound: boolean;
+  amount?: unknown;
+  currency?: unknown;
+  payee?: unknown;
+}> {
+  const requestHashes = loadDecisionRequestHashesFromDir(stateDir);
+  return loadApprovalsFromDir(stateDir).map((row) => {
+    const signed = requestHashes.get(row.ref);
+    const rowHash = sha256Canonical({ name: row.subject, arguments: row.args });
+    const bound = typeof signed === "string" && signed !== "" && rowHash === signed;
+    if (!bound) {
+      const { amount: _amount, currency: _currency, payee: _payee, ...rest } = row;
+      return { ...rest, bound: false };
+    }
+    return {
+      ...row,
+      bound: true,
+      amount: row.args.amountMinor,
+      currency: row.args.currency,
+      payee: row.args.payee,
+    };
+  });
+}
+
 // Unbounded GET /api/ledger stringified ~690 MB at 200k rows and threw Invalid string length (HTTP 500).
 const DEFAULT_LEDGER_LIMIT = 1000;
 const MAX_LEDGER_LIMIT = 5000;
@@ -741,7 +780,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
             policy: { hash: services.policyHash, document: services.policyDocument },
             policies: readPolicySnapshots(config.stateDir, hashes),
             inputs: await matchingInputs(config.stateDir, decisions),
-            approvals: loadApprovalsFromDir(config.stateDir),
+            approvals: approvalsForLedger(config.stateDir),
             more,
             piecesTouched,
             limit,

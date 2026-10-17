@@ -12,6 +12,7 @@ import {
   type ToolResult,
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
+import { policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
 import {
@@ -82,7 +83,16 @@ export function createBodyServices(opts: {
 
   // The policy is read before the ledger opens: opening takes the ledger lock,
   // and a start the policy stops must not leave that lock for the next one.
-  const policyText = readFileSync(opts.policyFile, "utf8");
+  const policyRefusal = policyFileRefusal(opts.policyFile);
+  if (policyRefusal) throw new Error(policyRefusal);
+  let policyText: string;
+  try {
+    policyText = readFileSync(opts.policyFile, "utf8");
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EISDIR") throw new Error(`VERAX_POLICY_FILE is a directory: ${opts.policyFile}`);
+    throw new Error(`VERAX_POLICY_FILE is missing or unreadable: ${opts.policyFile}`);
+  }
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
   const ledger = new FileLedger(opts.stateDir);

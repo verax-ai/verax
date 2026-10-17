@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 import { parseLedger, type PolicyStore } from "../apps/panel/src/rail/parse.ts";
 import { listen } from "../packages/body/src/server.ts";
+import { sha256Canonical } from "../packages/proxy/src/hash.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -256,6 +257,100 @@ describe("historical policy snapshots", () => {
     } finally {
       await new Promise<void>((resolve, reject) => {
         second.server.close((err) => (err ? reject(err) : resolve()));
+      });
+      await issuer.close();
+    }
+  });
+
+  it("GET /api/ledger shows a bound row from its arguments and an edited row as unbound", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-ledger-bound-"));
+    const audience = "http://127.0.0.1/verax-ledger-bound";
+    const issuer = await startDevIssuer(0, audience);
+    const server = await listen({
+      issuer: issuer.issuer,
+      jwksUrl: issuer.jwksUrl,
+      audience,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const port = (server.address() as { port: number }).port;
+    const approvedArgs = { amountMinor: 1_000, currency: "TRY", payee: "ads-platform", reference: "verax:d-bound" };
+    const approvedHash = sha256Canonical({ name: "spend", arguments: approvedArgs });
+    const editedArgs = { ...approvedArgs, amountMinor: 5_000, reference: "verax:d-edited" };
+    const row = (
+      ref: string,
+      args: Record<string, unknown>,
+      copies: { amount: number; currency: string; payee: string },
+    ) => ({
+      ref,
+      requestHash: approvedHash,
+      subject: "spend",
+      args,
+      ruleId: "spend-true",
+      ruleText: "Spends need operator approval.",
+      inputsSummary: { count: 0, ids: [] },
+      amount: copies.amount,
+      currency: copies.currency,
+      payee: copies.payee,
+      createdAtMs: 1,
+      expiresAtMs: 2,
+      status: "approved",
+      brain: "brain-1",
+      allowRef: `a-${ref}`,
+    });
+    try {
+      appendFileSync(
+        join(stateDir, "decisions.jsonl"),
+        [
+          { claims: { ref: "d-bound", requestHash: approvedHash, timestampMs: 1 } },
+          { claims: { ref: "d-edited", requestHash: approvedHash, timestampMs: 2 } },
+        ]
+          .map((line) => JSON.stringify(line))
+          .join("\n") + "\n",
+        "utf8",
+      );
+      writeFileSync(
+        join(stateDir, "approvals.jsonl"),
+        [
+          row("d-bound", approvedArgs, { amount: 5_000, currency: "USD", payee: "other-shop" }),
+          row("d-edited", editedArgs, { amount: 5_000, currency: "TRY", payee: "ads-platform" }),
+        ]
+          .map((line) => JSON.stringify(line))
+          .join("\n") + "\n",
+        "utf8",
+      );
+      const read = await issuer.sign({ scope: "verax:read verax:audit" });
+      const res = await fetch(`http://127.0.0.1:${port}/api/ledger?from=0&to=9999999999999`, {
+        headers: { authorization: `Bearer ${read}` },
+      });
+      assert.equal(res.status, 200, await res.clone().text());
+      const body = (await res.json()) as {
+        approvals: Array<{
+          ref: string;
+          bound?: boolean;
+          amount?: unknown;
+          currency?: unknown;
+          payee?: unknown;
+          args?: { amountMinor?: number; currency?: string; payee?: string };
+        }>;
+      };
+      const bound = body.approvals.find((r) => r.ref === "d-bound");
+      const edited = body.approvals.find((r) => r.ref === "d-edited");
+      assert.equal(bound?.bound, true);
+      assert.equal(bound?.amount, 1_000);
+      assert.equal(bound?.currency, "TRY");
+      assert.equal(bound?.payee, "ads-platform");
+      assert.equal(bound?.args?.amountMinor, 1_000);
+      assert.equal(edited?.bound, false);
+      assert.equal(edited?.amount, undefined);
+      assert.equal(edited?.currency, undefined);
+      assert.equal(edited?.payee, undefined);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => (err ? reject(err) : resolve()));
       });
       await issuer.close();
     }

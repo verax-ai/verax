@@ -47,6 +47,15 @@ export function readPairing(stateDir: string): PairingRecord | null {
   }
 }
 
+/** A pairing the door would still accept. Enrolling again replaces that code. */
+export function livePairing(stateDir: string, nowMs = Date.now()): boolean {
+  const row = readPairing(stateDir);
+  if (!row) return false;
+  if (row.attempts >= PAIRING_MAX_ATTEMPTS) return false;
+  if (nowMs > row.expiresAtMs) return false;
+  return true;
+}
+
 export function beginPairing(stateDir: string, nowMs = Date.now()): { code: string } {
   const code = mintPairingCode();
   writePairing(stateDir, {

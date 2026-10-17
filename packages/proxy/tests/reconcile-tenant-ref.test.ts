@@ -2,9 +2,22 @@ import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";
 
 import type { ApprovalRow } from "../src/approvals.ts";
+import { sha256Canonical } from "../src/hash.ts";
 import { parseCardCsv, reconcile } from "../src/reconcile.ts";
 import { tenantKey } from "../src/tenant.ts";
 import type { LedgerEffect } from "../src/types.ts";
+
+function signedApproval(row: Omit<ApprovalRow, "requestHash">): ApprovalRow {
+  return { ...row, requestHash: sha256Canonical({ name: row.subject, arguments: row.args }) };
+}
+
+function requestHashesOf(approvals: readonly ApprovalRow[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const row of approvals) {
+    if (row.allowRef) map.set(row.allowRef, sha256Canonical({ name: row.subject, arguments: row.args }));
+  }
+  return map;
+}
 
 // With an issuer, tenant or org on the principal, the proxy writes a held spend's ref as
 // `<tenantKey>:<raw>` (scopedClaimsRef). The payer copies that ref into the payment
@@ -17,9 +30,8 @@ function heldSpend(deferRef: string, allowRef: string): { effect: LedgerEffect; 
       row: { ref: allowRef, effectHash: "11".repeat(32), effectClass: "spend", timestampMs: noon },
       witnessClass: "self",
     },
-    approval: {
+    approval: signedApproval({
       ref: deferRef,
-      requestHash: "00".repeat(32),
       subject: "spend",
       args: { amountMinor: 125_050, currency: "TRY", payee: "true-ads", reference: `verax:${deferRef}` },
       ruleId: "spend-true",
@@ -33,7 +45,7 @@ function heldSpend(deferRef: string, allowRef: string): { effect: LedgerEffect; 
       status: "approved",
       brain: "brain-1",
       allowRef,
-    },
+    }),
   };
 }
 
@@ -46,6 +58,7 @@ function reconcileOne(deferRef: string) {
     toleranceMs: 3 * 86_400_000,
     approvals: [approval],
     decisionRefs: new Set(["a1"]),
+    decisionRequestHashes: requestHashesOf([approval]),
   });
   return { channel, report };
 }
@@ -76,6 +89,7 @@ describe("card statement ref for a tenant-scoped held spend", () => {
       toleranceMs: 3 * 86_400_000,
       approvals: [approval],
       decisionRefs: new Set(["a1"]),
+      decisionRequestHashes: requestHashesOf([approval]),
     });
     assert.equal(report.matched.length, 1);
     assert.equal(report.ghost.length, 0);
@@ -90,6 +104,7 @@ describe("card statement ref for a tenant-scoped held spend", () => {
       toleranceMs: 3 * 86_400_000,
       approvals: [one.approval, two.approval],
       decisionRefs: new Set(["a1", "a2"]),
+      decisionRequestHashes: requestHashesOf([one.approval, two.approval]),
     });
     assert.equal(report.matched.length, 0);
     assert.equal(report.ghost.length, 1);
@@ -106,6 +121,7 @@ describe("card statement ref for a tenant-scoped held spend", () => {
       toleranceMs: 3 * 86_400_000,
       approvals: [one.approval, pending],
       decisionRefs: new Set(["a1"]),
+      decisionRequestHashes: requestHashesOf([one.approval, pending]),
     });
     assert.equal(report.matched.length, 1);
     assert.equal(report.ghost.length, 0);
