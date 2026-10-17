@@ -80,6 +80,12 @@ question).
 
 `--keep` leaves the temporary ledger on disk. `verax verify <dir>` reads it
 back without a body, as in [Read the ledger back without us](#read-the-ledger-back-without-us).
+To keep it and check it:
+
+```sh
+npx @verax-ai/body demo --keep
+npx -y -p @verax-ai/body verax verify <the directory it printed>
+```
 
 ### The same rules, animated
 
@@ -212,25 +218,46 @@ of [`docs/STATUS.md`](docs/STATUS.md).
 
 A ledger only the vendor's running service can read is evidence a buyer
 rents, not evidence they hold. `verax verify` reads a state directory on
-its own — no body listening, nothing on the network — and states four
-things separately, because they fail separately:
+its own — no body listening, nothing on the network — and states each
+check on its own line, because they fail separately. On the ledger
+`npx @verax-ai/body demo --keep` leaves behind, 0.6.0 prints:
 
 ```
 $ verax verify ./verax-state
 ledger        ./verax-state
-decisions     6
-effects       4 (4 bound to a decision, 0 with none)
-signatures    6 verify, 0 do not
+decisions     5
+effects       3 (3 bound to a decision, 0 with none)
+signatures    5 verify, 0 do not
 chain         unbroken
 verified with the key carried in these files
-              verified against the key carried in the records themselves: this
-              shows the files are internally consistent, not that the key was
-              ever trusted. Pin a key you hold to check that.
+              verified against the key carried in the records themselves: this shows the files are internally consistent, not that the key was ever trusted. Pin a key you hold to check that.
+effects with the key carried in these files
+              verified against the key carried in the self effects themselves: this shows the files are internally consistent, not that the key was ever trusted. Pin a key you hold to check that.
+same-org with no key
+              no same-org effects, so no witness key was used
+checkpoints with no key
+              no checkpoints, so no checkpoint key was used
+index: 5 ref(s), each still a decision
+effect completeness checked
+inputs: 5 record(s), each with its inputs row
+tail: no checkpoint; removing the newest records with their effects is not detectable from these files
+control: no control records
+anchors: none (no checkpoint is registered with a transparency service)
+approval signatures  signed-verified 0 · signed-failed 0 · unsigned-http 0 · cli 0
+              no operator key was found in these files
+control signatures   signed-verified 0 · signed-failed 0 · unsigned-http 0 · cli 0 · file 0
+starts        1; largest gap none; previous beat missing at 1792241614080; 1 of 1 signed verify under the in-ledger record key
 
 VERIFIED
 ```
 
-That last pair of lines is the point. Checking a ledger against the key
+The demo approves nothing and halts nothing, so both signature counts are zero; an
+approval given through the operator door is counted on the `approval
+signatures` line ([remote approval](docs/design/remote-approval.md)). `tail`
+and `anchors` are about checkpoints, below. `starts` summarizes the
+heartbeat ([Watch for silence](#watch-for-silence)).
+
+The `verified with the key carried in these files` pair is the point. Checking a ledger against the key
 lying next to it proves the files agree with each other and nothing more —
 anything able to write the ledger could write that key too. Pass
 `--key <public.pem>` to verify decision records against a copy you hold, and
