@@ -2,7 +2,7 @@ import { type AddressInfo } from "node:net";
 import { setTimeout } from "node:timers";
 import { terminalText } from "@verax-ai/proxy";
 import { JwksFileError } from "./auth.ts";
-import { EX_CONFIG, loadConfig, overlayInventoryArg } from "./config.ts";
+import { EX_CONFIG, POLICY_FILE_ERROR_PREFIX, loadConfig, overlayInventoryArg } from "./config.ts";
 import { watchDesktopParent } from "./desktop-parent.ts";
 import { KeyAlgorithmError, KeysPartialError } from "./keys.ts";
 import { listen, operatorDoorOf } from "./server.ts";
@@ -72,6 +72,11 @@ export async function main(
       process.exit(err.code);
     }
     if (err instanceof Error && err.message.startsWith("downstream-")) {
+      process.stderr.write(`${terminalText(err.message)}\n`);
+      endProcess(EX_CONFIG);
+      return;
+    }
+    if (err instanceof Error && err.message.startsWith(POLICY_FILE_ERROR_PREFIX)) {
       process.stderr.write(`${terminalText(err.message)}\n`);
       endProcess(EX_CONFIG);
       return;

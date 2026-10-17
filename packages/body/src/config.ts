@@ -2,6 +2,9 @@ import { readFileSync, statSync } from "node:fs";
 
 export const EX_CONFIG = 78;
 
+/** A start error whose message begins with this is one stderr line and exit 78. */
+export const POLICY_FILE_ERROR_PREFIX = "VERAX_POLICY_FILE ";
+
 export type BodyConfig = {
   issuer: string;
   jwksUrl: string;
@@ -118,14 +121,14 @@ export function policyFileRefusal(path: string): string | null {
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "ENOENT") return null;
-    return `VERAX_POLICY_FILE is missing or unreadable: ${path}`;
+    return `${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${path}`;
   }
-  if (st.isDirectory()) return `VERAX_POLICY_FILE is a directory: ${path}`;
-  if (!st.isFile()) return `VERAX_POLICY_FILE is missing or unreadable: ${path}`;
+  if (st.isDirectory()) return `${POLICY_FILE_ERROR_PREFIX}is a directory: ${path}`;
+  if (!st.isFile()) return `${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${path}`;
   try {
     readFileSync(path);
   } catch {
-    return `VERAX_POLICY_FILE is missing or unreadable: ${path}`;
+    return `${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${path}`;
   }
   return null;
 }

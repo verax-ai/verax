@@ -12,7 +12,7 @@ import {
   type ToolResult,
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
-import { policyFileRefusal } from "./config.ts";
+import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
 import {
@@ -90,8 +90,8 @@ export function createBodyServices(opts: {
     policyText = readFileSync(opts.policyFile, "utf8");
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code === "EISDIR") throw new Error(`VERAX_POLICY_FILE is a directory: ${opts.policyFile}`);
-    throw new Error(`VERAX_POLICY_FILE is missing or unreadable: ${opts.policyFile}`);
+    if (code === "EISDIR") throw new Error(`${POLICY_FILE_ERROR_PREFIX}is a directory: ${opts.policyFile}`);
+    throw new Error(`${POLICY_FILE_ERROR_PREFIX}is missing or unreadable: ${opts.policyFile}`);
   }
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
