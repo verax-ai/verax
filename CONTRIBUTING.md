@@ -16,7 +16,7 @@ ledger is paid as described there.
 
 ## Set up
 
-Node 22.6 or newer.
+Node 22.12 or newer to work in this repository (the panel builds with vite 8). The published packages run on Node 22.6 or newer.
 
 ```sh
 npm ci
