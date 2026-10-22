@@ -115,7 +115,7 @@ Node 22.6 or newer. In an empty directory, pointing \`--cache\` at this
 bundle's \`npm-cache\` and the tarballs under \`packages/\`:
 
 \`\`\`sh
-npm install --offline --cache /path/to/this/bundle/npm-cache --no-audit --no-fund /path/to/this/bundle/packages/verax-ai-inventory-${version}.tgz /path/to/this/bundle/packages/verax-ai-proxy-${version}.tgz /path/to/this/bundle/packages/verax-ai-body-${version}.tgz
+npm install --offline --cache /path/to/this/bundle/npm-cache --no-audit --no-fund --ignore-scripts /path/to/this/bundle/packages/verax-ai-inventory-${version}.tgz /path/to/this/bundle/packages/verax-ai-proxy-${version}.tgz /path/to/this/bundle/packages/verax-ai-body-${version}.tgz
 npx --no-install verax --version
 \`\`\`
 
@@ -127,6 +127,8 @@ and \`--no-fund\` stop the install from talking to the registry for
 those side reports
 (https://docs.npmjs.com/cli/v11/using-npm/config#audit,
 https://docs.npmjs.com/cli/v11/using-npm/config#fund).
+\`--ignore-scripts\` skips lifecycle scripts
+(https://docs.npmjs.com/cli/v11/using-npm/config#ignore-scripts).
 
 ## What this does not do
 
@@ -177,7 +179,7 @@ export function buildOfflineBundle(repo: string, dest?: string): string {
     const tarballs = tarballPaths(bundle);
     const cache = join(bundle, "npm-cache");
     const installed = runNpm(
-      ["install", "--cache", cache, "--no-audit", "--no-fund", ...tarballs],
+      ["install", "--cache", cache, "--no-audit", "--no-fund", "--ignore-scripts", ...tarballs],
       staging,
     );
     if (installed.status !== 0) {

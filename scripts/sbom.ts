@@ -93,7 +93,8 @@ export function writeSbom(destDir: string, repo: string): string {
       throw new Error("npm pack wrote no tarballs");
     }
 
-    const installed = runNpm(["install", "--no-audit", "--no-fund", ...tarballs], staging);
+    // --ignore-scripts: docs.npmjs.com/cli/v11/using-npm/config#ignore-scripts
+    const installed = runNpm(["install", "--no-audit", "--no-fund", "--ignore-scripts", ...tarballs], staging);
     if (installed.status !== 0) {
       throw new Error(`npm install for SBOM failed:\n${installed.out.slice(0, 1200)}`);
     }

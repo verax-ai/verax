@@ -63,8 +63,18 @@ try {
   const tarballs = tarballPaths(bundle);
   // --offline: no network requests (docs.npmjs.com/cli/v11/using-npm/config#offline).
   // --cache: npm's cache directory (docs.npmjs.com/cli/v11/using-npm/config#cache).
+  // --ignore-scripts: skip lifecycle scripts (docs.npmjs.com/cli/v11/using-npm/config#ignore-scripts).
   const install = runNpm(
-    ["install", "--offline", "--cache", join(bundle, "npm-cache"), "--no-audit", "--no-fund", ...tarballs],
+    [
+      "install",
+      "--offline",
+      "--cache",
+      join(bundle, "npm-cache"),
+      "--no-audit",
+      "--no-fund",
+      "--ignore-scripts",
+      ...tarballs,
+    ],
     consumer,
   );
   check(install.status === 0, "npm install --offline from the bundle cache", install.out.slice(0, 800));

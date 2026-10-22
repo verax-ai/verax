@@ -30,7 +30,39 @@ permissions:
   contents: read
 
 jobs:
+  # SBOM installs the packed tarballs. That must not share the job that
+  # holds id-token: write for trusted publishing.
+  sbom:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm ci --ignore-scripts
+      - name: package version for the artifact name
+        id: version
+        run: |
+          set -euo pipefail
+          v="$(node -p "require('./packages/body/package.json').version")"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "version $v"
+      - name: CycloneDX SBOM for the three packages
+        run: npm run sbom
+      - name: keep the SBOM as an artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: sbom/verax-${{ steps.version.outputs.version }}.cdx.json
+          if-no-files-found: error
   publish:
+    needs: sbom
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
@@ -96,18 +128,6 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "version $v"
-      # One CycloneDX file for the three packages the customer installs,
-      # kept as an artifact on check and on publish. contents: read is
-      # enough for upload-artifact here, as in proxy-perf.yml; permissions
-      # are not widened.
-      - name: CycloneDX SBOM for the three packages
-        run: npm run sbom
-      - name: keep the SBOM as an artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: sbom-${{ steps.version.outputs.version }}
-          path: sbom/verax-${{ steps.version.outputs.version }}.cdx.json
-          if-no-files-found: error
       # Trusted publishing is configured on a package's own settings page,
       # which exists only after a first publish. A package that has never been
       # published fails here, not halfway through the loop.
