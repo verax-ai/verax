@@ -60,52 +60,7 @@ function haltOnAllow(inner: FileLedger, state: string, armed: { on: boolean }): 
   });
 }
 
-function allowMemory() {
-  return loadPolicy({
-    version: 1,
-    default: "deny",
-    rules: [{ id: "get", tool: "memory.get", requires: ["verax:read"], text: "read" }],
-  });
-}
-
 describe("black box P1-l: :halted is one contract", { concurrency: 1 }, () => {
-  it("S2: verifyLedger and explain give the same verdict on a :threw ledger", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "verax-bbp1l-threw-"));
-    const ledger = new FileLedger(dir);
-    try {
-      const proxy = createProxy({
-        policy: allowMemory(),
-        recordSigner: RECORD_SIGNER,
-        effectSigner: EFFECT_SIGNER,
-        ledger,
-        now: () => Date.now(),
-        nonce: () => "l-threw",
-        inner: async () => {
-          throw new Error("tool threw");
-        },
-      });
-      await assert.rejects(() =>
-        proxy.call({ name: "memory.get", arguments: { id: "x", _ref: "l-threw" } }, reader),
-      );
-      const allow = (await ledger.decisions()).find((d) => d.claims.decision === "allow");
-      assert.ok(allow, "the throw still leaves the allow");
-      const threwRef = allow.claims.ref;
-      assert.ok(threwRef);
-      const verified = await verifyLedger(dir, pins);
-      const explained = await explain(ledger, threwRef);
-      assert.equal(
-        explained.balanced,
-        verified.ok,
-        `threw: verify ok=${verified.ok} problems=${JSON.stringify(verified.problems).slice(0, 240)} explain balanced=${explained.balanced} finding=${explained.finding.code}`,
-      );
-      assert.equal(verified.ok, true, JSON.stringify(verified.problems).slice(0, 240));
-      assert.equal(explained.balanced, true, `${explained.finding.code} ${explained.finding.summary}`);
-    } finally {
-      ledger.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it("S2: verifyLedger and explain give the same verdict on a :halted ledger", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-bbp1l-halted-"));
     const armed = { on: false };

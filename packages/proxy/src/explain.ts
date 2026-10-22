@@ -1,4 +1,4 @@
-import { audit, DECISION_PROFILE, type Finding, type IssuerTrustPin, type PresentedExtract } from "@cedulon/audit";
+import { audit, DECISION_PROFILE, type Finding, type IssuerTrustPin } from "@cedulon/audit";
 import { findDecisionRecordChainBreak } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
 import { approvalsLogFor, type ApprovalsLog } from "./approvals.ts";
@@ -44,36 +44,60 @@ const WINDOW_COVERAGE = "window-coverage";
 /**
  * Cedulon's DECISION_PROFILE cannot be changed here. It compares a settlement
  * class to the allow's class and the hashes as if the tool always ran:
- * `:threw` is `effect-mismatch` (the writer stores a different hash),
- * `:halted` is `effect-class-mismatch` (same hash, class has the suffix).
- * `verifyLedger` already binds those rows to the allow's class plus the
- * suffix. Drop only those two codes when the row is that bound not-run
- * class, so both readers give the same verdict on the same ledger.
+ * `:threw` is `effect-mismatch` (the writer stores a different hash) and that
+ * finding is published — this wrapper does not drop it. `:halted` is
+ * `effect-class-mismatch` (same hash, class has the suffix). `verifyLedger`
+ * binds a self/same-org `:halted` row only when the same allow has matching
+ * ref, effectHash, and class plus `:halted`. Drop only `effect-class-mismatch`
+ * when that is the line Cedulon actually audited. Normal rows, third-party
+ * rows, and `:threw` are not exempt.
  */
-const NOT_RUN_AUDIT_CODES = new Set(["effect-mismatch", "effect-class-mismatch"]);
+type SettlementRow = { ref?: string; effectHash?: string; effectClass?: string };
 
 function allowedClassOf(record: SignedDecisionRecord): string | undefined {
   const named = record.claims.effectClass;
   if (typeof named === "string" && named !== "") return named;
-  return typeof record.claims.subject === "string" ? record.claims.subject : undefined;
+  return undefined;
 }
 
-function isBoundNotRunEffect(effectClass: string, allowedClass: string | undefined): boolean {
-  if (typeof allowedClass !== "string" || allowedClass === "") return false;
-  return effectClass === `${allowedClass}:threw` || effectClass === `${allowedClass}:halted`;
+function extractSettlementRow(extract: unknown): SettlementRow | undefined {
+  if (!extract || typeof extract !== "object") return undefined;
+  const body = (extract as { body?: { effects?: unknown } }).body;
+  const effects = body?.effects;
+  if (!Array.isArray(effects) || effects.length === 0) return undefined;
+  const row = effects[0];
+  if (!row || typeof row !== "object") return undefined;
+  return row as SettlementRow;
 }
 
-function dropBoundNotRunFindings(
+function isBoundHaltedRow(row: SettlementRow | undefined, record: SignedDecisionRecord): boolean {
+  const allowedClass = allowedClassOf(record);
+  if (!row || !allowedClass || record.claims.decision !== "allow") return false;
+  return (
+    row.ref === record.claims.ref &&
+    typeof row.effectHash === "string" &&
+    row.effectHash === record.claims.effectHash &&
+    row.effectClass === `${allowedClass}:halted`
+  );
+}
+
+function selfOrSameOrg(witnessClass: LedgerEffect["witnessClass"] | undefined): boolean {
+  return witnessClass === "self" || witnessClass === "same-org";
+}
+
+function dropBoundHaltedClassMismatch(
   findings: Finding[],
   decisions: SignedDecisionRecord[],
   effects: readonly LedgerEffect[],
+  userExtract: ExplainOpts["extract"] | undefined,
 ): Finding[] {
   return findings.filter((finding) => {
-    if (!NOT_RUN_AUDIT_CODES.has(finding.code)) return true;
+    if (finding.code !== "effect-class-mismatch") return true;
     const record = decisions.find((d) => d.claims.ref === finding.id);
     const effect = effects.find((e) => e.row.ref === finding.id && e.row.effectClass !== "duplicate-effect");
-    if (!record || !effect || record.claims.decision !== "allow") return true;
-    return !isBoundNotRunEffect(effect.row.effectClass, allowedClassOf(record));
+    if (!record || !effect || !selfOrSameOrg(effect.witnessClass)) return true;
+    const audited = userExtract ? extractSettlementRow(userExtract) : effect.row;
+    return !isBoundHaltedRow(audited, record);
   });
 }
 
@@ -156,7 +180,8 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     throw new Error(`explain-unknown-ref:${ref}`);
   }
   const effect = effects.find((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect") ?? null;
-  const presentedExtract = opts?.extract ?? effect?.receipt;
+  const userExtract = opts?.extract;
+  const presentedExtract = userExtract ?? effect?.receipt;
   const extractPresented = Boolean(presentedExtract);
   const resolvedTrust = resolveIssuerTrust(opts);
   const issuerTrust = resolvedTrust.pin;
@@ -192,15 +217,17 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
         ),
       ]
     : [];
-  const applicable = dropBoundNotRunFindings(
+  const applicable = dropBoundHaltedClassMismatch(
     dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
     decisions,
     effects,
+    userExtract,
   );
-  const applicableWarnings = dropBoundNotRunFindings(
+  const applicableWarnings = dropBoundHaltedClassMismatch(
     dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
     decisions,
     effects,
+    userExtract,
   );
   const refFindings = applicable.filter((f) => f.id === ref);
   const issuerFinding =
@@ -247,27 +274,43 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const inputsMissing =
     typeof record.claims.inputsHash === "string" && inputsDoc === null;
   if (inputsMissing) conditions.push("inputs document missing");
-  const balanced = refFindings.length === 0 && !chainBreak && !issuerMismatch && !inputsMismatch && !inputsMissing;
+  const auditedRow = userExtract ? extractSettlementRow(userExtract) : effect?.row;
+  const haltedUnbound =
+    typeof auditedRow?.effectClass === "string" &&
+    auditedRow.effectClass.endsWith(":halted") &&
+    !isBoundHaltedRow(auditedRow, record);
+  const balanced =
+    refFindings.length === 0 &&
+    !chainBreak &&
+    !issuerMismatch &&
+    !inputsMismatch &&
+    !inputsMissing &&
+    !haltedUnbound;
   const code = chainBreak
     ? "receipt-chain-break"
     : inputsMismatch
       ? "inputs-hash-mismatch"
       : inputsMissing
         ? "inputs-document-missing"
-        : (hit?.code ?? null);
+        : haltedUnbound
+          ? (hit?.code ?? "effect-class-mismatch")
+          : (hit?.code ?? null);
   const detail = chainBreak
     ? `receipt-chain-break at ${breakAt ?? "unknown"} (${brk?.reason ?? "broken"})`
     : inputsMismatch
       ? "inputs document hash does not match claims.inputsHash"
       : inputsMissing
         ? "claims.inputsHash is on the record; the inputs document is not on disk"
-        : (hit?.detail ?? null);
+        : haltedUnbound && !hit
+          ? "halted effect is not bound to the same allow"
+          : (hit?.detail ?? null);
   const findingCount = chainBreak
     ? Math.max(refFindings.length, 1)
     : refFindings.length +
       (issuerMismatch && pinned ? 1 : 0) +
       (inputsMismatch ? 1 : 0) +
-      (inputsMissing ? 1 : 0);
+      (inputsMissing ? 1 : 0) +
+      (haltedUnbound && refFindings.length === 0 ? 1 : 0);
   const guarantee = guaranteeWithConditions(report.guarantee, conditions);
   const summary = balanced
     ? balancedSummary(guarantee, conditions, report.summary)

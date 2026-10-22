@@ -408,13 +408,23 @@ incident is written. A body that is already halted does not open a
 second incident. Later gateway calls are `denied:halted:<ref>`.
 
 An allow that did not run writes `effectClass: "<tool>:halted"` on that
-allow's ref. Every reader treats that as not-run: reconcile's ref match
-skips `:halted` and `:threw` so an external statement with the same ref
-stays ghost; `verifyLedger` binds `:halted` only when some allow on that
-ref has that tool's class plus `:halted` (the same rule as `:threw`);
-`explain` drops Cedulon's `effect-class-mismatch` / `effect-mismatch` for
-those bound not-run classes so both give the same verdict on the same
-ledger; the panel files the row as its own outcome (`status.halted`,
+allow's ref, with the allow's dispatched `effectHash`. Every reader
+treats that as not-run. reconcile's ref match skips `:halted` and
+`:threw` so an external statement with the same ref stays ghost.
+`:threw` does not mean the tool never ran (`inner` was called; an
+external side effect may have happened) — successful completion was not
+verified; ghost classification stays cautious. `verifyLedger` binds a
+self/same-org `:halted` row only when the same allow has matching `ref`,
+matching `effectHash`, and `effectClass === allow.claims.effectClass +
+":halted"` (allow class is explicit and non-empty; no `subject`
+fallback). A signed wrong-hash `:halted`, a wrong-class `:halted`, or a
+`:halted` on a deny does not bind. The `:threw` rule is unchanged (class
+match, hash relaxed). `explain` drops only Cedulon's
+`effect-class-mismatch` when the line it actually audited is that bound
+`:halted` row. `effect-mismatch` stays. A normal row, a third-party row,
+a `:threw` row, and a presented extract that is not that bound `:halted`
+are not exempt — `:threw` remains `effect-mismatch` (published). The
+panel files the row as its own outcome (`status.halted`,
 `rec.say.effect.halted`), not as a completed run. Once the halt switch
 file exists the process flag is cleared even if `halt-history.jsonl`
 cannot be appended. A replay of the same `_ref` after that not-run row
