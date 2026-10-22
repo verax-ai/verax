@@ -1,6 +1,6 @@
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, existsSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { EX_CONFIG } from "./config.ts";
 
 export type KeyPair = { privateKeyPem: string; publicKeyPem: string };
@@ -67,7 +67,20 @@ export function canonicalizeDirPath(dir: string): string {
   try {
     real = realpathSync.native(abs);
   } catch {
-    // Missing leaf: keep resolve() so a not-yet-created dir still hashes stably.
+    // Missing leaf: realpath the nearest existing ancestor, then reattach the rest.
+    const missing: string[] = [];
+    let cursor = abs;
+    for (;;) {
+      const parent = dirname(cursor);
+      if (parent === cursor) break;
+      missing.unshift(basename(cursor));
+      try {
+        real = join(realpathSync.native(parent), ...missing);
+        break;
+      } catch {
+        cursor = parent;
+      }
+    }
   }
   return process.platform === "win32" ? real.toLowerCase() : real;
 }
