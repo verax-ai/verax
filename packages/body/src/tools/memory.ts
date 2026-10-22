@@ -2,12 +2,7 @@ import { existsSync } from "node:fs";
 import { tenantKey, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
 import { memoryQuotaBytes } from "../config.ts";
 import { loadOrCreateSigners } from "../keys.ts";
-import {
-  memoryStoreFor,
-  openMemoryStoreSync,
-  type IntegrityReason,
-  type MemoryStore,
-} from "../memory-store.ts";
+import { memoryStoreFor, type IntegrityReason, type MemoryStore } from "../memory-store.ts";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
@@ -22,45 +17,58 @@ function integrityResult(reason: IntegrityReason, id: string): ToolResult {
   return jsonResult({ error: reason, id }, true);
 }
 
-function storeFor(stateDir: string): MemoryStore {
+function storeFor(stateDir: string, store?: MemoryStore): MemoryStore {
+  if (store) return store;
   try {
     return memoryStoreFor(stateDir);
   } catch {
     const keys = loadOrCreateSigners(stateDir);
-    return openMemoryStoreSync({
-      stateDir,
+    return memoryStoreFor(stateDir, {
       publicKeyPem: keys.recordSigner.publicKeyPem,
       privateKeyPem: keys.recordSigner.privateKeyPem,
     });
   }
 }
 
-export function memoryHistoryUnavailable(stateDir: string): boolean {
-  return storeFor(stateDir).historyUnavailable;
+export function memoryHistoryUnavailable(stateDir: string, store?: MemoryStore): boolean {
+  return storeFor(stateDir, store).historyUnavailable;
 }
 
 /** True when `id` exists under a different tenant. Does not read legacy `memory/`. */
-export function memoryBelongsToOtherTenant(stateDir: string, id: string, selfKey: string): boolean {
+export function memoryBelongsToOtherTenant(
+  stateDir: string,
+  id: string,
+  selfKey: string,
+  store?: MemoryStore,
+): boolean {
   if (!ID_RE.test(id)) return false;
   if (!existsSync(stateDir)) return false;
-  return storeFor(stateDir).idVisibleForOtherTenant(id, selfKey);
+  return storeFor(stateDir, store).idVisibleForOtherTenant(id, selfKey);
 }
 
 /** True when this tenant already has `id` under its own memory path or commit. */
-export function memoryExistsForTenant(stateDir: string, id: string, principal: Principal): boolean {
+export function memoryExistsForTenant(
+  stateDir: string,
+  id: string,
+  principal: Principal,
+  store?: MemoryStore,
+): boolean {
   if (!ID_RE.test(id)) return false;
-  return storeFor(stateDir).idHeldByTenant(id, tenantKey(principal));
+  return storeFor(stateDir, store).idHeldByTenant(id, tenantKey(principal));
 }
 
 export async function readMemoryMeta(
   stateDir: string,
   id: string,
   principal?: Principal,
+  store?: MemoryStore,
 ): Promise<{ versionHash: string; validFromMs: number; validUntilMs: number } | null> {
   if (!principal) return null;
   if (typeof id !== "string" || !ID_RE.test(id)) return null;
-  const got = storeFor(stateDir).verifiedRead(tenantKey(principal), id);
+  const mem = storeFor(stateDir, store);
+  const got = mem.verifiedRead(tenantKey(principal), id);
   if (got.kind !== "ok") return null;
+  mem.rememberDecisionSnapshot(tenantKey(principal), got.object);
   return {
     versionHash: got.versionHash,
     validFromMs: got.object.validFromMs,
@@ -73,6 +81,7 @@ export async function memoryGet(
   stateDir: string,
   now: () => number,
   principal: Principal,
+  store?: MemoryStore,
 ): Promise<ToolResult> {
   const id = call.arguments.id;
   if (typeof id !== "string" || id === "") {
@@ -81,7 +90,12 @@ export async function memoryGet(
   if (!ID_RE.test(id)) {
     return jsonResult({ error: "id-invalid" }, true);
   }
-  const got = storeFor(stateDir).verifiedRead(tenantKey(principal), id);
+  const mem = storeFor(stateDir, store);
+  const tk = tenantKey(principal);
+  const pinned = mem.takeDecisionSnapshot(tk, id);
+  const got = pinned
+    ? { kind: "ok" as const, object: pinned, versionHash: pinned.versionHash }
+    : mem.verifiedRead(tk, id);
   if (got.kind === "integrity") return integrityResult(got.reason, id);
   if (got.kind === "not-found") return jsonResult({ error: "not-found", id }, true);
   const item = got.object;
@@ -99,6 +113,7 @@ export async function memoryPut(
   stateDir: string,
   principal: Principal,
   putRef = "",
+  store?: MemoryStore,
 ): Promise<ToolResult> {
   const id = call.arguments.id;
   const body = call.arguments.body;
@@ -118,8 +133,8 @@ export async function memoryPut(
     return jsonResult({ error: "validUntilMs-required" }, true);
   }
   const fromMs = typeof validFromMs === "number" ? validFromMs : 0;
-  const store = storeFor(stateDir);
-  const written = await store.put({
+  const mem = storeFor(stateDir, store);
+  const written = await mem.put({
     tenantKey: tenantKey(principal),
     id,
     body,

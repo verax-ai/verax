@@ -179,7 +179,9 @@ at the state directory root. Each line is `{payload, sig}`: the payload is
 and the signature is ed25519 over `canonical(payload)` with the record key.
 The trust root is the public key in the keys directory (default
 `<stateDir>/keys`; set `VERAX_KEYS_DIR` or `keysDir` to keep keys outside
-state). A key written inside a commit line is not used.
+state). A key written inside a commit line is not used. When keys live
+inside the state directory, `VERAX_RECORD_PUBKEY_PIN` (SHA-256 of the
+record public key's SPKI DER) catches a key substitution at start.
 
 What this catches (BPM draft T1–T8; `tests/memory-integrity.test.ts` after a
 stop, a plain-fs edit, and a start):
@@ -201,6 +203,8 @@ What this does not catch:
 - An attacker who can write the state directory and also hold the record
   private key. Signatures then verify. Put the keys outside the state
   directory with `VERAX_KEYS_DIR` when the threat is "state yes, keys no".
+- Cutting the newest lines off memory-commits.jsonl together with the objects they name. Those ids then read as never written. Detecting it needs the same outside anchor as T9.
+- Availability: one damaged commit line makes every memory read answer memory-integrity-history-unavailable until the chain is repaired. This is deliberate (fail closed).
 
 0.6.1 flat files `<id>.json` have no commit. `memory.get` answers
 `memory-integrity-unattested`. The operator command `verax memory reattest

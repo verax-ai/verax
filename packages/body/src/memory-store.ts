@@ -1,8 +1,15 @@
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { chmod, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { canonical } from "@cedulon/core";
+
+class UncertainAppendError extends Error {
+  constructor() {
+    super("memory-append-uncertain");
+    this.name = "UncertainAppendError";
+  }
+}
 
 export const MEMORY_COMMITS_FILE = "memory-commits.jsonl";
 export const MEMORY_PURPOSE = "verax.memory.v2";
@@ -177,8 +184,9 @@ export function relativeObjectPath(tenantKey: string, id: string, revision: numb
 }
 
 function resolveObjectPath(stateDir: string, objectPath: string): string | null {
-  if (objectPath.includes("\0") || objectPath.includes("..")) return null;
+  if (objectPath.includes("\0")) return null;
   const parts = objectPath.split("/").filter((part) => part !== "");
+  if (parts.some((part) => part === ".." || part === ".")) return null;
   if (parts.length !== 5 || parts[0] !== "tenants" || parts[2] !== "memory") return null;
   if (!parts[4]!.endsWith(".json")) return null;
   return guardedJoin(stateDir, ...parts);
@@ -212,9 +220,28 @@ function parseMemoryObject(raw: string): MemoryObject | null {
   };
 }
 
+function isUnsupportedDirFsync(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === "EPERM" || code === "EISDIR" || code === "EINVAL" || code === "ENOTSUP" || code === "ENOSYS";
+}
+
+async function mkdirDurable(dir: string): Promise<void> {
+  const created: string[] = [];
+  let current = resolve(dir);
+  while (!existsSync(current)) {
+    created.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  for (const path of created) await fsyncDir(path);
+  await fsyncDir(current);
+}
+
 async function writeFileDurable(finalPath: string, payload: string): Promise<void> {
   const dir = dirname(finalPath);
-  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await mkdirDurable(dir);
   const tmp = `${finalPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   const fh = await open(tmp, "w", 0o600);
   try {
@@ -240,18 +267,62 @@ async function fsyncDir(dir: string): Promise<void> {
     } finally {
       await fh.close();
     }
-  } catch {
-    // Directory fsync is not available on every platform.
+  } catch (err) {
+    if (isUnsupportedDirFsync(err)) return;
+    throw err;
   }
 }
 
 async function appendLineDurable(path: string, line: string): Promise<void> {
+  const existed = existsSync(path);
   const fh = await open(path, "a", 0o600);
+  let wrote = false;
+  let firstErr: unknown;
   try {
     await fh.writeFile(line, "utf8");
+    wrote = true;
     await fh.sync();
-  } finally {
+  } catch (err) {
+    firstErr = err;
+  }
+  try {
     await fh.close();
+  } catch (err) {
+    firstErr ??= err;
+    if (wrote) throw new UncertainAppendError();
+  }
+  if (wrote && firstErr) throw new UncertainAppendError();
+  if (firstErr) throw firstErr;
+  if (!existed) {
+    try {
+      await fsyncDir(dirname(path));
+    } catch {
+      throw new UncertainAppendError();
+    }
+  }
+}
+
+function* readCommitLines(path: string): Generator<string> {
+  const fd = openSync(path, "r");
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    let acc = "";
+    for (;;) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) break;
+      acc += buf.toString("utf8", 0, n);
+      let idx = acc.indexOf("\n");
+      while (idx !== -1) {
+        let line = acc.slice(0, idx);
+        acc = acc.slice(idx + 1);
+        if (line.endsWith("\r")) line = line.slice(0, -1);
+        yield line;
+        idx = acc.indexOf("\n");
+      }
+    }
+    if (acc.length > 0) yield acc.endsWith("\r") ? acc.slice(0, -1) : acc;
+  } finally {
+    closeSync(fd);
   }
 }
 
@@ -284,8 +355,9 @@ export class MemoryStore {
   readonly stateDir: string;
   readonly publicKeyPem: string;
   readonly privateKeyPem: string;
-  readonly historyUnavailable: boolean;
+  historyUnavailable: boolean;
   private readonly index = new Map<string, MemoryIndexEntry>();
+  private readonly decisionSnapshots = new Map<string, MemoryObject>();
   private lastSeq = 0;
   private lastHash: string | null = null;
 
@@ -305,6 +377,17 @@ export class MemoryStore {
     this.index = opts.index;
     this.lastSeq = opts.lastSeq;
     this.lastHash = opts.lastHash;
+  }
+
+  rememberDecisionSnapshot(tenantKey: string, object: MemoryObject): void {
+    this.decisionSnapshots.set(indexKey(tenantKey, object.id), object);
+  }
+
+  takeDecisionSnapshot(tenantKey: string, id: string): MemoryObject | undefined {
+    const key = indexKey(tenantKey, id);
+    const object = this.decisionSnapshots.get(key);
+    if (object) this.decisionSnapshots.delete(key);
+    return object;
   }
 
   lookup(tenantKey: string, id: string): MemoryIndexEntry | undefined {
@@ -367,7 +450,12 @@ export class MemoryStore {
       }
       const object = parseMemoryObject(raw);
       if (object === null) return { kind: "integrity", reason: "memory-integrity-mismatch" };
-      const versionHash = memoryVersionHash(object);
+      let versionHash: string;
+      try {
+        versionHash = memoryVersionHash(object);
+      } catch {
+        return { kind: "integrity", reason: "memory-integrity-mismatch" };
+      }
       if (
         object.id !== id ||
         object.tenantKey !== tenantKey ||
@@ -435,6 +523,7 @@ export class MemoryStore {
       }
       await writeFileDurable(abs, payload);
       await withLock(commitLock, async () => {
+        if (this.historyUnavailable) return;
         const commit: MemoryCommitPayload = {
           v: 1,
           seq: this.lastSeq + 1,
@@ -448,11 +537,22 @@ export class MemoryStore {
           ts: Date.now(),
         };
         const line = `${JSON.stringify({ payload: commit, sig: signPayload(commit, this.privateKeyPem) })}\n`;
-        await appendLineDurable(join(this.stateDir, MEMORY_COMMITS_FILE), line);
+        try {
+          await appendLineDurable(join(this.stateDir, MEMORY_COMMITS_FILE), line);
+        } catch (err) {
+          if (err instanceof UncertainAppendError) {
+            this.historyUnavailable = true;
+            return;
+          }
+          throw err;
+        }
         this.lastSeq = commit.seq;
         this.lastHash = sha256Canonical(commit);
         this.index.set(indexKey(opts.tenantKey, opts.id), { revision, versionHash, objectPath });
       });
+      if (this.historyUnavailable) {
+        return { ok: false as const, error: "memory-integrity-history-unavailable" as const };
+      }
       if (current) {
         const old = resolveObjectPath(this.stateDir, current.objectPath);
         if (old !== null && old !== abs) {
@@ -540,7 +640,11 @@ function openLoadedStore(
     lastSeq: loaded.lastSeq,
     lastHash: loaded.lastHash,
   });
-  stores.set(storeKey(opts.stateDir), store);
+  return store;
+}
+
+export function publishMemoryStore(store: MemoryStore): MemoryStore {
+  stores.set(storeKey(store.stateDir), store);
   return store;
 }
 
@@ -554,15 +658,15 @@ export function openMemoryStoreSync(opts: {
   if (!existsSync(path)) {
     return openLoadedStore(opts, { historyUnavailable: false, index, lastSeq: 0, lastHash: null });
   }
-  let raw: string;
+  let lines: Generator<string>;
   try {
-    raw = readFileSync(path, "utf8");
+    lines = readCommitLines(path);
   } catch {
     return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
   }
   let lastSeq = 0;
   let lastHash: string | null = null;
-  for (const line of raw.split(/\r?\n/)) {
+  for (const line of lines) {
     if (line.trim() === "") continue;
     let parsed: unknown;
     try {
@@ -603,7 +707,9 @@ export function memoryStoreFor(stateDir: string, keys?: { publicKeyPem: string; 
   if (!keys) {
     throw new Error("memory-store-unopened");
   }
-  return openMemoryStoreSync({ stateDir, publicKeyPem: keys.publicKeyPem, privateKeyPem: keys.privateKeyPem });
+  return publishMemoryStore(
+    openMemoryStoreSync({ stateDir, publicKeyPem: keys.publicKeyPem, privateKeyPem: keys.privateKeyPem }),
+  );
 }
 
 export function listLegacyMemoryFiles(stateDir: string): Array<{ tenantKey: string; id: string; path: string }> {

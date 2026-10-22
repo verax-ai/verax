@@ -299,7 +299,7 @@ export async function runApprove(
     return 1;
   }
   try {
-    const signers = loadOrCreateSigners(stateDir);
+    const signers = loadOrCreateSigners(stateDir, env.VERAX_KEYS_DIR);
     const approvals = approvalsLogFor(ledger);
     const decisions = await ledger.decisions();
     const defer = decisions.find((d) => d.claims.ref === ref && d.claims.decision === "defer");

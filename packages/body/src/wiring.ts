@@ -11,13 +11,14 @@ import {
   type ToolCall,
   type ToolResult,
 } from "@verax-ai/proxy";
+import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
 import { assertEd25519PublicKey, resolveKeysDir } from "./keys.ts";
-import { openMemoryStoreSync } from "./memory-store.ts";
+import { openMemoryStoreSync, publishMemoryStore, type MemoryStore } from "./memory-store.ts";
 import {
   memoryBelongsToOtherTenant,
   memoryExistsForTenant,
@@ -55,7 +56,52 @@ export type BodyServices = {
   policyDocument: unknown;
   listTools: () => readonly string[];
   explainOpts: () => Promise<ExplainOpts>;
+  recordSigner: RecordSigner;
+  memoryStore: MemoryStore;
 };
+
+function publicKeyDer(pem: string): Buffer {
+  return createPublicKey(pem).export({ type: "spki", format: "der" }) as Buffer;
+}
+
+function publicKeyDerFromPrivate(pem: string): Buffer {
+  return createPublicKey(createPrivateKey(pem)).export({ type: "spki", format: "der" }) as Buffer;
+}
+
+function recordPublicKeyPin(publicKeyPem: string): string {
+  return createHash("sha256").update(publicKeyDer(publicKeyPem)).digest("hex");
+}
+
+function isLegacyExplainPin(value: string): boolean {
+  return value.includes("BEGIN") && value.includes("PUBLIC KEY");
+}
+
+function resolveTrustPublicKey(opts: {
+  stateDir: string;
+  keysDir?: string;
+  recordSigner: RecordSigner;
+}): string {
+  const explicit = opts.keysDir?.trim();
+  if (!explicit) return opts.recordSigner.publicKeyPem;
+  const trustPub = join(resolveKeysDir(opts.stateDir, explicit), "record.public.pem");
+  if (!existsSync(trustPub)) {
+    throw new Error(`record-public-key-missing:${trustPub}`);
+  }
+  const publicKeyPem = readFileSync(trustPub, "utf8");
+  assertEd25519PublicKey(publicKeyPem, "record");
+  if (!publicKeyDer(publicKeyPem).equals(publicKeyDerFromPrivate(opts.recordSigner.privateKeyPem))) {
+    throw new Error("record-public-key-mismatch");
+  }
+  return publicKeyPem;
+}
+
+function assertRecordPubkeyPin(publicKeyPem: string): void {
+  const pin = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
+  if (pin === "" || isLegacyExplainPin(pin)) return;
+  if (pin.toLowerCase() !== recordPublicKeyPin(publicKeyPem)) {
+    throw new Error("record-pubkey-pin-mismatch");
+  }
+}
 
 /**
  * Tool functions live in a Map that is not exported. The only way to
@@ -100,19 +146,8 @@ export function createBodyServices(opts: {
   }
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
-  let publicKeyPem = opts.recordSigner.publicKeyPem;
-  if (opts.keysDir !== undefined) {
-    const trustPub = join(resolveKeysDir(opts.stateDir, opts.keysDir), "record.public.pem");
-    if (existsSync(trustPub)) {
-      publicKeyPem = readFileSync(trustPub, "utf8");
-      assertEd25519PublicKey(publicKeyPem, "record");
-    }
-  }
-  openMemoryStoreSync({
-    stateDir: opts.stateDir,
-    publicKeyPem,
-    privateKeyPem: opts.recordSigner.privateKeyPem,
-  });
+  const publicKeyPem = resolveTrustPublicKey(opts);
+  assertRecordPubkeyPin(publicKeyPem);
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
   ledger.onPieceClose = async (window) => {
@@ -122,8 +157,16 @@ export function createBodyServices(opts: {
       endMs: window.endMs,
     });
   };
+  let store: MemoryStore;
   try {
     persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
+    store = publishMemoryStore(
+      openMemoryStoreSync({
+        stateDir: opts.stateDir,
+        publicKeyPem,
+        privateKeyPem: opts.recordSigner.privateKeyPem,
+      }),
+    );
   } catch (err) {
     ledger.close();
     throw err;
@@ -132,17 +175,17 @@ export function createBodyServices(opts: {
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
-  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal));
-  registry.set("memory.put", (call, principal, ref) => memoryPut(call, opts.stateDir, principal, ref ?? ""));
+  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal, store));
+  registry.set("memory.put", (call, principal, ref) => memoryPut(call, opts.stateDir, principal, ref ?? "", store));
   const explainOpts = async (): Promise<ExplainOpts> => {
-    const env = process.env.VERAX_RECORD_PUBKEY_PIN;
-    const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
+    const env = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
+    const pem = env !== "" && isLegacyExplainPin(env) ? env : opts.recordSigner.publicKeyPem;
     return {
       ...(pem
         ? {
             issuerTrust: {
               publicKeyPem: pem,
-              source: env && env.trim() !== "" ? "env" : "own-key",
+              source: env !== "" && isLegacyExplainPin(env) ? "env" : "own-key",
             },
           }
         : {}),
@@ -183,14 +226,14 @@ export function createBodyServices(opts: {
     now,
     nonce,
     inner,
-    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal),
+    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal, store),
     checkTenantMismatch: async (call, principal) => {
       if (call.name === "memory.get") {
-        if (memoryHistoryUnavailable(opts.stateDir)) return false;
+        if (memoryHistoryUnavailable(opts.stateDir, store)) return false;
         const id = call.arguments.id;
         if (typeof id !== "string") return false;
-        if (memoryExistsForTenant(opts.stateDir, id, principal)) return false;
-        return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal));
+        if (memoryExistsForTenant(opts.stateDir, id, principal, store)) return false;
+        return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal), store);
       }
       if (call.name === "audit.explain") {
         const ref = call.arguments.ref;
@@ -213,5 +256,7 @@ export function createBodyServices(opts: {
     policyDocument,
     listTools: () => (extraNames.length === 0 ? TOOL_NAMES : [...TOOL_NAMES, ...extraNames]),
     explainOpts,
+    recordSigner: opts.recordSigner,
+    memoryStore: store,
   };
 }
