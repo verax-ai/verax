@@ -11,6 +11,7 @@ import {
   readFileSync,
   readSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
@@ -99,9 +100,24 @@ function outboxRecordPath(stateDir: string): string {
   return join(stateDir, ALARM_OUTBOX_RECORD);
 }
 
+function readOutboxEnvelope(path: string): AlarmEnvelope | null {
+  try {
+    if (!statSync(path).isFile()) return null;
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as AlarmEnvelope;
+    if (!parsed || typeof parsed !== "object" || typeof parsed.sig !== "string" || parsed.sig === "") return null;
+    if (!parsed.payload || typeof parsed.payload !== "object") return null;
+    const id = parsed.payload.eventId;
+    if (typeof id !== "string" || !isSafeOutboxEventId(id)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export function hasAlarmOutbox(stateDir: string, eventId: string): boolean {
   if (!isSafeOutboxEventId(eventId)) return false;
-  return existsSync(outboxPath(stateDir, eventId));
+  const envelope = readOutboxEnvelope(outboxPath(stateDir, eventId));
+  return envelope !== null && envelope.payload.eventId === eventId;
 }
 
 export function deliveredAlarmIds(stateDir: string): Set<string> {
@@ -161,17 +177,11 @@ export function listAlarmOutbox(stateDir: string): AlarmEnvelope[] {
   const names = readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
   const out: AlarmEnvelope[] = [];
   for (const name of names) {
-    try {
-      const parsed = JSON.parse(readFileSync(join(dir, name), "utf8")) as AlarmEnvelope;
-      if (!parsed || typeof parsed !== "object" || typeof parsed.sig !== "string") continue;
-      if (!parsed.payload || typeof parsed.payload !== "object") continue;
-      const eventId = parsed.payload.eventId;
-      if (typeof eventId !== "string" || !isSafeOutboxEventId(eventId)) continue;
-      if (delivered.has(eventId)) continue;
-      out.push(parsed);
-    } catch {
-      // A torn file is left for the next pass; it is not delivered.
-    }
+    const parsed = readOutboxEnvelope(join(dir, name));
+    if (!parsed) continue;
+    const eventId = parsed.payload.eventId;
+    if (typeof eventId !== "string" || delivered.has(eventId)) continue;
+    out.push(parsed);
   }
   return out;
 }

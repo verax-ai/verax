@@ -879,6 +879,12 @@ export function publishMemoryStore(store: MemoryStore): MemoryStore {
   return store;
 }
 
+/** Same-process memory gate when the halt switch file cannot be written. */
+export function markHistoryUnavailable(stateDir: string): void {
+  const store = stores.get(storeKey(stateDir));
+  if (store) store.historyUnavailable = true;
+}
+
 function emptyChain(): {
   historyUnavailable: false;
   index: Map<string, MemoryIndexEntry>;

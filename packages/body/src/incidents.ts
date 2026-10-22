@@ -23,8 +23,8 @@ import {
   type AlarmEnvelope,
 } from "./alarm-outbox.ts";
 import { haltBody, readHalt } from "./halt.ts";
-import { resolveKeysDir } from "./keys.ts";
-import type { IntegrityReason } from "./memory-store.ts";
+import { assertRecordKeyTrust, resolveKeysDir } from "./keys.ts";
+import { markHistoryUnavailable, type IntegrityReason } from "./memory-store.ts";
 
 export const INCIDENT_BY = "verax:memory-integrity";
 export const INCIDENT_RECORD = "incident.json";
@@ -179,17 +179,32 @@ function readIncidentFromPath(path: string): StoredIncident | null {
   return parseStoredIncident(raw);
 }
 
+function legacyMigrationComplete(stateDir: string, legacy: StoredIncident): boolean {
+  try {
+    const dest = incidentEventPath(stateDir, legacy.eventId);
+    if (!existsSync(dest) || !statSync(dest).isFile()) return false;
+    const stored = readIncidentFromPath(dest);
+    return stored !== null && stored.eventId === legacy.eventId;
+  } catch {
+    return false;
+  }
+}
+
 function migrateLegacyIncident(stateDir: string): void {
   const legacy = readIncidentFromPath(legacyIncidentPath(stateDir));
   if (!legacy) return;
+  if (legacyMigrationComplete(stateDir, legacy)) return;
   let dest: string;
   try {
     dest = incidentEventPath(stateDir, legacy.eventId);
   } catch {
     return;
   }
-  if (existsSync(dest)) return;
   try {
+    if (existsSync(dest) && !statSync(dest).isFile()) {
+      process.stderr.write("verax: incident: legacy migrate target is not a file\n");
+      return;
+    }
     writeJsonDurable(dest, legacy);
   } catch (err) {
     process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
@@ -231,7 +246,13 @@ function listIncidentRecords(stateDir: string): StoredIncident[] {
 function writeIncidentRecord(stateDir: string, record: StoredIncident): void {
   writeJsonDurable(incidentEventPath(stateDir, record.eventId), record);
   try {
-    writeJsonDurable(legacyIncidentPath(stateDir), record);
+    const legacyPath = legacyIncidentPath(stateDir);
+    const existing = readIncidentFromPath(legacyPath);
+    if (existing && existing.eventId !== record.eventId && !legacyMigrationComplete(stateDir, existing)) {
+      process.stderr.write("verax: incident: legacy record retained\n");
+      return;
+    }
+    writeJsonDurable(legacyPath, record);
   } catch (err) {
     process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
   }
@@ -312,13 +333,22 @@ function incidentPayload(opts: {
   };
 }
 
-function tryLoadRecordKeys(stateDir: string): { publicKeyPem: string; privateKeyPem: string } | null {
-  const dir = resolveKeysDir(stateDir);
+function tryLoadRecordKeys(
+  stateDir: string,
+  keysDir?: string | null,
+): { publicKeyPem: string; privateKeyPem: string } | null {
+  const resolved = resolveKeysDir(stateDir, keysDir ?? process.env.VERAX_KEYS_DIR);
   try {
-    return {
-      publicKeyPem: readFileSync(join(dir, "record.public.pem"), "utf8"),
-      privateKeyPem: readFileSync(join(dir, "record.private.pem"), "utf8"),
+    const recordSigner = {
+      publicKeyPem: readFileSync(join(resolved, "record.public.pem"), "utf8"),
+      privateKeyPem: readFileSync(join(resolved, "record.private.pem"), "utf8"),
     };
+    const publicKeyPem = assertRecordKeyTrust({
+      stateDir,
+      keysDir: resolved,
+      recordSigner,
+    });
+    return { publicKeyPem, privateKeyPem: recordSigner.privateKeyPem };
   } catch {
     return null;
   }
@@ -464,9 +494,9 @@ function finishAllClosedPending(opts: {
 }
 
 /** Resume: same verify/re-sign path; pending marker is atomic or resume does not finish. */
-export function closeIncidentsOnResume(stateDir: string): void {
+export function closeIncidentsOnResume(stateDir: string, keysDir?: string | null): void {
   migrateLegacyIncident(stateDir);
-  const keys = tryLoadRecordKeys(stateDir);
+  const keys = tryLoadRecordKeys(stateDir, keysDir);
   const records = listIncidentRecords(stateDir);
   const history = readHistoryIdentity(stateDir);
   if (history && !records.some((row) => row.eventId === history.eventId)) records.push(history);
@@ -504,16 +534,18 @@ export function raiseMemoryIntegrityIncident(opts: {
   alarmWebhookUrl?: string;
   now?: number;
 }): AlarmEnvelope | null {
-  const already = existsSync(join(opts.stateDir, "halted"));
-  let eventId: string = randomUUID();
+  let eventId = "";
   let observedAt = opts.now ?? Date.now();
   let triggerCode: IntegrityReason = opts.reason;
   let memoryHead = opts.memoryHead;
   let identity: StoredIncident | null = null;
   let wrote = false;
   let abort = false;
+  let already = false;
 
   try {
+    already = existsSync(join(opts.stateDir, "halted"));
+    eventId = randomUUID();
     migrateLegacyIncident(opts.stateDir);
     finishAllClosedPending(opts);
     const leftoverOpen = !already
@@ -544,14 +576,22 @@ export function raiseMemoryIntegrityIncident(opts: {
     process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
   } finally {
     if (!already && !abort) {
-      haltBody(opts.stateDir, INCIDENT_BY, "integrity", observedAt, undefined, {
-        eventId,
-        triggerCode,
-        ...(memoryHead ? { memoryHead } : {}),
-      });
+      try {
+        haltBody(opts.stateDir, INCIDENT_BY, "integrity", observedAt, undefined, {
+          ...(eventId !== "" ? { eventId } : {}),
+          triggerCode,
+          ...(memoryHead ? { memoryHead } : {}),
+        });
+      } catch (err) {
+        process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
+        if (!existsSync(join(opts.stateDir, "halted"))) {
+          markHistoryUnavailable(opts.stateDir);
+        }
+      }
     }
   }
   if (abort) return null;
+  if (eventId === "") return null;
   if (!wrote && identity) tryWriteIncidentRecord(opts.stateDir, identity);
 
   try {

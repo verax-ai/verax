@@ -73,6 +73,7 @@ export type BodyServices = {
   recordSigner: RecordSigner;
   memoryStore: MemoryStore;
   stopAlarms: () => Promise<void>;
+  keysDir?: string;
 };
 
 function isLegacyExplainPin(value: string): boolean {
@@ -277,5 +278,6 @@ export function createBodyServices(opts: {
     recordSigner: opts.recordSigner,
     memoryStore: store,
     stopAlarms,
+    ...(opts.keysDir ? { keysDir: opts.keysDir } : {}),
   };
 }

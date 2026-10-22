@@ -95,7 +95,7 @@ export async function handleControl(ctx: OperatorRequest, what: { resuming: bool
   const refused = !parsed.ok ? "bad-body" : gated.ok ? undefined : gated.error;
   const by = ctx.subject;
   const state = resuming
-    ? resumeBody(stateDir, by, "http", Date.now(), signature)
+    ? resumeBody(stateDir, by, "http", Date.now(), signature, services.keysDir)
     : {
         ...haltBody(stateDir, by, "http", Date.now(), signature),
         ...(refused ? { signatureRefused: refused } : {}),

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { canonical } from "@cedulon/core";
 import type { ControlSignature } from "@verax-ai/proxy";
 import { closeIncidentsOnResume } from "./incidents.ts";
+import { markHistoryUnavailable } from "./memory-store.ts";
 
 /**
  * The proxy refuses every call while `<stateDir>/halted` exists; that file is
@@ -138,19 +139,28 @@ export function haltBody(
   signature?: ControlSignature,
   incident?: Pick<HaltEvent, "eventId" | "triggerCode" | "memoryHead">,
 ): HaltState {
-  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-  if (!existsSync(join(stateDir, SWITCH))) {
-    writeFileSync(join(stateDir, SWITCH), "", { encoding: "utf8", mode: 0o600 });
-    appendHistory(stateDir, {
-      action: "halt",
-      atMs: now,
-      by,
-      via,
-      ...(signature ? { signature } : {}),
-      ...(incident?.eventId ? { eventId: incident.eventId } : {}),
-      ...(incident?.triggerCode ? { triggerCode: incident.triggerCode } : {}),
-      ...(incident?.memoryHead ? { memoryHead: incident.memoryHead } : {}),
-    });
+  try {
+    mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+    if (!existsSync(join(stateDir, SWITCH))) {
+      writeFileSync(join(stateDir, SWITCH), "", { encoding: "utf8", mode: 0o600 });
+      appendHistory(stateDir, {
+        action: "halt",
+        atMs: now,
+        by,
+        via,
+        ...(signature ? { signature } : {}),
+        ...(incident?.eventId ? { eventId: incident.eventId } : {}),
+        ...(incident?.triggerCode ? { triggerCode: incident.triggerCode } : {}),
+        ...(incident?.memoryHead ? { memoryHead: incident.memoryHead } : {}),
+      });
+    }
+  } catch (err) {
+    process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
+    if (!existsSync(join(stateDir, SWITCH))) {
+      markHistoryUnavailable(stateDir);
+    } else {
+      throw err;
+    }
   }
   return readHalt(stateDir);
 }
@@ -170,9 +180,10 @@ export function resumeBody(
   via: HaltEvent["via"],
   now = Date.now(),
   signature?: ControlSignature,
+  keysDir?: string | null,
 ): HaltState {
   if (existsSync(join(stateDir, SWITCH))) {
-    closeIncidentsOnResume(stateDir);
+    closeIncidentsOnResume(stateDir, keysDir);
     appendHistory(stateDir, { action: "resume", atMs: now, by, via, ...(signature ? { signature } : {}) });
     rmSync(join(stateDir, SWITCH), { force: true });
   }
@@ -205,7 +216,7 @@ export function runResume(
     return 0;
   }
   try {
-    resumeBody(stateDir, cliUser(), "cli");
+    resumeBody(stateDir, cliUser(), "cli", Date.now(), undefined, process.env.VERAX_KEYS_DIR);
   } catch (err) {
     writeErr(`resume-failed: ${oneLine(err)}\n`);
     return 1;
