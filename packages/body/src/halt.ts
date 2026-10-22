@@ -69,6 +69,15 @@ export function isHaltSwitchFile(stateDir: string): boolean {
   }
 }
 
+/** Something occupies the switch path that is not the halt file (a folder, etc.). */
+function isSwitchPathBlocked(stateDir: string): boolean {
+  try {
+    return !statSync(join(stateDir, SWITCH)).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function cliUser(): string {
   try {
     return userInfo().username || "unknown";
@@ -174,6 +183,9 @@ export function haltBody(
         ...(incident?.memoryHead ? { memoryHead: incident.memoryHead } : {}),
       });
     }
+    // The file is the single source of truth once it exists; an older
+    // flag-only halt must not survive a later successful write.
+    if (isHaltSwitchFile(stateDir)) clearProcessHalted(stateDir);
   } catch (err) {
     process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
     if (!isHaltSwitchFile(stateDir)) {
@@ -246,6 +258,12 @@ export function runResume(
   if (!stateDir) {
     writeErr("verax resume <stateDir>\n");
     return 78;
+  }
+  if (isSwitchPathBlocked(stateDir)) {
+    writeErr(
+      "resume-failed: switch-path-blocked; a running body may hold the halt in memory; clear the path and use POST /api/resume\n",
+    );
+    return 1;
   }
   if (!isHaltSwitchFile(stateDir) && !isProcessHalted(stateDir)) {
     writeErr("not halted\n");
