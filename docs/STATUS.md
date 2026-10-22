@@ -407,29 +407,6 @@ returned on the `_inputs` path. When a webhook is configured, one signed
 incident is written. A body that is already halted does not open a
 second incident. Later gateway calls are `denied:halted:<ref>`.
 
-An allow that did not run writes `effectClass: "<tool>:halted"` on that
-allow's ref, with the allow's dispatched `effectHash`. Every reader
-treats that as not-run. reconcile's ref match skips `:halted` and
-`:threw` so an external statement with the same ref stays ghost.
-`:threw` does not mean the tool never ran (`inner` was called; an
-external side effect may have happened) — successful completion was not
-verified; ghost classification stays cautious. `verifyLedger` binds a
-self/same-org `:halted` row only when the same allow has matching `ref`,
-matching `effectHash`, and `effectClass === allow.claims.effectClass +
-":halted"` (allow class is explicit and non-empty; no `subject`
-fallback). A signed wrong-hash `:halted`, a wrong-class `:halted`, or a
-`:halted` on a deny does not bind. The `:threw` rule is unchanged (class
-match, hash relaxed). `explain` drops only Cedulon's
-`effect-class-mismatch` when the line it actually audited is that bound
-`:halted` row. `effect-mismatch` stays. A normal row, a third-party row,
-a `:threw` row, and a presented extract that is not that bound `:halted`
-are not exempt — `:threw` remains `effect-mismatch` (published). The
-panel files the row as its own outcome (`status.halted`,
-`rec.say.effect.halted`), not as a completed run. Once the halt switch
-file exists the process flag is cleared even if `halt-history.jsonl`
-cannot be appended. A replay of the same `_ref` after that not-run row
-answers `denied:not-run-halted:<ref>` rather than `denied:halted:<ref>`.
-
 The halt history line carries `eventId` (and `triggerCode`) so a crash
 or write error after the switch cannot lose the alarm: opening the body
 completes a missing outbox file under that same `eventId` when no
@@ -462,6 +439,59 @@ the active POST, clears the timeout, waits for the running tick, and
 does not change outbox or history after that. Alarm delivery is not a
 tool an agent can call.
 
+### When the halt switch cannot be written
+
+The halt is the regular file `<stateDir>/halted`. If that path cannot be
+written (for example something else already occupies it), the body still
+stops: an in-process flag refuses every gateway call, approvals
+included, with `denied:halted:<ref>`. The flag exists only for this
+case. Once the switch file exists it is the single source of truth and
+the flag is cleared, even if `halt-history.jsonl` cannot be appended, so
+a `verax resume` from another process lifts a normal halt.
+
+An operator halt reports what it achieved: `verax halt` exits non-zero
+with `halt-failed: switch-unwritable`, and `POST /api/halt` answers 5xx,
+when the switch could not be written. `verax resume` from another
+process exits non-zero with `resume-failed: switch-path-blocked` when the
+switch path holds something that is not the halt file, because a running
+body may still hold the halt in memory. Clear the path, then resume
+through `POST /api/resume` on that body.
+
+### A halt between the allow and the run
+
+A call can be allowed and then meet a halt before the tool starts. The
+tool does not run. The allow's ref gets a signed effect row
+`effectClass: "<tool>:halted"` with the allow's dispatched `effectHash`,
+and the start mark is removed. A retry of the same `_ref` answers
+`denied:not-run-halted:<ref>` and does not run the tool; a new `_ref` is
+a new call. The panel shows the row as its own outcome
+(`status.halted`), not as a completed run.
+
+- `verifyLedger` binds a self or same-org `:halted` row only when the
+  same allow has the same `ref`, the same `effectHash`, and an explicit
+  `effectClass` that the row repeats with `:halted` appended. A
+  wrong-hash or wrong-class `:halted` row, or one on a deny, does not
+  bind.
+- `explain` drops Cedulon's `effect-class-mismatch` only when every row
+  it audited for that ref (the ledger row, and the presented extract or
+  the stored receipt) is such a bound `:halted` row; an extract with
+  more than one row is never excused. `effect-mismatch` is never
+  dropped.
+- `reconcile` does not match an external statement to a `:halted` or
+  `:threw` row by ref, so such a statement stays a ghost. Reconcile
+  counts only `spend` rows as money spent.
+- `:threw` is unchanged. It does not mean the tool never ran: the tool
+  was called and an external side effect may have happened, but its
+  completion was not verified. `explain` still reports a `:threw` row as
+  `effect-mismatch`.
+
+### Incident ids without randomness
+
+The incident `eventId` comes from `randomUUID`, then `randomBytes`. If
+both fail it is derived from the observation time, trigger, record key
+id, process id, a counter and any spare bytes, so two incidents in the
+same millisecond still get two ids.
+
 ### Upgrading from 0.6.1
 
 1. With the body stopped, review the old memory contents.
@@ -477,7 +507,10 @@ and the outbox; an independent external observer is a later stage (P4).
 The alarm signature binds the event to the record key; if that key is
 stolen it does not prove the event is truthful.
 
-Guards: `blackbox-p1`, `blackbox-p1-url`, `blackbox-p1-durability`.
+Guards: `blackbox-p1`, `blackbox-p1-url`, `blackbox-p1-durability`,
+`blackbox-p1-c`, `blackbox-p1-e`, `blackbox-p1-f`, `blackbox-p1-g`,
+`blackbox-p1-h`, `blackbox-p1-j`, `blackbox-p1-k`, `blackbox-p1-l`,
+`blackbox-p1-m`.
 
 ## Historical record
 
