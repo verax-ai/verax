@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Builds verax-offline-<version>/ on a machine that can reach the npm
 // registry: packed tarballs, an npm cache filled from those tarballs, the
-// CycloneDX files, SHA256SUMS, and INSTALL-OFFLINE.md.
+// CycloneDX file, SHA256SUMS, and INSTALL-OFFLINE.md.
 //
 // Run: node --experimental-strip-types scripts/offline-bundle.ts
 
@@ -20,31 +20,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { WORKSPACES, writeSboms } from "./sbom.ts";
+import { readShipVersion, WORKSPACES, writeSbom } from "./sbom.ts";
+
+export { readShipVersion };
 
 function run(cmd: string, args: string[], cwd: string): { status: number; out: string; stdout: string } {
   const shell = process.platform === "win32" && cmd !== process.execPath;
   const r = spawnSync(cmd, args, { cwd, encoding: "utf8", shell });
   return { status: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
-}
-
-export function readShipVersion(repo: string): string {
-  const versions = WORKSPACES.map(({ slug, workspace }) => {
-    const pkg = JSON.parse(readFileSync(join(repo, "packages", slug, "package.json"), "utf8")) as {
-      version?: unknown;
-    };
-    if (typeof pkg.version !== "string" || pkg.version.length === 0) {
-      throw new Error(`${workspace} has no version`);
-    }
-    return { workspace, version: pkg.version };
-  });
-  const version = versions[0]!.version;
-  for (const row of versions) {
-    if (row.version !== version) {
-      throw new Error(`${row.workspace} is ${row.version}, expected ${version}`);
-    }
-  }
-  return version;
 }
 
 export function walkFiles(root: string, rel = ""): string[] {
@@ -162,8 +145,9 @@ This is \`npm install\` of the three packages. It is not \`verax install\`,
 which still talks to the registry and writes an administrator-owned
 service.
 
-The CycloneDX files under \`sbom/\` were produced by \`npm sbom --sbom-format cyclonedx\`
-for each workspace package.
+The CycloneDX file under \`sbom/\` was produced by packing the three
+packages, installing those tarballs into a temporary directory, and
+running \`npm sbom --sbom-format cyclonedx --omit dev\`.
 `;
 }
 
@@ -188,7 +172,7 @@ export function buildOfflineBundle(repo: string, dest?: string): string {
     }
   }
 
-  writeSboms(join(bundle, "sbom"), repo);
+  writeSbom(join(bundle, "sbom"), repo);
 
   const staging = mkdtempSync(join(tmpdir(), "verax-offline-fill-"));
   try {

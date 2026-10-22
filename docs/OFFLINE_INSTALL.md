@@ -22,9 +22,12 @@ npm run sbom
 npm run offline:bundle
 ```
 
-`npm run sbom` writes `sbom/<package>-<version>.cdx.json` for
-`inventory`, `proxy` and `body` via `npm sbom --sbom-format cyclonedx --workspace <name>`
-(https://docs.npmjs.com/cli/v11/commands/npm-sbom). It does not pass
+`npm run sbom` writes `sbom/verax-<version>.cdx.json`. It packs
+`@verax-ai/proxy`, `@verax-ai/inventory` and `@verax-ai/body`, installs
+those tarballs into a temporary directory named `verax-sbom`, then runs
+`npm sbom --sbom-format cyclonedx --omit dev`
+(https://docs.npmjs.com/cli/v11/commands/npm-sbom). The file lists the
+three packages and their production dependencies. It does not pass
 `--package-lock-only`.
 
 `npm run offline:bundle` writes `verax-offline-<version>/`:
@@ -34,7 +37,7 @@ npm run offline:bundle
 - `npm-cache/` — filled by installing those tarballs into a temporary
   directory with `--cache` pointed at this folder
   (https://docs.npmjs.com/cli/v11/using-npm/config#cache)
-- `sbom/` — the same CycloneDX files
+- `sbom/` — the same CycloneDX file, `verax-<version>.cdx.json`
 - `SHA256SUMS` — SHA-256 of every file in the bundle except itself
 - `INSTALL-OFFLINE.md` — the steps that travel with the bundle
 
@@ -80,6 +83,6 @@ https://docs.npmjs.com/cli/v11/using-npm/config#fund).
 - The cache is npm's. Produce the bundle on a machine close to the
   isolated host (same OS family) if a dependency ever ships a native
   addon.
-- Release workflow `release.yml` writes the CycloneDX files as an
+- Release workflow `release.yml` writes the CycloneDX file as an
   artifact on both `confirm=check` and `confirm=publish`. It does not
-  attach them to the npm publish.
+  attach it to the npm publish.

@@ -6,7 +6,7 @@
 // Run: node --experimental-strip-types scripts/offline-bundle-smoke.ts
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -39,6 +39,20 @@ const cleanup = { recursive: true, force: true, maxRetries: 10, retryDelay: 200 
 try {
   const bundle = buildOfflineBundle(repo, join(bundleParent, `verax-offline-${version}`));
   check(true, `built ${bundle}`);
+
+  try {
+    const sbomFile = join(bundle, "sbom", `verax-${version}.cdx.json`);
+    const bom = JSON.parse(readFileSync(sbomFile, "utf8")) as {
+      bomFormat?: unknown;
+      components?: unknown;
+    };
+    check(
+      bom.bomFormat === "CycloneDX" && Array.isArray(bom.components) && bom.components.length > 0,
+      `bundle SBOM is CycloneDX with components (${sbomFile})`,
+    );
+  } catch (err) {
+    check(false, "bundle SBOM is CycloneDX with components", err instanceof Error ? err.message : "read failed");
+  }
 
   try {
     verifySha256Sums(bundle);
