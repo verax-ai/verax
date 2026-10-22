@@ -407,10 +407,12 @@ returned on the `_inputs` path. When a webhook is configured, one signed
 incident is written. A body that is already halted does not open a
 second incident. Later gateway calls are `denied:halted:<ref>`.
 
-The halt history line carries `eventId` (and `triggerCode`) so a crash
-or write error after the switch cannot lose the alarm: opening the body
-completes a missing outbox file under that same `eventId` when no
-delivery record exists.
+The halt history line carries `eventId` (and `triggerCode`). When a
+crash or write error after the switch leaves an alarm undelivered,
+opening the body attempts to complete the missing outbox file under that
+same `eventId` when no delivery record exists. That needs the incident
+record or the integrity halt history to survive, the record keys to be
+available and a webhook to be configured.
 
 The webhook is `listen` / `createBodyServices` `alarmWebhookUrl` /
 `alarmRetryMs`, or `VERAX_ALARM_WEBHOOK_URL` / `VERAX_ALARM_RETRY_MS`
