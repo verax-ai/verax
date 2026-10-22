@@ -170,6 +170,76 @@ closed pieces and their copies is designed in
 erasure by destroying a per-subject key are designed in
 `docs/design/erasure.md` and not built.
 
+## memory at rest
+
+`memory.get` serves an item only when the bytes on disk match the last signed
+memory commit for that tenant and id. The commit file is `memory-commits.jsonl`
+at the state directory root. Each line is `{payload, sig}`: the payload is
+`{v, seq, tenantKey, id, revision, versionHash, objectPath, putRef, prevCommitHash, ts}`
+and the signature is ed25519 over `canonical(payload)` with the record key.
+The trust root is the public key in the keys directory (default
+`<stateDir>/keys`; set `VERAX_KEYS_DIR` or `keysDir` to keep keys outside
+state). A key written inside a commit line is not used. When keys live
+inside the state directory, `VERAX_RECORD_PUBKEY_PIN` (the record
+public key PEM; parsed and compared as SPKI DER) catches a key
+substitution at start.
+
+What this catches (BPM draft T1–T8; `tests/memory-integrity.test.ts` after a
+stop, a plain-fs edit, and a start):
+
+- T1 in-place body edit
+- T2 newest version deleted (no fall-back to an older file)
+- T3 a stored object deleted (not answered as never written)
+- T4 two objects swapped between slots
+- T5 a well-formed object with no commit
+- T6 a genuine object from another tenant copied over this tenant's slot
+- T7 an older genuine version written over the newest
+- T8 `source` or other envelope metadata changed
+
+### Hardened profile
+
+When the record keys and the signed memory head live outside the state
+directory (`VERAX_KEYS_DIR`; optional `VERAX_MEMORY_HEAD_DIR`, otherwise the
+keys directory), a writer who can only change state cannot roll the body back
+to an earlier commit tip. The head file is
+`<headDir>/memory-head-<sha256(canonical stateDir) first 16 hex>.json`,
+`{payload:{v:1, stateDirHash, seq, lastHash, ts}, sig}` with the same
+ed25519 record signature as a commit line. `tests/memory-integrity.test.ts`
+measures this as C1h (restart unchanged), T9h (whole state directory restored
+to an earlier copy), and T2h (newest commit line and its object cut). C1h is
+accepted; T9h and T2h are refused. `verax doctor` warns when the keys directory is still
+inside state: a state-directory writer also holds the key, and this profile
+does not apply.
+
+- First use: a head is created on its own only while the commit chain is empty. When the chain has lines and no head exists (for example after the keys directory moved), memory stays closed until the operator runs verax memory rehead <stateDir>, which trusts the chain as it is at that moment.
+
+When keys stay in `<stateDir>/keys`, the head is written there too. T9 and
+cutting the newest commit then succeed: the attacker restores or rewrites the
+head with the state. The local profile still records T9 as ACCEPTED.
+
+What this does not catch:
+
+- T9 restoring an earlier copy of the whole state directory, including
+  `memory-commits.jsonl` and the keys, when the head is not outside state.
+  The local profile records T9 as ACCEPTED. The hardened profile (keys and
+  head outside) catches it; see T9h.
+- An attacker who can write the state directory and also hold the record
+  private key. Signatures then verify. Put the keys outside the state
+  directory with `VERAX_KEYS_DIR` when the threat is "state yes, keys no".
+- Cutting the newest lines off memory-commits.jsonl together with the objects
+  they name, when the head is not outside state. Those ids then read as never
+  written. The hardened profile catches it; see T2h.
+- Availability: one damaged commit line makes every memory read answer memory-integrity-history-unavailable until the chain is repaired. This is deliberate (fail closed).
+
+0.6.1 flat files `<id>.json` have no commit. `memory.get` answers
+`memory-integrity-unattested`. The operator command `verax memory reattest
+<stateDir>` (body stopped) writes each as revision 1, appends a commit,
+updates the signed head, and prints the ids. The body does not reattest on
+start.
+
+`audit.explain` still explains the decision record, not the current memory
+file. That comparison is later work.
+
 ## out of scope: OS compromise
 
 Hermes Agent, SECURITY.md section 2.2 The Boundary: OS-Level Isolation:

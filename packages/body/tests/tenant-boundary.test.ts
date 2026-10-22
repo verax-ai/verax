@@ -90,9 +90,9 @@ describe("S4 tenant boundary", () => {
 
       const aDir = join(stateDir, "tenants", tenantKey(writerA), "memory");
       const bDir = join(stateDir, "tenants", tenantKey(writerB), "memory");
-      assert.equal(existsSync(join(aDir, "note-1.json")), true);
+      assert.equal(existsSync(join(aDir, "note-1", "1.json")), true);
       assert.equal(existsSync(join(stateDir, "memory", "note-1.json")), false);
-      assert.equal(existsSync(join(bDir, "note-1.json")), false);
+      assert.equal(existsSync(join(bDir, "note-1", "1.json")), false);
     } finally {
       services.ledger.close();
     }
@@ -188,10 +188,10 @@ describe("S4 _ref namespace", () => {
       assert.equal(recs.some((d) => d.claims.reasonCode === "ref-reuse"), false);
       assert.equal(recs.filter((d) => d.claims.decision === "allow").length, 2);
       const aFile = JSON.parse(
-        readFileSync(join(stateDir, "tenants", tenantKey(writerA), "memory", "note-1.json"), "utf8"),
+        readFileSync(join(stateDir, "tenants", tenantKey(writerA), "memory", "note-1", "1.json"), "utf8"),
       ) as { body: { who?: string } };
       const bFile = JSON.parse(
-        readFileSync(join(stateDir, "tenants", tenantKey(writerB), "memory", "note-1.json"), "utf8"),
+        readFileSync(join(stateDir, "tenants", tenantKey(writerB), "memory", "note-1", "1.json"), "utf8"),
       ) as { body: { who?: string } };
       assert.equal(aFile.body.who, "a");
       assert.equal(bFile.body.who, "b");

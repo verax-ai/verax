@@ -233,7 +233,12 @@ export type ProxyDeps = {
   ledger: Ledger;
   now: () => number;
   nonce: () => string;
-  inner: (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
+  inner: (
+    call: ToolCall,
+    principal: Principal,
+    ref?: string,
+    bound?: ReadonlyArray<{ id: string; versionHash: string }>,
+  ) => Promise<ToolResult>;
   inputsLog?: InputsLog;
   resolveInput?: (id: string, principal?: Principal) => Promise<ResolvedInput | null>;
   /** True when the call names another tenant's memory id or decision ref. */

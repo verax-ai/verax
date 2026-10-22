@@ -12,13 +12,17 @@ import {
   type ToolResult,
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
+import { assertRecordKeyTrust, resolveHeadDir } from "./keys.ts";
+import { openMemoryStoreSync, publishMemoryStore, type MemoryStore } from "./memory-store.ts";
 import {
   memoryBelongsToOtherTenant,
   memoryExistsForTenant,
   memoryGet,
+  memoryHistoryUnavailable,
   memoryPut,
   readMemoryMeta,
 } from "./tools/memory.ts";
@@ -27,7 +31,14 @@ import { messageRead, messageSend } from "./tools/message.ts";
 import { spendAuthorize } from "./tools/spend.ts";
 import { requestWitnessCheckpoint, requestWitnessSign } from "./witness.ts";
 
-export type ToolFn = (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
+export type BoundInput = { id: string; versionHash: string };
+
+export type ToolFn = (
+  call: ToolCall,
+  principal: Principal,
+  ref?: string,
+  bound?: ReadonlyArray<BoundInput>,
+) => Promise<ToolResult>;
 
 export const TOOL_NAMES = [
   "memory.get",
@@ -51,7 +62,13 @@ export type BodyServices = {
   policyDocument: unknown;
   listTools: () => readonly string[];
   explainOpts: () => Promise<ExplainOpts>;
+  recordSigner: RecordSigner;
+  memoryStore: MemoryStore;
 };
+
+function isLegacyExplainPin(value: string): boolean {
+  return value.includes("BEGIN") && value.includes("PUBLIC KEY");
+}
 
 /**
  * Tool functions live in a Map that is not exported. The only way to
@@ -67,6 +84,8 @@ export function createBodyServices(opts: {
   now?: () => number;
   nonce?: () => string;
   extraTools?: readonly ExtraTool[];
+  keysDir?: string;
+  headDir?: string;
 }): BodyServices {
   const extraNames: string[] = [];
   const reserved = new Set<string>(TOOL_NAMES);
@@ -95,6 +114,7 @@ export function createBodyServices(opts: {
   }
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
+  const publicKeyPem = assertRecordKeyTrust(opts);
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
   ledger.onPieceClose = async (window) => {
@@ -104,8 +124,17 @@ export function createBodyServices(opts: {
       endMs: window.endMs,
     });
   };
+  let store: MemoryStore;
   try {
     persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
+    store = publishMemoryStore(
+      openMemoryStoreSync({
+        stateDir: opts.stateDir,
+        publicKeyPem,
+        privateKeyPem: opts.recordSigner.privateKeyPem,
+        headDir: resolveHeadDir(opts.stateDir, opts.keysDir, opts.headDir ?? process.env.VERAX_MEMORY_HEAD_DIR),
+      }),
+    );
   } catch (err) {
     ledger.close();
     throw err;
@@ -114,17 +143,19 @@ export function createBodyServices(opts: {
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
-  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal));
-  registry.set("memory.put", (call, principal) => memoryPut(call, opts.stateDir, principal));
+  registry.set("memory.get", (call, principal, _ref, bound) =>
+    memoryGet(call, opts.stateDir, now, principal, store, bound),
+  );
+  registry.set("memory.put", (call, principal, ref) => memoryPut(call, opts.stateDir, principal, ref ?? "", store));
   const explainOpts = async (): Promise<ExplainOpts> => {
-    const env = process.env.VERAX_RECORD_PUBKEY_PIN;
-    const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
+    const env = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
+    const pem = env !== "" && isLegacyExplainPin(env) ? env : opts.recordSigner.publicKeyPem;
     return {
       ...(pem
         ? {
             issuerTrust: {
               publicKeyPem: pem,
-              source: env && env.trim() !== "" ? "env" : "own-key",
+              source: env !== "" && isLegacyExplainPin(env) ? "env" : "own-key",
             },
           }
         : {}),
@@ -143,7 +174,7 @@ export function createBodyServices(opts: {
     registry.set(tool.name, tool.fn);
   }
 
-  const inner: ToolFn = async (call, principal, ref) => {
+  const inner: ToolFn = async (call, principal, ref, bound) => {
     const fn = registry.get(call.name);
     if (!fn) {
       return {
@@ -151,7 +182,7 @@ export function createBodyServices(opts: {
         isError: true,
       };
     }
-    return fn(call, principal, ref);
+    return fn(call, principal, ref, bound);
   };
 
   // Halt and resume lines are copied into the ledger when the body opens
@@ -165,13 +196,14 @@ export function createBodyServices(opts: {
     now,
     nonce,
     inner,
-    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal),
+    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal, store),
     checkTenantMismatch: async (call, principal) => {
       if (call.name === "memory.get") {
+        if (memoryHistoryUnavailable(opts.stateDir, store)) return false;
         const id = call.arguments.id;
         if (typeof id !== "string") return false;
-        if (memoryExistsForTenant(opts.stateDir, id, principal)) return false;
-        return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal));
+        if (memoryExistsForTenant(opts.stateDir, id, principal, store)) return false;
+        return memoryBelongsToOtherTenant(opts.stateDir, id, tenantKey(principal), store);
       }
       if (call.name === "audit.explain") {
         const ref = call.arguments.ref;
@@ -194,5 +226,7 @@ export function createBodyServices(opts: {
     policyDocument,
     listTools: () => (extraNames.length === 0 ? TOOL_NAMES : [...TOOL_NAMES, ...extraNames]),
     explainOpts,
+    recordSigner: opts.recordSigner,
+    memoryStore: store,
   };
 }

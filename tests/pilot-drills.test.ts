@@ -257,7 +257,7 @@ describe("pilot drills", () => {
         for (const name of readdirSync(p, { withFileTypes: true })) {
           const full = join(p, name.name);
           if (name.isDirectory()) walk(full);
-          else if (name.name === "note-t.json") files.push(full);
+          else if (name.name === "note-t.json" || full.replace(/\\/g, "/").includes("/note-t/")) files.push(full);
         }
       };
       walk(tenantRoot);

@@ -89,10 +89,15 @@ describe("attack R7", () => {
       assert.ok(refused.length >= 1, texts.join("\n"));
       let stored = 0;
       const tenants = join(stateDir, "tenants");
-      for (const tenant of readdirSync(tenants)) {
-        const memory = join(tenants, tenant, "memory");
-        for (const name of readdirSync(memory)) stored += statSync(join(memory, name)).size;
-      }
+      const walk = (dir: string): void => {
+        for (const name of readdirSync(dir)) {
+          const full = join(dir, name);
+          const info = statSync(full);
+          if (info.isDirectory()) walk(full);
+          else stored += info.size;
+        }
+      };
+      for (const tenant of readdirSync(tenants)) walk(join(tenants, tenant, "memory"));
       assert.ok(stored <= 1024 * 1024, String(stored));
     } finally {
       rmSync(stateDir, { recursive: true, force: true });

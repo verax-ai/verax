@@ -1,30 +1,10 @@
-import { createHash } from "node:crypto";
-import { existsSync, readdirSync } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
-import { resolve, sep } from "node:path";
-import { canonical } from "@cedulon/core";
+import { existsSync } from "node:fs";
 import { tenantKey, type Principal, type ToolCall, type ToolResult } from "@verax-ai/proxy";
 import { memoryQuotaBytes } from "../config.ts";
-
-function sha256Canonical(value: unknown): string {
-  return createHash("sha256").update(canonical(value), "utf8").digest("hex");
-}
+import { loadOrCreateSigners } from "../keys.ts";
+import { memoryStoreFor, type IntegrityReason, type MemoryStore } from "../memory-store.ts";
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-
-/** One in-process chain per tenant memory directory. The body is one process per state dir. */
-const memoryQuotaChain = new Map<string, Promise<unknown>>();
-
-function withMemoryQuotaLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
-  const previous = memoryQuotaChain.get(key) ?? Promise.resolve();
-  const run = previous.then(fn, fn);
-  const settled = run.then(() => undefined, () => undefined);
-  memoryQuotaChain.set(key, settled);
-  void settled.then(() => {
-    if (memoryQuotaChain.get(key) === settled) memoryQuotaChain.delete(key);
-  });
-  return run;
-}
 
 function jsonResult(value: unknown, isError = false): ToolResult {
   return {
@@ -33,71 +13,68 @@ function jsonResult(value: unknown, isError = false): ToolResult {
   };
 }
 
-function resolveMemoryPath(stateDir: string, id: string, principal: Principal): string | null {
-  if (!ID_RE.test(id)) return null;
-  const memoryDir = resolve(stateDir, "tenants", tenantKey(principal), "memory");
-  const path = resolve(memoryDir, `${id}.json`);
-  const prefix = memoryDir.endsWith(sep) ? memoryDir : `${memoryDir}${sep}`;
-  if (!path.startsWith(prefix)) return null;
-  return path;
+function integrityResult(reason: IntegrityReason, id: string): ToolResult {
+  return jsonResult({ error: reason, id }, true);
+}
+
+function storeFor(stateDir: string, store?: MemoryStore): MemoryStore {
+  if (store) return store;
+  try {
+    return memoryStoreFor(stateDir);
+  } catch {
+    const keys = loadOrCreateSigners(stateDir);
+    return memoryStoreFor(stateDir, {
+      publicKeyPem: keys.recordSigner.publicKeyPem,
+      privateKeyPem: keys.recordSigner.privateKeyPem,
+    });
+  }
+}
+
+export function memoryHistoryUnavailable(stateDir: string, store?: MemoryStore): boolean {
+  return storeFor(stateDir, store).historyUnavailable;
 }
 
 /** True when `id` exists under a different tenant. Does not read legacy `memory/`. */
-export function memoryBelongsToOtherTenant(stateDir: string, id: string, selfKey: string): boolean {
+export function memoryBelongsToOtherTenant(
+  stateDir: string,
+  id: string,
+  selfKey: string,
+  store?: MemoryStore,
+): boolean {
   if (!ID_RE.test(id)) return false;
-  const tenantsRoot = resolve(stateDir, "tenants");
-  if (!existsSync(tenantsRoot)) return false;
-  let names: string[];
-  try {
-    names = readdirSync(tenantsRoot);
-  } catch {
-    return false;
-  }
-  for (const name of names) {
-    if (name === selfKey) continue;
-    const path = resolve(tenantsRoot, name, "memory", `${id}.json`);
-    const prefix = resolve(tenantsRoot, name, "memory");
-    const guarded = prefix.endsWith(sep) ? prefix : `${prefix}${sep}`;
-    if (!path.startsWith(guarded)) continue;
-    if (existsSync(path)) return true;
-  }
-  return false;
+  if (!existsSync(stateDir)) return false;
+  return storeFor(stateDir, store).idVisibleForOtherTenant(id, selfKey);
 }
 
-/** True when this tenant already has `id` under its own memory path. */
-export function memoryExistsForTenant(stateDir: string, id: string, principal: Principal): boolean {
-  const path = resolveMemoryPath(stateDir, id, principal);
-  if (path === null) return false;
-  return existsSync(path);
+/** True when this tenant already has `id` under its own memory path or commit. */
+export function memoryExistsForTenant(
+  stateDir: string,
+  id: string,
+  principal: Principal,
+  store?: MemoryStore,
+): boolean {
+  if (!ID_RE.test(id)) return false;
+  return storeFor(stateDir, store).idHeldByTenant(id, tenantKey(principal));
 }
 
 export async function readMemoryMeta(
   stateDir: string,
   id: string,
   principal?: Principal,
+  store?: MemoryStore,
 ): Promise<{ versionHash: string; validFromMs: number; validUntilMs: number } | null> {
   if (!principal) return null;
-  const path = resolveMemoryPath(stateDir, id, principal);
-  if (path === null) return null;
-  try {
-    const item = JSON.parse(await readFile(path, "utf8")) as {
-      id: string;
-      body: unknown;
-      validFromMs?: number;
-      validUntilMs?: number;
-      versionHash?: string;
-    };
-    const validFromMs = typeof item.validFromMs === "number" ? item.validFromMs : 0;
-    const validUntilMs = typeof item.validUntilMs === "number" ? item.validUntilMs : 0;
-    const versionHash =
-      typeof item.versionHash === "string"
-        ? item.versionHash
-        : sha256Canonical({ id: item.id, body: item.body, validFromMs, validUntilMs });
-    return { versionHash, validFromMs, validUntilMs };
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw err;
-  }
+  if (typeof id !== "string" || !ID_RE.test(id)) return null;
+  const mem = storeFor(stateDir, store);
+  const tk = tenantKey(principal);
+  const got = await mem.withTenantLock(tk, async () => mem.verifiedRead(tk, id));
+  if (got.kind !== "ok") return null;
+  mem.rememberDecisionSnapshot(tenantKey(principal), got.object);
+  return {
+    versionHash: got.versionHash,
+    validFromMs: got.object.validFromMs,
+    validUntilMs: got.object.validUntilMs,
+  };
 }
 
 export async function memoryGet(
@@ -105,38 +82,42 @@ export async function memoryGet(
   stateDir: string,
   now: () => number,
   principal: Principal,
+  store?: MemoryStore,
+  bound: ReadonlyArray<{ id: string; versionHash: string }> = [],
 ): Promise<ToolResult> {
   const id = call.arguments.id;
   if (typeof id !== "string" || id === "") {
     return jsonResult({ error: "id-required" }, true);
   }
-  const path = resolveMemoryPath(stateDir, id, principal);
-  if (path === null) {
+  if (!ID_RE.test(id)) {
     return jsonResult({ error: "id-invalid" }, true);
   }
-  try {
-    const item = JSON.parse(await readFile(path, "utf8")) as {
-      id: string;
-      body: unknown;
-      validFromMs?: number;
-      validUntilMs?: number;
-    };
-    if (typeof item.validFromMs === "number" && item.validFromMs > now()) {
-      return jsonResult({ notYetValid: true, id: item.id, validFromMs: item.validFromMs });
-    }
-    if (typeof item.validUntilMs === "number" && item.validUntilMs < now()) {
-      return jsonResult({ stale: true, id: item.id, validUntilMs: item.validUntilMs });
-    }
-    return jsonResult(item);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return jsonResult({ error: "not-found", id }, true);
-    }
-    throw err;
+  const mem = storeFor(stateDir, store);
+  const tk = tenantKey(principal);
+  const got = await mem.withTenantLock(tk, async () => mem.verifiedRead(tk, id));
+  if (got.kind === "integrity") return integrityResult(got.reason, id);
+  if (got.kind === "not-found") return jsonResult({ error: "not-found", id }, true);
+  const pinned = bound.find((item) => item.id === id);
+  if (pinned && pinned.versionHash !== got.versionHash) {
+    return jsonResult({ error: "memory-changed", id }, true);
   }
+  const item = got.object;
+  if (item.validFromMs > now()) {
+    return jsonResult({ notYetValid: true, id: item.id, validFromMs: item.validFromMs });
+  }
+  if (item.validUntilMs < now()) {
+    return jsonResult({ stale: true, id: item.id, validUntilMs: item.validUntilMs });
+  }
+  return jsonResult(item);
 }
 
-export async function memoryPut(call: ToolCall, stateDir: string, principal: Principal): Promise<ToolResult> {
+export async function memoryPut(
+  call: ToolCall,
+  stateDir: string,
+  principal: Principal,
+  putRef = "",
+  store?: MemoryStore,
+): Promise<ToolResult> {
   const id = call.arguments.id;
   const body = call.arguments.body;
   const source = call.arguments.source;
@@ -145,8 +126,7 @@ export async function memoryPut(call: ToolCall, stateDir: string, principal: Pri
   if (typeof id !== "string" || id === "") {
     return jsonResult({ error: "id-required" }, true);
   }
-  const path = resolveMemoryPath(stateDir, id, principal);
-  if (path === null) {
+  if (!ID_RE.test(id)) {
     return jsonResult({ error: "id-invalid" }, true);
   }
   if (source === null || typeof source !== "object" || Array.isArray(source)) {
@@ -156,37 +136,22 @@ export async function memoryPut(call: ToolCall, stateDir: string, principal: Pri
     return jsonResult({ error: "validUntilMs-required" }, true);
   }
   const fromMs = typeof validFromMs === "number" ? validFromMs : 0;
-  const versionHash = sha256Canonical({ id, body, validFromMs: fromMs, validUntilMs });
-  const rec = {
+  const mem = storeFor(stateDir, store);
+  const written = await mem.put({
+    tenantKey: tenantKey(principal),
     id,
     body,
     source,
     validFromMs: fromMs,
     validUntilMs,
-    versionHash,
-  };
-  const dir = resolve(stateDir, "tenants", tenantKey(principal), "memory");
-  const payload = `${JSON.stringify(rec)}\n`;
-  return withMemoryQuotaLock(dir, async () => {
-    let used = 0;
-    try {
-      for (const name of await readdir(dir)) {
-        const file = resolve(dir, name);
-        if (file === path) continue;
-        const info = await stat(file);
-        if (info.isFile()) used += info.size;
-      }
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    }
-    if (used + Buffer.byteLength(payload) > memoryQuotaBytes()) {
-      return jsonResult({ error: "memory-quota" }, true);
-    }
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await writeFile(path, payload, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    return jsonResult({ ok: true, id, versionHash });
+    putRef,
+    quotaBytes: memoryQuotaBytes(),
   });
+  if (!written.ok) {
+    if (written.error === "memory-integrity-history-unavailable") {
+      return integrityResult(written.error, id);
+    }
+    return jsonResult({ error: written.error }, true);
+  }
+  return jsonResult({ ok: true, id: written.id, revision: written.revision, versionHash: written.versionHash });
 }

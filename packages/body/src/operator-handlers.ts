@@ -12,7 +12,6 @@ import { approvalChallenge, gateApprovalSignature } from "./approval-signature.t
 import { gateControlSignature, nextControlChallenge } from "./control-signature.ts";
 import { haltBody, readHalt, resumeBody } from "./halt.ts";
 import { MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
-import { loadOrCreateSigners } from "./keys.ts";
 import { readCredentials } from "./operator-credentials.ts";
 import { readRpConfig } from "./rp-config.ts";
 import type { createBodyServices } from "./wiring.ts";
@@ -214,7 +213,7 @@ export async function handleApprove(ctx: OperatorRequest): Promise<void> {
   const approvals = approvalsLogFor(services.ledger);
   const outcome = await approvePending({
     ledger: services.ledger,
-    recordSigner: loadOrCreateSigners(stateDir).recordSigner,
+    recordSigner: services.recordSigner,
     now: () => Date.now(),
     nonce: () => crypto.randomUUID(),
     ref,
