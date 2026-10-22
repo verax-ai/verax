@@ -21,6 +21,7 @@ import { runVerify } from "./verify-cli.ts";
 import { runUnlock } from "./unlock.ts";
 import { runWitness } from "./witness.ts";
 import { runWatch } from "./watch.ts";
+import { runMemoryRehead } from "./memory-rehead-cli.ts";
 import { runMemoryReattest } from "./memory-reattest-cli.ts";
 
 const HELP = `verax - the body an agent asks before it acts, and the ledger it answers from.
@@ -73,6 +74,9 @@ Usage: verax <command> [options]
   unlock [--force] <stateDir>   clear a stale ledger lock
   memory reattest <stateDir>
                        convert 0.6.1 flat memory files to signed V2 revisions.
+                       The body must be stopped.
+  memory rehead <stateDir>
+                       write a signed head from the current commit chain.
                        The body must be stopped.
 
   --help, -h           print this
@@ -361,6 +365,9 @@ async function dispatchCli(
     return 0;
   }
   if (argv[0] === "memory") {
+    if (argv[1] === "rehead") {
+      return runMemoryRehead(argv.slice(1), stdout, stderr, env);
+    }
     return runMemoryReattest(argv.slice(1), stdout, stderr, env);
   }
   const head = argv[0];

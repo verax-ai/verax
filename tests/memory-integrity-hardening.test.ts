@@ -11,6 +11,7 @@ import { tenantKey, verifyLedger } from "@verax-ai/proxy";
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { runDoctor } from "../packages/body/src/doctor.ts";
 import { loadOrCreateSigners, resolveHeadDir } from "../packages/body/src/keys.ts";
+import { runMemoryRehead } from "../packages/body/src/memory-rehead-cli.ts";
 import { MEMORY_COMMITS_FILE, memoryHeadPath, memoryStateDirHash } from "../packages/body/src/memory-store.ts";
 import { createBodyServices } from "../packages/body/src/wiring.ts";
 
@@ -95,7 +96,7 @@ function withPin<T>(pin: string, fn: () => T): T {
   }
 }
 
-describe("memory integrity hardening (H1-H18)", () => {
+describe("memory integrity hardening (H1-H20)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -635,4 +636,85 @@ describe("memory integrity hardening (H1-H18)", () => {
       }
     },
   );
+
+  it("H19: missing head on a non-empty chain stays closed until rehead", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h19-"));
+    const signers = loadOrCreateSigners(stateDir);
+    const opts = {
+      stateDir,
+      policyFile,
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+    };
+    const first = createBodyServices(opts);
+    try {
+      const a = await putFact(first, "n1", "fact-h19-a");
+      const b = await putFact(first, "n2", "fact-h19-b");
+      assert.equal(a.isError, false, JSON.stringify(a.data));
+      assert.equal(b.isError, false, JSON.stringify(b.data));
+      first.ledger.close();
+      const headPath = memoryHeadPath(stateDir, resolveHeadDir(stateDir));
+      rmSync(headPath);
+      const closed = createBodyServices(opts);
+      try {
+        const got = await getFact(closed, "n1");
+        assert.equal(got.isError, true, JSON.stringify(got.data));
+        assert.equal(got.data.error, "memory-integrity-history-unavailable");
+        const refused = await putFact(closed, "n3", "fact-h19-c");
+        assert.equal(refused.isError, true, JSON.stringify(refused.data));
+        assert.equal(refused.data.error, "memory-integrity-history-unavailable");
+        assert.equal(existsSync(headPath), false);
+      } finally {
+        closed.ledger.close();
+      }
+      let out = "";
+      let err = "";
+      const code = await runMemoryRehead(
+        ["rehead", stateDir],
+        { write(s) { out += s; return true; } },
+        { write(s) { err += s; return true; } },
+      );
+      assert.equal(code, 0, err);
+      assert.match(out, /^2 [0-9a-f]{16}\n$/);
+      assert.equal(existsSync(headPath), true);
+      const opened = createBodyServices(opts);
+      try {
+        const got1 = await getFact(opened, "n1");
+        const got2 = await getFact(opened, "n2");
+        assert.equal(got1.isError, false, JSON.stringify(got1.data));
+        assert.equal(got2.isError, false, JSON.stringify(got2.data));
+        assert.equal((got1.data.body as { fact?: string } | undefined)?.fact, "fact-h19-a");
+        assert.equal((got2.data.body as { fact?: string } | undefined)?.fact, "fact-h19-b");
+      } finally {
+        opened.ledger.close();
+      }
+    } finally {
+      if (existsSync(join(stateDir, "ledger.lock"))) first.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H20: rehead is refused while the body holds the ledger lock", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h20-"));
+    const signers = loadOrCreateSigners(stateDir);
+    const services = createBodyServices({
+      stateDir,
+      policyFile,
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+    });
+    try {
+      let err = "";
+      const code = await runMemoryRehead(
+        ["rehead", stateDir],
+        { write() { return true; } },
+        { write(s) { err += s; return true; } },
+      );
+      assert.equal(code, 1, err);
+      assert.match(err, /^memory-rehead-body-running\n$/);
+    } finally {
+      services.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });

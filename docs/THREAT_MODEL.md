@@ -211,7 +211,7 @@ accepted; T9h and T2h are refused. `verax doctor` warns when the keys directory 
 inside state: a state-directory writer also holds the key, and this profile
 does not apply.
 
-- First use: when no head file exists yet, the body trusts the chain it finds and signs a head for it. A state directory that was rolled back before the first start under the hardened profile is not detected.
+- First use: a head is created on its own only while the commit chain is empty. When the chain has lines and no head exists (for example after the keys directory moved), memory stays closed until the operator runs verax memory rehead <stateDir>, which trusts the chain as it is at that moment.
 
 When keys stay in `<stateDir>/keys`, the head is written there too. T9 and
 cutting the newest commit then succeed: the attacker restores or rewrites the

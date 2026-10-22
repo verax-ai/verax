@@ -829,6 +829,12 @@ function bindHead(
   const head = readVerifiedHead(headPath, opts.publicKeyPem, expectedHash);
   if (head.kind === "invalid") return unavailableStore(opts);
   if (head.kind === "missing") {
+    if (loaded.lastSeq > 0) {
+      process.stderr.write(
+        `memory-head-missing: the commit chain has ${loaded.lastSeq} lines but no memory head; run "verax memory rehead ${stateDir}" with the body stopped to trust the chain as it is now\n`,
+      );
+      return unavailableStore(opts);
+    }
     persistHeadSync({
       stateDir,
       headDir: opts.headDir,
@@ -836,9 +842,6 @@ function bindHead(
       seq: loaded.lastSeq,
       lastHash: loaded.lastHash,
     });
-    if (loaded.lastSeq > 0) {
-      process.stderr.write("memory-head-tofu: wrote a signed head from the existing commit chain\n");
-    }
     return openLoadedStore(opts, loaded);
   }
   if (loaded.lastSeq < head.payload.seq) return unavailableStore(opts);
@@ -863,6 +866,105 @@ export function publishMemoryStore(store: MemoryStore): MemoryStore {
   return store;
 }
 
+function emptyChain(): {
+  historyUnavailable: false;
+  index: Map<string, MemoryIndexEntry>;
+  lastSeq: number;
+  lastHash: string | null;
+  hashBySeq: Map<number, string>;
+} {
+  return {
+    historyUnavailable: false,
+    index: new Map(),
+    lastSeq: 0,
+    lastHash: null,
+    hashBySeq: new Map(),
+  };
+}
+
+function loadCommitChain(
+  stateDir: string,
+  publicKeyPem: string,
+): {
+  historyUnavailable: boolean;
+  index: Map<string, MemoryIndexEntry>;
+  lastSeq: number;
+  lastHash: string | null;
+  hashBySeq: Map<number, string>;
+} {
+  const path = join(stateDir, MEMORY_COMMITS_FILE);
+  const unavailable = {
+    historyUnavailable: true,
+    index: new Map<string, MemoryIndexEntry>(),
+    lastSeq: 0,
+    lastHash: null as string | null,
+    hashBySeq: new Map<number, string>(),
+  };
+  if (!existsSync(path)) return emptyChain();
+  try {
+    if (!statSync(path).isFile()) return unavailable;
+    const index = new Map<string, MemoryIndexEntry>();
+    const hashBySeq = new Map<number, string>();
+    let lastSeq = 0;
+    let lastHash: string | null = null;
+    for (const line of readCommitLines(path)) {
+      if (line.trim() === "") continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        return unavailable;
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !closedKeys(parsed, LINE_KEYS)) {
+        return unavailable;
+      }
+      const row = parsed as { payload?: unknown; sig?: unknown };
+      if (typeof row.sig !== "string" || !isCommitPayload(row.payload)) {
+        return unavailable;
+      }
+      if (!verifyPayload(row.payload, row.sig, publicKeyPem)) {
+        return unavailable;
+      }
+      if (row.payload.seq !== lastSeq + 1 || row.payload.prevCommitHash !== lastHash) {
+        return unavailable;
+      }
+      if (resolveObjectPath(stateDir, row.payload.objectPath) === null) {
+        return unavailable;
+      }
+      lastSeq = row.payload.seq;
+      lastHash = sha256Canonical(row.payload);
+      hashBySeq.set(lastSeq, lastHash);
+      index.set(indexKey(row.payload.tenantKey, row.payload.id), {
+        revision: row.payload.revision,
+        versionHash: row.payload.versionHash,
+        objectPath: row.payload.objectPath,
+      });
+    }
+    return { historyUnavailable: false, index, lastSeq, lastHash, hashBySeq };
+  } catch {
+    return unavailable;
+  }
+}
+
+export function reheadMemoryFromChain(opts: {
+  stateDir: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+  headDir?: string;
+}): { ok: true; seq: number; lastHash: string | null } | { ok: false } {
+  const loaded = loadCommitChain(opts.stateDir, opts.publicKeyPem);
+  if (loaded.historyUnavailable) return { ok: false };
+  const stateDir = resolve(opts.stateDir);
+  persistHeadSync({
+    stateDir,
+    headDir: resolveHeadDir(stateDir, undefined, opts.headDir),
+    privateKeyPem: opts.privateKeyPem,
+    seq: loaded.lastSeq,
+    lastHash: loaded.lastHash,
+  });
+  return { ok: true, seq: loaded.lastSeq, lastHash: loaded.lastHash };
+}
+
 export function openMemoryStoreSync(opts: {
   stateDir: string;
   publicKeyPem: string;
@@ -875,60 +977,9 @@ export function openMemoryStoreSync(opts: {
     publicKeyPem: opts.publicKeyPem,
     privateKeyPem: opts.privateKeyPem,
   };
-  const path = join(opts.stateDir, MEMORY_COMMITS_FILE);
-  const unavailable = () => unavailableStore(bound);
-  if (!existsSync(path)) {
-    return bindHead(bound, {
-      historyUnavailable: false,
-      index: new Map(),
-      lastSeq: 0,
-      lastHash: null,
-      hashBySeq: new Map(),
-    });
-  }
-  try {
-    if (!statSync(path).isFile()) return unavailable();
-    const index = new Map<string, MemoryIndexEntry>();
-    const hashBySeq = new Map<number, string>();
-    let lastSeq = 0;
-    let lastHash: string | null = null;
-    for (const line of readCommitLines(path)) {
-      if (line.trim() === "") continue;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(line) as unknown;
-      } catch {
-        return unavailable();
-      }
-      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !closedKeys(parsed, LINE_KEYS)) {
-        return unavailable();
-      }
-      const row = parsed as { payload?: unknown; sig?: unknown };
-      if (typeof row.sig !== "string" || !isCommitPayload(row.payload)) {
-        return unavailable();
-      }
-      if (!verifyPayload(row.payload, row.sig, opts.publicKeyPem)) {
-        return unavailable();
-      }
-      if (row.payload.seq !== lastSeq + 1 || row.payload.prevCommitHash !== lastHash) {
-        return unavailable();
-      }
-      if (resolveObjectPath(opts.stateDir, row.payload.objectPath) === null) {
-        return unavailable();
-      }
-      lastSeq = row.payload.seq;
-      lastHash = sha256Canonical(row.payload);
-      hashBySeq.set(lastSeq, lastHash);
-      index.set(indexKey(row.payload.tenantKey, row.payload.id), {
-        revision: row.payload.revision,
-        versionHash: row.payload.versionHash,
-        objectPath: row.payload.objectPath,
-      });
-    }
-    return bindHead(bound, { historyUnavailable: false, index, lastSeq, lastHash, hashBySeq });
-  } catch {
-    return unavailable();
-  }
+  const loaded = loadCommitChain(opts.stateDir, opts.publicKeyPem);
+  if (loaded.historyUnavailable) return unavailableStore(bound);
+  return bindHead(bound, loaded);
 }
 
 export function memoryStoreFor(stateDir: string, keys?: { publicKeyPem: string; privateKeyPem: string }): MemoryStore {
