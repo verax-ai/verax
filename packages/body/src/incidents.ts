@@ -1,4 +1,4 @@
-import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign, verify } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
@@ -50,6 +51,8 @@ type StoredIncident = {
   observedAt: number;
   memoryHead?: { seq: number; lastHash: string };
   envelope?: AlarmEnvelope;
+  /** Resume closed the halt; the alarm is still waiting to be written or sent. */
+  closedPendingDelivery?: boolean;
 };
 
 export function recordKeyId(publicKeyPem: string): string {
@@ -137,8 +140,18 @@ function readIncidentRecord(stateDir: string): StoredIncident | null {
       stored.memoryHead = { seq: head.seq, lastHash: head.lastHash };
     }
     if (row.envelope && typeof row.envelope === "object" && typeof row.envelope.sig === "string") {
-      stored.envelope = row.envelope;
+      const payload = row.envelope.payload;
+      if (
+        payload &&
+        typeof payload === "object" &&
+        payload.eventId === row.eventId &&
+        typeof payload.triggerCode === "string" &&
+        isIntegrityReason(payload.triggerCode)
+      ) {
+        stored.envelope = row.envelope;
+      }
     }
+    if (row.closedPendingDelivery === true) stored.closedPendingDelivery = true;
     return stored;
   } catch {
     return null;
@@ -147,6 +160,73 @@ function readIncidentRecord(stateDir: string): StoredIncident | null {
 
 function writeIncidentRecord(stateDir: string, record: StoredIncident): void {
   writeJsonDurable(incidentRecordPath(stateDir), record);
+}
+
+function tryWriteIncidentRecord(stateDir: string, record: StoredIncident): boolean {
+  try {
+    writeIncidentRecord(stateDir, record);
+    return true;
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+    return false;
+  }
+}
+
+function tryRemoveIncidentRecord(stateDir: string): void {
+  try {
+    rmSync(incidentRecordPath(stateDir), { force: true });
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  }
+}
+
+function isUsableStoredEnvelope(envelope: AlarmEnvelope, eventId: string, publicKeyPem: string): boolean {
+  const payload = envelope.payload;
+  if (!payload || typeof payload !== "object") return false;
+  if (payload.eventId !== eventId) return false;
+  if (typeof payload.triggerCode !== "string" || !isIntegrityReason(payload.triggerCode)) return false;
+  if (typeof envelope.sig !== "string" || envelope.sig === "") return false;
+  try {
+    return verify(
+      null,
+      Buffer.from(canonical(payload), "utf8"),
+      createPublicKey(publicKeyPem),
+      Buffer.from(envelope.sig, "base64"),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function usableEnvelope(
+  envelope: AlarmEnvelope | undefined,
+  eventId: string,
+  publicKeyPem: string,
+): AlarmEnvelope | undefined {
+  if (!envelope) return undefined;
+  if (isUsableStoredEnvelope(envelope, eventId, publicKeyPem)) return envelope;
+  process.stderr.write("verax: incident: stored envelope rejected\n");
+  return undefined;
+}
+
+function incidentPayload(opts: {
+  eventId: string;
+  observedAt: number;
+  triggerCode: string;
+  publicKeyPem: string;
+  memoryHead?: { seq: number; lastHash: string };
+}): IncidentPayload {
+  return {
+    v: 1,
+    purpose: "verax.incident.v1",
+    eventId: opts.eventId,
+    observedAt: opts.observedAt,
+    triggerCode: opts.triggerCode,
+    scopeKind: "global",
+    enforcementState: "halted",
+    keyId: recordKeyId(opts.publicKeyPem),
+    ...(opts.memoryHead ? { memoryHead: opts.memoryHead } : {}),
+  };
 }
 
 function readHistoryIdentity(stateDir: string): StoredIncident | null {
@@ -192,6 +272,41 @@ function persistEnvelope(stateDir: string, envelope: AlarmEnvelope): void {
   }
 }
 
+function finishClosedPending(
+  opts: {
+    stateDir: string;
+    publicKeyPem: string;
+    privateKeyPem: string;
+    memoryHead?: { seq: number; lastHash: string };
+    alarmWebhookUrl?: string;
+  },
+  stored: StoredIncident,
+): AlarmEnvelope | null {
+  if (hasAlarmDelivery(opts.stateDir, stored.eventId)) {
+    tryRemoveIncidentRecord(opts.stateDir);
+    return null;
+  }
+  if (!opts.alarmWebhookUrl) return null;
+  if (hasAlarmOutbox(opts.stateDir, stored.eventId)) return null;
+  const envelope =
+    usableEnvelope(stored.envelope, stored.eventId, opts.publicKeyPem) ??
+    signIncident(
+      incidentPayload({
+        eventId: stored.eventId,
+        observedAt: stored.observedAt,
+        triggerCode: stored.triggerCode,
+        publicKeyPem: opts.publicKeyPem,
+        memoryHead: stored.memoryHead ?? opts.memoryHead,
+      }),
+      opts.privateKeyPem,
+    );
+  persistEnvelope(opts.stateDir, envelope);
+  if (hasAlarmOutbox(opts.stateDir, stored.eventId) || hasAlarmDelivery(opts.stateDir, stored.eventId)) {
+    tryRemoveIncidentRecord(opts.stateDir);
+  }
+  return hasAlarmOutbox(opts.stateDir, stored.eventId) ? envelope : null;
+}
+
 export function raiseMemoryIntegrityIncident(opts: {
   stateDir: string;
   reason: IntegrityReason;
@@ -202,22 +317,26 @@ export function raiseMemoryIntegrityIncident(opts: {
   now?: number;
 }): AlarmEnvelope | null {
   const already = existsSync(join(opts.stateDir, "halted"));
-  const existing = already ? readIntegrityIdentity(opts.stateDir) : null;
+  const stored = readIncidentRecord(opts.stateDir);
+  if (!already && stored?.closedPendingDelivery) {
+    finishClosedPending(opts, stored);
+  }
+  const leftoverOpen = !already && stored && !stored.closedPendingDelivery ? stored : null;
+  const existing = already ? readIntegrityIdentity(opts.stateDir) : leftoverOpen;
   if (already && !existing) return null;
   const eventId = existing?.eventId ?? randomUUID();
   const observedAt = existing?.observedAt ?? opts.now ?? Date.now();
   const triggerCode = existing?.triggerCode ?? opts.reason;
   const memoryHead = existing?.memoryHead ?? opts.memoryHead;
+  const kept = usableEnvelope(existing?.envelope, eventId, opts.publicKeyPem);
   const record: StoredIncident = {
     eventId,
     triggerCode,
     observedAt,
     ...(memoryHead ? { memoryHead } : {}),
-    ...(existing?.envelope ? { envelope: existing.envelope } : {}),
+    ...(kept ? { envelope: kept } : {}),
   };
-  const stored = readIncidentRecord(opts.stateDir);
-  if (!already || !stored || stored.eventId !== eventId) writeIncidentRecord(opts.stateDir, record);
-
+  const wrote = tryWriteIncidentRecord(opts.stateDir, record);
   if (!already) {
     haltBody(opts.stateDir, INCIDENT_BY, "integrity", observedAt, undefined, {
       eventId,
@@ -225,6 +344,7 @@ export function raiseMemoryIntegrityIncident(opts: {
       ...(memoryHead ? { memoryHead } : {}),
     });
   }
+  if (!wrote) tryWriteIncidentRecord(opts.stateDir, record);
 
   if (!opts.alarmWebhookUrl) return null;
   if (hasAlarmDelivery(opts.stateDir, eventId)) return null;
@@ -233,28 +353,18 @@ export function raiseMemoryIntegrityIncident(opts: {
   const envelope =
     record.envelope ??
     signIncident(
-      {
-        v: 1,
-        purpose: "verax.incident.v1",
-        eventId,
-        observedAt,
-        triggerCode,
-        scopeKind: "global",
-        enforcementState: "halted",
-        keyId: recordKeyId(opts.publicKeyPem),
-        ...(memoryHead ? { memoryHead } : {}),
-      },
+      incidentPayload({ eventId, observedAt, triggerCode, publicKeyPem: opts.publicKeyPem, memoryHead }),
       opts.privateKeyPem,
     );
   if (!record.envelope) {
     record.envelope = envelope;
-    writeIncidentRecord(opts.stateDir, record);
+    tryWriteIncidentRecord(opts.stateDir, record);
   }
   persistEnvelope(opts.stateDir, envelope);
   return already ? (hasAlarmOutbox(opts.stateDir, eventId) ? envelope : null) : envelope;
 }
 
-/** On open: halt exists, outbox and delivery do not — finish the same eventId. */
+/** On open: finish a missing halt, a missing outbox, or a resume-pending delivery. Same eventId. */
 export function completeMemoryIntegrityIncident(opts: {
   stateDir: string;
   publicKeyPem: string;
@@ -262,7 +372,18 @@ export function completeMemoryIntegrityIncident(opts: {
   memoryHead?: { seq: number; lastHash: string };
   alarmWebhookUrl?: string;
 }): AlarmEnvelope | null {
-  if (!existsSync(join(opts.stateDir, "halted"))) return null;
+  const stored = readIncidentRecord(opts.stateDir);
+  if (!existsSync(join(opts.stateDir, "halted"))) {
+    if (stored && !stored.closedPendingDelivery) {
+      return raiseMemoryIntegrityIncident({
+        ...opts,
+        reason: stored.triggerCode,
+        now: stored.observedAt,
+      });
+    }
+    if (stored?.closedPendingDelivery) return finishClosedPending(opts, stored);
+    return null;
+  }
   const existing = readIntegrityIdentity(opts.stateDir);
   return raiseMemoryIntegrityIncident({
     ...opts,

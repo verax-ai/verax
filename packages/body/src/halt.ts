@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { canonical } from "@cedulon/core";
 import type { ControlSignature } from "@verax-ai/proxy";
+import { hasAlarmDelivery, hasAlarmOutbox, writeAlarmOutbox, type AlarmEnvelope } from "./alarm-outbox.ts";
 
 /**
  * The proxy refuses every call while `<stateDir>/halted` exists; that file is
@@ -41,8 +42,50 @@ export type HaltState = { halted: boolean; since?: HaltEvent };
 
 const SWITCH = "halted";
 const HISTORY = "halt-history.jsonl";
-/** Identity of the active integrity halt; closed on resume so the next event is new. */
 const INCIDENT = "incident.json";
+
+function oneLine(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  return text.replace(/[\r\n]+/g, " ").slice(0, 300);
+}
+
+/** Keep an undelivered alarm across resume: outbox write, or mark closed-pending. */
+function closeIncidentOnResume(stateDir: string): void {
+  const path = join(stateDir, INCIDENT);
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return;
+  }
+  let row: { eventId?: unknown; envelope?: AlarmEnvelope; closedPendingDelivery?: unknown };
+  try {
+    row = JSON.parse(raw) as { eventId?: unknown; envelope?: AlarmEnvelope; closedPendingDelivery?: unknown };
+  } catch {
+    return;
+  }
+  if (typeof row.eventId !== "string" || row.eventId === "") return;
+  if (hasAlarmDelivery(stateDir, row.eventId)) {
+    rmSync(path, { force: true });
+    return;
+  }
+  if (row.envelope && typeof row.envelope === "object") {
+    try {
+      writeAlarmOutbox(stateDir, row.envelope);
+    } catch (err) {
+      process.stderr.write(`verax: alarm-outbox: ${oneLine(err)}\n`);
+    }
+  }
+  if (hasAlarmOutbox(stateDir, row.eventId) || hasAlarmDelivery(stateDir, row.eventId)) {
+    rmSync(path, { force: true });
+    return;
+  }
+  try {
+    writeFileSync(path, `${JSON.stringify({ ...row, closedPendingDelivery: true })}\n`, { encoding: "utf8", mode: 0o600 });
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  }
+}
 
 function cliUser(): string {
   try {
@@ -155,9 +198,9 @@ export function haltBody(
  * Resuming a body that is not halted changes nothing and writes nothing.
  * The line goes to the history before the switch is removed: if it cannot be
  * written, the append throws and the body stays halted, rather than running
- * again with no record of who let it. The incident identity is closed after
- * that line and before the key: a later integrity halt is a new event. Pending
- * alarm outbox files stay so an undelivered alarm still delivers.
+ * again with no record of who let it. An undelivered incident is written to
+ * the outbox or marked closed-pending-delivery, then the switch is removed.
+ * A later integrity halt is a new event. Pending outbox files stay.
  */
 export function resumeBody(
   stateDir: string,
@@ -168,7 +211,7 @@ export function resumeBody(
 ): HaltState {
   if (existsSync(join(stateDir, SWITCH))) {
     appendHistory(stateDir, { action: "resume", atMs: now, by, via, ...(signature ? { signature } : {}) });
-    rmSync(join(stateDir, INCIDENT), { force: true });
+    closeIncidentOnResume(stateDir);
     rmSync(join(stateDir, SWITCH), { force: true });
   }
   return readHalt(stateDir);
