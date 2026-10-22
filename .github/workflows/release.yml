@@ -96,6 +96,17 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "version $v"
+      # CycloneDX for the three packages, kept as an artifact on check and
+      # on publish. contents: read is enough for upload-artifact here, as
+      # in proxy-perf.yml; permissions are not widened.
+      - name: CycloneDX SBOM for the three packages
+        run: npm run sbom
+      - name: keep the SBOM as an artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ steps.version.outputs.version }}
+          path: sbom/*.cdx.json
+          if-no-files-found: error
       # Trusted publishing is configured on a package's own settings page,
       # which exists only after a first publish. A package that has never been
       # published fails here, not halfway through the loop.
