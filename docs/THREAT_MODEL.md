@@ -202,14 +202,16 @@ When the record keys and the signed memory head live outside the state
 directory (`VERAX_KEYS_DIR`; optional `VERAX_MEMORY_HEAD_DIR`, otherwise the
 keys directory), a writer who can only change state cannot roll the body back
 to an earlier commit tip. The head file is
-`<headDir>/memory-head-<sha256(resolve(stateDir)) first 16 hex>.json`,
+`<headDir>/memory-head-<sha256(canonical stateDir) first 16 hex>.json`,
 `{payload:{v:1, stateDirHash, seq, lastHash, ts}, sig}` with the same
 ed25519 record signature as a commit line. `tests/memory-integrity.test.ts`
 measures this as C1h (restart unchanged), T9h (whole state directory restored
-to an earlier copy), and T2h (newest commit line and its object cut). Those
-three are refused. `verax doctor` warns when the keys directory is still
+to an earlier copy), and T2h (newest commit line and its object cut). C1h is
+accepted; T9h and T2h are refused. `verax doctor` warns when the keys directory is still
 inside state: a state-directory writer also holds the key, and this profile
 does not apply.
+
+- First use: when no head file exists yet, the body trusts the chain it finds and signs a head for it. A state directory that was rolled back before the first start under the hardened profile is not detected.
 
 When keys stay in `<stateDir>/keys`, the head is written there too. T9 and
 cutting the newest commit then succeed: the attacker restores or rewrites the

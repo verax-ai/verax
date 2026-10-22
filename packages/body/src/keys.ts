@@ -1,6 +1,6 @@
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
-import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, existsSync } from "node:fs";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { EX_CONFIG } from "./config.ts";
 
 export type KeyPair = { privateKeyPem: string; publicKeyPem: string };
@@ -60,13 +60,27 @@ export function resolveHeadDir(stateDir: string, keysDir?: string | null, headDi
   return resolveKeysDir(stateDir, keysDir);
 }
 
+/** Physical path for custody and head identity: junctions resolved, win32 case-folded. */
+export function canonicalizeDirPath(dir: string): string {
+  const abs = resolve(dir);
+  let real = abs;
+  try {
+    real = realpathSync.native(abs);
+  } catch {
+    // Missing leaf: keep resolve() so a not-yet-created dir still hashes stably.
+  }
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
 /** True when `inner` is `root` or a path under it. */
 export function pathIsInsideDir(root: string, inner: string): boolean {
-  const rootAbs = resolve(root);
-  const innerAbs = resolve(inner);
+  const rootAbs = canonicalizeDirPath(root);
+  const innerAbs = canonicalizeDirPath(inner);
   if (innerAbs === rootAbs) return true;
   const rel = relative(rootAbs, innerAbs);
-  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+  if (rel === "") return true;
+  if (isAbsolute(rel)) return false;
+  return rel !== ".." && !rel.startsWith(`..${sep}`);
 }
 
 export function loadOrCreateSigners(stateDir: string, keysDir?: string | null): {

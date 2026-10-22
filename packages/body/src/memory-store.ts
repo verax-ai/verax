@@ -16,7 +16,7 @@ import {
 import { chmod, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { canonical } from "@cedulon/core";
-import { resolveHeadDir } from "./keys.ts";
+import { canonicalizeDirPath, resolveHeadDir } from "./keys.ts";
 
 class UncertainAppendError extends Error {
   constructor() {
@@ -149,7 +149,7 @@ export function memoryVersionHash(fields: {
 }
 
 export function memoryStateDirHash(stateDir: string): string {
-  return createHash("sha256").update(resolve(stateDir), "utf8").digest("hex");
+  return createHash("sha256").update(canonicalizeDirPath(stateDir), "utf8").digest("hex");
 }
 
 export function memoryHeadPath(stateDir: string, headDir: string): string {
@@ -524,12 +524,12 @@ export class MemoryStore {
     this.lastHash = opts.lastHash;
   }
 
-  private async persistHead(): Promise<void> {
+  private async persistHead(seq: number, lastHash: string | null): Promise<void> {
     const payload: MemoryHeadPayload = {
       v: 1,
       stateDirHash: memoryStateDirHash(this.stateDir),
-      seq: this.lastSeq,
-      lastHash: this.lastHash,
+      seq,
+      lastHash,
       ts: Date.now(),
     };
     await writeFileDurable(memoryHeadPath(this.stateDir, this.headDir), encodeHeadLine(payload, this.privateKeyPem));
@@ -693,10 +693,15 @@ export class MemoryStore {
           }
           throw err;
         }
-        this.lastSeq = commit.seq;
-        this.lastHash = sha256Canonical(commit);
-        await this.persistHead();
-        this.index.set(indexKey(opts.tenantKey, opts.id), { revision, versionHash, objectPath });
+        const nextHash = sha256Canonical(commit);
+        try {
+          await this.persistHead(commit.seq, nextHash);
+          this.lastSeq = commit.seq;
+          this.lastHash = nextHash;
+          this.index.set(indexKey(opts.tenantKey, opts.id), { revision, versionHash, objectPath });
+        } catch {
+          this.historyUnavailable = true;
+        }
       });
       if (this.historyUnavailable) {
         return { ok: false as const, error: "memory-integrity-history-unavailable" as const };

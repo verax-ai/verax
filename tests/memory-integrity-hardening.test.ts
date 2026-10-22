@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -11,7 +11,7 @@ import { tenantKey, verifyLedger } from "@verax-ai/proxy";
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { runDoctor } from "../packages/body/src/doctor.ts";
 import { loadOrCreateSigners, resolveHeadDir } from "../packages/body/src/keys.ts";
-import { MEMORY_COMMITS_FILE, memoryHeadPath } from "../packages/body/src/memory-store.ts";
+import { MEMORY_COMMITS_FILE, memoryHeadPath, memoryStateDirHash } from "../packages/body/src/memory-store.ts";
 import { createBodyServices } from "../packages/body/src/wiring.ts";
 
 const policyFile = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "proxy", "policy", "default.json");
@@ -95,7 +95,7 @@ function withPin<T>(pin: string, fn: () => T): T {
   }
 }
 
-describe("memory integrity hardening (H1-H16)", () => {
+describe("memory integrity hardening (H1-H18)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -580,4 +580,59 @@ describe("memory integrity hardening (H1-H16)", () => {
       rmSync(keysDir, { recursive: true, force: true });
     }
   });
+
+  it("H17: a directory at the head path fail-closes; get never serves the old version", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h17-"));
+    const keys = testKeys();
+    const opts = { stateDir, policyFile, recordSigner: keys, effectSigner: keys };
+    const first = createBodyServices(opts);
+    try {
+      const v1 = await putFact(first, "n1", "fact-h17-v1");
+      assert.equal(v1.isError, false, JSON.stringify(v1.data));
+      const headPath = memoryHeadPath(stateDir, resolveHeadDir(stateDir));
+      rmSync(headPath);
+      mkdirSync(headPath);
+      try {
+        await putFact(first, "n1", "fact-h17-v2");
+      } catch {
+        // put may throw or return; get must still fail-close.
+      }
+      const got = await getFact(first, "n1");
+      assert.equal(got.isError, true, JSON.stringify(got.data));
+      assert.equal(got.data.error, "memory-integrity-history-unavailable");
+      assert.notEqual((got.data.body as { fact?: string } | undefined)?.fact, "fact-h17-v1");
+      assert.notEqual((got.data.body as { fact?: string } | undefined)?.fact, "fact-h17-v2");
+    } finally {
+      if (existsSync(join(stateDir, "ledger.lock"))) first.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it(
+    "H18: win32 case variants of the same state dir share doctor warning and head file name",
+    { skip: process.platform !== "win32" && "win32 folds case; a different case is a different path elsewhere" },
+    () => {
+      const stateDir = mkdtempSync(join(tmpdir(), "verax-h18-"));
+      const lower = stateDir.toLowerCase();
+      const upper = stateDir.toUpperCase();
+      try {
+        assert.notEqual(lower, upper);
+        const argv = ["node", "cli.ts", "doctor"];
+        const original = runDoctor({ VERAX_STATE_DIR: lower }, argv);
+        const cased = runDoctor({ VERAX_STATE_DIR: upper }, argv);
+        const warningA = original.find((c) => c.id === "record-key-location");
+        const warningB = cased.find((c) => c.id === "record-key-location");
+        assert.equal(warningA?.level, "warn", JSON.stringify(original));
+        assert.equal(warningB?.level, "warn", JSON.stringify(cased));
+        assert.equal(warningA?.detail, warningB?.detail);
+        assert.equal(memoryStateDirHash(lower), memoryStateDirHash(upper));
+        assert.equal(
+          basename(memoryHeadPath(lower, resolveHeadDir(lower))),
+          basename(memoryHeadPath(upper, resolveHeadDir(upper))),
+        );
+      } finally {
+        rmSync(stateDir, { recursive: true, force: true });
+      }
+    },
+  );
 });

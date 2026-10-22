@@ -203,12 +203,18 @@ describe("verax demo", { concurrency: 1 }, () => {
         }
       }
       assert.equal(existsSync(join(dir!, "jwks.json")), false);
-      assert.deepEqual(readdirSync(join(dir!, "keys")).sort(), [
+      const keyNames = readdirSync(join(dir!, "keys")).sort();
+      const pems = keyNames.filter((name) => name.endsWith(".pem"));
+      assert.deepEqual(pems, [
         "effect.private.pem",
         "effect.public.pem",
         "record.private.pem",
         "record.public.pem",
       ]);
+      for (const name of keyNames) {
+        if (name.endsWith(".pem")) continue;
+        assert.match(name, /^memory-head-[0-9a-f]{16}\.json$/);
+      }
     } finally {
       spy.restore();
       removeDir(dir);
