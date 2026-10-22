@@ -4,7 +4,8 @@
 // Files are located by unique markers in their content, not by layout, so the tests stay
 // valid if the storage layout changes. Objects must live under <state>/tenants/.
 import { strict as assert } from "node:assert";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { canonical } from "@cedulon/core";
 import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -173,6 +174,43 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
       await s.start();
       refused(await s.get("A", "n3"), ["attacker-fact"], "T1");
       servedFact(await s.get("A", "n2"), s.fact("A", "n2"), "T1 neighbour");
+    });
+  });
+
+  // B/n5 is the last commit written, so no later prevCommitHash covers it: only the signature can.
+  it("T1b: content tamper with every unkeyed hash recomputed is refused", async () => {
+    await withStore(async (s) => {
+      await s.stop();
+      const p = objectWith(s.state, s.fact("B", "n5"));
+      const obj = JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown> & { body: { fact: string } };
+      const oldHash = String(obj.versionHash ?? "");
+      obj.body.fact = "attacker-fact";
+      // The v2 envelope is public and unkeyed, so an attacker without the signing key can recompute it.
+      const newHash = createHash("sha256")
+        .update(
+          canonical({
+            purpose: "verax.memory.v2",
+            hashSchema: 2,
+            tenantKey: obj.tenantKey,
+            id: obj.id,
+            revision: obj.revision,
+            body: obj.body,
+            source: obj.source,
+            validFromMs: obj.validFromMs,
+            validUntilMs: obj.validUntilMs,
+          }),
+          "utf8",
+        )
+        .digest("hex");
+      obj.versionHash = newHash;
+      writeFileSync(p, JSON.stringify(obj) + "\n");
+      landed(p, "attacker-fact");
+      for (const f of filesUnder(s.state).filter((f) => !f.includes(`${join(s.state, "tenants")}`))) {
+        const text = readFileSync(f, "utf8");
+        if (oldHash !== "" && text.includes(oldHash)) writeFileSync(f, text.replaceAll(oldHash, newHash));
+      }
+      await s.start();
+      refused(await s.get("B", "n5"), ["attacker-fact"], "T1b");
     });
   });
 
