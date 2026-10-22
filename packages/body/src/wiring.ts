@@ -11,7 +11,7 @@ import {
   type ToolCall,
   type ToolResult,
 } from "@verax-ai/proxy";
-import { createHash, createPrivateKey, createPublicKey } from "node:crypto";
+import { createPrivateKey, createPublicKey } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
@@ -68,10 +68,6 @@ function publicKeyDerFromPrivate(pem: string): Buffer {
   return createPublicKey(createPrivateKey(pem)).export({ type: "spki", format: "der" }) as Buffer;
 }
 
-function recordPublicKeyPin(publicKeyPem: string): string {
-  return createHash("sha256").update(publicKeyDer(publicKeyPem)).digest("hex");
-}
-
 function isLegacyExplainPin(value: string): boolean {
   return value.includes("BEGIN") && value.includes("PUBLIC KEY");
 }
@@ -97,8 +93,14 @@ function resolveTrustPublicKey(opts: {
 
 function assertRecordPubkeyPin(publicKeyPem: string): void {
   const pin = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
-  if (pin === "" || isLegacyExplainPin(pin)) return;
-  if (pin.toLowerCase() !== recordPublicKeyPin(publicKeyPem)) {
+  if (pin === "") return;
+  let pinnedDer: Buffer;
+  try {
+    pinnedDer = publicKeyDer(pin);
+  } catch {
+    throw new Error("record-pubkey-pin-mismatch");
+  }
+  if (!pinnedDer.equals(publicKeyDer(publicKeyPem))) {
     throw new Error("record-pubkey-pin-mismatch");
   }
 }

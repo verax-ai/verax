@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { createHash, createPublicKey, generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -37,11 +37,6 @@ function testKeys() {
     privateKeyPem: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
     publicKeyPem: publicKey.export({ type: "spki", format: "pem" }).toString(),
   };
-}
-
-function pinOf(pem: string): string {
-  const der = createPublicKey(pem).export({ type: "spki", format: "der" }) as Buffer;
-  return createHash("sha256").update(der).digest("hex");
 }
 
 function parse(result: { isError?: boolean; content: { text: string }[] }): {
@@ -98,7 +93,7 @@ function withPin<T>(pin: string, fn: () => T): T {
   }
 }
 
-describe("memory integrity hardening (H1-H7)", () => {
+describe("memory integrity hardening (H1-H9)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -165,13 +160,13 @@ describe("memory integrity hardening (H1-H7)", () => {
     const keys = testKeys();
     const opts = { stateDir, policyFile, recordSigner: keys, effectSigner: keys };
     try {
-      assert.throws(() => withPin("0".repeat(64), () => createBodyServices(opts)), /record-pubkey-pin-mismatch/);
+      assert.throws(() => withPin(testKeys().publicKeyPem, () => createBodyServices(opts)), /record-pubkey-pin-mismatch/);
       assert.equal(existsSync(join(stateDir, "ledger.lock")), false);
-      const first = withPin(pinOf(keys.publicKeyPem), () => createBodyServices(opts));
+      const first = withPin(keys.publicKeyPem, () => createBodyServices(opts));
       const seeded = await putFact(first, "n1", "fact-h4");
       assert.equal(seeded.isError, false, JSON.stringify(seeded.data));
       first.ledger.close();
-      const restarted = withPin(pinOf(keys.publicKeyPem), () => createBodyServices(opts));
+      const restarted = withPin(keys.publicKeyPem, () => createBodyServices(opts));
       try {
         const got = await getFact(restarted, "n1");
         assert.equal(got.isError, false, JSON.stringify(got.data));
@@ -290,6 +285,116 @@ describe("memory integrity hardening (H1-H7)", () => {
       }
       rmSync(stateDir, { recursive: true, force: true });
       rmSync(keysDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H8: a later put after an _inputs pin is served by memory.get, not the pinned v1", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h8-"));
+    const keys = testKeys();
+    const opts = { stateDir, policyFile, recordSigner: keys, effectSigner: keys };
+    const services = createBodyServices(opts);
+    try {
+      const v1 = await putFact(services, "n1", "fact-h8-v1");
+      assert.equal(v1.isError, false, JSON.stringify(v1.data));
+      const versionHash = String(v1.data.versionHash ?? "");
+      assert.match(versionHash, /^[0-9a-f]{64}$/);
+
+      let remembered = 0;
+      const orig = services.memoryStore.rememberDecisionSnapshot.bind(services.memoryStore);
+      services.memoryStore.rememberDecisionSnapshot = (tenant, object) => {
+        remembered += 1;
+        orig(tenant, object);
+      };
+
+      await services.proxy.call(
+        { name: "message.read", arguments: { _inputs: [{ id: "n1", versionHash }] } },
+        writer,
+      );
+      assert.equal(remembered, 1, "readMemoryMeta must run for the _inputs pin");
+
+      const v2 = await putFact(services, "n1", "fact-h8-v2");
+      assert.equal(v2.isError, false, JSON.stringify(v2.data));
+      const got = await getFact(services, "n1");
+      assert.equal(got.isError, false, JSON.stringify(got.data));
+      assert.equal((got.data.body as { fact?: string } | undefined)?.fact, "fact-h8-v2");
+    } finally {
+      services.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H9: a pin does not skip verification after restart or a same-process file change", async () => {
+    const keys = testKeys();
+
+    const liveDir = mkdtempSync(join(tmpdir(), "verax-h9-live-"));
+    const live = createBodyServices({ stateDir: liveDir, policyFile, recordSigner: keys, effectSigner: keys });
+    try {
+      const seeded = await putFact(live, "n1", "fact-h9-live");
+      assert.equal(seeded.isError, false, JSON.stringify(seeded.data));
+      const versionHash = String(seeded.data.versionHash ?? "");
+      assert.match(versionHash, /^[0-9a-f]{64}$/);
+
+      let remembered = 0;
+      const orig = live.memoryStore.rememberDecisionSnapshot.bind(live.memoryStore);
+      live.memoryStore.rememberDecisionSnapshot = (tenant, object) => {
+        remembered += 1;
+        orig(tenant, object);
+      };
+      await live.proxy.call(
+        { name: "message.read", arguments: { _inputs: [{ id: "n1", versionHash }] } },
+        writer,
+      );
+      assert.equal(remembered, 1, "readMemoryMeta must run for the _inputs pin");
+
+      const path = objectWith(liveDir, "fact-h9-live");
+      writeFileSync(path, readFileSync(path, "utf8").replaceAll("fact-h9-live", "attacker-live"));
+      const got = await getFact(live, "n1");
+      assert.equal(got.isError, true, JSON.stringify(got.data));
+      assert.match(String(got.data.error ?? ""), /^memory-integrity-/);
+      assert.equal(JSON.stringify(got.data).includes("attacker-live"), false);
+      assert.equal(JSON.stringify(got.data).includes("fact-h9-live"), false);
+    } finally {
+      live.ledger.close();
+      rmSync(liveDir, { recursive: true, force: true });
+    }
+
+    const restartDir = mkdtempSync(join(tmpdir(), "verax-h9-restart-"));
+    const restartOpts = { stateDir: restartDir, policyFile, recordSigner: keys, effectSigner: keys };
+    const first = createBodyServices(restartOpts);
+    try {
+      const seeded = await putFact(first, "n1", "fact-h9-restart");
+      assert.equal(seeded.isError, false, JSON.stringify(seeded.data));
+      const versionHash = String(seeded.data.versionHash ?? "");
+      assert.match(versionHash, /^[0-9a-f]{64}$/);
+
+      let remembered = 0;
+      const orig = first.memoryStore.rememberDecisionSnapshot.bind(first.memoryStore);
+      first.memoryStore.rememberDecisionSnapshot = (tenant, object) => {
+        remembered += 1;
+        orig(tenant, object);
+      };
+      await first.proxy.call(
+        { name: "message.read", arguments: { _inputs: [{ id: "n1", versionHash }] } },
+        writer,
+      );
+      assert.equal(remembered, 1, "readMemoryMeta must run for the _inputs pin");
+      first.ledger.close();
+
+      const path = objectWith(restartDir, "fact-h9-restart");
+      writeFileSync(path, readFileSync(path, "utf8").replaceAll("fact-h9-restart", "attacker-restart"));
+      const restarted = createBodyServices(restartOpts);
+      try {
+        const got = await getFact(restarted, "n1");
+        assert.equal(got.isError, true, JSON.stringify(got.data));
+        assert.match(String(got.data.error ?? ""), /^memory-integrity-/);
+        assert.equal(JSON.stringify(got.data).includes("attacker-restart"), false);
+        assert.equal(JSON.stringify(got.data).includes("fact-h9-restart"), false);
+      } finally {
+        restarted.ledger.close();
+      }
+    } finally {
+      if (existsSync(join(restartDir, "ledger.lock"))) first.ledger.close();
+      rmSync(restartDir, { recursive: true, force: true });
     }
   });
 });

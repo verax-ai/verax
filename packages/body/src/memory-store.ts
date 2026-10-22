@@ -390,6 +390,10 @@ export class MemoryStore {
     return object;
   }
 
+  forgetDecisionSnapshot(tenantKey: string, id: string): void {
+    this.decisionSnapshots.delete(indexKey(tenantKey, id));
+  }
+
   lookup(tenantKey: string, id: string): MemoryIndexEntry | undefined {
     return this.index.get(indexKey(tenantKey, id));
   }
@@ -563,6 +567,7 @@ export class MemoryStore {
           }
         }
       }
+      this.forgetDecisionSnapshot(opts.tenantKey, opts.id);
       return { ok: true as const, id: opts.id, revision, versionHash };
     });
   }

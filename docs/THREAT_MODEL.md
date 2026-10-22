@@ -180,8 +180,9 @@ and the signature is ed25519 over `canonical(payload)` with the record key.
 The trust root is the public key in the keys directory (default
 `<stateDir>/keys`; set `VERAX_KEYS_DIR` or `keysDir` to keep keys outside
 state). A key written inside a commit line is not used. When keys live
-inside the state directory, `VERAX_RECORD_PUBKEY_PIN` (SHA-256 of the
-record public key's SPKI DER) catches a key substitution at start.
+inside the state directory, `VERAX_RECORD_PUBKEY_PIN` (the record
+public key PEM; parsed and compared as SPKI DER) catches a key
+substitution at start.
 
 What this catches (BPM draft T1–T8; `tests/memory-integrity.test.ts` after a
 stop, a plain-fs edit, and a start):

@@ -93,11 +93,12 @@ export async function memoryGet(
   const mem = storeFor(stateDir, store);
   const tk = tenantKey(principal);
   const pinned = mem.takeDecisionSnapshot(tk, id);
-  const got = pinned
-    ? { kind: "ok" as const, object: pinned, versionHash: pinned.versionHash }
-    : mem.verifiedRead(tk, id);
+  const got = mem.verifiedRead(tk, id);
   if (got.kind === "integrity") return integrityResult(got.reason, id);
   if (got.kind === "not-found") return jsonResult({ error: "not-found", id }, true);
+  if (pinned && pinned.versionHash !== got.versionHash) {
+    return jsonResult({ error: "memory-changed", id }, true);
+  }
   const item = got.object;
   if (item.validFromMs > now()) {
     return jsonResult({ notYetValid: true, id: item.id, validFromMs: item.validFromMs });
