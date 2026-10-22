@@ -84,7 +84,8 @@ export type IncidentEventIdGenerators = {
 /**
  * randomUUID, then randomBytes, then a SHA-256 UUID of observedAt+trigger+record key.
  * Generators are a parameter so a failing producer can be injected; that is
- * dependency injection, not a product-code test hook.
+ * dependency injection, not a product-code test hook. The last resort is
+ * stable for the same inputs (a retry of one incident stays one id).
  */
 export function incidentEventIdFrom(
   opts: {
@@ -104,23 +105,51 @@ export function incidentEventIdFrom(
   } catch {
     // Same: fall through to a deterministic identity.
   }
+  return lastResortIncidentId(opts, "");
+}
+
+const fallbackAlloc = { seq: 0 };
+
+function lastResortIncidentId(
+  opts: { observedAt: number; triggerCode: string; publicKeyPem: string },
+  unique: string,
+): string {
   try {
     const keyId = recordKeyId(opts.publicKeyPem);
-    return uuidFromHex(
-      createHash("sha256").update(`${opts.observedAt}\0${opts.triggerCode}\0${keyId}`, "utf8").digest("hex"),
-    );
+    const material = unique
+      ? `${opts.observedAt}\0${opts.triggerCode}\0${keyId}\0${unique}`
+      : `${opts.observedAt}\0${opts.triggerCode}\0${keyId}`;
+    return uuidFromHex(createHash("sha256").update(material, "utf8").digest("hex"));
   } catch {
-    return uuidFromHex(createHash("sha256").update(String(opts.observedAt), "utf8").digest("hex"));
+    const material = unique ? `${opts.observedAt}\0${unique}` : String(opts.observedAt);
+    return uuidFromHex(createHash("sha256").update(material, "utf8").digest("hex"));
   }
 }
 
-/** Production path: the same cascade, wired to node:crypto. */
+/** Production path: the same cascade; last resort mixes pid, a counter, and extra bytes. */
 export function allocateIncidentEventId(opts: {
   observedAt: number;
   triggerCode: string;
   publicKeyPem: string;
 }): string {
-  return incidentEventIdFrom(opts, { randomUUID, randomBytes });
+  try {
+    return randomUUID();
+  } catch {
+    // RNG may refuse; keep going.
+  }
+  try {
+    return uuidFromBytes(randomBytes(16));
+  } catch {
+    // Same: fall through to a unique last resort.
+  }
+  fallbackAlloc.seq += 1;
+  let entropy = "";
+  try {
+    entropy = randomBytes(8).toString("hex");
+  } catch {
+    // Extra bytes are optional; pid + counter still separate two allocations.
+  }
+  return lastResortIncidentId(opts, `${process.pid}\0${fallbackAlloc.seq}\0${entropy}`);
 }
 
 export function signIncident(payload: IncidentPayload, privateKeyPem: string): AlarmEnvelope {

@@ -4,20 +4,24 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { canonical } from "@cedulon/core";
-import type { ControlSignature } from "@verax-ai/proxy";
 import {
   clearProcessHalted,
   isProcessHalted,
   markProcessHalted,
   persistHaltedSwitch,
-} from "../../proxy/src/process-halt.ts";
+  type ControlSignature,
+} from "@verax-ai/proxy";
 import { closeIncidentsOnResume } from "./incidents.ts";
 import { markHistoryUnavailable } from "./memory-store.ts";
 
 /**
  * The proxy refuses every call while `<stateDir>/halted` is a regular file, or
- * while this process has marked a halt that could not persist that file. The
- * file is the switch and stays empty. Who flipped it and when goes to
+ * while this process has marked a halt that could not persist that file.
+ * The process flag is set only when that write fails; a written file is the
+ * single source of truth, so a later `verax resume` in another process can
+ * lift a normal halt by removing the file. A flag-only halt (path blocked)
+ * is lifted in this process by `resumeBody` — HTTP `POST /api/resume`.
+ * The file is the switch and stays empty. Who flipped it and when goes to
  * `halt-history.jsonl` beside it, one line per halt or resume, so the panel
  * can say "stopped by operator-7 at 14:02" and a resume is not silent.
  *
@@ -155,7 +159,6 @@ export function haltBody(
   signature?: ControlSignature,
   incident?: Pick<HaltEvent, "eventId" | "triggerCode" | "memoryHead">,
 ): HaltState {
-  markProcessHalted(stateDir);
   try {
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     if (!isHaltSwitchFile(stateDir)) {
@@ -173,9 +176,14 @@ export function haltBody(
     }
   } catch (err) {
     process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
-    persistHaltedSwitch(stateDir);
     if (!isHaltSwitchFile(stateDir)) {
-      markHistoryUnavailable(stateDir);
+      markProcessHalted(stateDir);
+      persistHaltedSwitch(stateDir);
+      if (!isHaltSwitchFile(stateDir)) {
+        markHistoryUnavailable(stateDir);
+      } else {
+        throw err;
+      }
     } else {
       throw err;
     }

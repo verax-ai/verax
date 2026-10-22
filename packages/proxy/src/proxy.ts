@@ -347,6 +347,9 @@ export function createProxy(deps: ProxyDeps) {
       arguments: dispatchedArgs,
     });
     let result: ToolResult;
+    if (stateDir && isProxyHalted(stateDir)) {
+      return denied("halted", ref);
+    }
     try {
       result = await deps.inner(frozenCall, principal, ref, bound);
     } catch (err) {
@@ -621,31 +624,36 @@ export function createProxy(deps: ProxyDeps) {
     syncControlRecords,
     async call(call: ToolCall, principal: Principal): Promise<ToolResult> {
       if (stateDir) {
-        await drainApprovalCommands(stateDir, async (cmd) => {
-          const defer = await lookupDecisionByRef(deps.ledger, cmd.ref);
-          if (!defer || defer.decision !== "defer") return;
-          await approvePending({
-            ledger: deps.ledger,
-            recordSigner: deps.recordSigner,
-            now: deps.now,
-            nonce: deps.nonce,
-            ref: cmd.ref,
-            approverId: cmd.approverId,
-            // A command with no `via` is an old queue file; treat it as a script, not a person.
-            via: cmd.via === "cli" ? "cli" : "cli-script",
-            policyHash: defer.policyHash,
-            approvals,
-            inputsLog,
-            budgetGuard,
+        // Halt (file or process flag) is checked before the queue can authorize
+        // a spend or any other pending tool. approvePending uses the same gate.
+        if (!isProxyHalted(stateDir)) {
+          await drainApprovalCommands(stateDir, async (cmd) => {
+            const defer = await lookupDecisionByRef(deps.ledger, cmd.ref);
+            if (!defer || defer.decision !== "defer") return;
+            await approvePending({
+              ledger: deps.ledger,
+              recordSigner: deps.recordSigner,
+              now: deps.now,
+              nonce: deps.nonce,
+              ref: cmd.ref,
+              approverId: cmd.approverId,
+              // A command with no `via` is an old queue file; treat it as a script, not a person.
+              via: cmd.via === "cli" ? "cli" : "cli-script",
+              policyHash: defer.policyHash,
+              approvals,
+              inputsLog,
+              budgetGuard,
+            });
           });
-        });
+        }
         await syncControlRecords();
       }
       const dispatched = toolCallOf(call);
       const requestHash = sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
-      if (stateDir && isProxyHalted(stateDir)) {
+      async function denyIfHalted(): Promise<ToolResult | null> {
+        if (!stateDir || !isProxyHalted(stateDir)) return null;
         const ref = deps.nonce();
         await writeRecord({
           decision: "deny",
@@ -658,6 +666,10 @@ export function createProxy(deps: ProxyDeps) {
           timestampMs,
         });
         return denied("halted", ref);
+      }
+      {
+        const halted = await denyIfHalted();
+        if (halted) return halted;
       }
       if (stateDir && diskProbe.freeBytes(stateDir) < deps.policy.limits.diskFreeBytes) {
         const ref = deps.nonce();
@@ -679,19 +691,9 @@ export function createProxy(deps: ProxyDeps) {
         // A halt that landed while this call waited must be on the chain before the deny.
         if (stateDir) await syncControlRecords();
         // A call that waited here behind another admission reads the halt flag again.
-        if (stateDir && isProxyHalted(stateDir)) {
-          const ref = deps.nonce();
-          await writeRecord({
-            decision: "deny",
-            reasonCode: "halted",
-            ref,
-            requestHash,
-            inputs: resolved.inputs,
-            effectHash: null,
-            subject: call.name,
-            timestampMs,
-          });
-          return { kind: "done", result: denied("halted", ref) };
+        {
+          const halted = await denyIfHalted();
+          if (halted) return { kind: "done", result: halted };
         }
         if (given === "invalid") {
           const ref = deps.nonce();
@@ -874,6 +876,10 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("tenant-mismatch", denyRef) };
                 }
+                {
+                  const halted = await denyIfHalted();
+                  if (halted) return { kind: "done", result: halted };
+                }
                 return launchInner(dispatched, principal, allow.ref, scopedRef, boundRows);
               }
               return { kind: "done", result: deferred(given) };
@@ -993,6 +999,10 @@ export function createProxy(deps: ProxyDeps) {
         }
         if (!allow) {
           return { kind: "done", result: denied(reasonCode, shown, call) };
+        }
+        {
+          const halted = await denyIfHalted();
+          if (halted) return { kind: "done", result: halted };
         }
         return launchInner(dispatched, principal, ref, ref, resolved.inputs.inputs);
       });
