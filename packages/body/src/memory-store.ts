@@ -1,8 +1,22 @@
 import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
-import { closeSync, existsSync, openSync, readSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  existsSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeSync,
+} from "node:fs";
 import { chmod, mkdir, open, rename, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { canonical } from "@cedulon/core";
+import { resolveHeadDir } from "./keys.ts";
 
 class UncertainAppendError extends Error {
   constructor() {
@@ -39,6 +53,7 @@ const COMMIT_PAYLOAD_KEYS = new Set([
   "ts",
 ]);
 const LINE_KEYS = new Set(["payload", "sig"]);
+const HEAD_PAYLOAD_KEYS = new Set(["v", "stateDirHash", "seq", "lastHash", "ts"]);
 
 export type MemoryObject = {
   id: string;
@@ -78,6 +93,14 @@ export type MemoryCommitPayload = {
   objectPath: string;
   putRef: string;
   prevCommitHash: string | null;
+  ts: number;
+};
+
+export type MemoryHeadPayload = {
+  v: 1;
+  stateDirHash: string;
+  seq: number;
+  lastHash: string | null;
   ts: number;
 };
 
@@ -125,7 +148,15 @@ export function memoryVersionHash(fields: {
   });
 }
 
-function signPayload(payload: MemoryCommitPayload, privateKeyPem: string): string {
+export function memoryStateDirHash(stateDir: string): string {
+  return createHash("sha256").update(resolve(stateDir), "utf8").digest("hex");
+}
+
+export function memoryHeadPath(stateDir: string, headDir: string): string {
+  return join(headDir, `memory-head-${memoryStateDirHash(stateDir).slice(0, 16)}.json`);
+}
+
+function signPayload(payload: unknown, privateKeyPem: string): string {
   const key = createPrivateKey(privateKeyPem);
   return sign(null, Buffer.from(canonical(payload), "utf8"), key).toString("base64");
 }
@@ -169,6 +200,28 @@ function isCommitPayload(value: unknown): value is MemoryCommitPayload {
     (row.prevCommitHash === null || (typeof row.prevCommitHash === "string" && /^[0-9a-f]{64}$/.test(row.prevCommitHash))) &&
     typeof row.ts === "number"
   );
+}
+
+function isHeadPayload(value: unknown): value is MemoryHeadPayload {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!closedKeys(value, HEAD_PAYLOAD_KEYS)) return false;
+  const row = value as Record<string, unknown>;
+  const lastHashOk =
+    row.lastHash === null || (typeof row.lastHash === "string" && /^[0-9a-f]{64}$/.test(row.lastHash));
+  if (
+    row.v !== 1 ||
+    typeof row.stateDirHash !== "string" ||
+    !/^[0-9a-f]{64}$/.test(row.stateDirHash) ||
+    typeof row.seq !== "number" ||
+    !Number.isInteger(row.seq) ||
+    row.seq < 0 ||
+    !lastHashOk ||
+    typeof row.ts !== "number"
+  ) {
+    return false;
+  }
+  if (row.seq === 0) return row.lastHash === null;
+  return typeof row.lastHash === "string";
 }
 
 function guardedJoin(root: string, ...parts: string[]): string | null {
@@ -273,6 +326,97 @@ async function fsyncDir(dir: string): Promise<void> {
   }
 }
 
+function fsyncDirSync(dir: string): void {
+  try {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch (err) {
+    if (isUnsupportedDirFsync(err)) return;
+    throw err;
+  }
+}
+
+function mkdirDurableSync(dir: string): void {
+  const created: string[] = [];
+  let current = resolve(dir);
+  while (!existsSync(current)) {
+    created.push(current);
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  for (const path of created) fsyncDirSync(path);
+  fsyncDirSync(current);
+}
+
+function writeFileDurableSync(finalPath: string, payload: string): void {
+  const dir = dirname(finalPath);
+  mkdirDurableSync(dir);
+  const tmp = `${finalPath}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  const fd = openSync(tmp, "w", 0o600);
+  try {
+    writeSync(fd, payload, 0, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, finalPath);
+  try {
+    chmodSync(finalPath, 0o600);
+  } catch {
+    // Windows may refuse chmod; the file is already written.
+  }
+  fsyncDirSync(dir);
+}
+
+function encodeHeadLine(payload: MemoryHeadPayload, privateKeyPem: string): string {
+  return `${JSON.stringify({ payload, sig: signPayload(payload, privateKeyPem) })}\n`;
+}
+
+function persistHeadSync(opts: {
+  stateDir: string;
+  headDir: string;
+  privateKeyPem: string;
+  seq: number;
+  lastHash: string | null;
+}): void {
+  const payload: MemoryHeadPayload = {
+    v: 1,
+    stateDirHash: memoryStateDirHash(opts.stateDir),
+    seq: opts.seq,
+    lastHash: opts.lastHash,
+    ts: Date.now(),
+  };
+  writeFileDurableSync(memoryHeadPath(opts.stateDir, opts.headDir), encodeHeadLine(payload, opts.privateKeyPem));
+}
+
+function readVerifiedHead(
+  path: string,
+  publicKeyPem: string,
+  expectedStateDirHash: string,
+): { kind: "missing" } | { kind: "invalid" } | { kind: "ok"; payload: MemoryHeadPayload } {
+  if (!existsSync(path)) return { kind: "missing" };
+  try {
+    if (!statSync(path).isFile()) return { kind: "invalid" };
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !closedKeys(parsed, LINE_KEYS)) {
+      return { kind: "invalid" };
+    }
+    const row = parsed as { payload?: unknown; sig?: unknown };
+    if (typeof row.sig !== "string" || !isHeadPayload(row.payload)) return { kind: "invalid" };
+    if (!verifyPayload(row.payload, row.sig, publicKeyPem)) return { kind: "invalid" };
+    if (row.payload.stateDirHash !== expectedStateDirHash) return { kind: "invalid" };
+    return { kind: "ok", payload: row.payload };
+  } catch {
+    return { kind: "invalid" };
+  }
+}
+
 async function appendLineDurable(path: string, line: string): Promise<void> {
   const existed = existsSync(path);
   const fh = await open(path, "a", 0o600);
@@ -352,6 +496,7 @@ function dirHasJson(root: string, ...parts: string[]): boolean {
 
 export class MemoryStore {
   readonly stateDir: string;
+  readonly headDir: string;
   readonly publicKeyPem: string;
   readonly privateKeyPem: string;
   historyUnavailable: boolean;
@@ -361,6 +506,7 @@ export class MemoryStore {
 
   constructor(opts: {
     stateDir: string;
+    headDir: string;
     publicKeyPem: string;
     privateKeyPem: string;
     historyUnavailable: boolean;
@@ -369,12 +515,24 @@ export class MemoryStore {
     lastHash: string | null;
   }) {
     this.stateDir = opts.stateDir;
+    this.headDir = opts.headDir;
     this.publicKeyPem = opts.publicKeyPem;
     this.privateKeyPem = opts.privateKeyPem;
     this.historyUnavailable = opts.historyUnavailable;
     this.index = opts.index;
     this.lastSeq = opts.lastSeq;
     this.lastHash = opts.lastHash;
+  }
+
+  private async persistHead(): Promise<void> {
+    const payload: MemoryHeadPayload = {
+      v: 1,
+      stateDirHash: memoryStateDirHash(this.stateDir),
+      seq: this.lastSeq,
+      lastHash: this.lastHash,
+      ts: Date.now(),
+    };
+    await writeFileDurable(memoryHeadPath(this.stateDir, this.headDir), encodeHeadLine(payload, this.privateKeyPem));
   }
 
   rememberDecisionSnapshot(_tenantKey: string, _object: MemoryObject): void {}
@@ -537,6 +695,7 @@ export class MemoryStore {
         }
         this.lastSeq = commit.seq;
         this.lastHash = sha256Canonical(commit);
+        await this.persistHead();
         this.index.set(indexKey(opts.tenantKey, opts.id), { revision, versionHash, objectPath });
       });
       if (this.historyUnavailable) {
@@ -610,6 +769,7 @@ export class MemoryStore {
 function openLoadedStore(
   opts: {
     stateDir: string;
+    headDir: string;
     publicKeyPem: string;
     privateKeyPem: string;
   },
@@ -622,6 +782,7 @@ function openLoadedStore(
 ): MemoryStore {
   const store = new MemoryStore({
     stateDir: resolve(opts.stateDir),
+    headDir: opts.headDir,
     publicKeyPem: opts.publicKeyPem,
     privateKeyPem: opts.privateKeyPem,
     historyUnavailable: loaded.historyUnavailable,
@@ -630,6 +791,66 @@ function openLoadedStore(
     lastHash: loaded.lastHash,
   });
   return store;
+}
+
+function unavailableStore(opts: {
+  stateDir: string;
+  headDir: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+}): MemoryStore {
+  return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
+}
+
+function bindHead(
+  opts: {
+    stateDir: string;
+    headDir: string;
+    publicKeyPem: string;
+    privateKeyPem: string;
+  },
+  loaded: {
+    historyUnavailable: boolean;
+    index: Map<string, MemoryIndexEntry>;
+    lastSeq: number;
+    lastHash: string | null;
+    hashBySeq: Map<number, string>;
+  },
+): MemoryStore {
+  if (loaded.historyUnavailable) return unavailableStore(opts);
+  const stateDir = resolve(opts.stateDir);
+  const headPath = memoryHeadPath(stateDir, opts.headDir);
+  const expectedHash = memoryStateDirHash(stateDir);
+  const head = readVerifiedHead(headPath, opts.publicKeyPem, expectedHash);
+  if (head.kind === "invalid") return unavailableStore(opts);
+  if (head.kind === "missing") {
+    persistHeadSync({
+      stateDir,
+      headDir: opts.headDir,
+      privateKeyPem: opts.privateKeyPem,
+      seq: loaded.lastSeq,
+      lastHash: loaded.lastHash,
+    });
+    if (loaded.lastSeq > 0) {
+      process.stderr.write("memory-head-tofu: wrote a signed head from the existing commit chain\n");
+    }
+    return openLoadedStore(opts, loaded);
+  }
+  if (loaded.lastSeq < head.payload.seq) return unavailableStore(opts);
+  if (head.payload.seq > 0) {
+    const atHead = loaded.hashBySeq.get(head.payload.seq);
+    if (atHead !== head.payload.lastHash) return unavailableStore(opts);
+  }
+  if (loaded.lastSeq > head.payload.seq) {
+    persistHeadSync({
+      stateDir,
+      headDir: opts.headDir,
+      privateKeyPem: opts.privateKeyPem,
+      seq: loaded.lastSeq,
+      lastHash: loaded.lastHash,
+    });
+  }
+  return openLoadedStore(opts, loaded);
 }
 
 export function publishMemoryStore(store: MemoryStore): MemoryStore {
@@ -641,16 +862,29 @@ export function openMemoryStoreSync(opts: {
   stateDir: string;
   publicKeyPem: string;
   privateKeyPem: string;
+  headDir?: string;
 }): MemoryStore {
+  const bound = {
+    stateDir: opts.stateDir,
+    headDir: resolveHeadDir(opts.stateDir, undefined, opts.headDir),
+    publicKeyPem: opts.publicKeyPem,
+    privateKeyPem: opts.privateKeyPem,
+  };
   const path = join(opts.stateDir, MEMORY_COMMITS_FILE);
-  const unavailable = () =>
-    openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
+  const unavailable = () => unavailableStore(bound);
   if (!existsSync(path)) {
-    return openLoadedStore(opts, { historyUnavailable: false, index: new Map(), lastSeq: 0, lastHash: null });
+    return bindHead(bound, {
+      historyUnavailable: false,
+      index: new Map(),
+      lastSeq: 0,
+      lastHash: null,
+      hashBySeq: new Map(),
+    });
   }
   try {
     if (!statSync(path).isFile()) return unavailable();
     const index = new Map<string, MemoryIndexEntry>();
+    const hashBySeq = new Map<number, string>();
     let lastSeq = 0;
     let lastHash: string | null = null;
     for (const line of readCommitLines(path)) {
@@ -679,13 +913,14 @@ export function openMemoryStoreSync(opts: {
       }
       lastSeq = row.payload.seq;
       lastHash = sha256Canonical(row.payload);
+      hashBySeq.set(lastSeq, lastHash);
       index.set(indexKey(row.payload.tenantKey, row.payload.id), {
         revision: row.payload.revision,
         versionHash: row.payload.versionHash,
         objectPath: row.payload.objectPath,
       });
     }
-    return openLoadedStore(opts, { historyUnavailable: false, index, lastSeq, lastHash });
+    return bindHead(bound, { historyUnavailable: false, index, lastSeq, lastHash, hashBySeq });
   } catch {
     return unavailable();
   }

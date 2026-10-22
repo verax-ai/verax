@@ -196,21 +196,44 @@ stop, a plain-fs edit, and a start):
 - T7 an older genuine version written over the newest
 - T8 `source` or other envelope metadata changed
 
+### Hardened profile
+
+When the record keys and the signed memory head live outside the state
+directory (`VERAX_KEYS_DIR`; optional `VERAX_MEMORY_HEAD_DIR`, otherwise the
+keys directory), a writer who can only change state cannot roll the body back
+to an earlier commit tip. The head file is
+`<headDir>/memory-head-<sha256(resolve(stateDir)) first 16 hex>.json`,
+`{payload:{v:1, stateDirHash, seq, lastHash, ts}, sig}` with the same
+ed25519 record signature as a commit line. `tests/memory-integrity.test.ts`
+measures this as C1h (restart unchanged), T9h (whole state directory restored
+to an earlier copy), and T2h (newest commit line and its object cut). Those
+three are refused. `verax doctor` warns when the keys directory is still
+inside state: a state-directory writer also holds the key, and this profile
+does not apply.
+
+When keys stay in `<stateDir>/keys`, the head is written there too. T9 and
+cutting the newest commit then succeed: the attacker restores or rewrites the
+head with the state. The local profile still records T9 as ACCEPTED.
+
 What this does not catch:
 
 - T9 restoring an earlier copy of the whole state directory, including
-  `memory-commits.jsonl` and the keys. There is no head anchored outside the
-  directory in this phase. The local profile records T9 as ACCEPTED.
+  `memory-commits.jsonl` and the keys, when the head is not outside state.
+  The local profile records T9 as ACCEPTED. The hardened profile (keys and
+  head outside) catches it; see T9h.
 - An attacker who can write the state directory and also hold the record
   private key. Signatures then verify. Put the keys outside the state
   directory with `VERAX_KEYS_DIR` when the threat is "state yes, keys no".
-- Cutting the newest lines off memory-commits.jsonl together with the objects they name. Those ids then read as never written. Detecting it needs the same outside anchor as T9.
+- Cutting the newest lines off memory-commits.jsonl together with the objects
+  they name, when the head is not outside state. Those ids then read as never
+  written. The hardened profile catches it; see T2h.
 - Availability: one damaged commit line makes every memory read answer memory-integrity-history-unavailable until the chain is repaired. This is deliberate (fail closed).
 
 0.6.1 flat files `<id>.json` have no commit. `memory.get` answers
 `memory-integrity-unattested`. The operator command `verax memory reattest
-<stateDir>` (body stopped) writes each as revision 1, appends a commit, and
-prints the ids. The body does not reattest on start.
+<stateDir>` (body stopped) writes each as revision 1, appends a commit,
+updates the signed head, and prints the ids. The body does not reattest on
+start.
 
 `audit.explain` still explains the decision record, not the current memory
 file. That comparison is later work.

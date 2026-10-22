@@ -10,6 +10,7 @@ import { lockHolderAlive, lockState } from "@verax-ai/proxy";
 import { readLockFile } from "./unlock.ts";
 import { pendingAnchors } from "./anchor-cli.ts";
 import { readWitnessListen } from "./witness.ts";
+import { pathIsInsideDir, resolveKeysDir } from "./keys.ts";
 
 export type DoctorLevel = "ok" | "warn" | "fail";
 
@@ -151,6 +152,15 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
       opts.keyOwner ?? defaultKeyOwner,
     );
     if (custody) checks.push(custody);
+    const keysDir = resolveKeysDir(stateDir, env.VERAX_KEYS_DIR);
+    if (pathIsInsideDir(stateDir, keysDir)) {
+      checks.push({
+        id: "record-key-location",
+        level: "warn",
+        detail:
+          "record key is inside the state directory; a state-directory writer also holds the key. Set VERAX_KEYS_DIR to a directory outside the state directory.",
+      });
+    }
   }
 
   const secretNames = Object.entries(env)

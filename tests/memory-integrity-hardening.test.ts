@@ -9,7 +9,9 @@ import { fileURLToPath } from "node:url";
 import { tenantKey, verifyLedger } from "@verax-ai/proxy";
 
 import { runApprove } from "../packages/body/src/approve-cli.ts";
-import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
+import { runDoctor } from "../packages/body/src/doctor.ts";
+import { loadOrCreateSigners, resolveHeadDir } from "../packages/body/src/keys.ts";
+import { MEMORY_COMMITS_FILE, memoryHeadPath } from "../packages/body/src/memory-store.ts";
 import { createBodyServices } from "../packages/body/src/wiring.ts";
 
 const policyFile = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "proxy", "policy", "default.json");
@@ -93,7 +95,7 @@ function withPin<T>(pin: string, fn: () => T): T {
   }
 }
 
-describe("memory integrity hardening (H1-H13)", () => {
+describe("memory integrity hardening (H1-H16)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -485,6 +487,97 @@ describe("memory integrity hardening (H1-H13)", () => {
     } finally {
       services.ledger.close();
       rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H14: a broken head signature makes get history-unavailable after open", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h14-"));
+    const keys = testKeys();
+    const opts = { stateDir, policyFile, recordSigner: keys, effectSigner: keys };
+    const first = createBodyServices(opts);
+    try {
+      const seeded = await putFact(first, "n1", "fact-h14");
+      assert.equal(seeded.isError, false, JSON.stringify(seeded.data));
+      first.ledger.close();
+      const headPath = memoryHeadPath(stateDir, resolveHeadDir(stateDir));
+      const row = JSON.parse(readFileSync(headPath, "utf8")) as { sig: string };
+      writeFileSync(headPath, `${JSON.stringify({ ...row, sig: `x${row.sig.slice(1)}` })}\n`);
+      const restarted = createBodyServices(opts);
+      try {
+        const got = await getFact(restarted, "n1");
+        assert.equal(got.isError, true, JSON.stringify(got.data));
+        assert.equal(got.data.error, "memory-integrity-history-unavailable");
+      } finally {
+        restarted.ledger.close();
+      }
+    } finally {
+      if (existsSync(join(stateDir, "ledger.lock"))) first.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H15: crash after commit, before head update, opens and the head catches up", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h15-"));
+    const keys = testKeys();
+    const opts = { stateDir, policyFile, recordSigner: keys, effectSigner: keys };
+    const first = createBodyServices(opts);
+    try {
+      const a = await putFact(first, "n1", "fact-h15-a");
+      assert.equal(a.isError, false, JSON.stringify(a.data));
+      const headPath = memoryHeadPath(stateDir, resolveHeadDir(stateDir));
+      const previous = readFileSync(headPath);
+      const b = await putFact(first, "n2", "fact-h15-b");
+      assert.equal(b.isError, false, JSON.stringify(b.data));
+      writeFileSync(headPath, previous);
+      first.ledger.close();
+      const restarted = createBodyServices(opts);
+      try {
+        const got1 = await getFact(restarted, "n1");
+        const got2 = await getFact(restarted, "n2");
+        assert.equal(got1.isError, false, JSON.stringify(got1.data));
+        assert.equal(got2.isError, false, JSON.stringify(got2.data));
+        assert.equal((got1.data.body as { fact?: string } | undefined)?.fact, "fact-h15-a");
+        assert.equal((got2.data.body as { fact?: string } | undefined)?.fact, "fact-h15-b");
+        const head = JSON.parse(readFileSync(headPath, "utf8")) as { payload: { seq: number; lastHash: string } };
+        const lines = readFileSync(join(stateDir, MEMORY_COMMITS_FILE), "utf8")
+          .split("\n")
+          .filter((line) => line.trim() !== "");
+        const last = JSON.parse(lines[lines.length - 1]!) as { payload: { seq: number } };
+        assert.equal(head.payload.seq, last.payload.seq);
+        assert.equal(head.payload.seq, 2);
+      } finally {
+        restarted.ledger.close();
+      }
+    } finally {
+      if (existsSync(join(stateDir, "ledger.lock"))) first.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H16: verax doctor warns when the key dir is inside state, and not when it is outside", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h16-"));
+    const keysDir = mkdtempSync(join(tmpdir(), "verax-h16-keys-"));
+    try {
+      const inside = runDoctor({ VERAX_STATE_DIR: stateDir }, ["node", "cli.ts", "doctor"]);
+      const warning = inside.find((c) => c.id === "record-key-location");
+      assert.equal(warning?.level, "warn", JSON.stringify(inside));
+      assert.match(
+        warning?.detail ?? "",
+        /record key is inside the state directory; a state-directory writer also holds the key/,
+      );
+      assert.match(warning?.detail ?? "", /VERAX_KEYS_DIR/);
+      const outside = runDoctor(
+        { VERAX_STATE_DIR: stateDir, VERAX_KEYS_DIR: keysDir },
+        ["node", "cli.ts", "doctor"],
+      );
+      assert.equal(
+        outside.find((c) => c.id === "record-key-location"),
+        undefined,
+        JSON.stringify(outside),
+      );
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+      rmSync(keysDir, { recursive: true, force: true });
     }
   });
 });

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { FileLedger } from "@verax-ai/proxy";
 import { EX_CONFIG } from "./config.ts";
-import { loadOrCreateSigners, resolveKeysDir } from "./keys.ts";
+import { loadOrCreateSigners, resolveHeadDir, resolveKeysDir } from "./keys.ts";
 import { listLegacyMemoryFiles, openMemoryStoreSync } from "./memory-store.ts";
 
 function usage(): string {
@@ -68,6 +68,7 @@ export async function runMemoryReattest(
       stateDir,
       publicKeyPem: signers.recordSigner.publicKeyPem,
       privateKeyPem: signers.recordSigner.privateKeyPem,
+      headDir: resolveHeadDir(stateDir, keysDir, env.VERAX_MEMORY_HEAD_DIR),
     });
     if (store.historyUnavailable) {
       stderr.write("memory-reattest-history-unavailable\n");

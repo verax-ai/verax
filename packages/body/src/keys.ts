@@ -1,6 +1,6 @@
 import { createPublicKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, writeFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { EX_CONFIG } from "./config.ts";
 
 export type KeyPair = { privateKeyPem: string; publicKeyPem: string };
@@ -51,6 +51,22 @@ export function resolveKeysDir(stateDir: string, keysDir?: string | null): strin
   const explicit = keysDir?.trim();
   if (explicit) return explicit;
   return join(stateDir, "keys");
+}
+
+/** Memory head lives here. `VERAX_MEMORY_HEAD_DIR` wins; otherwise the keys directory. */
+export function resolveHeadDir(stateDir: string, keysDir?: string | null, headDir?: string | null): string {
+  const explicit = headDir?.trim();
+  if (explicit) return explicit;
+  return resolveKeysDir(stateDir, keysDir);
+}
+
+/** True when `inner` is `root` or a path under it. */
+export function pathIsInsideDir(root: string, inner: string): boolean {
+  const rootAbs = resolve(root);
+  const innerAbs = resolve(inner);
+  if (innerAbs === rootAbs) return true;
+  const rel = relative(rootAbs, innerAbs);
+  return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
 }
 
 export function loadOrCreateSigners(stateDir: string, keysDir?: string | null): {

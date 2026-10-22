@@ -448,6 +448,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       recordSigner: signers.recordSigner,
       effectSigner: signers.effectSigner,
       keysDir,
+      ...(config.headDir ? { headDir: config.headDir } : {}),
       ...(extraTools.length > 0 ? { extraTools } : {}),
     });
   } catch (err) {

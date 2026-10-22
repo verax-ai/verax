@@ -17,7 +17,7 @@ import { join } from "node:path";
 import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
-import { assertEd25519PublicKey, resolveKeysDir } from "./keys.ts";
+import { assertEd25519PublicKey, resolveHeadDir, resolveKeysDir } from "./keys.ts";
 import { openMemoryStoreSync, publishMemoryStore, type MemoryStore } from "./memory-store.ts";
 import {
   memoryBelongsToOtherTenant,
@@ -134,6 +134,7 @@ export function createBodyServices(opts: {
   nonce?: () => string;
   extraTools?: readonly ExtraTool[];
   keysDir?: string;
+  headDir?: string;
 }): BodyServices {
   const extraNames: string[] = [];
   const reserved = new Set<string>(TOOL_NAMES);
@@ -181,6 +182,7 @@ export function createBodyServices(opts: {
         stateDir: opts.stateDir,
         publicKeyPem,
         privateKeyPem: opts.recordSigner.privateKeyPem,
+        headDir: resolveHeadDir(opts.stateDir, opts.keysDir, opts.headDir ?? process.env.VERAX_MEMORY_HEAD_DIR),
       }),
     );
   } catch (err) {

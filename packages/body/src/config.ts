@@ -53,6 +53,11 @@ export type BodyConfig = {
    * `VERAX_KEYS_DIR` sets this when the keys must sit outside the state directory.
    */
   keysDir?: string;
+  /**
+   * Directory holding the signed memory head. Default is the keys directory.
+   * `VERAX_MEMORY_HEAD_DIR` sets this when the head must sit outside both.
+   */
+  headDir?: string;
 };
 
 export type OperatorDoorConfig = {
@@ -254,6 +259,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   const inventoryRaw = env.VERAX_INVENTORY_FILE?.trim() ?? "";
   const downstreamRaw = env.VERAX_DOWNSTREAM?.trim() ?? "";
   const keysDirRaw = env.VERAX_KEYS_DIR?.trim() ?? "";
+  const headDirRaw = env.VERAX_MEMORY_HEAD_DIR?.trim() ?? "";
   return {
     ok: true,
     value: {
@@ -270,6 +276,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       inventoryFile: inventoryRaw === "" ? null : inventoryRaw,
       downstreamFile: downstreamRaw === "" ? null : downstreamRaw,
       ...(keysDirRaw !== "" ? { keysDir: keysDirRaw } : {}),
+      ...(headDirRaw !== "" ? { headDir: headDirRaw } : {}),
       allowedOrigins: (env.VERAX_ALLOWED_ORIGINS ?? "")
         .split(",")
         .map((item) => item.trim())
