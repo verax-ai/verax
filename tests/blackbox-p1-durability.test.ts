@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import { ALARM_HISTORY, ALARM_OUTBOX_DIR, ALARM_OUTBOX_RECORD, writeAlarmOutbox } from "../packages/body/src/alarm-outbox.ts";
 import { startAlarmDelivery } from "../packages/body/src/alarm-webhook.ts";
+import { resumeBody } from "../packages/body/src/halt.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -179,6 +180,33 @@ function controlVias(state: string): string[] {
 }
 
 describe("black box P1 durability", () => {
+  // Gate test: after an operator resume, a new integrity failure is a new incident and must reach the webhook.
+  it("D6: a second integrity failure after resume sends a second alarm with a new event id", async () => {
+    const rx = await receiver();
+    try {
+      await withBody(rx.url, async (b) => {
+        await b.stop();
+        tamper(b.state, b.fact("n3"));
+        await b.start();
+        await b.get("n3");
+        assert.ok(await until(() => rx.got.length >= 1, 5000), "first alarm not delivered");
+        const firstId = rx.got[0]!.payload.eventId;
+        await b.stop();
+        resumeBody(b.state, "test-operator", "cli");
+        assert.equal(existsSync(join(b.state, "halted")), false, "resume did not clear the halt");
+        tamper(b.state, b.fact("n2"));
+        await b.start();
+        const r = await b.get("n2");
+        assert.equal(r.isError, true);
+        assert.equal(existsSync(join(b.state, "halted")), true, "second failure did not halt");
+        assert.ok(await until(() => rx.got.length >= 2, 5000), `second alarm not delivered (got ${rx.got.length})`);
+        assert.notEqual(rx.got[1]!.payload.eventId, firstId, "second incident reused the first event id");
+      });
+    } finally {
+      await rx.close();
+    }
+  });
+
   // Gate test: the halt is on disk but the outbox entry is gone (a crash between the two writes). The open must
   // rebuild the incident with the same event id and deliver it.
   it("D5: an integrity halt whose outbox entry was lost is completed on the next open, same event id", async () => {
