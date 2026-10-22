@@ -7,7 +7,7 @@ import { inputsLogFor } from "./inputs.ts";
 import { lookupResolvedBy } from "./ledger.ts";
 import { loadCheckpoints } from "./checkpoints.ts";
 import { samePublicKey, thirdPartyReceiptCoversRow } from "./third-party.ts";
-import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger } from "./types.ts";
+import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger, LedgerEffect } from "./types.ts";
 
 async function pairFor(
   ledger: Ledger,
@@ -40,6 +40,42 @@ async function pairFor(
 }
 
 const WINDOW_COVERAGE = "window-coverage";
+
+/**
+ * Cedulon's DECISION_PROFILE cannot be changed here. It compares a settlement
+ * class to the allow's class and the hashes as if the tool always ran:
+ * `:threw` is `effect-mismatch` (the writer stores a different hash),
+ * `:halted` is `effect-class-mismatch` (same hash, class has the suffix).
+ * `verifyLedger` already binds those rows to the allow's class plus the
+ * suffix. Drop only those two codes when the row is that bound not-run
+ * class, so both readers give the same verdict on the same ledger.
+ */
+const NOT_RUN_AUDIT_CODES = new Set(["effect-mismatch", "effect-class-mismatch"]);
+
+function allowedClassOf(record: SignedDecisionRecord): string | undefined {
+  const named = record.claims.effectClass;
+  if (typeof named === "string" && named !== "") return named;
+  return typeof record.claims.subject === "string" ? record.claims.subject : undefined;
+}
+
+function isBoundNotRunEffect(effectClass: string, allowedClass: string | undefined): boolean {
+  if (typeof allowedClass !== "string" || allowedClass === "") return false;
+  return effectClass === `${allowedClass}:threw` || effectClass === `${allowedClass}:halted`;
+}
+
+function dropBoundNotRunFindings(
+  findings: Finding[],
+  decisions: SignedDecisionRecord[],
+  effects: readonly LedgerEffect[],
+): Finding[] {
+  return findings.filter((finding) => {
+    if (!NOT_RUN_AUDIT_CODES.has(finding.code)) return true;
+    const record = decisions.find((d) => d.claims.ref === finding.id);
+    const effect = effects.find((e) => e.row.ref === finding.id && e.row.effectClass !== "duplicate-effect");
+    if (!record || !effect || record.claims.decision !== "allow") return true;
+    return !isBoundNotRunEffect(effect.row.effectClass, allowedClassOf(record));
+  });
+}
 
 function resolveIssuerTrust(opts?: ExplainOpts): {
   pin: IssuerTrustPin | undefined;
@@ -156,12 +192,16 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
         ),
       ]
     : [];
-  const applicable = dropWindow
-    ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE)
-    : report.findings;
-  const applicableWarnings = dropWindow
-    ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE)
-    : report.warnings;
+  const applicable = dropBoundNotRunFindings(
+    dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
+    decisions,
+    effects,
+  );
+  const applicableWarnings = dropBoundNotRunFindings(
+    dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
+    decisions,
+    effects,
+  );
   const refFindings = applicable.filter((f) => f.id === ref);
   const issuerFinding =
     applicable.find((f) => f.code === "issuer-key-mismatch" || f.id === "issuer") ??

@@ -433,6 +433,11 @@ function descriptorsFor(
   return stamps && stamps.length > 0 ? stamps : undefined;
 }
 
+/** A signed not-run row is not an external event. Ref matching must not hide a ghost behind it. */
+function isNotRunEffectClass(effectClass: string): boolean {
+  return effectClass.endsWith(":halted") || effectClass.endsWith(":threw");
+}
+
 export function reconcile(
   channelRows: readonly ChannelRow[],
   effects: readonly LedgerEffect[],
@@ -491,6 +496,7 @@ export function reconcile(
           (e, i) =>
             !used.has(i) &&
             decided(e) &&
+            !isNotRunEffectClass(e.row.effectClass) &&
             (e.row.ref === ref || opts?.approvals?.some((a) => a.ref === ref && a.allowRef === e.row.ref)),
         );
       let idx = findFor(row.ref);

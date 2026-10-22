@@ -407,6 +407,19 @@ returned on the `_inputs` path. When a webhook is configured, one signed
 incident is written. A body that is already halted does not open a
 second incident. Later gateway calls are `denied:halted:<ref>`.
 
+An allow that did not run writes `effectClass: "<tool>:halted"` on that
+allow's ref. Every reader treats that as not-run: reconcile's ref match
+skips `:halted` and `:threw` so an external statement with the same ref
+stays ghost; `verifyLedger` binds `:halted` only when some allow on that
+ref has that tool's class plus `:halted` (the same rule as `:threw`);
+`explain` drops Cedulon's `effect-class-mismatch` / `effect-mismatch` for
+those bound not-run classes so both give the same verdict on the same
+ledger; the panel files the row as its own outcome (`status.halted`,
+`rec.say.effect.halted`), not as a completed run. Once the halt switch
+file exists the process flag is cleared even if `halt-history.jsonl`
+cannot be appended. A replay of the same `_ref` after that not-run row
+answers `denied:not-run-halted:<ref>` rather than `denied:halted:<ref>`.
+
 The halt history line carries `eventId` (and `triggerCode`) so a crash
 or write error after the switch cannot lose the alarm: opening the body
 completes a missing outbox file under that same `eventId` when no

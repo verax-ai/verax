@@ -132,4 +132,36 @@ describe("record line", () => {
     const line = recordLine(en, defer("kart-test-1"), [], "en");
     assert.equal(line.kind, "defer");
   });
+
+  it("names a :halted effect as halted, not allowed and not threw", () => {
+    const action: RailAction = {
+      record: {
+        claims: {
+          subject: "memory.get",
+          decision: "allow",
+          reasonCode: "rule",
+          timestampMs: 1,
+          decider: "verax-proxy",
+          ref: "halt-1",
+          policyHash: "f7",
+          effectHash: "ed",
+        },
+      },
+      effect: {
+        row: {
+          ref: "halt-1",
+          effectClass: "memory.get:halted",
+          effectHash: "ed",
+          timestampMs: 2,
+        },
+      },
+      rule: { id: "get", tool: "memory.get", text: "read" },
+      finding: null,
+    };
+    const line = recordLine(en, action, [], "en");
+    assert.equal(line.kind, "halted");
+    assert.notEqual(line.kind, "allow");
+    assert.notEqual(line.kind, "threw");
+    assert.equal(line.outcome, "allow rule");
+  });
 });

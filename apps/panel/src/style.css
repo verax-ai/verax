@@ -487,7 +487,9 @@ aside {
 .record-status.defer,
 .record-row.defer .record-status,
 .record-status.threw,
-.record-row.threw .record-status {
+.record-row.threw .record-status,
+.record-status.halted,
+.record-row.halted .record-status {
   color: var(--accent);
 }
 .record-asked {

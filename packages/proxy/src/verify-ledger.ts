@@ -24,11 +24,12 @@
  *               shared with record/effect/witness signers are refused. Without
  *               a third-party pin the row is named unchecked and is not bound.
  *               For self/same-org rows, a
- *               thrown call relaxes only the hash, and only for the tool that
- *               was allowed: some decision on that ref has `decision: "allow"`
- *               and this row's class is exactly that decision's `effectClass`
- *               plus `:threw`. A deny, or an allow of a different tool, does
- *               not bind. The signature is still required. A
+ *               thrown or halted call relaxes only the hash, and only for the
+ *               tool that was allowed: some decision on that ref has
+ *               `decision: "allow"` and this row's class is exactly that
+ *               decision's `effectClass` plus `:threw` or `:halted`. A deny,
+ *               or an allow of a different tool, does not bind. The signature
+ *               is still required. A
  *               `duplicate-effect` row is bound to the decision by ref and to
  *               the fixed refusal hash the writer stores, not to the
  *               decision's effectHash; the signature is still required.
@@ -1163,6 +1164,10 @@ function isDecisionRow(row: unknown): row is SignedDecisionRecord {
   return claims !== null && typeof claims === "object";
 }
 
+function isNotRunEffectClass(effectClass: string): boolean {
+  return effectClass.endsWith(":threw") || effectClass.endsWith(":halted");
+}
+
 export async function verifyLedger(dir: string, opts: VerifyOptions = {}): Promise<VerifyResult> {
   try {
     return await verifyLedgerUnchecked(dir, opts);
@@ -1279,14 +1284,15 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   }
 
   // An effect is bound only when a decision with that ref records the same
-  // effectHash. A `:threw` row relaxes the hash and nothing else: it binds
-  // only when some decision on that ref is an allow and the row's class is
-  // exactly that decision's effectClass plus `:threw`. A deny did not throw,
-  // and an allow of a different tool is not this class. A `duplicate-effect`
-  // row must carry the writer's fixed refusal hash. The attestation plus
-  // receipt still verify under one effect key. A mismatch is named and counts
-  // as orphaned. A second primary row for a ref that already has one is named
-  // and is not bound, even when the first row itself did not bind.
+  // effectHash. A `:threw` or `:halted` row relaxes the hash and nothing else:
+  // it binds only when some decision on that ref is an allow and the row's
+  // class is exactly that decision's effectClass plus that suffix. A deny did
+  // not throw or halt, and an allow of a different tool is not this class. A
+  // `duplicate-effect` row must carry the writer's fixed refusal hash. The
+  // attestation plus receipt still verify under one effect key. A mismatch is
+  // named and counts as orphaned. A second primary row for a ref that already
+  // has one is named and is not bound, even when the first row itself did not
+  // bind.
   const refler = new Set<string>();
   const hashesByRef = new Map<string, Set<string>>();
   const allowedClassesByRef = new Map<string, Set<string>>();
@@ -1400,20 +1406,25 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (ref !== null) primarySeen.add(ref);
     const hashes = ref === null ? undefined : hashesByRef.get(ref);
     const hashMatch = effectHash !== null && hashes?.has(effectHash) === true;
-    if (e.witnessClass !== "third-party" && effectClass.endsWith(":threw")) {
+    if (e.witnessClass !== "third-party" && isNotRunEffectClass(effectClass)) {
       const allowed = ref === null ? undefined : allowedClassesByRef.get(ref);
-      let thrownOk = false;
+      const suffix = effectClass.endsWith(":threw") ? ":threw" : ":halted";
+      let notRunOk = false;
       if (allowed) {
         for (const cls of allowed) {
-          if (`${cls}:threw` === effectClass) {
-            thrownOk = true;
+          if (`${cls}${suffix}` === effectClass) {
+            notRunOk = true;
             break;
           }
         }
       }
-      if (!thrownOk) {
+      if (!notRunOk) {
         effectsOrphaned += 1;
-        problems.push(`thrown effect does not match an allowed decision: ref ${ref ?? "(missing)"}`);
+        problems.push(
+          suffix === ":threw"
+            ? `thrown effect does not match an allowed decision: ref ${ref ?? "(missing)"}`
+            : `halted effect does not match an allowed decision: ref ${ref ?? "(missing)"}`,
+        );
         continue;
       }
     } else if (!hashMatch) {

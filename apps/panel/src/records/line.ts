@@ -4,10 +4,11 @@ import { formatMinor } from "./money.ts";
 import type { PendingApproval, RailAction } from "../rail/types.ts";
 import { approvalForRef, resolutionOf } from "./approval-state.ts";
 
-export type RecordKind = "allow" | "deny" | "defer" | "threw" | "expired";
+export type RecordKind = "allow" | "deny" | "defer" | "threw" | "halted" | "expired";
 
 export function kindOf(action: RailAction, approvals: readonly PendingApproval[] = []): RecordKind {
   if (action.effect?.row.effectClass.endsWith(":threw")) return "threw";
+  if (action.effect?.row.effectClass.endsWith(":halted")) return "halted";
   const resolution = resolutionOf(action, approvals);
   if (resolution === "waiting") return "defer";
   if (resolution === "expired") return "expired";
@@ -19,6 +20,7 @@ export function statusWord(copy: Copy, kind: RecordKind): string {
   if (kind === "deny") return copy["status.deny"];
   if (kind === "defer") return copy["status.defer"];
   if (kind === "expired") return copy["status.expired"];
+  if (kind === "halted") return copy["status.halted"];
   return copy["status.threw"];
 }
 

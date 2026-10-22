@@ -170,8 +170,15 @@ export function haltBody(
 ): HaltState {
   try {
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    if (!isHaltSwitchFile(stateDir)) {
+    const hadSwitch = isHaltSwitchFile(stateDir);
+    if (!hadSwitch) {
       writeFileSync(join(stateDir, SWITCH), "", { encoding: "utf8", mode: 0o600 });
+    }
+    // The file is the single source of truth once it exists. History is a
+    // separate write: an older flag-only halt must not survive a later
+    // successful switch, even if the history line cannot be appended.
+    if (isHaltSwitchFile(stateDir)) clearProcessHalted(stateDir);
+    if (!hadSwitch && isHaltSwitchFile(stateDir)) {
       appendHistory(stateDir, {
         action: "halt",
         atMs: now,
@@ -183,20 +190,18 @@ export function haltBody(
         ...(incident?.memoryHead ? { memoryHead: incident.memoryHead } : {}),
       });
     }
-    // The file is the single source of truth once it exists; an older
-    // flag-only halt must not survive a later successful write.
-    if (isHaltSwitchFile(stateDir)) clearProcessHalted(stateDir);
   } catch (err) {
     process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
+    if (isHaltSwitchFile(stateDir)) {
+      clearProcessHalted(stateDir);
+      throw err;
+    }
+    markProcessHalted(stateDir);
+    persistHaltedSwitch(stateDir);
     if (!isHaltSwitchFile(stateDir)) {
-      markProcessHalted(stateDir);
-      persistHaltedSwitch(stateDir);
-      if (!isHaltSwitchFile(stateDir)) {
-        markHistoryUnavailable(stateDir);
-      } else {
-        throw err;
-      }
+      markHistoryUnavailable(stateDir);
     } else {
+      clearProcessHalted(stateDir);
       throw err;
     }
   }

@@ -122,7 +122,7 @@ async function replayAfterEffect(ledger: Ledger, ref: string): Promise<ToolResul
     return threwReplay(ref);
   }
   if (primary?.row.effectClass.endsWith(":halted")) {
-    return denied("halted", ref);
+    return denied("not-run-halted", ref);
   }
   return allowedReplay(ref);
 }
