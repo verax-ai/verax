@@ -75,6 +75,13 @@ const ALLOWED = new Set([
   // into the ledger: one name for the directory and one for the mark.
   "OPERATOR_REMOVED_DIR",
   "operatorRemovalMark",
+  // The body halts, and the proxy refuses calls, through one in-process flag
+  // for a halt whose switch file could not be written; both packages have
+  // to read the same flag.
+  "clearProcessHalted",
+  "isProcessHalted",
+  "markProcessHalted",
+  "persistHaltedSwitch",
 ]);
 
 describe("B1 exports map", () => {
