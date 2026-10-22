@@ -41,6 +41,8 @@ export type HaltState = { halted: boolean; since?: HaltEvent };
 
 const SWITCH = "halted";
 const HISTORY = "halt-history.jsonl";
+/** Identity of the active integrity halt; closed on resume so the next event is new. */
+const INCIDENT = "incident.json";
 
 function cliUser(): string {
   try {
@@ -153,7 +155,9 @@ export function haltBody(
  * Resuming a body that is not halted changes nothing and writes nothing.
  * The line goes to the history before the switch is removed: if it cannot be
  * written, the append throws and the body stays halted, rather than running
- * again with no record of who let it.
+ * again with no record of who let it. The incident identity is closed after
+ * that line and before the key: a later integrity halt is a new event. Pending
+ * alarm outbox files stay so an undelivered alarm still delivers.
  */
 export function resumeBody(
   stateDir: string,
@@ -164,6 +168,7 @@ export function resumeBody(
 ): HaltState {
   if (existsSync(join(stateDir, SWITCH))) {
     appendHistory(stateDir, { action: "resume", atMs: now, by, via, ...(signature ? { signature } : {}) });
+    rmSync(join(stateDir, INCIDENT), { force: true });
     rmSync(join(stateDir, SWITCH), { force: true });
   }
   return readHalt(stateDir);

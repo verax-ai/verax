@@ -170,7 +170,18 @@ function readHistoryIdentity(stateDir: string): StoredIncident | null {
 }
 
 function readIntegrityIdentity(stateDir: string): StoredIncident | null {
-  return readIncidentRecord(stateDir) ?? readHistoryIdentity(stateDir);
+  const halt = readHalt(stateDir);
+  if (!halt.halted) return null;
+  const record = readIncidentRecord(stateDir);
+  const history = readHistoryIdentity(stateDir);
+  if (history) {
+    if (record?.eventId === history.eventId) return record;
+    return history;
+  }
+  // C1: switch with no history line — the on-disk record is this halt.
+  // An operator halt has `since` and does not own a leftover record.
+  if (record && (!halt.since || halt.since.via === "integrity")) return record;
+  return null;
 }
 
 function persistEnvelope(stateDir: string, envelope: AlarmEnvelope): void {
@@ -191,7 +202,7 @@ export function raiseMemoryIntegrityIncident(opts: {
   now?: number;
 }): AlarmEnvelope | null {
   const already = existsSync(join(opts.stateDir, "halted"));
-  const existing = readIntegrityIdentity(opts.stateDir);
+  const existing = already ? readIntegrityIdentity(opts.stateDir) : null;
   if (already && !existing) return null;
   const eventId = existing?.eventId ?? randomUUID();
   const observedAt = existing?.observedAt ?? opts.now ?? Date.now();
@@ -204,7 +215,8 @@ export function raiseMemoryIntegrityIncident(opts: {
     ...(memoryHead ? { memoryHead } : {}),
     ...(existing?.envelope ? { envelope: existing.envelope } : {}),
   };
-  if (!readIncidentRecord(opts.stateDir)) writeIncidentRecord(opts.stateDir, record);
+  const stored = readIncidentRecord(opts.stateDir);
+  if (!already || !stored || stored.eventId !== eventId) writeIncidentRecord(opts.stateDir, record);
 
   if (!already) {
     haltBody(opts.stateDir, INCIDENT_BY, "integrity", observedAt, undefined, {
