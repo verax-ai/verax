@@ -31,6 +31,10 @@ export type HaltEvent = {
   by: string;
   via: "cli" | "http" | "integrity";
   signature?: ControlSignature;
+  /** Integrity halt only: the incident this switch is bound to. */
+  eventId?: string;
+  triggerCode?: string;
+  memoryHead?: { seq: number; lastHash: string };
 };
 
 export type HaltState = { halted: boolean; since?: HaltEvent };
@@ -89,7 +93,14 @@ function lastHalt(stateDir: string): HaltEvent | undefined {
     try {
       const row = JSON.parse(lines[i] ?? "") as Partial<HaltEvent>;
       if (row.action === "halt" && typeof row.atMs === "number" && typeof row.by === "string") {
-        return { action: "halt", atMs: row.atMs, by: row.by, via: haltVia(row.via) };
+        const event: HaltEvent = { action: "halt", atMs: row.atMs, by: row.by, via: haltVia(row.via) };
+        if (typeof row.eventId === "string" && row.eventId !== "") event.eventId = row.eventId;
+        if (typeof row.triggerCode === "string" && row.triggerCode !== "") event.triggerCode = row.triggerCode;
+        const head = row.memoryHead;
+        if (head && typeof head === "object" && typeof head.seq === "number" && typeof head.lastHash === "string") {
+          event.memoryHead = { seq: head.seq, lastHash: head.lastHash };
+        }
+        return event;
       }
       if (row.action === "resume") return undefined;
     } catch {
@@ -112,11 +123,21 @@ export function haltBody(
   via: HaltEvent["via"],
   now = Date.now(),
   signature?: ControlSignature,
+  incident?: Pick<HaltEvent, "eventId" | "triggerCode" | "memoryHead">,
 ): HaltState {
   mkdirSync(stateDir, { recursive: true, mode: 0o700 });
   if (!existsSync(join(stateDir, SWITCH))) {
     writeFileSync(join(stateDir, SWITCH), "", { encoding: "utf8", mode: 0o600 });
-    appendHistory(stateDir, { action: "halt", atMs: now, by, via, ...(signature ? { signature } : {}) });
+    appendHistory(stateDir, {
+      action: "halt",
+      atMs: now,
+      by,
+      via,
+      ...(signature ? { signature } : {}),
+      ...(incident?.eventId ? { eventId: incident.eventId } : {}),
+      ...(incident?.triggerCode ? { triggerCode: incident.triggerCode } : {}),
+      ...(incident?.memoryHead ? { memoryHead: incident.memoryHead } : {}),
+    });
   }
   return readHalt(stateDir);
 }

@@ -21,7 +21,7 @@ import {
   POLICY_FILE_ERROR_PREFIX,
   policyFileRefusal,
 } from "./config.ts";
-import { raiseMemoryIntegrityIncident } from "./incidents.ts";
+import { completeMemoryIntegrityIncident, raiseMemoryIntegrityIncident } from "./incidents.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
 import { assertRecordKeyTrust, resolveHeadDir } from "./keys.ts";
@@ -72,7 +72,7 @@ export type BodyServices = {
   explainOpts: () => Promise<ExplainOpts>;
   recordSigner: RecordSigner;
   memoryStore: MemoryStore;
-  stopAlarms: () => void;
+  stopAlarms: () => void | Promise<void>;
 };
 
 function isLegacyExplainPin(value: string): boolean {
@@ -157,6 +157,13 @@ export function createBodyServices(opts: {
   }
   const now = opts.now ?? (() => Date.now());
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
+  completeMemoryIntegrityIncident({
+    stateDir: opts.stateDir,
+    publicKeyPem,
+    privateKeyPem: opts.recordSigner.privateKeyPem,
+    memoryHead: store.memoryHead(),
+    ...(alarmUrl !== "" ? { alarmWebhookUrl: alarmUrl } : {}),
+  });
   const stopAlarms =
     alarmUrl === ""
       ? () => {}
@@ -168,6 +175,7 @@ export function createBodyServices(opts: {
       publicKeyPem,
       privateKeyPem: opts.recordSigner.privateKeyPem,
       memoryHead: store.memoryHead(),
+      now: now(),
       ...(alarmUrl !== "" ? { alarmWebhookUrl: alarmUrl } : {}),
     });
     pokeAlarmDelivery(opts.stateDir);

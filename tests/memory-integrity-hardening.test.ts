@@ -10,6 +10,7 @@ import { tenantKey, verifyLedger } from "@verax-ai/proxy";
 
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { runDoctor } from "../packages/body/src/doctor.ts";
+import { resumeBody } from "../packages/body/src/halt.ts";
 import { loadOrCreateSigners, resolveHeadDir } from "../packages/body/src/keys.ts";
 import { runMemoryRehead } from "../packages/body/src/memory-rehead-cli.ts";
 import { MEMORY_COMMITS_FILE, memoryHeadPath, memoryStateDirHash } from "../packages/body/src/memory-store.ts";
@@ -669,9 +670,24 @@ describe("memory integrity hardening (H1-H22)", () => {
         const got = await getFact(closed, "n1");
         assert.equal(got.isError, true, JSON.stringify(got.data));
         assert.equal(got.data.error, "memory-integrity-history-unavailable");
-        const refused = await putFact(closed, "n3", "fact-h19-c");
-        assert.equal(refused.isError, true, JSON.stringify(refused.data));
-        assert.equal(refused.data.error, "memory-integrity-history-unavailable");
+        const refused = await closed.proxy.call(
+          {
+            name: "memory.put",
+            arguments: {
+              id: "n3",
+              body: { fact: "fact-h19-c" },
+              source: { uri: "file://n3", retrievedAtMs: 1 },
+              validUntilMs: UNTIL,
+            },
+          },
+          writer,
+        );
+        assert.equal(refused.isError, true, refused.content[0]?.text);
+        const refusedText = refused.content[0]?.text ?? "";
+        assert.ok(
+          refusedText.includes("memory-integrity-history-unavailable") || /denied:halted/.test(refusedText),
+          refusedText,
+        );
         assert.equal(existsSync(headPath), false);
       } finally {
         closed.ledger.close();
@@ -688,6 +704,13 @@ describe("memory integrity hardening (H1-H22)", () => {
       assert.equal(existsSync(headPath), true);
       const opened = createBodyServices(opts);
       try {
+        const halted1 = await opened.proxy.call({ name: "memory.get", arguments: { id: "n1" } }, writer);
+        const halted2 = await opened.proxy.call({ name: "memory.get", arguments: { id: "n2" } }, writer);
+        assert.equal(halted1.isError, true, halted1.content[0]?.text);
+        assert.equal(halted2.isError, true, halted2.content[0]?.text);
+        assert.match(halted1.content[0]?.text ?? "", /denied:halted/);
+        assert.match(halted2.content[0]?.text ?? "", /denied:halted/);
+        resumeBody(stateDir, "test-operator", "cli");
         const got1 = await getFact(opened, "n1");
         const got2 = await getFact(opened, "n2");
         assert.equal(got1.isError, false, JSON.stringify(got1.data));

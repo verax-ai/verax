@@ -396,14 +396,21 @@ On a detected memory integrity failure, Verax stops new gateway calls and
 delivers a signed alarm to the configured webhook, retrying until the
 receiver accepts it.
 
-`memory.get` or decision-input resolution (`readMemoryMeta`) that sees
-`memory-integrity-mismatch`, `memory-integrity-missing`,
-`memory-integrity-unattested`, or `memory-integrity-history-unavailable`
-writes `<stateDir>/halted` (`haltBody`, `by: "verax:memory-integrity"`,
-`via: "integrity"`) and, when a webhook is configured, one signed incident.
-A body that is already halted does not open a second incident. The first
-detecting call still returns the integrity error; later gateway calls are
-`denied:halted:<ref>`.
+`memory.get` that sees `memory-integrity-mismatch`,
+`memory-integrity-missing`, `memory-integrity-unattested`, or
+`memory-integrity-history-unavailable` writes `<stateDir>/halted`
+(`haltBody`, `by: "verax:memory-integrity"`, `via: "integrity"`) and
+returns that integrity code. Decision-input resolution (`readMemoryMeta`
+on `_inputs`) that sees the same failure also opens the halt, but that
+call is answered `denied:halted:<ref>` — the integrity code is not
+returned on the `_inputs` path. When a webhook is configured, one signed
+incident is written. A body that is already halted does not open a
+second incident. Later gateway calls are `denied:halted:<ref>`.
+
+The halt history line carries `eventId` (and `triggerCode`) so a crash
+or write error after the switch cannot lose the alarm: opening the body
+completes a missing outbox file under that same `eventId` when no
+delivery record exists.
 
 The webhook is `listen` / `createBodyServices` `alarmWebhookUrl` /
 `alarmRetryMs`, or `VERAX_ALARM_WEBHOOK_URL` / `VERAX_ALARM_RETRY_MS`
@@ -422,17 +429,30 @@ when the store has one. It does not carry memory content, `source`,
 user data other than an id, tokens, or file paths.
 
 Pending deliveries live in `<stateDir>/alarm-outbox/<eventId>.json` (temp,
-fsync, rename). A 2xx deletes the file and appends `alarm-history.jsonl`.
-The body retries the same `eventId` every `alarmRetryMs` and resumes
-pending files on open. Closing the body clears the timer. Alarm delivery
-is not a tool an agent can call.
+fsync, rename). A 2xx first appends a durable `alarm-history.jsonl` line
+(fsync) and only then deletes the outbox file; an eventId already in
+that history is not sent again. The body retries the same `eventId`
+every `alarmRetryMs` and resumes pending files on open. A filesystem or
+network error inside the sender is written as one stderr line; the
+pending file stays and the next tick retries. Closing the body aborts
+the active POST, clears the timeout, waits for the running tick, and
+does not change outbox or history after that. Alarm delivery is not a
+tool an agent can call.
+
+### Upgrading from 0.6.1
+
+1. With the body stopped, review the old memory contents.
+2. Run `verax memory reattest <stateDir>` with the same key and head
+   configuration the body will use.
+3. Then start the body. The first read of an unre-attested legacy
+   record stops the body and `verax resume` asks for passkey approval.
 
 Limits: an attacker who can write the machine can delete the `halted` file
 and the outbox; an independent external observer is a later stage (P4).
 The alarm signature binds the event to the record key; if that key is
 stolen it does not prove the event is truthful.
 
-Guards: `blackbox-p1`, `blackbox-p1-url`.
+Guards: `blackbox-p1`, `blackbox-p1-url`, `blackbox-p1-durability`.
 
 ## Historical record
 

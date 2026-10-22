@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import {
-  appendFileSync,
   chmodSync,
   closeSync,
   existsSync,
@@ -69,13 +68,61 @@ function writeFileDurable(finalPath: string, payload: string): void {
   fsyncDir(dir);
 }
 
+/** Same-name file beside the outbox directory. A folder here blocks the write. */
+export const ALARM_OUTBOX_RECORD = `${ALARM_OUTBOX_DIR}.json`;
+
+function outboxRecordPath(stateDir: string): string {
+  return join(stateDir, ALARM_OUTBOX_RECORD);
+}
+
+export function hasAlarmOutbox(stateDir: string, eventId: string): boolean {
+  return existsSync(outboxPath(stateDir, eventId));
+}
+
+export function deliveredAlarmIds(stateDir: string): Set<string> {
+  const path = join(stateDir, ALARM_HISTORY);
+  if (!existsSync(path)) return new Set();
+  const raw = readFileSync(path, "utf8");
+  const ids = new Set<string>();
+  for (const line of raw.split("\n")) {
+    if (line.trim() === "") continue;
+    try {
+      const row = JSON.parse(line) as { eventId?: unknown };
+      if (typeof row.eventId === "string" && row.eventId !== "") ids.add(row.eventId);
+    } catch {
+      // A torn history line is not a delivery.
+    }
+  }
+  return ids;
+}
+
+export function hasAlarmDelivery(stateDir: string, eventId: string): boolean {
+  return deliveredAlarmIds(stateDir).has(eventId);
+}
+
+function appendFileDurable(path: string, line: string): void {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const fd = openSync(path, "a", 0o600);
+  try {
+    writeSync(fd, line, null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  fsyncDir(dir);
+}
+
 export function writeAlarmOutbox(stateDir: string, envelope: AlarmEnvelope): void {
   const eventId = envelope.payload.eventId;
   if (typeof eventId !== "string" || eventId === "") throw new Error("alarm-event-id-missing");
-  writeFileDurable(outboxPath(stateDir, eventId), `${JSON.stringify(envelope)}\n`);
+  const body = `${JSON.stringify(envelope)}\n`;
+  writeFileDurable(outboxRecordPath(stateDir), body);
+  writeFileDurable(outboxPath(stateDir, eventId), body);
 }
 
 export function listAlarmOutbox(stateDir: string): AlarmEnvelope[] {
+  const delivered = deliveredAlarmIds(stateDir);
   const dir = outboxDir(stateDir);
   if (!existsSync(dir)) return [];
   const names = readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
@@ -85,6 +132,8 @@ export function listAlarmOutbox(stateDir: string): AlarmEnvelope[] {
       const parsed = JSON.parse(readFileSync(join(dir, name), "utf8")) as AlarmEnvelope;
       if (!parsed || typeof parsed !== "object" || typeof parsed.sig !== "string") continue;
       if (!parsed.payload || typeof parsed.payload !== "object") continue;
+      const eventId = parsed.payload.eventId;
+      if (typeof eventId === "string" && delivered.has(eventId)) continue;
       out.push(parsed);
     } catch {
       // A torn file is left for the next pass; it is not delivered.
@@ -96,16 +145,17 @@ export function listAlarmOutbox(stateDir: string): AlarmEnvelope[] {
 export function markAlarmDelivered(stateDir: string, envelope: AlarmEnvelope, now = Date.now()): void {
   const eventId = envelope.payload.eventId;
   if (typeof eventId !== "string" || eventId === "") return;
-  const path = outboxPath(stateDir, eventId);
-  try {
-    unlinkSync(path);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-  }
   const line = {
     eventId,
     deliveredAtMs: now,
     triggerCode: envelope.payload.triggerCode,
   };
-  appendFileSync(join(stateDir, ALARM_HISTORY), `${JSON.stringify(line)}\n`, { encoding: "utf8", mode: 0o600 });
+  appendFileDurable(join(stateDir, ALARM_HISTORY), `${JSON.stringify(line)}\n`);
+  for (const path of [outboxPath(stateDir, eventId), outboxRecordPath(stateDir)]) {
+    try {
+      unlinkSync(path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+    }
+  }
 }

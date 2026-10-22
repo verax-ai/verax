@@ -237,14 +237,23 @@ What this does not catch:
 updates the signed head, and prints the ids. The body does not reattest on
 start.
 
+### Upgrading from 0.6.1
+
+1. With the body stopped, review the old memory contents.
+2. Run `verax memory reattest <stateDir>` with the same key and head
+   configuration the body will use.
+3. Then start the body. The first read of an unre-attested legacy
+   record stops the body and `verax resume` asks for passkey approval.
+
 On a detected memory integrity failure, Verax stops new gateway calls and
 delivers a signed alarm to the configured webhook, retrying until the
-receiver accepts it. The detecting `memory.get` (or a `_inputs` resolution
-that sees the same integrity code) still returns the integrity error; the
-halt switch then refuses later calls. The alarm is signed by the record
-key over `canonical(payload)` and is not a tool an agent can invoke. An
-`http` webhook other than loopback (`127.0.0.1`, `[::1]`, `localhost`) is
-refused at start.
+receiver accepts it. The detecting `memory.get` still returns the
+integrity code. A `_inputs` resolution that sees the same failure opens
+the halt, and that call is answered `denied:halted` — the two paths are
+not the same reply. The halt switch then refuses later calls. The alarm
+is signed by the record key over `canonical(payload)` and is not a tool
+an agent can invoke. An `http` webhook other than loopback (`127.0.0.1`,
+`[::1]`, `localhost`) is refused at start.
 
 Limits: an attacker who can write the machine can delete the `halted` file
 and the alarm outbox; an independent external observer is a later stage

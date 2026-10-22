@@ -211,7 +211,9 @@ export async function verifyControlSignatures(
     if (control.signature === undefined) {
       if (control.via === "http") unsignedHttp += 1;
       else if (control.via === "cli") cli += 1;
-      else file += 1;
+      else if (control.via === "integrity") {
+        // An automatic integrity halt stays integrity in the signed record.
+      } else file += 1;
     } else {
       const sig = controlSignatureOf(control.signature);
       const expectedPrev = at === 0 ? null : at > 0 ? lineHashByLine.get(at - 1) : undefined;
