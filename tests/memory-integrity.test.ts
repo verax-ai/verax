@@ -30,8 +30,9 @@ type Store = {
   src: (ctx: "A" | "B", id: string) => string;
 };
 
-async function withStore(run: (s: Store) => Promise<void>): Promise<void> {
+async function withStore(run: (s: Store) => Promise<void>, profile: { keysOutside?: boolean } = {}): Promise<void> {
   const state = mkdtempSync(join(tmpdir(), "verax-memint-"));
+  const keysDir = profile.keysOutside ? mkdtempSync(join(tmpdir(), "verax-memint-keys-")) : undefined;
   const issuer = await startDevIssuer(0, audience);
   const scope = "verax:read verax:memory";
   const tokens = { A: await issuer.sign({ scope, sub: "agent-a" }), B: await issuer.sign({ scope, sub: "agent-b" }) };
@@ -40,6 +41,7 @@ async function withStore(run: (s: Store) => Promise<void>): Promise<void> {
     jwksUrl: issuer.jwksUrl,
     audience,
     stateDir: state,
+    ...(keysDir ? { keysDir } : {}),
     bindHost: "127.0.0.1",
     bindPort: 0,
     policyFile,
@@ -101,6 +103,7 @@ async function withStore(run: (s: Store) => Promise<void>): Promise<void> {
     await s.stop();
     await issuer.close?.();
     rmSync(state, { recursive: true, force: true });
+    if (keysDir) rmSync(keysDir, { recursive: true, force: true });
   }
 }
 
@@ -332,4 +335,56 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
       });
     },
   );
+});
+
+// Hardened profile: the record key and the memory head live outside the state directory, so an attacker who can
+// write the state directory cannot roll back what the body last committed.
+describe("memory integrity at rest, keys and head outside the state directory", () => {
+  it("C1h: a restart with no edit serves every record unchanged", async () => {
+    await withStore(
+      async (s) => {
+        await s.stop();
+        await s.start();
+        for (const ctx of ["A", "B"] as const) {
+          for (const id of IDS) servedFact(await s.get(ctx, id), s.fact(ctx, id), `C1h ${ctx}/${id}`);
+        }
+      },
+      { keysOutside: true },
+    );
+  });
+
+  it("T9h: restoring an earlier copy of the whole state directory is refused", async () => {
+    await withStore(
+      async (s) => {
+        await s.stop();
+        const snap = mkdtempSync(join(tmpdir(), "verax-memint-snap-"));
+        cpSync(s.state, snap, { recursive: true });
+        await s.start();
+        assert.equal((await s.put("A", "n1", s.fact("A", "n1", 2))).isError, false);
+        await s.stop();
+        for (const name of readdirSync(s.state)) rmSync(join(s.state, name), { recursive: true, force: true });
+        cpSync(snap, s.state, { recursive: true });
+        rmSync(snap, { recursive: true, force: true });
+        await s.start();
+        refused(await s.get("A", "n1"), [s.fact("A", "n1", 1)], "T9h");
+      },
+      { keysOutside: true },
+    );
+  });
+
+  it("T2h: cutting the newest commit line with the object it names is refused, not read as never written", async () => {
+    await withStore(
+      async (s) => {
+        assert.equal((await s.put("A", "n7", s.fact("A", "n7"))).isError, false);
+        await s.stop();
+        const commits = join(s.state, "memory-commits.jsonl");
+        const lines = readFileSync(commits, "utf8").split("\n").filter((l) => l.trim() !== "");
+        writeFileSync(commits, lines.slice(0, -1).join("\n") + "\n");
+        unlinkSync(objectWith(s.state, s.fact("A", "n7")));
+        await s.start();
+        refused(await s.get("A", "n7"), [], "T2h");
+      },
+      { keysOutside: true },
+    );
+  });
 });
