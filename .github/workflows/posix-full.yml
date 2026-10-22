@@ -26,10 +26,13 @@ jobs:
         # The whole suite on macOS too; the installer e2e alone left most tests unrun there.
         os: [ubuntu-latest, macos-latest]
     # Same hang-to-red reason as windows-full. Green posix-full runs on
-    # 8 Sep 2026 finished in 1m26s–2m36s (1m44s on e9173e7). 8 minutes
-    # is about 3× the slowest green. Do not skip tests or set
-    # continue-on-error.
-    timeout-minutes: 8
+    # 8 Sep 2026 finished in 1m26s–2m36s (1m44s on e9173e7). The 8-minute
+    # bound now sits on the npm test step itself, so a hung test still
+    # turns red. The job bound covers a slow browser install too: on
+    # 22 Oct 2026 the playwright install took 7m13s on one ubuntu runner
+    # (22s–41s on green runs) and the job was cancelled before npm test
+    # finished. Do not skip tests or set continue-on-error.
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -47,7 +50,9 @@ jobs:
       - run: npm ci --ignore-scripts
       # The panel browser tests drive a real Chromium; the suite must carry it too.
       - run: npx playwright install --with-deps chromium
+        timeout-minutes: 10
       - run: npm test
+        timeout-minutes: 8
       # What the suite proves about the repository, this proves about the
       # tarballs: a clean install elsewhere, and the installed bin answering.
       - run: npm run pack:smoke
