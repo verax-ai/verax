@@ -58,6 +58,17 @@ export type BodyConfig = {
    * `VERAX_MEMORY_HEAD_DIR` sets this when the head must sit outside both.
    */
   headDir?: string;
+  /**
+   * HTTPS webhook that receives a signed integrity incident. `http` is
+   * accepted only for 127.0.0.1, [::1], and localhost. `VERAX_ALARM_WEBHOOK_URL`
+   * sets this the same way `VERAX_KEYS_DIR` sets `keysDir`.
+   */
+  alarmWebhookUrl?: string;
+  /**
+   * How often the body retries an undelivered alarm, in milliseconds.
+   * Default 30000; floor 100. `VERAX_ALARM_RETRY_MS` sets this.
+   */
+  alarmRetryMs?: number;
 };
 
 export type OperatorDoorConfig = {
@@ -110,6 +121,31 @@ function parseBind(raw: string | undefined): { host: string; port: number } {
 export function isLoopbackHost(host: string): boolean {
   const stripped = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
   return LOOPBACK.has(stripped);
+}
+
+export const DEFAULT_ALARM_RETRY_MS = 30_000;
+export const MIN_ALARM_RETRY_MS = 100;
+
+/** An https URL, or http on 127.0.0.1 / [::1] / localhost. Anything else is refused at start. */
+export function isAllowedAlarmWebhookUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && isLoopbackHost(url.hostname);
+}
+
+export const ALARM_WEBHOOK_URL_ERROR =
+  "alarm webhook URL needs https (or http on 127.0.0.1, [::1], or localhost)";
+
+export function alarmRetryMs(raw?: string | number): number {
+  if (raw === undefined || raw === "") return DEFAULT_ALARM_RETRY_MS;
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n)) return DEFAULT_ALARM_RETRY_MS;
+  return Math.max(MIN_ALARM_RETRY_MS, Math.floor(n));
 }
 
 function jwksPinParses(raw: string): { keys: Record<string, unknown>[] } | null {
@@ -260,6 +296,11 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   const downstreamRaw = env.VERAX_DOWNSTREAM?.trim() ?? "";
   const keysDirRaw = env.VERAX_KEYS_DIR?.trim() ?? "";
   const headDirRaw = env.VERAX_MEMORY_HEAD_DIR?.trim() ?? "";
+  const alarmWebhookRaw = env.VERAX_ALARM_WEBHOOK_URL?.trim() ?? "";
+  if (alarmWebhookRaw !== "" && !isAllowedAlarmWebhookUrl(alarmWebhookRaw)) {
+    return { ok: false, code: EX_CONFIG, reason: ALARM_WEBHOOK_URL_ERROR };
+  }
+  const alarmRetryRaw = env.VERAX_ALARM_RETRY_MS?.trim() ?? "";
   return {
     ok: true,
     value: {
@@ -277,6 +318,8 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       downstreamFile: downstreamRaw === "" ? null : downstreamRaw,
       ...(keysDirRaw !== "" ? { keysDir: keysDirRaw } : {}),
       ...(headDirRaw !== "" ? { headDir: headDirRaw } : {}),
+      ...(alarmWebhookRaw !== "" ? { alarmWebhookUrl: alarmWebhookRaw } : {}),
+      ...(alarmRetryRaw !== "" ? { alarmRetryMs: alarmRetryMs(alarmRetryRaw) } : {}),
       allowedOrigins: (env.VERAX_ALLOWED_ORIGINS ?? "")
         .split(",")
         .map((item) => item.trim())

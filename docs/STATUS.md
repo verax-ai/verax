@@ -390,6 +390,50 @@ the rule and name the hosts it may reach in `egress`.
 Guards: `policy-unknown-keys`, `policy-snapshot-unknown-keys`,
 `attack-r26-egress-unused`. Published in 0.5.0.
 
+## Memory integrity halt and signed alarm — unreleased
+
+On a detected memory integrity failure, Verax stops new gateway calls and
+delivers a signed alarm to the configured webhook, retrying until the
+receiver accepts it.
+
+`memory.get` or decision-input resolution (`readMemoryMeta`) that sees
+`memory-integrity-mismatch`, `memory-integrity-missing`,
+`memory-integrity-unattested`, or `memory-integrity-history-unavailable`
+writes `<stateDir>/halted` (`haltBody`, `by: "verax:memory-integrity"`,
+`via: "integrity"`) and, when a webhook is configured, one signed incident.
+A body that is already halted does not open a second incident. The first
+detecting call still returns the integrity error; later gateway calls are
+`denied:halted:<ref>`.
+
+The webhook is `listen` / `createBodyServices` `alarmWebhookUrl` /
+`alarmRetryMs`, or `VERAX_ALARM_WEBHOOK_URL` / `VERAX_ALARM_RETRY_MS`
+(same pattern as `VERAX_KEYS_DIR`). Default retry is 30000 ms, floor 100 ms.
+The URL must be `https:`; the only `http` exceptions are `http://127.0.0.1`,
+`http://[::1]`, and `http://localhost`. Any other `http` URL (for example
+`http://example.com`) is a start error (`alarm webhook URL needs https…`)
+and the alarm stays off. Redirects are not followed; a 302 is not delivery.
+The POST times out at 10 seconds; 2xx is acceptance; the response body is
+not read. The envelope is `{ payload, sig }` with `sig` ed25519 over
+`canonical(payload)` using the record private key. `payload` is `v:1`,
+`purpose:"verax.incident.v1"`, `eventId`, `observedAt`, `triggerCode`,
+`scopeKind:"global"`, `enforcementState:"halted"`, `keyId` (SHA-256 of the
+record public key SPKI DER, first 16 hex), and `memoryHead` `{seq,lastHash}`
+when the store has one. It does not carry memory content, `source`,
+user data other than an id, tokens, or file paths.
+
+Pending deliveries live in `<stateDir>/alarm-outbox/<eventId>.json` (temp,
+fsync, rename). A 2xx deletes the file and appends `alarm-history.jsonl`.
+The body retries the same `eventId` every `alarmRetryMs` and resumes
+pending files on open. Closing the body clears the timer. Alarm delivery
+is not a tool an agent can call.
+
+Limits: an attacker who can write the machine can delete the `halted` file
+and the outbox; an independent external observer is a later stage (P4).
+The alarm signature binds the event to the record key; if that key is
+stolen it does not prove the event is truthful.
+
+Guards: `blackbox-p1`, `blackbox-p1-url`.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a

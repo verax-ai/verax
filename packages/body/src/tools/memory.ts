@@ -57,17 +57,24 @@ export function memoryExistsForTenant(
   return storeFor(stateDir, store).idHeldByTenant(id, tenantKey(principal));
 }
 
+export type IntegritySink = (reason: IntegrityReason) => void;
+
 export async function readMemoryMeta(
   stateDir: string,
   id: string,
   principal?: Principal,
   store?: MemoryStore,
+  onIntegrity?: IntegritySink,
 ): Promise<{ versionHash: string; validFromMs: number; validUntilMs: number } | null> {
   if (!principal) return null;
   if (typeof id !== "string" || !ID_RE.test(id)) return null;
   const mem = storeFor(stateDir, store);
   const tk = tenantKey(principal);
   const got = await mem.withTenantLock(tk, async () => mem.verifiedRead(tk, id));
+  if (got.kind === "integrity") {
+    onIntegrity?.(got.reason);
+    return null;
+  }
   if (got.kind !== "ok") return null;
   mem.rememberDecisionSnapshot(tenantKey(principal), got.object);
   return {
@@ -84,6 +91,7 @@ export async function memoryGet(
   principal: Principal,
   store?: MemoryStore,
   bound: ReadonlyArray<{ id: string; versionHash: string }> = [],
+  onIntegrity?: IntegritySink,
 ): Promise<ToolResult> {
   const id = call.arguments.id;
   if (typeof id !== "string" || id === "") {
@@ -95,7 +103,10 @@ export async function memoryGet(
   const mem = storeFor(stateDir, store);
   const tk = tenantKey(principal);
   const got = await mem.withTenantLock(tk, async () => mem.verifiedRead(tk, id));
-  if (got.kind === "integrity") return integrityResult(got.reason, id);
+  if (got.kind === "integrity") {
+    onIntegrity?.(got.reason);
+    return integrityResult(got.reason, id);
+  }
   if (got.kind === "not-found") return jsonResult({ error: "not-found", id }, true);
   const pinned = bound.find((item) => item.id === id);
   if (pinned && pinned.versionHash !== got.versionHash) {

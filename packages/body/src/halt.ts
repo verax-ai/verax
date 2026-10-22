@@ -22,12 +22,14 @@ import type { ControlSignature } from "@verax-ai/proxy";
  *
  * An HTTP halt or resume made with the operator's passkey carries that
  * assertion on its line, and the control record carries it on from there.
+ * A memory integrity failure uses `via: "integrity"` and
+ * `by: "verax:memory-integrity"`.
  */
 export type HaltEvent = {
   action: "halt" | "resume";
   atMs: number;
   by: string;
-  via: "cli" | "http";
+  via: "cli" | "http" | "integrity";
   signature?: ControlSignature;
 };
 
@@ -70,6 +72,11 @@ export function historyTail(stateDir: string): string | null {
   return createHash("sha256").update(canonical(last), "utf8").digest("hex");
 }
 
+function haltVia(raw: unknown): HaltEvent["via"] {
+  if (raw === "http" || raw === "integrity") return raw;
+  return "cli";
+}
+
 function lastHalt(stateDir: string): HaltEvent | undefined {
   let raw: string;
   try {
@@ -82,7 +89,7 @@ function lastHalt(stateDir: string): HaltEvent | undefined {
     try {
       const row = JSON.parse(lines[i] ?? "") as Partial<HaltEvent>;
       if (row.action === "halt" && typeof row.atMs === "number" && typeof row.by === "string") {
-        return { action: "halt", atMs: row.atMs, by: row.by, via: row.via === "http" ? "http" : "cli" };
+        return { action: "halt", atMs: row.atMs, by: row.by, via: haltVia(row.via) };
       }
       if (row.action === "resume") return undefined;
     } catch {

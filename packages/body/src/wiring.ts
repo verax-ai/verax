@@ -13,11 +13,19 @@ import {
 } from "@verax-ai/proxy";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
+import { pokeAlarmDelivery, startAlarmDelivery } from "./alarm-webhook.ts";
+import {
+  ALARM_WEBHOOK_URL_ERROR,
+  alarmRetryMs,
+  isAllowedAlarmWebhookUrl,
+  POLICY_FILE_ERROR_PREFIX,
+  policyFileRefusal,
+} from "./config.ts";
+import { raiseMemoryIntegrityIncident } from "./incidents.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
 import { assertRecordKeyTrust, resolveHeadDir } from "./keys.ts";
-import { openMemoryStoreSync, publishMemoryStore, type MemoryStore } from "./memory-store.ts";
+import { openMemoryStoreSync, publishMemoryStore, type IntegrityReason, type MemoryStore } from "./memory-store.ts";
 import {
   memoryBelongsToOtherTenant,
   memoryExistsForTenant,
@@ -64,6 +72,7 @@ export type BodyServices = {
   explainOpts: () => Promise<ExplainOpts>;
   recordSigner: RecordSigner;
   memoryStore: MemoryStore;
+  stopAlarms: () => void;
 };
 
 function isLegacyExplainPin(value: string): boolean {
@@ -86,8 +95,15 @@ export function createBodyServices(opts: {
   extraTools?: readonly ExtraTool[];
   keysDir?: string;
   headDir?: string;
+  alarmWebhookUrl?: string;
+  alarmRetryMs?: number;
 }): BodyServices {
   const extraNames: string[] = [];
+  const alarmUrl = opts.alarmWebhookUrl?.trim() ?? "";
+  if (alarmUrl !== "" && !isAllowedAlarmWebhookUrl(alarmUrl)) {
+    throw new Error(ALARM_WEBHOOK_URL_ERROR);
+  }
+  const retryMs = alarmRetryMs(opts.alarmRetryMs);
   const reserved = new Set<string>(TOOL_NAMES);
   for (const tool of opts.extraTools ?? []) {
     if (reserved.has(tool.name) || extraNames.includes(tool.name)) {
@@ -141,10 +157,25 @@ export function createBodyServices(opts: {
   }
   const now = opts.now ?? (() => Date.now());
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
+  const stopAlarms =
+    alarmUrl === ""
+      ? () => {}
+      : startAlarmDelivery({ stateDir: opts.stateDir, url: alarmUrl, retryMs });
+  const onIntegrity = (reason: IntegrityReason): void => {
+    raiseMemoryIntegrityIncident({
+      stateDir: opts.stateDir,
+      reason,
+      publicKeyPem,
+      privateKeyPem: opts.recordSigner.privateKeyPem,
+      memoryHead: store.memoryHead(),
+      ...(alarmUrl !== "" ? { alarmWebhookUrl: alarmUrl } : {}),
+    });
+    pokeAlarmDelivery(opts.stateDir);
+  };
 
   const registry = new Map<string, ToolFn>();
   registry.set("memory.get", (call, principal, _ref, bound) =>
-    memoryGet(call, opts.stateDir, now, principal, store, bound),
+    memoryGet(call, opts.stateDir, now, principal, store, bound, onIntegrity),
   );
   registry.set("memory.put", (call, principal, ref) => memoryPut(call, opts.stateDir, principal, ref ?? "", store));
   const explainOpts = async (): Promise<ExplainOpts> => {
@@ -196,7 +227,7 @@ export function createBodyServices(opts: {
     now,
     nonce,
     inner,
-    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal, store),
+    resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal, store, onIntegrity),
     checkTenantMismatch: async (call, principal) => {
       if (call.name === "memory.get") {
         if (memoryHistoryUnavailable(opts.stateDir, store)) return false;
@@ -228,5 +259,6 @@ export function createBodyServices(opts: {
     explainOpts,
     recordSigner: opts.recordSigner,
     memoryStore: store,
+    stopAlarms,
   };
 }

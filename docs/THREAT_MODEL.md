@@ -237,6 +237,21 @@ What this does not catch:
 updates the signed head, and prints the ids. The body does not reattest on
 start.
 
+On a detected memory integrity failure, Verax stops new gateway calls and
+delivers a signed alarm to the configured webhook, retrying until the
+receiver accepts it. The detecting `memory.get` (or a `_inputs` resolution
+that sees the same integrity code) still returns the integrity error; the
+halt switch then refuses later calls. The alarm is signed by the record
+key over `canonical(payload)` and is not a tool an agent can invoke. An
+`http` webhook other than loopback (`127.0.0.1`, `[::1]`, `localhost`) is
+refused at start.
+
+Limits: an attacker who can write the machine can delete the `halted` file
+and the alarm outbox; an independent external observer is a later stage
+(P4). The alarm signature binds the event to the record key; if that key
+is stolen it does not prove the event is truthful. Halt does not unwind a
+tool call that has already started.
+
 `audit.explain` still explains the decision record, not the current memory
 file. That comparison is later work.
 
