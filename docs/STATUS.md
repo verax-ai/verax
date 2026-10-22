@@ -390,6 +390,130 @@ the rule and name the hosts it may reach in `egress`.
 Guards: `policy-unknown-keys`, `policy-snapshot-unknown-keys`,
 `attack-r26-egress-unused`. Published in 0.5.0.
 
+## Memory integrity halt and signed alarm — unreleased
+
+On a detected memory integrity failure, Verax stops new gateway calls and
+delivers a signed alarm to the configured webhook, retrying until the
+receiver accepts it.
+
+`memory.get` that sees `memory-integrity-mismatch`,
+`memory-integrity-missing`, `memory-integrity-unattested`, or
+`memory-integrity-history-unavailable` writes `<stateDir>/halted`
+(`haltBody`, `by: "verax:memory-integrity"`, `via: "integrity"`) and
+returns that integrity code. Decision-input resolution (`readMemoryMeta`
+on `_inputs`) that sees the same failure also opens the halt, but that
+call is answered `denied:halted:<ref>` — the integrity code is not
+returned on the `_inputs` path. When a webhook is configured, one signed
+incident is written. A body that is already halted does not open a
+second incident. Later gateway calls are `denied:halted:<ref>`.
+
+The halt history line carries `eventId` (and `triggerCode`). When a
+crash or write error after the switch leaves an alarm undelivered,
+opening the body attempts to complete the missing outbox file under that
+same `eventId` when no delivery record exists. That needs the incident
+record or the integrity halt history to survive, the record keys to be
+available and a webhook to be configured.
+
+The webhook is `listen` / `createBodyServices` `alarmWebhookUrl` /
+`alarmRetryMs`, or `VERAX_ALARM_WEBHOOK_URL` / `VERAX_ALARM_RETRY_MS`
+(same pattern as `VERAX_KEYS_DIR`). Default retry is 30000 ms, floor 100 ms.
+The URL must be `https:`; the only `http` exceptions are `http://127.0.0.1`,
+`http://[::1]`, and `http://localhost`. Any other `http` URL (for example
+`http://example.com`) is a start error (`alarm webhook URL needs https…`)
+and the alarm stays off. Redirects are not followed; a 302 is not delivery.
+The POST times out at 10 seconds; 2xx is acceptance; the response body is
+not read. The envelope is `{ payload, sig }` with `sig` ed25519 over
+`canonical(payload)` using the record private key. `payload` is `v:1`,
+`purpose:"verax.incident.v1"`, `eventId`, `observedAt`, `triggerCode`,
+`scopeKind:"global"`, `enforcementState:"halted"`, `keyId` (SHA-256 of the
+record public key SPKI DER, first 16 hex), and `memoryHead` `{seq,lastHash}`
+when the store has one. It does not carry memory content, `source`,
+user data other than an id, tokens, or file paths.
+
+Pending deliveries live in `<stateDir>/alarm-outbox/<eventId>.json` (temp,
+fsync, rename). A 2xx first appends a durable `alarm-history.jsonl` line
+(fsync) and only then deletes the outbox file; an eventId already in
+that history is not sent again. The body retries the same `eventId`
+every `alarmRetryMs` and resumes pending files on open. A filesystem or
+network error inside the sender is written as one stderr line; the
+pending file stays and the next tick retries. Closing the body aborts
+the active POST, clears the timeout, waits for the running tick, and
+does not change outbox or history after that. Alarm delivery is not a
+tool an agent can call.
+
+### When the halt switch cannot be written
+
+The halt is the regular file `<stateDir>/halted`. If that path cannot be
+written (for example something else already occupies it), the body still
+stops: an in-process flag refuses every gateway call, approvals
+included, with `denied:halted:<ref>`. The flag exists only for this
+case. Once the switch file exists it is the single source of truth and
+the flag is cleared, even if `halt-history.jsonl` cannot be appended, so
+a `verax resume` from another process lifts a normal halt.
+
+An operator halt reports what it achieved: `verax halt` exits non-zero
+with `halt-failed: switch-unwritable`, and `POST /api/halt` answers 5xx,
+when the switch could not be written. `verax resume` from another
+process exits non-zero with `resume-failed: switch-path-blocked` when the
+switch path holds something that is not the halt file, because a running
+body may still hold the halt in memory. Clear the path, then resume
+through `POST /api/resume` on that body.
+
+### A halt between the allow and the run
+
+A call can be allowed and then meet a halt before the tool starts. The
+tool does not run. The allow's ref gets a signed effect row
+`effectClass: "<tool>:halted"` with the allow's dispatched `effectHash`,
+and the start mark is removed. A retry of the same `_ref` answers
+`denied:not-run-halted:<ref>` and does not run the tool; a new `_ref` is
+a new call. The panel shows the row as its own outcome
+(`status.halted`), not as a completed run.
+
+- `verifyLedger` binds a self or same-org `:halted` row only when the
+  same allow has the same `ref`, the same `effectHash`, and an explicit
+  `effectClass` that the row repeats with `:halted` appended. A
+  wrong-hash or wrong-class `:halted` row, or one on a deny, does not
+  bind.
+- `explain` drops Cedulon's `effect-class-mismatch` only when every row
+  it audited for that ref (the ledger row, and the presented extract or
+  the stored receipt) is such a bound `:halted` row; an extract with
+  more than one row is never excused. `effect-mismatch` is never
+  dropped.
+- `reconcile` does not match an external statement to a `:halted` or
+  `:threw` row by ref, so such a statement stays a ghost. Reconcile
+  counts only `spend` rows as money spent.
+- `:threw` is unchanged. It does not mean the tool never ran: the tool
+  was called and an external side effect may have happened, but its
+  completion was not verified. `explain` still reports a `:threw` row as
+  `effect-mismatch`.
+
+### Incident ids without randomness
+
+The incident `eventId` comes from `randomUUID`, then `randomBytes`. If
+both fail it is derived from the observation time, trigger, record key
+id, process id, a counter and any spare bytes, so two incidents in the
+same millisecond still get two ids.
+
+### Upgrading from 0.6.1
+
+1. With the body stopped, review the old memory contents.
+2. Run `verax memory reattest <stateDir>` with the same key and head
+   configuration the body will use.
+3. Then start the body. The first read of an unre-attested legacy
+   record stops the body and `verax resume` asks for passkey approval.
+4. If the body is already halted, reattest does not lift that halt.
+   After reattest, an authorized `verax resume` is still required.
+
+Limits: an attacker who can write the machine can delete the `halted` file
+and the outbox; an independent external observer is a later stage (P4).
+The alarm signature binds the event to the record key; if that key is
+stolen it does not prove the event is truthful.
+
+Guards: `blackbox-p1`, `blackbox-p1-url`, `blackbox-p1-durability`,
+`blackbox-p1-c`, `blackbox-p1-e`, `blackbox-p1-f`, `blackbox-p1-g`,
+`blackbox-p1-h`, `blackbox-p1-j`, `blackbox-p1-k`, `blackbox-p1-l`,
+`blackbox-p1-m`.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a

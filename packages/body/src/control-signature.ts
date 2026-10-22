@@ -26,6 +26,7 @@ import {
   trustOf,
 } from "./approval-signature.ts";
 import { historyTail } from "./halt.ts";
+import { INCIDENT_BY } from "./incidents.ts";
 import {
   credentialsPath,
   findCredential,
@@ -120,6 +121,7 @@ export type ControlSignatureReport = {
   unsignedHttp: number;
   cli: number;
   file: number;
+  integrity: number;
   line: string;
   trustSource: "pinned" | "in-ledger" | "none";
   trustNote: string;
@@ -128,10 +130,15 @@ export type ControlSignatureReport = {
 type ControlOnDisk = {
   action?: unknown;
   via?: unknown;
+  by?: unknown;
   line?: unknown;
   lineHash?: unknown;
   signature?: unknown;
 };
+
+function integrityAccepted(control: ControlOnDisk, action: ControlAction): boolean {
+  return action === "halt" && control.via === "integrity" && control.by === INCIDENT_BY;
+}
 
 function controlSignatureOf(value: unknown): ControlSignature | null {
   if (!value || typeof value !== "object") return null;
@@ -192,6 +199,7 @@ export async function verifyControlSignatures(
   let unsignedHttp = 0;
   let cli = 0;
   let file = 0;
+  let integrity = 0;
   const lineHashByLine = new Map<number, string>();
   const used = new Set<string>();
   // Ledger order, not history-line order. A removal between two control
@@ -208,14 +216,17 @@ export async function verifyControlSignatures(
     if (!control) continue;
     const at = typeof control.line === "number" && Number.isInteger(control.line) ? control.line : -1;
 
-    if (control.signature === undefined) {
+    const action: ControlAction = claims.subject === "verax.halt" ? "halt" : "resume";
+    if (control.via === "integrity") {
+      if (integrityAccepted(control, action) && control.signature === undefined) integrity += 1;
+      else signedFailed += 1;
+    } else if (control.signature === undefined) {
       if (control.via === "http") unsignedHttp += 1;
       else if (control.via === "cli") cli += 1;
       else file += 1;
     } else {
       const sig = controlSignatureOf(control.signature);
       const expectedPrev = at === 0 ? null : at > 0 ? lineHashByLine.get(at - 1) : undefined;
-      const action: ControlAction = claims.subject === "verax.halt" ? "halt" : "resume";
       const challenge =
         sig && expectedPrev !== undefined && sig.prev === expectedPrev
           ? controlChallenge({ action, prev: expectedPrev })
@@ -239,7 +250,8 @@ export async function verifyControlSignatures(
     unsignedHttp,
     cli,
     file,
-    line: `control signatures   signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli} · file ${file}${signedAfterRemovalSegment(signedAfterRemoval)}`,
+    integrity,
+    line: `control signatures   signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli} · file ${file} · integrity ${integrity}${signedAfterRemovalSegment(signedAfterRemoval)}`,
     trustSource: trust.trustSource,
     trustNote: trust.trustNote,
   };

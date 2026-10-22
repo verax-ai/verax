@@ -25,6 +25,7 @@ import { signDecisionRecord } from "@cedulon/core";
 import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } from "./ledger.ts";
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { terminalText } from "./policy.ts";
+import { isProxyHalted } from "./process-halt.ts";
 import { inputsLogFor } from "./inputs.ts";
 import { SerialQueue } from "./serial-queue.ts";
 import type { ApprovalChannel, ApprovalSignature, DecisionInputs, InputsLog, Ledger, Policy, RecordSigner } from "./types.ts";
@@ -346,7 +347,7 @@ function ledgerStateDir(ledger: object): string | null {
 function approvalsHalted(ledger: object): boolean {
   const dir = ledgerStateDir(ledger);
   if (!dir) return false;
-  return existsSync(join(dir, "halted"));
+  return isProxyHalted(dir);
 }
 
 async function approvePendingUnlocked(opts: {

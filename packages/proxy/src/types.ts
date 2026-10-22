@@ -125,7 +125,7 @@ export type DecisionInputRow = {
 export type ControlInput = {
   action: "halt" | "resume";
   by: string;
-  via: "cli" | "http" | "file";
+  via: "cli" | "http" | "file" | "integrity";
   atMs: number;
   line: number;
   lineHash: string;

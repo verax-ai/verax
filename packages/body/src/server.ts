@@ -7,6 +7,7 @@ import { Server as McpServer } from "@modelcontextprotocol/sdk/server/index.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { bodyVersion } from "./body-version.ts";
+import { assertAlarmWebhookUrl } from "./alarm-webhook.ts";
 import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
 import { openOperatorDoor } from "./operator-door.ts";
@@ -425,6 +426,7 @@ function definitionsForStart(
 }
 
 export async function listen(config: BodyConfig): Promise<Server> {
+  if (config.alarmWebhookUrl) assertAlarmWebhookUrl(config.alarmWebhookUrl);
   const keysDir = resolveKeysDir(config.stateDir, config.keysDir);
   const signers = loadOrCreateSigners(config.stateDir, keysDir);
   const bodyPublicKeyPems = [signers.recordSigner.publicKeyPem, signers.effectSigner.publicKeyPem];
@@ -449,6 +451,8 @@ export async function listen(config: BodyConfig): Promise<Server> {
       effectSigner: signers.effectSigner,
       keysDir,
       ...(config.headDir ? { headDir: config.headDir } : {}),
+      ...(config.alarmWebhookUrl ? { alarmWebhookUrl: config.alarmWebhookUrl } : {}),
+      ...(config.alarmRetryMs !== undefined ? { alarmRetryMs: config.alarmRetryMs } : {}),
       ...(extraTools.length > 0 ? { extraTools } : {}),
     });
   } catch (err) {
@@ -470,6 +474,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       downstream === undefined ? undefined : { downstream },
     );
   } catch (err) {
+    await Promise.resolve(services.stopAlarms()).catch(() => undefined);
     services.ledger.close();
     await closeAll(sessions);
     throw err;
@@ -903,6 +908,13 @@ export async function listen(config: BodyConfig): Promise<Server> {
   // That is said on stderr and goes no further: thrown from a close listener
   // it would stop the listeners after it and take the process down, and
   // thrown after a failed start it would replace the reason the start failed.
+  const stopAlarms = async (): Promise<void> => {
+    try {
+      await Promise.resolve(services.stopAlarms());
+    } catch {
+      // A stuck retry timer must not hide the ledger close.
+    }
+  };
   const closeLedger = (): void => {
     try {
       services.ledger.close();
@@ -910,11 +922,22 @@ export async function listen(config: BodyConfig): Promise<Server> {
       process.stderr.write(`verax: ledger close: ${terminalText(err instanceof Error ? err.message : "fault")}\n`);
     }
   };
+  const rawClose = server.close.bind(server);
+  server.close = ((callback?: (err?: Error) => void) => {
+    return rawClose((err?: Error) => {
+      void stopAlarms()
+        .catch(() => undefined)
+        .then(() => {
+          closeLedger();
+          if (callback) callback(err);
+        });
+    });
+  }) as Server["close"];
   server.on("close", () => {
-    closeLedger();
     void closeAll(sessions);
   });
   const stopStart = async (): Promise<void> => {
+    await stopAlarms();
     closeLedger();
     await closeAll(sessions);
   };

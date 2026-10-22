@@ -109,6 +109,7 @@ const CONTROL_NOT_CHECKED: ControlSignatureReport = {
   unsignedHttp: 0,
   cli: 0,
   file: 0,
+  integrity: 0,
   line: "control signatures   not checked",
   trustSource: "none",
   trustNote: "control signatures were not checked",

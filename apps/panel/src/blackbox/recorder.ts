@@ -172,10 +172,11 @@ export function chainFor(
     links.push({ id: "effect", state: "waiting", say: "effect.held", detail: null, code: null });
   } else if (action.effect) {
     const witness = action.effect.witnessClass ?? action.witnessClass ?? null;
+    const halted = action.effect.row.effectClass.endsWith(":halted");
     links.push({
       id: "effect",
-      state: "done",
-      say: "effect",
+      state: halted ? "stopped" : "done",
+      say: halted ? "effect.halted" : "effect",
       detail: witness ? `${action.effect.row.effectClass} / ${witness}` : action.effect.row.effectClass,
       code: short(action.effect.row.effectHash),
     });

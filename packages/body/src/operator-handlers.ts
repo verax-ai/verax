@@ -94,12 +94,32 @@ export async function handleControl(ctx: OperatorRequest, what: { resuming: bool
   const signature = gated.ok ? gated.signature : undefined;
   const refused = !parsed.ok ? "bad-body" : gated.ok ? undefined : gated.error;
   const by = ctx.subject;
-  const state = resuming
-    ? resumeBody(stateDir, by, "http", Date.now(), signature)
-    : {
+  if (!resuming) {
+    let state;
+    try {
+      state = {
         ...haltBody(stateDir, by, "http", Date.now(), signature),
         ...(refused ? { signatureRefused: refused } : {}),
       };
+    } catch (err) {
+      const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
+      send(res, 500, { error: "halt-failed", reason: message.slice(0, 300) });
+      return;
+    }
+    if (!readHalt(stateDir).halted) {
+      send(res, 500, { error: "halt-failed", reason: "switch-unwritable" });
+      return;
+    }
+    try {
+      await services.proxy.syncControlRecords();
+    } catch (err) {
+      const message = (err instanceof Error ? err.message : String(err)).replace(/[\r\n]+/g, " ");
+      process.stderr.write(`verax-proxy: control sync failed: ${terminalText(message)}\n`);
+    }
+    send(res, 200, state);
+    return;
+  }
+  const state = resumeBody(stateDir, by, "http", Date.now(), signature, services.keysDir);
   try {
     await services.proxy.syncControlRecords();
   } catch (err) {

@@ -545,6 +545,12 @@ export class MemoryStore {
     return withLock(tenantMemoryLockKey(this.stateDir, tenantKey), fn);
   }
 
+  /** The signed commit tip, when the store has one. Omitted from an alarm when absent. */
+  memoryHead(): { seq: number; lastHash: string } | undefined {
+    if (this.lastSeq < 1 || this.lastHash === null) return undefined;
+    return { seq: this.lastSeq, lastHash: this.lastHash };
+  }
+
   lookup(tenantKey: string, id: string): MemoryIndexEntry | undefined {
     return this.index.get(indexKey(tenantKey, id));
   }
@@ -871,6 +877,12 @@ function bindHead(
 export function publishMemoryStore(store: MemoryStore): MemoryStore {
   stores.set(storeKey(store.stateDir), store);
   return store;
+}
+
+/** Same-process memory gate when the halt switch file cannot be written. */
+export function markHistoryUnavailable(stateDir: string): void {
+  const store = stores.get(storeKey(stateDir));
+  if (store) store.historyUnavailable = true;
 }
 
 function emptyChain(): {

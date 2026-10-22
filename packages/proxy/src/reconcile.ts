@@ -433,6 +433,16 @@ function descriptorsFor(
   return stamps && stamps.length > 0 ? stamps : undefined;
 }
 
+/**
+ * A signed not-run row is not treated as an external event. `:threw` does not
+ * mean the tool never ran: `inner` was called and a downstream side effect may
+ * have happened. Successful completion was not verified. Ghost classification
+ * stays cautious — ref matching must not hide a statement behind either suffix.
+ */
+function isNotRunEffectClass(effectClass: string): boolean {
+  return effectClass.endsWith(":halted") || effectClass.endsWith(":threw");
+}
+
 export function reconcile(
   channelRows: readonly ChannelRow[],
   effects: readonly LedgerEffect[],
@@ -491,6 +501,7 @@ export function reconcile(
           (e, i) =>
             !used.has(i) &&
             decided(e) &&
+            !isNotRunEffectClass(e.row.effectClass) &&
             (e.row.ref === ref || opts?.approvals?.some((a) => a.ref === ref && a.allowRef === e.row.ref)),
         );
       let idx = findFor(row.ref);

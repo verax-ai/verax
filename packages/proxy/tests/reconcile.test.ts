@@ -436,3 +436,50 @@ describe("card:", () => {
     assert.equal(report.matched[0]!.toleranceMs, 120_000);
   });
 });
+
+describe("P1-l: a not-run effect does not cover an external row", () => {
+  function sendRow(ref: string): Parameters<typeof reconcile>[0][number] {
+    return {
+      channel: "sent",
+      externalId: "msg-ghost-send",
+      occurredAtMs: 50,
+      subject: "message.send",
+      ref,
+    };
+  }
+
+  function sendEffect(ref: string, effectClass: string): LedgerEffect {
+    return {
+      row: {
+        ref,
+        effectHash: "aa".repeat(32),
+        effectClass,
+        timestampMs: 50,
+      },
+      witnessClass: "self",
+    };
+  }
+
+  it("a :halted row with the same ref stays unmatched; the statement is ghost", () => {
+    const report = reconcileDecided([sendRow("halt-ref")], [sendEffect("halt-ref", "message.send:halted")]);
+    assert.equal(report.matched.length, 0, JSON.stringify(report.matched));
+    assert.equal(report.ghost.length, 1);
+    assert.equal(report.ghost[0]!.externalId, "msg-ghost-send");
+    assert.equal(report.unsent.length, 1);
+    assert.equal(report.unsent[0]!.effectClass, "message.send:halted");
+  });
+
+  it("a :threw row with the same ref stays unmatched; the statement is ghost", () => {
+    const report = reconcileDecided([sendRow("threw-ref")], [sendEffect("threw-ref", "message.send:threw")]);
+    assert.equal(report.matched.length, 0, JSON.stringify(report.matched));
+    assert.equal(report.ghost.length, 1);
+    assert.equal(report.ghost[0]!.externalId, "msg-ghost-send");
+  });
+
+  it("a completed message.send with the same ref still matches", () => {
+    const report = reconcileDecided([sendRow("ran-ref")], [sendEffect("ran-ref", "message.send")]);
+    assert.equal(report.matched.length, 1);
+    assert.equal(report.matched[0]!.effect.ref, "ran-ref");
+    assert.equal(report.ghost.length, 0);
+  });
+});

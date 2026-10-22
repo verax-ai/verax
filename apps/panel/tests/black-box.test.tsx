@@ -206,4 +206,27 @@ describe("the black box tab", () => {
     expect(document.querySelector(".obs-left")).toBeNull();
     expect(document.querySelector(".obs-detail")).toBeNull();
   });
+
+  it("says a :halted allow did not run; it does not say the tool ran", () => {
+    const halted: RailAction = {
+      ...memoryRecord,
+      record: { claims: { ...memoryRecord.record.claims, decision: "allow", reasonCode: "rule", ref: "m-halt" } },
+      effect: {
+        row: {
+          ref: "m-halt",
+          effectClass: "memory.get:halted",
+          effectHash: HASH,
+          timestampMs: 1_788_800_040_000,
+        },
+        witnessClass: "self",
+      },
+    };
+    const { box, cx } = openBox({ actions: [halted] });
+    const mark = cx.querySelector(".mark.allow");
+    if (!(mark instanceof HTMLElement)) throw new Error("no allow mark on the tape");
+    fireEvent.click(mark);
+    const chain = box.getByTestId("box-chain");
+    expect(chain.textContent).toContain(panelCopy()["rec.say.effect.halted"]);
+    expect(chain.textContent).not.toContain(panelCopy()["rec.say.effect"]);
+  });
 });

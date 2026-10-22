@@ -7,7 +7,7 @@ import { filterActions, filterActive, type RecordFilter } from "./filter.ts";
 import { recordLine, statusWord, type RecordKind } from "./line.ts";
 import { countRecords, summarySentence } from "./summary.ts";
 
-const KINDS: readonly RecordKind[] = ["allow", "deny", "defer", "threw", "expired"];
+const KINDS: readonly RecordKind[] = ["allow", "deny", "defer", "threw", "halted", "expired"];
 /**
  * Rows drawn at once. The rest are revealed a hundred at a time as the reader
  * reaches the end of the list, so loading older pages never puts thousands

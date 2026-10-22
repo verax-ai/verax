@@ -146,6 +146,13 @@ function servedFact(r: Served, fact: string, label: string): void {
   assert.ok(servedText(r).includes(fact), `${label}: expected ${fact}, got ${servedText(r).slice(0, 200)}`);
 }
 
+/** After the first integrity failure the body is halted; later calls are signed denies. */
+function halted(r: Served, label: string): void {
+  assert.equal(r.isError, true, `${label}: ${servedText(r).slice(0, 200)}`);
+  const text = typeof r.data.raw === "string" ? r.data.raw : servedText(r);
+  assert.match(text, /denied:halted/, `${label}: ${text}`);
+}
+
 describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
   it("C1: a restart with no edit serves every record unchanged", async () => {
     await withStore(async (s) => {
@@ -176,7 +183,7 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
       landed(p, "attacker-fact");
       await s.start();
       refused(await s.get("A", "n3"), ["attacker-fact"], "T1");
-      servedFact(await s.get("A", "n2"), s.fact("A", "n2"), "T1 neighbour");
+      halted(await s.get("A", "n2"), "T1 neighbour");
     });
   });
 
@@ -232,10 +239,12 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
       await s.stop();
       unlinkSync(objectWith(s.state, s.fact("A", "n3")));
       await s.start();
-      refused(await s.get("A", "n3"), [], "T3");
+      // Read the never-written id first: an integrity failure halts the body, so this check must come before it.
       const never = await s.get("A", "never-written");
       assert.equal(never.isError, true);
       assert.equal(never.data.error, "not-found", "an id that was never written stays not-found");
+      refused(await s.get("A", "n3"), [], "T3");
+      halted(await s.get("A", "n2"), "T3 after halt");
     });
   });
 
@@ -251,7 +260,7 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
       landed(p2, s.fact("A", "n4"));
       await s.start();
       refused(await s.get("A", "n2"), [s.fact("A", "n4")], "T4 n2");
-      refused(await s.get("A", "n4"), [s.fact("A", "n2")], "T4 n4");
+      halted(await s.get("A", "n4"), "T4 n4");
     });
   });
 
@@ -286,7 +295,7 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
       landed(b, s.fact("A", "n1"));
       await s.start();
       refused(await s.get("B", "n1"), [s.fact("A", "n1")], "T6");
-      servedFact(await s.get("A", "n1"), s.fact("A", "n1"), "T6 source context intact");
+      halted(await s.get("A", "n1"), "T6 after halt");
     });
   });
 
