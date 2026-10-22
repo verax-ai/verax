@@ -6,12 +6,14 @@ import {
   fsyncSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
+  statSync,
   writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { canonical } from "@cedulon/core";
 import {
   hasAlarmDelivery,
@@ -21,10 +23,12 @@ import {
   type AlarmEnvelope,
 } from "./alarm-outbox.ts";
 import { haltBody, readHalt } from "./halt.ts";
+import { resolveKeysDir } from "./keys.ts";
 import type { IntegrityReason } from "./memory-store.ts";
 
 export const INCIDENT_BY = "verax:memory-integrity";
 export const INCIDENT_RECORD = "incident.json";
+export const INCIDENTS_DIR = "incidents";
 
 const INTEGRITY_REASONS = new Set<string>([
   "memory-integrity-mismatch",
@@ -114,17 +118,24 @@ function writeJsonDurable(path: string, value: unknown): void {
   fsyncDir(dir);
 }
 
-function incidentRecordPath(stateDir: string): string {
+function incidentEventPath(stateDir: string, eventId: string): string {
+  if (!isAlarmEventId(eventId)) throw new Error("incident-event-id-invalid");
+  const dir = resolve(join(stateDir, INCIDENTS_DIR));
+  const leaf = `${eventId}.json`;
+  const path = resolve(dir, leaf);
+  const rel = relative(dir, path);
+  if (rel === "" || isAbsolute(rel) || rel.startsWith("..") || rel.split(sep).includes("..")) {
+    throw new Error("incident-path-escape");
+  }
+  if (path !== join(dir, leaf)) throw new Error("incident-path-escape");
+  return path;
+}
+
+function legacyIncidentPath(stateDir: string): string {
   return join(stateDir, INCIDENT_RECORD);
 }
 
-function readIncidentRecord(stateDir: string): StoredIncident | null {
-  let raw: string;
-  try {
-    raw = readFileSync(incidentRecordPath(stateDir), "utf8");
-  } catch {
-    return null;
-  }
+function parseStoredIncident(raw: string): StoredIncident | null {
   try {
     const row = JSON.parse(raw) as Partial<StoredIncident> & { envelope?: AlarmEnvelope };
     if (typeof row.eventId !== "string" || !isAlarmEventId(row.eventId)) return null;
@@ -158,8 +169,72 @@ function readIncidentRecord(stateDir: string): StoredIncident | null {
   }
 }
 
+function readIncidentFromPath(path: string): StoredIncident | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  return parseStoredIncident(raw);
+}
+
+function migrateLegacyIncident(stateDir: string): void {
+  const legacy = readIncidentFromPath(legacyIncidentPath(stateDir));
+  if (!legacy) return;
+  let dest: string;
+  try {
+    dest = incidentEventPath(stateDir, legacy.eventId);
+  } catch {
+    return;
+  }
+  if (existsSync(dest)) return;
+  try {
+    writeJsonDurable(dest, legacy);
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  }
+}
+
+function listIncidentRecords(stateDir: string): StoredIncident[] {
+  migrateLegacyIncident(stateDir);
+  const byId = new Map<string, StoredIncident>();
+  const dir = join(stateDir, INCIDENTS_DIR);
+  try {
+    if (existsSync(dir) && statSync(dir).isDirectory()) {
+      for (const name of readdirSync(dir)) {
+        if (!name.endsWith(".json")) continue;
+        const path = join(dir, name);
+        try {
+          if (!statSync(path).isFile()) continue;
+        } catch {
+          continue;
+        }
+        const stored = readIncidentFromPath(path);
+        if (stored) byId.set(stored.eventId, stored);
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  }
+  const legacy = readIncidentFromPath(legacyIncidentPath(stateDir));
+  if (legacy) {
+    const existing = byId.get(legacy.eventId);
+    if (!existing) byId.set(legacy.eventId, legacy);
+    else if (legacy.closedPendingDelivery && !existing.closedPendingDelivery) {
+      byId.set(legacy.eventId, { ...existing, closedPendingDelivery: true });
+    }
+  }
+  return [...byId.values()];
+}
+
 function writeIncidentRecord(stateDir: string, record: StoredIncident): void {
-  writeJsonDurable(incidentRecordPath(stateDir), record);
+  writeJsonDurable(incidentEventPath(stateDir, record.eventId), record);
+  try {
+    writeJsonDurable(legacyIncidentPath(stateDir), record);
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  }
 }
 
 function tryWriteIncidentRecord(stateDir: string, record: StoredIncident): boolean {
@@ -172,11 +247,19 @@ function tryWriteIncidentRecord(stateDir: string, record: StoredIncident): boole
   }
 }
 
-function tryRemoveIncidentRecord(stateDir: string): void {
+function tryRemoveIncidentRecord(stateDir: string, eventId: string): void {
   try {
-    rmSync(incidentRecordPath(stateDir), { force: true });
+    rmSync(incidentEventPath(stateDir, eventId), { force: true });
   } catch (err) {
     process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  }
+  const legacy = readIncidentFromPath(legacyIncidentPath(stateDir));
+  if (legacy && legacy.eventId === eventId) {
+    try {
+      rmSync(legacyIncidentPath(stateDir), { force: true });
+    } catch (err) {
+      process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+    }
   }
 }
 
@@ -229,6 +312,27 @@ function incidentPayload(opts: {
   };
 }
 
+function tryLoadRecordKeys(stateDir: string): { publicKeyPem: string; privateKeyPem: string } | null {
+  const dir = resolveKeysDir(stateDir);
+  try {
+    return {
+      publicKeyPem: readFileSync(join(dir, "record.public.pem"), "utf8"),
+      privateKeyPem: readFileSync(join(dir, "record.private.pem"), "utf8"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function safeHasAlarmDelivery(stateDir: string, eventId: string): boolean {
+  try {
+    return hasAlarmDelivery(stateDir, eventId);
+  } catch (err) {
+    process.stderr.write(`verax: alarm-history: ${oneLine(err)}\n`);
+    return false;
+  }
+}
+
 function readHistoryIdentity(stateDir: string): StoredIncident | null {
   const halt = readHalt(stateDir);
   if (!halt.halted || halt.since?.via !== "integrity" || typeof halt.since.eventId !== "string") return null;
@@ -249,17 +353,23 @@ function readHistoryIdentity(stateDir: string): StoredIncident | null {
   };
 }
 
+function recordForEvent(stateDir: string, eventId: string): StoredIncident | null {
+  return listIncidentRecords(stateDir).find((row) => row.eventId === eventId) ?? null;
+}
+
 function readIntegrityIdentity(stateDir: string): StoredIncident | null {
   const halt = readHalt(stateDir);
   if (!halt.halted) return null;
-  const record = readIncidentRecord(stateDir);
   const history = readHistoryIdentity(stateDir);
   if (history) {
-    if (record?.eventId === history.eventId) return record;
+    const record = recordForEvent(stateDir, history.eventId);
+    if (record) return record;
     return history;
   }
   // C1: switch with no history line — the on-disk record is this halt.
   // An operator halt has `since` and does not own a leftover record.
+  const records = listIncidentRecords(stateDir).filter((row) => !row.closedPendingDelivery);
+  const record = records[0] ?? null;
   if (record && (!halt.since || halt.since.via === "integrity")) return record;
   return null;
 }
@@ -272,23 +382,15 @@ function persistEnvelope(stateDir: string, envelope: AlarmEnvelope): void {
   }
 }
 
-function finishClosedPending(
+function signedEnvelope(
   opts: {
-    stateDir: string;
     publicKeyPem: string;
     privateKeyPem: string;
     memoryHead?: { seq: number; lastHash: string };
-    alarmWebhookUrl?: string;
   },
   stored: StoredIncident,
-): AlarmEnvelope | null {
-  if (hasAlarmDelivery(opts.stateDir, stored.eventId)) {
-    tryRemoveIncidentRecord(opts.stateDir);
-    return null;
-  }
-  if (!opts.alarmWebhookUrl) return null;
-  if (hasAlarmOutbox(opts.stateDir, stored.eventId)) return null;
-  const envelope =
+): AlarmEnvelope {
+  return (
     usableEnvelope(stored.envelope, stored.eventId, opts.publicKeyPem) ??
     signIncident(
       incidentPayload({
@@ -299,12 +401,98 @@ function finishClosedPending(
         memoryHead: stored.memoryHead ?? opts.memoryHead,
       }),
       opts.privateKeyPem,
-    );
+    )
+  );
+}
+
+function finishClosedPending(
+  opts: {
+    stateDir: string;
+    publicKeyPem: string;
+    privateKeyPem: string;
+    memoryHead?: { seq: number; lastHash: string };
+    alarmWebhookUrl?: string;
+  },
+  stored: StoredIncident,
+): AlarmEnvelope | null {
+  if (safeHasAlarmDelivery(opts.stateDir, stored.eventId)) {
+    tryRemoveIncidentRecord(opts.stateDir, stored.eventId);
+    return null;
+  }
+  if (!opts.alarmWebhookUrl) return null;
+  if (hasAlarmOutbox(opts.stateDir, stored.eventId)) return null;
+  const envelope = signedEnvelope(opts, stored);
   persistEnvelope(opts.stateDir, envelope);
-  if (hasAlarmOutbox(opts.stateDir, stored.eventId) || hasAlarmDelivery(opts.stateDir, stored.eventId)) {
-    tryRemoveIncidentRecord(opts.stateDir);
+  if (hasAlarmOutbox(opts.stateDir, stored.eventId) || safeHasAlarmDelivery(opts.stateDir, stored.eventId)) {
+    tryRemoveIncidentRecord(opts.stateDir, stored.eventId);
   }
   return hasAlarmOutbox(opts.stateDir, stored.eventId) ? envelope : null;
+}
+
+function tryFinishClosedPending(
+  opts: {
+    stateDir: string;
+    publicKeyPem: string;
+    privateKeyPem: string;
+    memoryHead?: { seq: number; lastHash: string };
+    alarmWebhookUrl?: string;
+  },
+  stored: StoredIncident,
+): AlarmEnvelope | null {
+  try {
+    return finishClosedPending(opts, stored);
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+    return null;
+  }
+}
+
+function finishAllClosedPending(opts: {
+  stateDir: string;
+  publicKeyPem: string;
+  privateKeyPem: string;
+  memoryHead?: { seq: number; lastHash: string };
+  alarmWebhookUrl?: string;
+}): AlarmEnvelope | null {
+  let last: AlarmEnvelope | null = null;
+  for (const stored of listIncidentRecords(opts.stateDir)) {
+    if (!stored.closedPendingDelivery) continue;
+    const envelope = tryFinishClosedPending(opts, stored);
+    if (envelope) last = envelope;
+  }
+  return last;
+}
+
+/** Resume: same verify/re-sign path; pending marker is atomic or resume does not finish. */
+export function closeIncidentsOnResume(stateDir: string): void {
+  migrateLegacyIncident(stateDir);
+  const keys = tryLoadRecordKeys(stateDir);
+  const records = listIncidentRecords(stateDir);
+  const history = readHistoryIdentity(stateDir);
+  if (history && !records.some((row) => row.eventId === history.eventId)) records.push(history);
+  for (const stored of records) {
+    if (safeHasAlarmDelivery(stateDir, stored.eventId)) {
+      tryRemoveIncidentRecord(stateDir, stored.eventId);
+      continue;
+    }
+    let envelope: AlarmEnvelope | undefined;
+    if (keys) {
+      envelope = signedEnvelope(keys, stored);
+      persistEnvelope(stateDir, envelope);
+    } else if (stored.envelope && typeof stored.envelope === "object") {
+      process.stderr.write("verax: incident: resume skipped unverified envelope\n");
+    }
+    if (hasAlarmOutbox(stateDir, stored.eventId) || safeHasAlarmDelivery(stateDir, stored.eventId)) {
+      tryRemoveIncidentRecord(stateDir, stored.eventId);
+      continue;
+    }
+    const pending: StoredIncident = {
+      ...stored,
+      closedPendingDelivery: true,
+      ...(envelope ? { envelope } : {}),
+    };
+    writeIncidentRecord(stateDir, pending);
+  }
 }
 
 export function raiseMemoryIntegrityIncident(opts: {
@@ -317,51 +505,76 @@ export function raiseMemoryIntegrityIncident(opts: {
   now?: number;
 }): AlarmEnvelope | null {
   const already = existsSync(join(opts.stateDir, "halted"));
-  const stored = readIncidentRecord(opts.stateDir);
-  if (!already && stored?.closedPendingDelivery) {
-    finishClosedPending(opts, stored);
-  }
-  const leftoverOpen = !already && stored && !stored.closedPendingDelivery ? stored : null;
-  const existing = already ? readIntegrityIdentity(opts.stateDir) : leftoverOpen;
-  if (already && !existing) return null;
-  const eventId = existing?.eventId ?? randomUUID();
-  const observedAt = existing?.observedAt ?? opts.now ?? Date.now();
-  const triggerCode = existing?.triggerCode ?? opts.reason;
-  const memoryHead = existing?.memoryHead ?? opts.memoryHead;
-  const kept = usableEnvelope(existing?.envelope, eventId, opts.publicKeyPem);
-  const record: StoredIncident = {
-    eventId,
-    triggerCode,
-    observedAt,
-    ...(memoryHead ? { memoryHead } : {}),
-    ...(kept ? { envelope: kept } : {}),
-  };
-  const wrote = tryWriteIncidentRecord(opts.stateDir, record);
-  if (!already) {
-    haltBody(opts.stateDir, INCIDENT_BY, "integrity", observedAt, undefined, {
+  let eventId: string = randomUUID();
+  let observedAt = opts.now ?? Date.now();
+  let triggerCode: IntegrityReason = opts.reason;
+  let memoryHead = opts.memoryHead;
+  let identity: StoredIncident | null = null;
+  let wrote = false;
+  let abort = false;
+
+  try {
+    migrateLegacyIncident(opts.stateDir);
+    finishAllClosedPending(opts);
+    const leftoverOpen = !already
+      ? (listIncidentRecords(opts.stateDir).find((row) => !row.closedPendingDelivery) ?? null)
+      : null;
+    identity = already ? readIntegrityIdentity(opts.stateDir) : leftoverOpen;
+    if (already && !identity) {
+      abort = true;
+      return null;
+    }
+    if (identity) {
+      eventId = identity.eventId;
+      observedAt = identity.observedAt;
+      triggerCode = identity.triggerCode;
+      memoryHead = identity.memoryHead ?? memoryHead;
+    }
+    const kept = usableEnvelope(identity?.envelope, eventId, opts.publicKeyPem);
+    const record: StoredIncident = {
       eventId,
       triggerCode,
+      observedAt,
       ...(memoryHead ? { memoryHead } : {}),
-    });
+      ...(kept ? { envelope: kept } : {}),
+    };
+    wrote = tryWriteIncidentRecord(opts.stateDir, record);
+    identity = { ...record };
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+  } finally {
+    if (!already && !abort) {
+      haltBody(opts.stateDir, INCIDENT_BY, "integrity", observedAt, undefined, {
+        eventId,
+        triggerCode,
+        ...(memoryHead ? { memoryHead } : {}),
+      });
+    }
   }
-  if (!wrote) tryWriteIncidentRecord(opts.stateDir, record);
+  if (abort) return null;
+  if (!wrote && identity) tryWriteIncidentRecord(opts.stateDir, identity);
 
-  if (!opts.alarmWebhookUrl) return null;
-  if (hasAlarmDelivery(opts.stateDir, eventId)) return null;
-  if (already && hasAlarmOutbox(opts.stateDir, eventId)) return null;
+  try {
+    if (!opts.alarmWebhookUrl) return null;
+    if (safeHasAlarmDelivery(opts.stateDir, eventId)) return null;
+    if (already && hasAlarmOutbox(opts.stateDir, eventId)) return null;
 
-  const envelope =
-    record.envelope ??
-    signIncident(
-      incidentPayload({ eventId, observedAt, triggerCode, publicKeyPem: opts.publicKeyPem, memoryHead }),
-      opts.privateKeyPem,
-    );
-  if (!record.envelope) {
-    record.envelope = envelope;
-    tryWriteIncidentRecord(opts.stateDir, record);
+    const envelope =
+      usableEnvelope(identity?.envelope, eventId, opts.publicKeyPem) ??
+      signIncident(
+        incidentPayload({ eventId, observedAt, triggerCode, publicKeyPem: opts.publicKeyPem, memoryHead }),
+        opts.privateKeyPem,
+      );
+    if (identity && !identity.envelope) {
+      identity.envelope = envelope;
+      tryWriteIncidentRecord(opts.stateDir, identity);
+    }
+    persistEnvelope(opts.stateDir, envelope);
+    return already ? (hasAlarmOutbox(opts.stateDir, eventId) ? envelope : null) : envelope;
+  } catch (err) {
+    process.stderr.write(`verax: incident: ${oneLine(err)}\n`);
+    return null;
   }
-  persistEnvelope(opts.stateDir, envelope);
-  return already ? (hasAlarmOutbox(opts.stateDir, eventId) ? envelope : null) : envelope;
 }
 
 /** On open: finish a missing halt, a missing outbox, or a resume-pending delivery. Same eventId. */
@@ -372,22 +585,25 @@ export function completeMemoryIntegrityIncident(opts: {
   memoryHead?: { seq: number; lastHash: string };
   alarmWebhookUrl?: string;
 }): AlarmEnvelope | null {
-  const stored = readIncidentRecord(opts.stateDir);
+  migrateLegacyIncident(opts.stateDir);
+  const pending = finishAllClosedPending(opts);
   if (!existsSync(join(opts.stateDir, "halted"))) {
-    if (stored && !stored.closedPendingDelivery) {
+    const leftover = listIncidentRecords(opts.stateDir).find((row) => !row.closedPendingDelivery);
+    if (leftover) {
       return raiseMemoryIntegrityIncident({
         ...opts,
-        reason: stored.triggerCode,
-        now: stored.observedAt,
+        reason: leftover.triggerCode,
+        now: leftover.observedAt,
       });
     }
-    if (stored?.closedPendingDelivery) return finishClosedPending(opts, stored);
-    return null;
+    return pending;
   }
   const existing = readIntegrityIdentity(opts.stateDir);
-  return raiseMemoryIntegrityIncident({
-    ...opts,
-    reason: existing?.triggerCode ?? "memory-integrity-mismatch",
-    now: existing?.observedAt,
-  });
+  return (
+    raiseMemoryIntegrityIncident({
+      ...opts,
+      reason: existing?.triggerCode ?? "memory-integrity-mismatch",
+      now: existing?.observedAt,
+    }) ?? pending
+  );
 }
