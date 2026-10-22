@@ -5,7 +5,6 @@
 //
 // Run: node --experimental-strip-types scripts/offline-bundle.ts
 
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -20,15 +19,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { runNpm } from "./lib/npm-run.ts";
 import { readShipVersion, WORKSPACES, writeSbom } from "./sbom.ts";
 
 export { readShipVersion };
-
-function run(cmd: string, args: string[], cwd: string): { status: number; out: string; stdout: string } {
-  const shell = process.platform === "win32" && cmd !== process.execPath;
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf8", shell });
-  return { status: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
-}
 
 export function walkFiles(root: string, rel = ""): string[] {
   const dir = rel ? join(root, rel) : root;
@@ -162,8 +156,7 @@ export function buildOfflineBundle(repo: string, dest?: string): string {
 
   for (const { workspace } of WORKSPACES) {
     // --pack-destination and --workspace: docs.npmjs.com/cli/v11/commands/npm-pack
-    const packed = run(
-      "npm",
+    const packed = runNpm(
       ["pack", "--workspace", workspace, "--pack-destination", join(bundle, "packages"), "--loglevel", "silent"],
       repo,
     );
@@ -183,8 +176,7 @@ export function buildOfflineBundle(repo: string, dest?: string): string {
     );
     const tarballs = tarballPaths(bundle);
     const cache = join(bundle, "npm-cache");
-    const installed = run(
-      "npm",
+    const installed = runNpm(
       ["install", "--cache", cache, "--no-audit", "--no-fund", ...tarballs],
       staging,
     );

@@ -5,20 +5,14 @@
 //
 // Run: node --experimental-strip-types scripts/offline-bundle-smoke.ts
 
-import { spawnSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { defaultElevated } from "../packages/body/src/install.ts";
+import { runNpm, runNpx } from "./lib/npm-run.ts";
 import { buildOfflineBundle, readShipVersion, tarballPaths, verifySha256Sums } from "./offline-bundle.ts";
-
-function run(cmd: string, args: string[], cwd: string): { status: number; out: string; stdout: string } {
-  const shell = process.platform === "win32" && cmd !== process.execPath;
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf8", shell });
-  return { status: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
-}
 
 const failures: string[] = [];
 function check(ok: boolean, what: string, detail = ""): void {
@@ -69,14 +63,13 @@ try {
   const tarballs = tarballPaths(bundle);
   // --offline: no network requests (docs.npmjs.com/cli/v11/using-npm/config#offline).
   // --cache: npm's cache directory (docs.npmjs.com/cli/v11/using-npm/config#cache).
-  const install = run(
-    "npm",
+  const install = runNpm(
     ["install", "--offline", "--cache", join(bundle, "npm-cache"), "--no-audit", "--no-fund", ...tarballs],
     consumer,
   );
   check(install.status === 0, "npm install --offline from the bundle cache", install.out.slice(0, 800));
 
-  const printed = run("npx", ["--no-install", "verax", "--version"], consumer);
+  const printed = runNpx(["--no-install", "verax", "--version"], consumer);
   const line = printed.stdout.trim().split(/\r?\n/)[0] ?? "";
   check(
     printed.status === 0 && line === version,

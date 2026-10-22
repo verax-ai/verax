@@ -7,11 +7,12 @@
 //
 // Run: node --experimental-strip-types scripts/sbom.ts
 
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { runNpm } from "./lib/npm-run.ts";
 
 export const WORKSPACES = [
   { workspace: "@verax-ai/inventory", slug: "inventory" },
@@ -24,12 +25,6 @@ type CycloneDx = {
   components?: unknown;
   metadata?: { component?: unknown };
 };
-
-function run(cmd: string, args: string[], cwd: string): { status: number; out: string; stdout: string } {
-  const shell = process.platform === "win32" && cmd !== process.execPath;
-  const r = spawnSync(cmd, args, { cwd, encoding: "utf8", shell });
-  return { status: r.status ?? 1, out: `${r.stdout ?? ""}${r.stderr ?? ""}`, stdout: r.stdout ?? "" };
-}
 
 function parseJsonObject(stdout: string): unknown {
   const start = stdout.indexOf("{");
@@ -66,8 +61,7 @@ export function writeSbom(destDir: string, repo: string): string {
     const packDir = join(staging, "p");
     mkdirSync(packDir, { recursive: true });
     // -w and --pack-destination: docs.npmjs.com/cli/v11/commands/npm-pack
-    const packed = run(
-      "npm",
+    const packed = runNpm(
       [
         "pack",
         "-w",
@@ -99,13 +93,13 @@ export function writeSbom(destDir: string, repo: string): string {
       throw new Error("npm pack wrote no tarballs");
     }
 
-    const installed = run("npm", ["install", "--no-audit", "--no-fund", ...tarballs], staging);
+    const installed = runNpm(["install", "--no-audit", "--no-fund", ...tarballs], staging);
     if (installed.status !== 0) {
       throw new Error(`npm install for SBOM failed:\n${installed.out.slice(0, 1200)}`);
     }
 
     // --sbom-format cyclonedx and --omit: docs.npmjs.com/cli/v11/commands/npm-sbom
-    const generated = run("npm", ["sbom", "--sbom-format", "cyclonedx", "--omit", "dev"], staging);
+    const generated = runNpm(["sbom", "--sbom-format", "cyclonedx", "--omit", "dev"], staging);
     if (generated.status !== 0) {
       throw new Error(`npm sbom failed:\n${generated.out.slice(0, 800)}`);
     }
