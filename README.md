@@ -310,6 +310,8 @@ verax --help
 verax doctor
 ```
 
+A host that cannot reach the npm registry can install from an offline bundle; the steps are in [docs/OFFLINE_INSTALL.md](docs/OFFLINE_INSTALL.md).
+
 On an account where every process is elevated (the built-in Administrator, or `EnableLUA=0`), a command from a user-writable npm prefix is refused; use the administrator-owned copy at `%ProgramFiles%\verax-cli`.
 
 Node 22.6 or newer. The body speaks MCP over Streamable HTTP at `/mcp` on
