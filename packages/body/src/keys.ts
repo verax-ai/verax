@@ -1,4 +1,4 @@
-import { createPublicKey, generateKeyPairSync } from "node:crypto";
+import { createPrivateKey, createPublicKey, generateKeyPairSync } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync, existsSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { EX_CONFIG } from "./config.ts";
@@ -135,4 +135,66 @@ export function loadOrCreateSigners(stateDir: string, keysDir?: string | null): 
   assertEd25519PublicKey(loaded.recordSigner.publicKeyPem, "record");
   assertEd25519PublicKey(loaded.effectSigner.publicKeyPem, "effect");
   return loaded;
+}
+
+function publicKeyDer(pem: string): Buffer {
+  return createPublicKey(pem).export({ type: "spki", format: "der" }) as Buffer;
+}
+
+function publicKeyDerFromPrivate(pem: string): Buffer {
+  return createPublicKey(createPrivateKey(pem)).export({ type: "spki", format: "der" }) as Buffer;
+}
+
+function assertSignerMatchesPublicKey(publicKeyPem: string, privateKeyPem: string): void {
+  if (!publicKeyDer(publicKeyPem).equals(publicKeyDerFromPrivate(privateKeyPem))) {
+    throw new Error("record-public-key-mismatch");
+  }
+}
+
+function resolveTrustPublicKey(opts: {
+  stateDir: string;
+  keysDir?: string;
+  recordSigner: KeyPair;
+}): string {
+  const explicit = opts.keysDir?.trim();
+  if (!explicit) {
+    assertSignerMatchesPublicKey(opts.recordSigner.publicKeyPem, opts.recordSigner.privateKeyPem);
+    return opts.recordSigner.publicKeyPem;
+  }
+  const trustPub = join(resolveKeysDir(opts.stateDir, explicit), "record.public.pem");
+  if (!existsSync(trustPub)) {
+    throw new Error(`record-public-key-missing:${trustPub}`);
+  }
+  const publicKeyPem = readFileSync(trustPub, "utf8");
+  assertEd25519PublicKey(publicKeyPem, "record");
+  assertSignerMatchesPublicKey(publicKeyPem, opts.recordSigner.privateKeyPem);
+  return publicKeyPem;
+}
+
+function assertRecordPubkeyPin(publicKeyPem: string): void {
+  const pin = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
+  if (pin === "") return;
+  let pinnedDer: Buffer;
+  try {
+    pinnedDer = publicKeyDer(pin);
+  } catch {
+    throw new Error("record-pubkey-pin-mismatch");
+  }
+  if (!pinnedDer.equals(publicKeyDer(publicKeyPem))) {
+    throw new Error("record-pubkey-pin-mismatch");
+  }
+}
+
+/**
+ * Record public/private match plus `VERAX_RECORD_PUBKEY_PIN` (PEM).
+ * Body open, rehead, and reattest call this before any head write.
+ */
+export function assertRecordKeyTrust(opts: {
+  stateDir: string;
+  keysDir?: string;
+  recordSigner: KeyPair;
+}): string {
+  const publicKeyPem = resolveTrustPublicKey(opts);
+  assertRecordPubkeyPin(publicKeyPem);
+  return publicKeyPem;
 }

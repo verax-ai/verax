@@ -88,15 +88,24 @@ async function getFact(services: ReturnType<typeof createBodyServices>, id: stri
 function withPin<T>(pin: string, fn: () => T): T {
   const prev = process.env.VERAX_RECORD_PUBKEY_PIN;
   process.env.VERAX_RECORD_PUBKEY_PIN = pin;
-  try {
-    return fn();
-  } finally {
+  const restore = () => {
     if (prev === undefined) delete process.env.VERAX_RECORD_PUBKEY_PIN;
     else process.env.VERAX_RECORD_PUBKEY_PIN = prev;
+  };
+  try {
+    const result = fn();
+    if (result instanceof Promise) {
+      return result.finally(restore) as T;
+    }
+    restore();
+    return result;
+  } catch (err) {
+    restore();
+    throw err;
   }
 }
 
-describe("memory integrity hardening (H1-H21)", () => {
+describe("memory integrity hardening (H1-H22)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -744,6 +753,63 @@ describe("memory integrity hardening (H1-H21)", () => {
       }
     } finally {
       services.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H22: a wrong VERAX_RECORD_PUBKEY_PIN refuses rehead and writes no head; the matching pin works", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h22-"));
+    const signers = loadOrCreateSigners(stateDir);
+    const opts = {
+      stateDir,
+      policyFile,
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+    };
+    const first = createBodyServices(opts);
+    try {
+      const seeded = await putFact(first, "n1", "fact-h22");
+      assert.equal(seeded.isError, false, JSON.stringify(seeded.data));
+      first.ledger.close();
+      const headPath = memoryHeadPath(stateDir, resolveHeadDir(stateDir));
+      rmSync(headPath);
+      assert.equal(existsSync(headPath), false);
+
+      let err = "";
+      const refused = await withPin(testKeys().publicKeyPem, () =>
+        runMemoryRehead(
+          ["rehead", stateDir],
+          { write() { return true; } },
+          { write(s) { err += s; return true; } },
+        ),
+      );
+      assert.equal(refused, 1, err);
+      assert.match(err, /^memory-rehead-failed:record-pubkey-pin-mismatch\n$/);
+      assert.equal(existsSync(headPath), false);
+
+      let out = "";
+      err = "";
+      const code = await withPin(signers.recordSigner.publicKeyPem, () =>
+        runMemoryRehead(
+          ["rehead", stateDir],
+          { write(s) { out += s; return true; } },
+          { write(s) { err += s; return true; } },
+        ),
+      );
+      assert.equal(code, 0, err);
+      assert.match(out, /^1 [0-9a-f]{16}\n$/);
+      assert.equal(existsSync(headPath), true);
+
+      const opened = createBodyServices(opts);
+      try {
+        const got = await getFact(opened, "n1");
+        assert.equal(got.isError, false, JSON.stringify(got.data));
+        assert.equal((got.data.body as { fact?: string } | undefined)?.fact, "fact-h22");
+      } finally {
+        opened.ledger.close();
+      }
+    } finally {
+      if (existsSync(join(stateDir, "ledger.lock"))) first.ledger.close();
       rmSync(stateDir, { recursive: true, force: true });
     }
   });

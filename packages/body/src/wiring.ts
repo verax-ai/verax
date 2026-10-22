@@ -11,13 +11,12 @@ import {
   type ToolCall,
   type ToolResult,
 } from "@verax-ai/proxy";
-import { createPrivateKey, createPublicKey } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
-import { assertEd25519PublicKey, resolveHeadDir, resolveKeysDir } from "./keys.ts";
+import { assertRecordKeyTrust, resolveHeadDir } from "./keys.ts";
 import { openMemoryStoreSync, publishMemoryStore, type MemoryStore } from "./memory-store.ts";
 import {
   memoryBelongsToOtherTenant,
@@ -67,56 +66,8 @@ export type BodyServices = {
   memoryStore: MemoryStore;
 };
 
-function publicKeyDer(pem: string): Buffer {
-  return createPublicKey(pem).export({ type: "spki", format: "der" }) as Buffer;
-}
-
-function publicKeyDerFromPrivate(pem: string): Buffer {
-  return createPublicKey(createPrivateKey(pem)).export({ type: "spki", format: "der" }) as Buffer;
-}
-
 function isLegacyExplainPin(value: string): boolean {
   return value.includes("BEGIN") && value.includes("PUBLIC KEY");
-}
-
-function assertSignerMatchesPublicKey(publicKeyPem: string, privateKeyPem: string): void {
-  if (!publicKeyDer(publicKeyPem).equals(publicKeyDerFromPrivate(privateKeyPem))) {
-    throw new Error("record-public-key-mismatch");
-  }
-}
-
-function resolveTrustPublicKey(opts: {
-  stateDir: string;
-  keysDir?: string;
-  recordSigner: RecordSigner;
-}): string {
-  const explicit = opts.keysDir?.trim();
-  if (!explicit) {
-    assertSignerMatchesPublicKey(opts.recordSigner.publicKeyPem, opts.recordSigner.privateKeyPem);
-    return opts.recordSigner.publicKeyPem;
-  }
-  const trustPub = join(resolveKeysDir(opts.stateDir, explicit), "record.public.pem");
-  if (!existsSync(trustPub)) {
-    throw new Error(`record-public-key-missing:${trustPub}`);
-  }
-  const publicKeyPem = readFileSync(trustPub, "utf8");
-  assertEd25519PublicKey(publicKeyPem, "record");
-  assertSignerMatchesPublicKey(publicKeyPem, opts.recordSigner.privateKeyPem);
-  return publicKeyPem;
-}
-
-function assertRecordPubkeyPin(publicKeyPem: string): void {
-  const pin = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
-  if (pin === "") return;
-  let pinnedDer: Buffer;
-  try {
-    pinnedDer = publicKeyDer(pin);
-  } catch {
-    throw new Error("record-pubkey-pin-mismatch");
-  }
-  if (!pinnedDer.equals(publicKeyDer(publicKeyPem))) {
-    throw new Error("record-pubkey-pin-mismatch");
-  }
 }
 
 /**
@@ -163,8 +114,7 @@ export function createBodyServices(opts: {
   }
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
-  const publicKeyPem = resolveTrustPublicKey(opts);
-  assertRecordPubkeyPin(publicKeyPem);
+  const publicKeyPem = assertRecordKeyTrust(opts);
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
   ledger.onPieceClose = async (window) => {

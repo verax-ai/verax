@@ -1,6 +1,6 @@
 import { FileLedger } from "@verax-ai/proxy";
 import { EX_CONFIG } from "./config.ts";
-import { loadOrCreateSigners, resolveHeadDir, resolveKeysDir } from "./keys.ts";
+import { assertRecordKeyTrust, loadOrCreateSigners, resolveHeadDir } from "./keys.ts";
 import { reheadMemoryFromChain } from "./memory-store.ts";
 
 function usage(): string {
@@ -39,11 +39,16 @@ export async function runMemoryRehead(
     return 1;
   }
   try {
-    const keysDir = resolveKeysDir(stateDir, env.VERAX_KEYS_DIR);
+    const keysDir = env.VERAX_KEYS_DIR;
     const signers = loadOrCreateSigners(stateDir, keysDir);
+    const publicKeyPem = assertRecordKeyTrust({
+      stateDir,
+      keysDir,
+      recordSigner: signers.recordSigner,
+    });
     const result = reheadMemoryFromChain({
       stateDir,
-      publicKeyPem: signers.recordSigner.publicKeyPem,
+      publicKeyPem,
       privateKeyPem: signers.recordSigner.privateKeyPem,
       headDir: resolveHeadDir(stateDir, keysDir, env.VERAX_MEMORY_HEAD_DIR),
     });
