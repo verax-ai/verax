@@ -11,14 +11,18 @@ import {
   type ToolCall,
   type ToolResult,
 } from "@verax-ai/proxy";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { POLICY_FILE_ERROR_PREFIX, policyFileRefusal } from "./config.ts";
 import { persistPolicySnapshot } from "./policy-store.ts";
 import { inputsPrincipal } from "./inputs-read.ts";
+import { assertEd25519PublicKey, resolveKeysDir } from "./keys.ts";
+import { openMemoryStoreSync } from "./memory-store.ts";
 import {
   memoryBelongsToOtherTenant,
   memoryExistsForTenant,
   memoryGet,
+  memoryHistoryUnavailable,
   memoryPut,
   readMemoryMeta,
 } from "./tools/memory.ts";
@@ -67,6 +71,7 @@ export function createBodyServices(opts: {
   now?: () => number;
   nonce?: () => string;
   extraTools?: readonly ExtraTool[];
+  keysDir?: string;
 }): BodyServices {
   const extraNames: string[] = [];
   const reserved = new Set<string>(TOOL_NAMES);
@@ -95,6 +100,19 @@ export function createBodyServices(opts: {
   }
   const policyDocument = JSON.parse(policyText) as unknown;
   const policy = loadPolicy(policyText);
+  let publicKeyPem = opts.recordSigner.publicKeyPem;
+  if (opts.keysDir !== undefined) {
+    const trustPub = join(resolveKeysDir(opts.stateDir, opts.keysDir), "record.public.pem");
+    if (existsSync(trustPub)) {
+      publicKeyPem = readFileSync(trustPub, "utf8");
+      assertEd25519PublicKey(publicKeyPem, "record");
+    }
+  }
+  openMemoryStoreSync({
+    stateDir: opts.stateDir,
+    publicKeyPem,
+    privateKeyPem: opts.recordSigner.privateKeyPem,
+  });
   const ledger = new FileLedger(opts.stateDir);
   ledger.remoteWitness = (row, resultHash) => requestWitnessSign(opts.stateDir, row, resultHash);
   ledger.onPieceClose = async (window) => {
@@ -115,7 +133,7 @@ export function createBodyServices(opts: {
 
   const registry = new Map<string, ToolFn>();
   registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal));
-  registry.set("memory.put", (call, principal) => memoryPut(call, opts.stateDir, principal));
+  registry.set("memory.put", (call, principal, ref) => memoryPut(call, opts.stateDir, principal, ref ?? ""));
   const explainOpts = async (): Promise<ExplainOpts> => {
     const env = process.env.VERAX_RECORD_PUBKEY_PIN;
     const pem = env && env.trim() !== "" ? env : opts.recordSigner.publicKeyPem;
@@ -168,6 +186,7 @@ export function createBodyServices(opts: {
     resolveInput: (id, principal) => readMemoryMeta(opts.stateDir, id, principal),
     checkTenantMismatch: async (call, principal) => {
       if (call.name === "memory.get") {
+        if (memoryHistoryUnavailable(opts.stateDir)) return false;
         const id = call.arguments.id;
         if (typeof id !== "string") return false;
         if (memoryExistsForTenant(opts.stateDir, id, principal)) return false;

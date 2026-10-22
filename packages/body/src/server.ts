@@ -24,7 +24,7 @@ import {
 import { createVerifier, readBearer, resourceMetadataUrl, wwwAuthenticate } from "./auth.ts";
 import { bumpMetric, bumpUnauthenticated } from "./metrics.ts";
 import { isRevokedJti } from "./revoke.ts";
-import { loadOrCreateSigners } from "./keys.ts";
+import { loadOrCreateSigners, resolveKeysDir } from "./keys.ts";
 import { matchingInputs } from "./inputs-read.ts";
 import { readPolicySnapshots } from "./policy-store.ts";
 import { readHeartbeat, readInstallHealthNonce, readWitnessPulse } from "./health-extras.ts";
@@ -65,9 +65,10 @@ export const TOOL_META = [
       "Reads one memory item this tenant stored earlier with memory.put, by its id. " +
       "Use it to recall a fact, a setting or a note before acting on it; nothing is written. " +
       "Like every call it passes the policy gate and leaves a signed decision record; an id that belongs to another tenant is answered with a signed deny. " +
-      "Returns the stored item as JSON: {id, body, source, validFromMs, validUntilMs, versionHash}. " +
+      "Returns the stored item as JSON: {id, revision, body, source, validFromMs, validUntilMs, versionHash} when it matches the signed memory commit for this tenant. " +
       "Outside the validity window the body is withheld: {stale: true, id, validUntilMs} after it, {notYetValid: true, id, validFromMs} before it. " +
-      'An unknown id answers {error: "not-found", id}.',
+      'An unknown id answers {error: "not-found", id}. ' +
+      'A changed, missing, or uncommitted item answers {error: "memory-integrity-mismatch"|"memory-integrity-missing"|"memory-integrity-unattested"|"memory-integrity-history-unavailable", id} and does not include body or source.',
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -82,8 +83,9 @@ export const TOOL_META = [
     description:
       "Writes one memory item for this tenant, or replaces the item with the same id, in the body's state directory on this machine. " +
       "Use it to keep a fact for a later memory.get together with where it came from and how long it holds, so a stale fact is not served later. " +
-      "The call passes the policy gate and is recorded; the record carries the item's versionHash, a SHA-256 over id, body and validity window. " +
-      "Returns {ok: true, id, versionHash}. " +
+      "The call passes the policy gate and is recorded; the record carries the item's versionHash, a SHA-256 over a v2 envelope of tenant, id, revision, body, source and validity window. " +
+      "Each write is a new revision file; the previous file is removed only after a signed commit line is appended. " +
+      "Returns {ok: true, id, revision, versionHash}. " +
       'A missing source answers {error: "source-required"}, a missing validUntilMs {error: "validUntilMs-required"}, a malformed id {error: "id-invalid"}.',
     inputSchema: {
       type: "object",
@@ -423,11 +425,12 @@ function definitionsForStart(
 }
 
 export async function listen(config: BodyConfig): Promise<Server> {
-  const signers = loadOrCreateSigners(config.stateDir);
+  const keysDir = resolveKeysDir(config.stateDir, config.keysDir);
+  const signers = loadOrCreateSigners(config.stateDir, keysDir);
   const bodyPublicKeyPems = [signers.recordSigner.publicKeyPem, signers.effectSigner.publicKeyPem];
   if (config.downstreamFile) {
     try {
-      bodyPublicKeyPems.push(readFileSync(join(config.stateDir, "keys", "witness.public.pem"), "utf8"));
+      bodyPublicKeyPems.push(readFileSync(join(keysDir, "witness.public.pem"), "utf8"));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
     }
@@ -444,6 +447,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       policyFile: config.policyFile,
       recordSigner: signers.recordSigner,
       effectSigner: signers.effectSigner,
+      keysDir,
       ...(extraTools.length > 0 ? { extraTools } : {}),
     });
   } catch (err) {

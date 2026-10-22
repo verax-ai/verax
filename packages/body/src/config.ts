@@ -48,6 +48,11 @@ export type BodyConfig = {
   messageQuotaBytes?: number;
   /** The operator door, a second listener. Null leaves it shut. */
   operatorDoor?: OperatorDoorConfig | null;
+  /**
+   * Directory holding record/effect signer PEMs. Default is `<stateDir>/keys`.
+   * `VERAX_KEYS_DIR` sets this when the keys must sit outside the state directory.
+   */
+  keysDir?: string;
 };
 
 export type OperatorDoorConfig = {
@@ -248,6 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
   }
   const inventoryRaw = env.VERAX_INVENTORY_FILE?.trim() ?? "";
   const downstreamRaw = env.VERAX_DOWNSTREAM?.trim() ?? "";
+  const keysDirRaw = env.VERAX_KEYS_DIR?.trim() ?? "";
   return {
     ok: true,
     value: {
@@ -263,6 +269,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ConfigResult {
       tlsTerminated,
       inventoryFile: inventoryRaw === "" ? null : inventoryRaw,
       downstreamFile: downstreamRaw === "" ? null : downstreamRaw,
+      ...(keysDirRaw !== "" ? { keysDir: keysDirRaw } : {}),
       allowedOrigins: (env.VERAX_ALLOWED_ORIGINS ?? "")
         .split(",")
         .map((item) => item.trim())

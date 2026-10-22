@@ -46,11 +46,18 @@ function writePemAtomic(path: string, pem: string): void {
   renameSync(tmp, path);
 }
 
-export function loadOrCreateSigners(stateDir: string): {
+/** Keys live here. Default is `<stateDir>/keys`; `listen` / `createBodyServices` may pass `keysDir`. */
+export function resolveKeysDir(stateDir: string, keysDir?: string | null): string {
+  const explicit = keysDir?.trim();
+  if (explicit) return explicit;
+  return join(stateDir, "keys");
+}
+
+export function loadOrCreateSigners(stateDir: string, keysDir?: string | null): {
   recordSigner: KeyPair;
   effectSigner: KeyPair;
 } {
-  const dir = join(stateDir, "keys");
+  const dir = resolveKeysDir(stateDir, keysDir);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const recPriv = join(dir, "record.private.pem");
   const recPub = join(dir, "record.public.pem");

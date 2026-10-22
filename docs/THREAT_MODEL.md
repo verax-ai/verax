@@ -170,6 +170,46 @@ closed pieces and their copies is designed in
 erasure by destroying a per-subject key are designed in
 `docs/design/erasure.md` and not built.
 
+## memory at rest
+
+`memory.get` serves an item only when the bytes on disk match the last signed
+memory commit for that tenant and id. The commit file is `memory-commits.jsonl`
+at the state directory root. Each line is `{payload, sig}`: the payload is
+`{v, seq, tenantKey, id, revision, versionHash, objectPath, putRef, prevCommitHash, ts}`
+and the signature is ed25519 over `canonical(payload)` with the record key.
+The trust root is the public key in the keys directory (default
+`<stateDir>/keys`; set `VERAX_KEYS_DIR` or `keysDir` to keep keys outside
+state). A key written inside a commit line is not used.
+
+What this catches (BPM draft T1–T8; `tests/memory-integrity.test.ts` after a
+stop, a plain-fs edit, and a start):
+
+- T1 in-place body edit
+- T2 newest version deleted (no fall-back to an older file)
+- T3 a stored object deleted (not answered as never written)
+- T4 two objects swapped between slots
+- T5 a well-formed object with no commit
+- T6 a genuine object from another tenant copied over this tenant's slot
+- T7 an older genuine version written over the newest
+- T8 `source` or other envelope metadata changed
+
+What this does not catch:
+
+- T9 restoring an earlier copy of the whole state directory, including
+  `memory-commits.jsonl` and the keys. There is no head anchored outside the
+  directory in this phase. The local profile records T9 as ACCEPTED.
+- An attacker who can write the state directory and also hold the record
+  private key. Signatures then verify. Put the keys outside the state
+  directory with `VERAX_KEYS_DIR` when the threat is "state yes, keys no".
+
+0.6.1 flat files `<id>.json` have no commit. `memory.get` answers
+`memory-integrity-unattested`. The operator command `verax memory reattest
+<stateDir>` (body stopped) writes each as revision 1, appends a commit, and
+prints the ids. The body does not reattest on start.
+
+`audit.explain` still explains the decision record, not the current memory
+file. That comparison is later work.
+
 ## out of scope: OS compromise
 
 Hermes Agent, SECURITY.md section 2.2 The Boundary: OS-Level Isolation:
