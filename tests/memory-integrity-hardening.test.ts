@@ -96,7 +96,7 @@ function withPin<T>(pin: string, fn: () => T): T {
   }
 }
 
-describe("memory integrity hardening (H1-H20)", () => {
+describe("memory integrity hardening (H1-H21)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -712,6 +712,36 @@ describe("memory integrity hardening (H1-H20)", () => {
       );
       assert.equal(code, 1, err);
       assert.match(err, /^memory-rehead-body-running\n$/);
+    } finally {
+      services.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H21: concurrent put and get of a new id never returns memory-integrity-*", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h21-"));
+    const keys = testKeys();
+    const services = createBodyServices({ stateDir, policyFile, recordSigner: keys, effectSigner: keys });
+    try {
+      for (let i = 0; i < 50; i++) {
+        const id = `n-h21-${i}`;
+        const fact = `fact-h21-${i}`;
+        const [written, got] = await Promise.all([putFact(services, id, fact), getFact(services, id)]);
+        assert.equal(written.isError, false, JSON.stringify(written.data));
+        const getError = typeof got.data.error === "string" ? got.data.error : "";
+        assert.equal(getError.startsWith("memory-integrity-"), false, JSON.stringify(got.data));
+        if (got.isError) {
+          assert.equal(got.data.error, "not-found", JSON.stringify(got.data));
+        } else {
+          assert.equal((got.data.body as { fact?: string } | undefined)?.fact, fact);
+        }
+      }
+      for (let i = 0; i < 50; i++) {
+        const id = `n-h21-${i}`;
+        const got = await getFact(services, id);
+        assert.equal(got.isError, false, JSON.stringify(got.data));
+        assert.equal((got.data.body as { fact?: string } | undefined)?.fact, `fact-h21-${i}`);
+      }
     } finally {
       services.ledger.close();
       rmSync(stateDir, { recursive: true, force: true });

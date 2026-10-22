@@ -118,6 +118,10 @@ function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
+function tenantMemoryLockKey(stateDir: string, tenantKey: string): string {
+  return `memory-quota:${resolve(stateDir, "tenants", tenantKey, "memory")}`;
+}
+
 function sha256Canonical(value: unknown): string {
   return createHash("sha256").update(canonical(value), "utf8").digest("hex");
 }
@@ -537,6 +541,10 @@ export class MemoryStore {
 
   rememberDecisionSnapshot(_tenantKey: string, _object: MemoryObject): void {}
 
+  withTenantLock<T>(tenantKey: string, fn: () => Promise<T>): Promise<T> {
+    return withLock(tenantMemoryLockKey(this.stateDir, tenantKey), fn);
+  }
+
   lookup(tenantKey: string, id: string): MemoryIndexEntry | undefined {
     return this.index.get(indexKey(tenantKey, id));
   }
@@ -636,9 +644,8 @@ export class MemoryStore {
     if (this.historyUnavailable) {
       return { ok: false, error: "memory-integrity-history-unavailable" };
     }
-    const tenantLock = `memory-quota:${resolve(this.stateDir, "tenants", opts.tenantKey, "memory")}`;
     const commitLock = `memory-commits:${storeKey(this.stateDir)}`;
-    return withLock(tenantLock, async () => {
+    return this.withTenantLock(opts.tenantKey, async () => {
       const current = this.lookup(opts.tenantKey, opts.id);
       const revision = current ? current.revision + 1 : 1;
       const versionHash = memoryVersionHash({

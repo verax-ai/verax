@@ -66,7 +66,8 @@ export async function readMemoryMeta(
   if (!principal) return null;
   if (typeof id !== "string" || !ID_RE.test(id)) return null;
   const mem = storeFor(stateDir, store);
-  const got = mem.verifiedRead(tenantKey(principal), id);
+  const tk = tenantKey(principal);
+  const got = await mem.withTenantLock(tk, async () => mem.verifiedRead(tk, id));
   if (got.kind !== "ok") return null;
   mem.rememberDecisionSnapshot(tenantKey(principal), got.object);
   return {
@@ -93,7 +94,7 @@ export async function memoryGet(
   }
   const mem = storeFor(stateDir, store);
   const tk = tenantKey(principal);
-  const got = mem.verifiedRead(tk, id);
+  const got = await mem.withTenantLock(tk, async () => mem.verifiedRead(tk, id));
   if (got.kind === "integrity") return integrityResult(got.reason, id);
   if (got.kind === "not-found") return jsonResult({ error: "not-found", id }, true);
   const pinned = bound.find((item) => item.id === id);
