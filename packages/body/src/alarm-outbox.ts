@@ -128,7 +128,7 @@ export function hasAlarmDelivery(stateDir: string, eventId: string): boolean {
 function appendFileDurable(path: string, line: string): void {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
-  const fd = openSync(path, "a", 0o600);
+  const fd = openSync(path, "a+", 0o600);
   try {
     const size = fstatSync(fd).size;
     if (size > 0) {
