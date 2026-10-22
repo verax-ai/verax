@@ -1,4 +1,5 @@
-import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign, verify } from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
+import * as nodeCrypto from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -22,7 +23,7 @@ import {
   writeAlarmOutbox,
   type AlarmEnvelope,
 } from "./alarm-outbox.ts";
-import { haltBody, readHalt } from "./halt.ts";
+import { haltBody, isHaltSwitchFile, readHalt } from "./halt.ts";
 import { assertRecordKeyTrust, resolveKeysDir } from "./keys.ts";
 import { markHistoryUnavailable, type IntegrityReason } from "./memory-store.ts";
 
@@ -62,6 +63,44 @@ type StoredIncident = {
 export function recordKeyId(publicKeyPem: string): string {
   const der = createPublicKey(publicKeyPem).export({ type: "spki", format: "der" }) as Buffer;
   return createHash("sha256").update(der).digest("hex").slice(0, 16);
+}
+
+function uuidFromHex(hex: string): string {
+  const h = hex.toLowerCase().replace(/[^0-9a-f]/g, "").padEnd(32, "0").slice(0, 32);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
+}
+
+function uuidFromBytes(buf: Buffer): string {
+  const b = Buffer.from(buf);
+  b[6] = (b[6]! & 0x0f) | 0x40;
+  b[8] = (b[8]! & 0x3f) | 0x80;
+  return uuidFromHex(b.toString("hex"));
+}
+
+/** randomUUID, then randomBytes, then a SHA-256 UUID of observedAt+trigger+record key. */
+export function allocateIncidentEventId(opts: {
+  observedAt: number;
+  triggerCode: string;
+  publicKeyPem: string;
+}): string {
+  try {
+    return nodeCrypto.randomUUID();
+  } catch {
+    // RNG may refuse; keep going.
+  }
+  try {
+    return uuidFromBytes(nodeCrypto.randomBytes(16));
+  } catch {
+    // Same: fall through to a deterministic identity.
+  }
+  try {
+    const keyId = recordKeyId(opts.publicKeyPem);
+    return uuidFromHex(
+      createHash("sha256").update(`${opts.observedAt}\0${opts.triggerCode}\0${keyId}`, "utf8").digest("hex"),
+    );
+  } catch {
+    return uuidFromHex(createHash("sha256").update(String(opts.observedAt), "utf8").digest("hex"));
+  }
 }
 
 export function signIncident(payload: IncidentPayload, privateKeyPem: string): AlarmEnvelope {
@@ -544,8 +583,12 @@ export function raiseMemoryIntegrityIncident(opts: {
   let already = false;
 
   try {
-    already = existsSync(join(opts.stateDir, "halted"));
-    eventId = randomUUID();
+    already = isHaltSwitchFile(opts.stateDir);
+    eventId = allocateIncidentEventId({
+      observedAt,
+      triggerCode,
+      publicKeyPem: opts.publicKeyPem,
+    });
     migrateLegacyIncident(opts.stateDir);
     finishAllClosedPending(opts);
     const leftoverOpen = !already
@@ -584,7 +627,7 @@ export function raiseMemoryIntegrityIncident(opts: {
         });
       } catch (err) {
         process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
-        if (!existsSync(join(opts.stateDir, "halted"))) {
+        if (!isHaltSwitchFile(opts.stateDir)) {
           markHistoryUnavailable(opts.stateDir);
         }
       }
@@ -627,7 +670,7 @@ export function completeMemoryIntegrityIncident(opts: {
 }): AlarmEnvelope | null {
   migrateLegacyIncident(opts.stateDir);
   const pending = finishAllClosedPending(opts);
-  if (!existsSync(join(opts.stateDir, "halted"))) {
+  if (!isHaltSwitchFile(opts.stateDir)) {
     const leftover = listIncidentRecords(opts.stateDir).find((row) => !row.closedPendingDelivery);
     if (leftover) {
       return raiseMemoryIntegrityIncident({

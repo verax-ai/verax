@@ -1,5 +1,4 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { isProxyHalted } from "./process-halt.ts";
 import { signDecisionRecord } from "@cedulon/core";
 import type { DecisionKind } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
@@ -646,7 +645,7 @@ export function createProxy(deps: ProxyDeps) {
       const requestHash = sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
-      if (stateDir && existsSync(join(stateDir, "halted"))) {
+      if (stateDir && isProxyHalted(stateDir)) {
         const ref = deps.nonce();
         await writeRecord({
           decision: "deny",
@@ -680,7 +679,7 @@ export function createProxy(deps: ProxyDeps) {
         // A halt that landed while this call waited must be on the chain before the deny.
         if (stateDir) await syncControlRecords();
         // A call that waited here behind another admission reads the halt flag again.
-        if (stateDir && existsSync(join(stateDir, "halted"))) {
+        if (stateDir && isProxyHalted(stateDir)) {
           const ref = deps.nonce();
           await writeRecord({
             decision: "deny",

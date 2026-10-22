@@ -1,16 +1,23 @@
 import { createHash } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
 import { canonical } from "@cedulon/core";
 import type { ControlSignature } from "@verax-ai/proxy";
+import {
+  clearProcessHalted,
+  isProcessHalted,
+  markProcessHalted,
+  persistHaltedSwitch,
+} from "../../proxy/src/process-halt.ts";
 import { closeIncidentsOnResume } from "./incidents.ts";
 import { markHistoryUnavailable } from "./memory-store.ts";
 
 /**
- * The proxy refuses every call while `<stateDir>/halted` exists; that file is
- * the switch and stays empty. Who flipped it and when goes to
+ * The proxy refuses every call while `<stateDir>/halted` is a regular file, or
+ * while this process has marked a halt that could not persist that file. The
+ * file is the switch and stays empty. Who flipped it and when goes to
  * `halt-history.jsonl` beside it, one line per halt or resume, so the panel
  * can say "stopped by operator-7 at 14:02" and a resume is not silent.
  *
@@ -47,6 +54,15 @@ const HISTORY = "halt-history.jsonl";
 function oneLine(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
   return text.replace(/[\r\n]+/g, " ").slice(0, 300);
+}
+
+/** The switch is an empty file. A folder at the path is a blocked write, not a halt. */
+export function isHaltSwitchFile(stateDir: string): boolean {
+  try {
+    return statSync(join(stateDir, SWITCH)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function cliUser(): string {
@@ -125,7 +141,7 @@ function lastHalt(stateDir: string): HaltEvent | undefined {
 }
 
 export function readHalt(stateDir: string): HaltState {
-  if (!existsSync(join(stateDir, SWITCH))) return { halted: false };
+  if (!isHaltSwitchFile(stateDir)) return { halted: false };
   const since = lastHalt(stateDir);
   return since ? { halted: true, since } : { halted: true };
 }
@@ -139,9 +155,10 @@ export function haltBody(
   signature?: ControlSignature,
   incident?: Pick<HaltEvent, "eventId" | "triggerCode" | "memoryHead">,
 ): HaltState {
+  markProcessHalted(stateDir);
   try {
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-    if (!existsSync(join(stateDir, SWITCH))) {
+    if (!isHaltSwitchFile(stateDir)) {
       writeFileSync(join(stateDir, SWITCH), "", { encoding: "utf8", mode: 0o600 });
       appendHistory(stateDir, {
         action: "halt",
@@ -156,7 +173,8 @@ export function haltBody(
     }
   } catch (err) {
     process.stderr.write(`verax: halt: ${oneLine(err)}\n`);
-    if (!existsSync(join(stateDir, SWITCH))) {
+    persistHaltedSwitch(stateDir);
+    if (!isHaltSwitchFile(stateDir)) {
       markHistoryUnavailable(stateDir);
     } else {
       throw err;
@@ -182,10 +200,11 @@ export function resumeBody(
   signature?: ControlSignature,
   keysDir?: string | null,
 ): HaltState {
-  if (existsSync(join(stateDir, SWITCH))) {
+  if (isHaltSwitchFile(stateDir) || isProcessHalted(stateDir)) {
     closeIncidentsOnResume(stateDir, keysDir);
     appendHistory(stateDir, { action: "resume", atMs: now, by, via, ...(signature ? { signature } : {}) });
-    rmSync(join(stateDir, SWITCH), { force: true });
+    if (isHaltSwitchFile(stateDir)) rmSync(join(stateDir, SWITCH), { force: true });
+    clearProcessHalted(stateDir);
   }
   return readHalt(stateDir);
 }
@@ -198,7 +217,16 @@ export function runHalt(
     writeErr("verax halt <stateDir>\n");
     return 78;
   }
-  haltBody(stateDir, cliUser(), "cli");
+  try {
+    haltBody(stateDir, cliUser(), "cli");
+  } catch (err) {
+    writeErr(`halt-failed: ${oneLine(err)}\n`);
+    return 1;
+  }
+  if (!readHalt(stateDir).halted) {
+    writeErr("halt-failed: switch-unwritable\n");
+    return 1;
+  }
   writeErr("halted\n");
   return 0;
 }
@@ -211,7 +239,7 @@ export function runResume(
     writeErr("verax resume <stateDir>\n");
     return 78;
   }
-  if (!existsSync(join(stateDir, SWITCH))) {
+  if (!isHaltSwitchFile(stateDir) && !isProcessHalted(stateDir)) {
     writeErr("not halted\n");
     return 0;
   }

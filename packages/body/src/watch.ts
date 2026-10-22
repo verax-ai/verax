@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { setTimeout as delay } from "node:timers/promises";
-import { haltBody } from "./halt.ts";
+import { haltBody, readHalt } from "./halt.ts";
 import { readHeartbeat } from "./health-extras.ts";
 import { isLoopbackHost } from "./config.ts";
 
@@ -141,8 +141,10 @@ export async function runWatch(argv: readonly string[], hooks: WatchHooks = {}):
       } else if (opts.url) {
         actionResult = "remote halt is out of scope";
       } else {
-        try { haltBody(opts.stateDir!, "verax-watch", "cli", now); }
-        catch { actionResult = "halt-failed"; }
+        try {
+          haltBody(opts.stateDir!, "verax-watch", "cli", now);
+          if (!readHalt(opts.stateDir!).halted) actionResult = "halt-failed";
+        } catch { actionResult = "halt-failed"; }
       }
       stdout.write(`${JSON.stringify({ event: "silence", atMs: now, reason, action: opts.action, actionResult })}\n`);
       if (actionResult === "halt-failed") { stderr.write("verax-watch: could not persist halt\n"); return 3; }

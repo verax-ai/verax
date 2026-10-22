@@ -1,4 +1,12 @@
 export { createProxy, LedgerDenyUnrecorded } from "./proxy.ts";
+export {
+  clearProcessHalted,
+  isHaltedSwitchFile,
+  isProcessHalted,
+  isProxyHalted,
+  markProcessHalted,
+  persistHaltedSwitch,
+} from "./process-halt.ts";
 export { effectDescriptor, sha256Canonical } from "./hash.ts";
 export { samePublicKey, thirdPartyReceiptRejection } from "./third-party.ts";
 export { loadPolicy, TERMINAL_CONTROL_CLASS, DISPLAY_ESCAPE_CLASS, terminalText, terminalLines } from "./policy.ts";
