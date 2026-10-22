@@ -20,7 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { runNpm } from "./lib/npm-run.ts";
-import { readShipVersion, WORKSPACES, writeSbom } from "./sbom.ts";
+import { readShipVersion, WORKSPACES, writeSbomFromInstall } from "./sbom.ts";
 
 export { readShipVersion };
 
@@ -141,9 +141,9 @@ This is \`npm install\` of the three packages. It is not \`verax install\`,
 which still talks to the registry and writes an administrator-owned
 service.
 
-The CycloneDX file under \`sbom/\` was produced by packing the three
-packages, installing those tarballs into a temporary directory, and
-running \`npm sbom --sbom-format cyclonedx --omit dev\`.
+The CycloneDX file under \`sbom/\` was produced from the same temporary
+install that filled \`npm-cache\`, by running \`npm sbom --sbom-format
+cyclonedx --omit dev\`.
 `;
 }
 
@@ -167,8 +167,6 @@ export function buildOfflineBundle(repo: string, dest?: string): string {
     }
   }
 
-  writeSbom(join(bundle, "sbom"), repo);
-
   const staging = mkdtempSync(join(tmpdir(), "verax-offline-fill-"));
   try {
     writeFileSync(
@@ -185,6 +183,7 @@ export function buildOfflineBundle(repo: string, dest?: string): string {
     if (installed.status !== 0) {
       throw new Error(`filling npm-cache failed:\n${installed.out.slice(0, 1200)}`);
     }
+    writeSbomFromInstall(join(bundle, "sbom"), staging, version);
     const logs = join(cache, "_logs");
     if (existsSync(logs)) {
       rmSync(logs, { recursive: true, force: true });

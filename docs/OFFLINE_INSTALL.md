@@ -37,7 +37,9 @@ three packages and their production dependencies. It does not pass
 - `npm-cache/` — filled by installing those tarballs into a temporary
   directory with `--cache` pointed at this folder
   (https://docs.npmjs.com/cli/v11/using-npm/config#cache)
-- `sbom/` — the same CycloneDX file, `verax-<version>.cdx.json`
+- `sbom/` — CycloneDX from the same staging install that fills
+  `npm-cache`, `verax-<version>.cdx.json` (same helper as
+  `npm run sbom`)
 - `SHA256SUMS` — SHA-256 of every file in the bundle except itself
 - `INSTALL-OFFLINE.md` — the steps that travel with the bundle
 
@@ -64,13 +66,15 @@ Install into an empty directory. `--offline` refuses a registry request
 (https://docs.npmjs.com/cli/v11/using-npm/config#offline):
 
 ```sh
-npm install --offline --cache /path/to/verax-offline-<version>/npm-cache --no-audit --no-fund /path/to/verax-offline-<version>/packages/verax-ai-inventory-<version>.tgz /path/to/verax-offline-<version>/packages/verax-ai-proxy-<version>.tgz /path/to/verax-offline-<version>/packages/verax-ai-body-<version>.tgz
+npm install --offline --cache /path/to/verax-offline-<version>/npm-cache --no-audit --no-fund --ignore-scripts /path/to/verax-offline-<version>/packages/verax-ai-inventory-<version>.tgz /path/to/verax-offline-<version>/packages/verax-ai-proxy-<version>.tgz /path/to/verax-offline-<version>/packages/verax-ai-body-<version>.tgz
 npx --no-install verax --version
 ```
 
 `--no-audit` and `--no-fund` stop those side reports from contacting
 the registry (https://docs.npmjs.com/cli/v11/using-npm/config#audit,
 https://docs.npmjs.com/cli/v11/using-npm/config#fund).
+`--ignore-scripts` skips lifecycle scripts
+(https://docs.npmjs.com/cli/v11/using-npm/config#ignore-scripts).
 
 ## Limits
 

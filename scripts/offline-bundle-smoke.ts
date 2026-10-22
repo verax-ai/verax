@@ -20,6 +20,41 @@ function check(ok: boolean, what: string, detail = ""): void {
   if (!ok) failures.push(what);
 }
 
+function parseJsonObject(stdout: string): unknown {
+  const start = stdout.indexOf("{");
+  if (start < 0) {
+    throw new Error(`npm ls printed no json: ${stdout.slice(0, 240)}`);
+  }
+  return JSON.parse(stdout.slice(start));
+}
+
+function componentName(component: { name?: unknown; group?: unknown }): string | null {
+  if (typeof component.name === "string" && component.name.startsWith("@")) {
+    return component.name;
+  }
+  if (typeof component.group === "string" && typeof component.name === "string") {
+    return `${component.group}/${component.name}`;
+  }
+  return typeof component.name === "string" ? component.name : null;
+}
+
+function installedVersions(tree: unknown): Map<string, string> {
+  const versions = new Map<string, string>();
+  const walk = (node: unknown, key?: string) => {
+    if (!node || typeof node !== "object") return;
+    const rec = node as { name?: unknown; version?: unknown; dependencies?: unknown };
+    const name = typeof rec.name === "string" ? rec.name : key;
+    if (name && typeof rec.version === "string") versions.set(name, rec.version);
+    if (rec.dependencies && typeof rec.dependencies === "object" && rec.dependencies) {
+      for (const [depName, dep] of Object.entries(rec.dependencies as Record<string, unknown>)) {
+        walk(dep, depName);
+      }
+    }
+  };
+  walk(tree);
+  return versions;
+}
+
 const repo = join(dirname(fileURLToPath(import.meta.url)), "..");
 const version = readShipVersion(repo);
 const bundleParent = mkdtempSync(join(tmpdir(), "verax-offline-bundle-"));
@@ -86,6 +121,35 @@ try {
     "verax --version from the offline install",
     (line || printed.out.trim()).slice(0, 80),
   );
+
+  try {
+    const sbomFile = join(bundle, "sbom", `verax-${version}.cdx.json`);
+    const bom = JSON.parse(readFileSync(sbomFile, "utf8")) as {
+      components?: unknown;
+    };
+    const listed = Array.isArray(bom.components) ? bom.components : [];
+    const ls = runNpm(["ls", "--json", "--all", "--omit", "dev", "--offline"], consumer);
+    const installed = installedVersions(parseJsonObject(ls.stdout));
+    const verax = listed
+      .map((row) => (row && typeof row === "object" ? row : null))
+      .filter((row): row is { name?: unknown; group?: unknown; version?: unknown } => row !== null)
+      .map((row) => ({ name: componentName(row), version: row.version }))
+      .filter((row): row is { name: string; version: string } => typeof row.name === "string" && typeof row.version === "string");
+    const ours = verax.filter((row) => row.name.startsWith("@verax-ai/"));
+    const third = verax.find((row) => !row.name.startsWith("@verax-ai/") && installed.has(row.name));
+    const oursMatch =
+      ours.length > 0 && ours.every((row) => installed.get(row.name) === row.version);
+    const thirdMatch = third !== undefined && installed.get(third.name) === third.version;
+    check(
+      oursMatch && thirdMatch,
+      "SBOM versions match offline npm ls --json",
+      oursMatch && thirdMatch
+        ? `${ours.length} @verax-ai/* and ${third!.name}@${third!.version}`
+        : `ours=${ours.map((row) => `${row.name}@${row.version}≠${installed.get(row.name) ?? "missing"}`).join(",") || "none"}; third=${third ? `${third.name}@${third.version}≠${installed.get(third.name) ?? "missing"}` : "none"}`,
+    );
+  } catch (err) {
+    check(false, "SBOM versions match offline npm ls --json", err instanceof Error ? err.message : "compare failed");
+  }
 } catch (err) {
   check(false, "offline bundle smoke", err instanceof Error ? err.message : "smoke failed");
 } finally {

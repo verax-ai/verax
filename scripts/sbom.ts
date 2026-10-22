@@ -34,6 +34,30 @@ function parseJsonObject(stdout: string): unknown {
   return JSON.parse(stdout.slice(start));
 }
 
+/** CycloneDX from an already-installed staging tree: `verax-<version>.cdx.json`. */
+export function writeSbomFromInstall(destDir: string, staging: string, version: string): string {
+  mkdirSync(destDir, { recursive: true });
+  // --sbom-format cyclonedx and --omit: docs.npmjs.com/cli/v11/commands/npm-sbom
+  const generated = runNpm(["sbom", "--sbom-format", "cyclonedx", "--omit", "dev"], staging);
+  if (generated.status !== 0) {
+    throw new Error(`npm sbom failed:\n${generated.out.slice(0, 800)}`);
+  }
+  const bom = parseJsonObject(generated.stdout) as CycloneDx;
+  if (bom.bomFormat !== "CycloneDX") {
+    throw new Error(`bomFormat is ${JSON.stringify(bom.bomFormat)}, not "CycloneDX"`);
+  }
+  const listed = Array.isArray(bom.components) ? bom.components : [];
+  if (listed.length === 0 && bom.metadata?.component && typeof bom.metadata.component === "object") {
+    bom.components = [bom.metadata.component];
+  }
+  if (!Array.isArray(bom.components) || bom.components.length === 0) {
+    throw new Error("CycloneDX component list is empty");
+  }
+  const file = join(destDir, `verax-${version}.cdx.json`);
+  writeFileSync(file, `${JSON.stringify(bom, null, 2)}\n`, "utf8");
+  return file;
+}
+
 export function readShipVersion(repo: string): string {
   const versions = WORKSPACES.map(({ slug, workspace }) => {
     const pkg = JSON.parse(readFileSync(join(repo, "packages", slug, "package.json"), "utf8")) as {
@@ -99,25 +123,7 @@ export function writeSbom(destDir: string, repo: string): string {
       throw new Error(`npm install for SBOM failed:\n${installed.out.slice(0, 1200)}`);
     }
 
-    // --sbom-format cyclonedx and --omit: docs.npmjs.com/cli/v11/commands/npm-sbom
-    const generated = runNpm(["sbom", "--sbom-format", "cyclonedx", "--omit", "dev"], staging);
-    if (generated.status !== 0) {
-      throw new Error(`npm sbom failed:\n${generated.out.slice(0, 800)}`);
-    }
-    const bom = parseJsonObject(generated.stdout) as CycloneDx;
-    if (bom.bomFormat !== "CycloneDX") {
-      throw new Error(`bomFormat is ${JSON.stringify(bom.bomFormat)}, not "CycloneDX"`);
-    }
-    const listed = Array.isArray(bom.components) ? bom.components : [];
-    if (listed.length === 0 && bom.metadata?.component && typeof bom.metadata.component === "object") {
-      bom.components = [bom.metadata.component];
-    }
-    if (!Array.isArray(bom.components) || bom.components.length === 0) {
-      throw new Error("CycloneDX component list is empty");
-    }
-    const file = join(destDir, `verax-${version}.cdx.json`);
-    writeFileSync(file, `${JSON.stringify(bom, null, 2)}\n`, "utf8");
-    return file;
+    return writeSbomFromInstall(destDir, staging, version);
   } finally {
     rmSync(staging, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   }

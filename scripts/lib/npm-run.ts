@@ -1,9 +1,10 @@
 // npm's own CLI, run with this Node. No shell: arguments stay a list,
 // so Node 24 does not emit DEP0190 ("arguments are not escaped, only concatenated").
 //
-// npmCli is process.env.npm_execpath when an npm script launched us, else
-// the copy next to this Node — not a workspace node_modules/npm. Windows
-// and POSIX use the same join. Missing both is a hard error.
+// npmCli is process.env.npm_execpath when an npm script launched us. Otherwise
+// the copy that ships with this Node — not a workspace node_modules/npm.
+// Windows keeps npm next to node.exe; a POSIX prefix install keeps it under
+// <prefix>/lib/node_modules. Missing every candidate is a hard error.
 
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -13,6 +14,11 @@ export type NpmRunResult = { status: number; out: string; stdout: string };
 
 function nextToNode(cli: string): string {
   return join(dirname(process.execPath), "node_modules", "npm", "bin", cli);
+}
+
+function posixPrefixNpmCli(): string {
+  const prefix = dirname(dirname(process.execPath));
+  return join(prefix, "lib", "node_modules", "npm", "bin", "npm-cli.js");
 }
 
 export function npmCliPath(): string {
@@ -25,8 +31,10 @@ export function npmCliPath(): string {
   }
   const nextToThisNode = nextToNode("npm-cli.js");
   if (existsSync(nextToThisNode)) return nextToThisNode;
+  const posixLayout = posixPrefixNpmCli();
+  if (existsSync(posixLayout)) return posixLayout;
   throw new Error(
-    `cannot find npm-cli.js: npm_execpath is unset and ${nextToThisNode} is not next to this Node`,
+    `cannot find npm-cli.js: npm_execpath is unset, ${nextToThisNode} is not next to this Node, and ${posixLayout} is not the POSIX prefix layout`,
   );
 }
 
