@@ -82,6 +82,7 @@ export async function memoryGet(
   now: () => number,
   principal: Principal,
   store?: MemoryStore,
+  bound: ReadonlyArray<{ id: string; versionHash: string }> = [],
 ): Promise<ToolResult> {
   const id = call.arguments.id;
   if (typeof id !== "string" || id === "") {
@@ -92,10 +93,10 @@ export async function memoryGet(
   }
   const mem = storeFor(stateDir, store);
   const tk = tenantKey(principal);
-  const pinned = mem.takeDecisionSnapshot(tk, id);
   const got = mem.verifiedRead(tk, id);
   if (got.kind === "integrity") return integrityResult(got.reason, id);
   if (got.kind === "not-found") return jsonResult({ error: "not-found", id }, true);
+  const pinned = bound.find((item) => item.id === id);
   if (pinned && pinned.versionHash !== got.versionHash) {
     return jsonResult({ error: "memory-changed", id }, true);
   }

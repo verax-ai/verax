@@ -276,11 +276,11 @@ async function fsyncDir(dir: string): Promise<void> {
 async function appendLineDurable(path: string, line: string): Promise<void> {
   const existed = existsSync(path);
   const fh = await open(path, "a", 0o600);
-  let wrote = false;
+  let writeStarted = false;
   let firstErr: unknown;
   try {
+    writeStarted = true;
     await fh.writeFile(line, "utf8");
-    wrote = true;
     await fh.sync();
   } catch (err) {
     firstErr = err;
@@ -289,9 +289,8 @@ async function appendLineDurable(path: string, line: string): Promise<void> {
     await fh.close();
   } catch (err) {
     firstErr ??= err;
-    if (wrote) throw new UncertainAppendError();
   }
-  if (wrote && firstErr) throw new UncertainAppendError();
+  if (writeStarted && firstErr) throw new UncertainAppendError();
   if (firstErr) throw firstErr;
   if (!existed) {
     try {
@@ -357,7 +356,6 @@ export class MemoryStore {
   readonly privateKeyPem: string;
   historyUnavailable: boolean;
   private readonly index = new Map<string, MemoryIndexEntry>();
-  private readonly decisionSnapshots = new Map<string, MemoryObject>();
   private lastSeq = 0;
   private lastHash: string | null = null;
 
@@ -379,20 +377,7 @@ export class MemoryStore {
     this.lastHash = opts.lastHash;
   }
 
-  rememberDecisionSnapshot(tenantKey: string, object: MemoryObject): void {
-    this.decisionSnapshots.set(indexKey(tenantKey, object.id), object);
-  }
-
-  takeDecisionSnapshot(tenantKey: string, id: string): MemoryObject | undefined {
-    const key = indexKey(tenantKey, id);
-    const object = this.decisionSnapshots.get(key);
-    if (object) this.decisionSnapshots.delete(key);
-    return object;
-  }
-
-  forgetDecisionSnapshot(tenantKey: string, id: string): void {
-    this.decisionSnapshots.delete(indexKey(tenantKey, id));
-  }
+  rememberDecisionSnapshot(_tenantKey: string, _object: MemoryObject): void {}
 
   lookup(tenantKey: string, id: string): MemoryIndexEntry | undefined {
     return this.index.get(indexKey(tenantKey, id));
@@ -567,7 +552,6 @@ export class MemoryStore {
           }
         }
       }
-      this.forgetDecisionSnapshot(opts.tenantKey, opts.id);
       return { ok: true as const, id: opts.id, revision, versionHash };
     });
   }
@@ -659,51 +643,52 @@ export function openMemoryStoreSync(opts: {
   privateKeyPem: string;
 }): MemoryStore {
   const path = join(opts.stateDir, MEMORY_COMMITS_FILE);
-  const index = new Map<string, MemoryIndexEntry>();
+  const unavailable = () =>
+    openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
   if (!existsSync(path)) {
-    return openLoadedStore(opts, { historyUnavailable: false, index, lastSeq: 0, lastHash: null });
+    return openLoadedStore(opts, { historyUnavailable: false, index: new Map(), lastSeq: 0, lastHash: null });
   }
-  let lines: Generator<string>;
   try {
-    lines = readCommitLines(path);
+    if (!statSync(path).isFile()) return unavailable();
+    const index = new Map<string, MemoryIndexEntry>();
+    let lastSeq = 0;
+    let lastHash: string | null = null;
+    for (const line of readCommitLines(path)) {
+      if (line.trim() === "") continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(line) as unknown;
+      } catch {
+        return unavailable();
+      }
+      if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !closedKeys(parsed, LINE_KEYS)) {
+        return unavailable();
+      }
+      const row = parsed as { payload?: unknown; sig?: unknown };
+      if (typeof row.sig !== "string" || !isCommitPayload(row.payload)) {
+        return unavailable();
+      }
+      if (!verifyPayload(row.payload, row.sig, opts.publicKeyPem)) {
+        return unavailable();
+      }
+      if (row.payload.seq !== lastSeq + 1 || row.payload.prevCommitHash !== lastHash) {
+        return unavailable();
+      }
+      if (resolveObjectPath(opts.stateDir, row.payload.objectPath) === null) {
+        return unavailable();
+      }
+      lastSeq = row.payload.seq;
+      lastHash = sha256Canonical(row.payload);
+      index.set(indexKey(row.payload.tenantKey, row.payload.id), {
+        revision: row.payload.revision,
+        versionHash: row.payload.versionHash,
+        objectPath: row.payload.objectPath,
+      });
+    }
+    return openLoadedStore(opts, { historyUnavailable: false, index, lastSeq, lastHash });
   } catch {
-    return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
+    return unavailable();
   }
-  let lastSeq = 0;
-  let lastHash: string | null = null;
-  for (const line of lines) {
-    if (line.trim() === "") continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line) as unknown;
-    } catch {
-      return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
-    }
-    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || !closedKeys(parsed, LINE_KEYS)) {
-      return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
-    }
-    const row = parsed as { payload?: unknown; sig?: unknown };
-    if (typeof row.sig !== "string" || !isCommitPayload(row.payload)) {
-      return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
-    }
-    if (!verifyPayload(row.payload, row.sig, opts.publicKeyPem)) {
-      return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
-    }
-    if (row.payload.seq !== lastSeq + 1 || row.payload.prevCommitHash !== lastHash) {
-      return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
-    }
-    if (resolveObjectPath(opts.stateDir, row.payload.objectPath) === null) {
-      return openLoadedStore(opts, { historyUnavailable: true, index: new Map(), lastSeq: 0, lastHash: null });
-    }
-    lastSeq = row.payload.seq;
-    lastHash = sha256Canonical(row.payload);
-    index.set(indexKey(row.payload.tenantKey, row.payload.id), {
-      revision: row.payload.revision,
-      versionHash: row.payload.versionHash,
-      objectPath: row.payload.objectPath,
-    });
-  }
-  return openLoadedStore(opts, { historyUnavailable: false, index, lastSeq, lastHash });
 }
 
 export function memoryStoreFor(stateDir: string, keys?: { publicKeyPem: string; privateKeyPem: string }): MemoryStore {

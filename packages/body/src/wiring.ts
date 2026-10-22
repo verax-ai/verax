@@ -32,7 +32,14 @@ import { messageRead, messageSend } from "./tools/message.ts";
 import { spendAuthorize } from "./tools/spend.ts";
 import { requestWitnessCheckpoint, requestWitnessSign } from "./witness.ts";
 
-export type ToolFn = (call: ToolCall, principal: Principal, ref?: string) => Promise<ToolResult>;
+export type BoundInput = { id: string; versionHash: string };
+
+export type ToolFn = (
+  call: ToolCall,
+  principal: Principal,
+  ref?: string,
+  bound?: ReadonlyArray<BoundInput>,
+) => Promise<ToolResult>;
 
 export const TOOL_NAMES = [
   "memory.get",
@@ -72,22 +79,29 @@ function isLegacyExplainPin(value: string): boolean {
   return value.includes("BEGIN") && value.includes("PUBLIC KEY");
 }
 
+function assertSignerMatchesPublicKey(publicKeyPem: string, privateKeyPem: string): void {
+  if (!publicKeyDer(publicKeyPem).equals(publicKeyDerFromPrivate(privateKeyPem))) {
+    throw new Error("record-public-key-mismatch");
+  }
+}
+
 function resolveTrustPublicKey(opts: {
   stateDir: string;
   keysDir?: string;
   recordSigner: RecordSigner;
 }): string {
   const explicit = opts.keysDir?.trim();
-  if (!explicit) return opts.recordSigner.publicKeyPem;
+  if (!explicit) {
+    assertSignerMatchesPublicKey(opts.recordSigner.publicKeyPem, opts.recordSigner.privateKeyPem);
+    return opts.recordSigner.publicKeyPem;
+  }
   const trustPub = join(resolveKeysDir(opts.stateDir, explicit), "record.public.pem");
   if (!existsSync(trustPub)) {
     throw new Error(`record-public-key-missing:${trustPub}`);
   }
   const publicKeyPem = readFileSync(trustPub, "utf8");
   assertEd25519PublicKey(publicKeyPem, "record");
-  if (!publicKeyDer(publicKeyPem).equals(publicKeyDerFromPrivate(opts.recordSigner.privateKeyPem))) {
-    throw new Error("record-public-key-mismatch");
-  }
+  assertSignerMatchesPublicKey(publicKeyPem, opts.recordSigner.privateKeyPem);
   return publicKeyPem;
 }
 
@@ -177,7 +191,9 @@ export function createBodyServices(opts: {
   const nonce = opts.nonce ?? (() => crypto.randomUUID());
 
   const registry = new Map<string, ToolFn>();
-  registry.set("memory.get", (call, principal) => memoryGet(call, opts.stateDir, now, principal, store));
+  registry.set("memory.get", (call, principal, _ref, bound) =>
+    memoryGet(call, opts.stateDir, now, principal, store, bound),
+  );
   registry.set("memory.put", (call, principal, ref) => memoryPut(call, opts.stateDir, principal, ref ?? "", store));
   const explainOpts = async (): Promise<ExplainOpts> => {
     const env = process.env.VERAX_RECORD_PUBKEY_PIN?.trim() ?? "";
@@ -206,7 +222,7 @@ export function createBodyServices(opts: {
     registry.set(tool.name, tool.fn);
   }
 
-  const inner: ToolFn = async (call, principal, ref) => {
+  const inner: ToolFn = async (call, principal, ref, bound) => {
     const fn = registry.get(call.name);
     if (!fn) {
       return {
@@ -214,7 +230,7 @@ export function createBodyServices(opts: {
         isError: true,
       };
     }
-    return fn(call, principal, ref);
+    return fn(call, principal, ref, bound);
   };
 
   // Halt and resume lines are copied into the ledger when the body opens

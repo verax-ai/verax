@@ -337,6 +337,7 @@ export function createProxy(deps: ProxyDeps) {
     principal: Principal,
     ref: string,
     effectRecorded: { ok: boolean },
+    bound: ReadonlyArray<{ id: string; versionHash: string }>,
   ): Promise<ToolResult> {
     const dispatchedName = call.name;
     const dispatchedArgs = deepFreeze(structuredClone(call.arguments));
@@ -348,7 +349,7 @@ export function createProxy(deps: ProxyDeps) {
     });
     let result: ToolResult;
     try {
-      result = await deps.inner(frozenCall, principal, ref);
+      result = await deps.inner(frozenCall, principal, ref, bound);
     } catch (err) {
       const row: EffectRow = {
         ref,
@@ -505,13 +506,14 @@ export function createProxy(deps: ProxyDeps) {
     principal: Principal,
     allowRef: string,
     flightKey: string,
+    bound: ReadonlyArray<{ id: string; versionHash: string }>,
   ): AdmissionPlan {
     // Written before the tool runs, removed after the effect is recorded. A
     // mark that survives the process is what tells a restarted body that this
     // ref was already started (in-flight-log.ts).
     if (stateDir !== null) markStarted(stateDir, flightKey, dispatchedCall.name);
     const effectRecorded = { ok: false };
-    const work = runInner(dispatchedCall, principal, allowRef, effectRecorded);
+    const work = runInner(dispatchedCall, principal, allowRef, effectRecorded, bound);
     inFlight.set(flightKey, work);
     return { kind: "run", work, key: flightKey, replayRef: allowRef, effectRecorded };
   }
@@ -873,7 +875,7 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("tenant-mismatch", denyRef) };
                 }
-                return launchInner(dispatched, principal, allow.ref, scopedRef);
+                return launchInner(dispatched, principal, allow.ref, scopedRef, boundRows);
               }
               return { kind: "done", result: deferred(given) };
             }
@@ -993,7 +995,7 @@ export function createProxy(deps: ProxyDeps) {
         if (!allow) {
           return { kind: "done", result: denied(reasonCode, shown, call) };
         }
-        return launchInner(dispatched, principal, ref, ref);
+        return launchInner(dispatched, principal, ref, ref, resolved.inputs.inputs);
       });
 
       if (plan.kind === "done") return plan.result;

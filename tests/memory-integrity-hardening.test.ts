@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { verifyLedger } from "@verax-ai/proxy";
+import { tenantKey, verifyLedger } from "@verax-ai/proxy";
 
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
@@ -93,7 +93,7 @@ function withPin<T>(pin: string, fn: () => T): T {
   }
 }
 
-describe("memory integrity hardening (H1-H9)", () => {
+describe("memory integrity hardening (H1-H13)", () => {
   it("H1: a second open is refused and the first body keeps serving; a restart serves all", async () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-h1-"));
     const keys = testKeys();
@@ -395,6 +395,96 @@ describe("memory integrity hardening (H1-H9)", () => {
     } finally {
       if (existsSync(join(restartDir, "ledger.lock"))) first.ledger.close();
       rmSync(restartDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H10: memory.get _inputs v1, v2 written after the decision and before the tool, answers memory-changed", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h10-"));
+    const keys = testKeys();
+    const opts = { stateDir, policyFile, recordSigner: keys, effectSigner: keys };
+    const services = createBodyServices(opts);
+    try {
+      const v1 = await putFact(services, "n1", "fact-h10-v1");
+      assert.equal(v1.isError, false, JSON.stringify(v1.data));
+      const versionHash = String(v1.data.versionHash ?? "");
+      assert.match(versionHash, /^[0-9a-f]{64}$/);
+
+      const orig = services.ledger.appendDecisionChained.bind(services.ledger);
+      let injected = false;
+      (services.ledger as { appendDecisionChained: typeof orig }).appendDecisionChained = async (build) => {
+        let subject = "";
+        let decision = "";
+        await orig((prev) => {
+          const rec = build(prev);
+          subject = rec.claims.subject;
+          decision = rec.claims.decision;
+          return rec;
+        });
+        if (!injected && subject === "memory.get" && decision === "allow") {
+          injected = true;
+          const written = await services.memoryStore.put({
+            tenantKey: tenantKey(writer),
+            id: "n1",
+            body: { fact: "fact-h10-v2" },
+            source: { uri: "file://n1", retrievedAtMs: 1 },
+            validFromMs: 0,
+            validUntilMs: UNTIL,
+            putRef: "h10-race",
+            quotaBytes: 1_000_000,
+          });
+          assert.equal(written.ok, true, JSON.stringify(written));
+        }
+      };
+
+      const got = parse(
+        await services.proxy.call(
+          { name: "memory.get", arguments: { id: "n1", _inputs: [{ id: "n1", versionHash }] } },
+          writer,
+        ),
+      );
+      assert.equal(injected, true, "v2 must be written after the allow and before memory.get");
+      assert.equal(got.isError, true, JSON.stringify(got.data));
+      assert.equal(got.data.error, "memory-changed");
+      assert.equal(got.data.id, "n1");
+    } finally {
+      services.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H12: without keysDir, a public key that is not the record private key stops the open", () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h12-"));
+    const keys = testKeys();
+    const other = testKeys();
+    try {
+      assert.throws(
+        () =>
+          createBodyServices({
+            stateDir,
+            policyFile,
+            recordSigner: { publicKeyPem: keys.publicKeyPem, privateKeyPem: other.privateKeyPem },
+            effectSigner: keys,
+          }),
+        /record-public-key-mismatch/,
+      );
+      assert.equal(existsSync(join(stateDir, "ledger.lock")), false);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("H13: a directory at the commit path opens the body; get is history-unavailable", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-h13-"));
+    const keys = testKeys();
+    mkdirSync(join(stateDir, "memory-commits.jsonl"));
+    const services = createBodyServices({ stateDir, policyFile, recordSigner: keys, effectSigner: keys });
+    try {
+      const got = await getFact(services, "n1");
+      assert.equal(got.isError, true, JSON.stringify(got.data));
+      assert.equal(got.data.error, "memory-integrity-history-unavailable");
+    } finally {
+      services.ledger.close();
+      rmSync(stateDir, { recursive: true, force: true });
     }
   });
 });
