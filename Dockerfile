@@ -6,7 +6,7 @@
 # The image installs the published package, so VERAX_VERSION must already be
 # on npm. Without VERAX_ISSUER, VERAX_JWKS_URL and VERAX_AUDIENCE the body
 # refuses to start (exit 78): there is no default token.
-FROM node:24-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24-slim@sha256:55fb5f5a527ea2c5c4a95f963e48ef90aa38c7b346054fdc8ee9957a2b55d205
 ARG VERAX_VERSION=0.6.1
 RUN npm install -g --no-audit --no-fund "@verax-ai/body@${VERAX_VERSION}" \
  && npm cache clean --force \
