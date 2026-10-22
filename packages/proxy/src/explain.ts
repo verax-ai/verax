@@ -64,7 +64,8 @@ function extractSettlementRow(extract: unknown): SettlementRow | undefined {
   if (!extract || typeof extract !== "object") return undefined;
   const body = (extract as { body?: { effects?: unknown } }).body;
   const effects = body?.effects;
-  if (!Array.isArray(effects) || effects.length === 0) return undefined;
+  // One row or nothing: with more, the row a finding came from is unknown.
+  if (!Array.isArray(effects) || effects.length !== 1) return undefined;
   const row = effects[0];
   if (!row || typeof row !== "object") return undefined;
   return row as SettlementRow;
@@ -85,19 +86,35 @@ function selfOrSameOrg(witnessClass: LedgerEffect["witnessClass"] | undefined): 
   return witnessClass === "self" || witnessClass === "same-org";
 }
 
+/**
+ * Every row the audit saw for a ref: the ledger row, plus the extract that
+ * was presented for the explained ref (the caller's, or the stored receipt).
+ */
+function auditedRows(
+  effect: LedgerEffect,
+  explainedRef: string,
+  presentedExtract: unknown,
+): Array<SettlementRow | undefined> {
+  const rows: Array<SettlementRow | undefined> = [effect.row];
+  if (effect.row.ref === explainedRef && presentedExtract !== undefined) {
+    rows.push(extractSettlementRow(presentedExtract));
+  }
+  return rows;
+}
+
 function dropBoundHaltedClassMismatch(
   findings: Finding[],
   decisions: SignedDecisionRecord[],
   effects: readonly LedgerEffect[],
-  userExtract: ExplainOpts["extract"] | undefined,
+  explainedRef: string,
+  presentedExtract: unknown,
 ): Finding[] {
   return findings.filter((finding) => {
     if (finding.code !== "effect-class-mismatch") return true;
     const record = decisions.find((d) => d.claims.ref === finding.id);
     const effect = effects.find((e) => e.row.ref === finding.id && e.row.effectClass !== "duplicate-effect");
     if (!record || !effect || !selfOrSameOrg(effect.witnessClass)) return true;
-    const audited = userExtract ? extractSettlementRow(userExtract) : effect.row;
-    return !isBoundHaltedRow(audited, record);
+    return !auditedRows(effect, explainedRef, presentedExtract).every((row) => isBoundHaltedRow(row, record));
   });
 }
 
@@ -221,13 +238,15 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
     decisions,
     effects,
-    userExtract,
+    ref,
+    presentedExtract,
   );
   const applicableWarnings = dropBoundHaltedClassMismatch(
     dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
     decisions,
     effects,
-    userExtract,
+    ref,
+    presentedExtract,
   );
   const refFindings = applicable.filter((f) => f.id === ref);
   const issuerFinding =
@@ -274,11 +293,11 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const inputsMissing =
     typeof record.claims.inputsHash === "string" && inputsDoc === null;
   if (inputsMissing) conditions.push("inputs document missing");
-  const auditedRow = userExtract ? extractSettlementRow(userExtract) : effect?.row;
   const haltedUnbound =
-    typeof auditedRow?.effectClass === "string" &&
-    auditedRow.effectClass.endsWith(":halted") &&
-    !isBoundHaltedRow(auditedRow, record);
+    effect !== null &&
+    auditedRows(effect, ref, presentedExtract).some(
+      (row) => typeof row?.effectClass === "string" && row.effectClass.endsWith(":halted") && !isBoundHaltedRow(row, record),
+    );
   const balanced =
     refFindings.length === 0 &&
     !chainBreak &&

@@ -214,6 +214,83 @@ describe("black box P1-m: :halted binds on the same allow only", { concurrency: 
     }
   });
 
+  it("a bound :halted ledger row does not excuse a stored receipt with the right hash and another class", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-bbp1m-receipt-"));
+    let ledger: FileLedger | undefined;
+    try {
+      const out = await callHalted(dir);
+      ledger = out.ledger;
+      const effect = (await ledger.effects()).find((e) => e.row.ref === out.ref);
+      assert.equal(effect?.row.effectClass, "memory.get:halted");
+      const forged = signEffectExtract(
+        {
+          deciderId: "verax-proxy",
+          channelId: "verax-body",
+          windowStartMs: 1,
+          windowEndMs: 2,
+          effects: [{ ref: out.ref, effectHash: effect!.row.effectHash, effectClass: "memory.get:other", timestampMs: 1, actor: "brain-m" }],
+        },
+        EFFECT_SIGNER.privateKeyPem,
+        EFFECT_SIGNER.publicKeyPem,
+      );
+      const real = ledger;
+      const withReceipt = new Proxy(real, {
+        get(target, prop) {
+          if (prop === "effects") {
+            return async () =>
+              (await target.effects()).map((e) => (e.row.ref === out.ref ? { ...e, receipt: forged } : e));
+          }
+          const value = Reflect.get(target, prop, target) as unknown;
+          return typeof value === "function" ? (value as (...a: unknown[]) => unknown).bind(target) : value;
+        },
+      });
+      const explained = await explain(withReceipt, out.ref);
+      assert.equal(
+        explained.balanced,
+        false,
+        `the audited row is the stored receipt: balanced=${explained.balanced} finding=${explained.finding.code}`,
+      );
+    } finally {
+      ledger?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an extract with a bound :halted row and a second row for the ref is not excused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-bbp1m-two-rows-"));
+    let ledger: FileLedger | undefined;
+    try {
+      const out = await callHalted(dir);
+      ledger = out.ledger;
+      const effect = (await ledger.effects()).find((e) => e.row.ref === out.ref);
+      assert.equal(effect?.row.effectClass, "memory.get:halted");
+      const row = effect!.row;
+      const extract = signEffectExtract(
+        {
+          deciderId: "verax-proxy",
+          channelId: "verax-body",
+          windowStartMs: 1,
+          windowEndMs: 2,
+          effects: [
+            { ref: out.ref, effectHash: row.effectHash, effectClass: "memory.get:halted", timestampMs: 1, actor: "brain-m" },
+            { ref: out.ref, effectHash: row.effectHash, effectClass: "memory.get:other", timestampMs: 1, actor: "brain-m" },
+          ],
+        },
+        EFFECT_SIGNER.privateKeyPem,
+        EFFECT_SIGNER.publicKeyPem,
+      );
+      const explained = await explain(ledger, out.ref, { extract });
+      assert.equal(
+        explained.balanced,
+        false,
+        `two rows for one ref: balanced=${explained.balanced} finding=${explained.finding.code}`,
+      );
+    } finally {
+      ledger?.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a bound :halted ledger row does not excuse a presented extract with the right hash and another class", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-bbp1m-extract-class-"));
     let ledger: FileLedger | undefined;
