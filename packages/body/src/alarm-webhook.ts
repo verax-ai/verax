@@ -57,7 +57,12 @@ export async function postAlarmWebhook(
 const pokers = new Map<string, () => void>();
 
 /** Retry pending outbox files until each receiver answers 2xx. Same eventId every time. */
-export function startAlarmDelivery(opts: { stateDir: string; url: string; retryMs: number }): () => Promise<void> {
+export function startAlarmDelivery(opts: {
+  stateDir: string;
+  url: string;
+  retryMs: number;
+  onTick?: () => void;
+}): () => Promise<void> {
   assertAlarmWebhookUrl(opts.url);
   let stopped = false;
   let inFlight = false;
@@ -69,6 +74,11 @@ export function startAlarmDelivery(opts: { stateDir: string; url: string; retryM
     inFlight = true;
     running = (async () => {
       try {
+        try {
+          opts.onTick?.();
+        } catch (err) {
+          process.stderr.write(`verax: alarm-delivery: ${oneLine(err)}\n`);
+        }
         for (const envelope of listAlarmOutbox(opts.stateDir)) {
           if (stopped) break;
           const ok = await postAlarmWebhook(opts.url, envelope, abort.signal);

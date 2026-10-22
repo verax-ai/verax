@@ -446,6 +446,8 @@ tool an agent can call.
    configuration the body will use.
 3. Then start the body. The first read of an unre-attested legacy
    record stops the body and `verax resume` asks for passkey approval.
+4. If the body is already halted, reattest does not lift that halt.
+   After reattest, an authorized `verax resume` is still required.
 
 Limits: an attacker who can write the machine can delete the `halted` file
 and the outbox; an independent external observer is a later stage (P4).

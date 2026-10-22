@@ -279,7 +279,13 @@ function parseHistoryLine(raw: string, line: number): ParsedLine | null {
   if (typeof row.atMs !== "number" || !Number.isFinite(row.atMs)) return null;
   if (typeof row.by !== "string" || row.by.length === 0 || row.by.length > 256) return null;
   const via: Via =
-    row.via === "http" || row.via === "file" || row.via === "integrity" ? row.via : "cli";
+    row.via === "http" || row.via === "file"
+      ? row.via
+      : row.via === "integrity"
+        ? "integrity"
+        : "cli";
+  // via: integrity is copied as claimed. verax verify accepts it only for
+  // action halt by verax:memory-integrity; any other pair is unsigned/failed.
   const parsed: ParsedLine = { action: row.action, atMs: row.atMs, by: row.by, via, line };
   // The signature is copied as the line carries it, not judged here: a body
   // that dropped a bad one would turn a forged line into a quiet unsigned one.

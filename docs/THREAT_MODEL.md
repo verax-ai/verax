@@ -244,6 +244,8 @@ start.
    configuration the body will use.
 3. Then start the body. The first read of an unre-attested legacy
    record stops the body and `verax resume` asks for passkey approval.
+4. If the body is already halted, reattest does not lift that halt.
+   After reattest, an authorized `verax resume` is still required.
 
 On a detected memory integrity failure, Verax stops new gateway calls and
 delivers a signed alarm to the configured webhook, retrying until the

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -51,7 +51,14 @@ function cliUser(): string {
 }
 
 function appendHistory(stateDir: string, event: HaltEvent): void {
-  appendFileSync(join(stateDir, HISTORY), `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+  mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+  const fd = openSync(join(stateDir, HISTORY), "a", 0o600);
+  try {
+    writeSync(fd, `${JSON.stringify(event)}\n`, null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /**

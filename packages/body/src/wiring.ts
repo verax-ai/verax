@@ -72,7 +72,7 @@ export type BodyServices = {
   explainOpts: () => Promise<ExplainOpts>;
   recordSigner: RecordSigner;
   memoryStore: MemoryStore;
-  stopAlarms: () => void | Promise<void>;
+  stopAlarms: () => Promise<void>;
 };
 
 function isLegacyExplainPin(value: string): boolean {
@@ -141,6 +141,8 @@ export function createBodyServices(opts: {
     });
   };
   let store: MemoryStore;
+  const now = opts.now ?? (() => Date.now());
+  const nonce = opts.nonce ?? (() => crypto.randomUUID());
   try {
     persistPolicySnapshot(opts.stateDir, policy.hash, policyDocument);
     store = publishMemoryStore(
@@ -151,23 +153,30 @@ export function createBodyServices(opts: {
         headDir: resolveHeadDir(opts.stateDir, opts.keysDir, opts.headDir ?? process.env.VERAX_MEMORY_HEAD_DIR),
       }),
     );
+    completeMemoryIntegrityIncident({
+      stateDir: opts.stateDir,
+      publicKeyPem,
+      privateKeyPem: opts.recordSigner.privateKeyPem,
+      memoryHead: store.memoryHead(),
+      ...(alarmUrl !== "" ? { alarmWebhookUrl: alarmUrl } : {}),
+    });
   } catch (err) {
     ledger.close();
     throw err;
   }
-  const now = opts.now ?? (() => Date.now());
-  const nonce = opts.nonce ?? (() => crypto.randomUUID());
-  completeMemoryIntegrityIncident({
-    stateDir: opts.stateDir,
-    publicKeyPem,
-    privateKeyPem: opts.recordSigner.privateKeyPem,
-    memoryHead: store.memoryHead(),
-    ...(alarmUrl !== "" ? { alarmWebhookUrl: alarmUrl } : {}),
-  });
+  const finishPending = (): void => {
+    completeMemoryIntegrityIncident({
+      stateDir: opts.stateDir,
+      publicKeyPem,
+      privateKeyPem: opts.recordSigner.privateKeyPem,
+      memoryHead: store.memoryHead(),
+      ...(alarmUrl !== "" ? { alarmWebhookUrl: alarmUrl } : {}),
+    });
+  };
   const stopAlarms =
     alarmUrl === ""
-      ? () => {}
-      : startAlarmDelivery({ stateDir: opts.stateDir, url: alarmUrl, retryMs });
+      ? async () => {}
+      : startAlarmDelivery({ stateDir: opts.stateDir, url: alarmUrl, retryMs, onTick: finishPending });
   const onIntegrity = (reason: IntegrityReason): void => {
     raiseMemoryIntegrityIncident({
       stateDir: opts.stateDir,

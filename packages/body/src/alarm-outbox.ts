@@ -3,28 +3,52 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   fsyncSync,
   mkdirSync,
   openSync,
   readdirSync,
   readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const ALARM_OUTBOX_DIR = "alarm-outbox";
 export const ALARM_HISTORY = "alarm-history.jsonl";
+export const ALARM_EVENT_ID = /^[0-9a-f-]{36}$/i;
 
 export type AlarmEnvelope = { payload: Record<string, unknown>; sig: string };
+
+export function isAlarmEventId(eventId: string): boolean {
+  if (!ALARM_EVENT_ID.test(eventId)) return false;
+  if (eventId.includes("/") || eventId.includes("\\") || eventId.includes("..")) return false;
+  return true;
+}
+
+/** A leaf name that cannot walk out of the outbox directory. */
+export function isSafeOutboxEventId(eventId: string): boolean {
+  if (eventId === "" || eventId.includes("/") || eventId.includes("\\") || eventId.includes("..")) return false;
+  return true;
+}
 
 function outboxDir(stateDir: string): string {
   return join(stateDir, ALARM_OUTBOX_DIR);
 }
 
 function outboxPath(stateDir: string, eventId: string): string {
-  return join(outboxDir(stateDir), `${eventId}.json`);
+  if (!isSafeOutboxEventId(eventId)) throw new Error("alarm-event-id-invalid");
+  const dir = resolve(outboxDir(stateDir));
+  const leaf = `${eventId}.json`;
+  const path = resolve(dir, leaf);
+  const rel = relative(dir, path);
+  if (rel === "" || isAbsolute(rel) || rel.startsWith("..") || rel.split(sep).includes("..")) {
+    throw new Error("alarm-outbox-path-escape");
+  }
+  if (path !== join(dir, leaf)) throw new Error("alarm-outbox-path-escape");
+  return path;
 }
 
 function isUnsupportedDirFsync(err: unknown): boolean {
@@ -76,6 +100,7 @@ function outboxRecordPath(stateDir: string): string {
 }
 
 export function hasAlarmOutbox(stateDir: string, eventId: string): boolean {
+  if (!isSafeOutboxEventId(eventId)) return false;
   return existsSync(outboxPath(stateDir, eventId));
 }
 
@@ -88,7 +113,7 @@ export function deliveredAlarmIds(stateDir: string): Set<string> {
     if (line.trim() === "") continue;
     try {
       const row = JSON.parse(line) as { eventId?: unknown };
-      if (typeof row.eventId === "string" && row.eventId !== "") ids.add(row.eventId);
+      if (typeof row.eventId === "string" && isSafeOutboxEventId(row.eventId)) ids.add(row.eventId);
     } catch {
       // A torn history line is not a delivery.
     }
@@ -105,6 +130,13 @@ function appendFileDurable(path: string, line: string): void {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const fd = openSync(path, "a", 0o600);
   try {
+    const size = fstatSync(fd).size;
+    if (size > 0) {
+      const last = Buffer.alloc(1);
+      if (readSync(fd, last, 0, 1, size - 1) === 1 && last[0] !== 0x0a) {
+        writeSync(fd, "\n", null, "utf8");
+      }
+    }
     writeSync(fd, line, null, "utf8");
     fsyncSync(fd);
   } finally {
@@ -116,6 +148,7 @@ function appendFileDurable(path: string, line: string): void {
 export function writeAlarmOutbox(stateDir: string, envelope: AlarmEnvelope): void {
   const eventId = envelope.payload.eventId;
   if (typeof eventId !== "string" || eventId === "") throw new Error("alarm-event-id-missing");
+  if (!isSafeOutboxEventId(eventId)) throw new Error("alarm-event-id-invalid");
   const body = `${JSON.stringify(envelope)}\n`;
   writeFileDurable(outboxRecordPath(stateDir), body);
   writeFileDurable(outboxPath(stateDir, eventId), body);
@@ -133,7 +166,8 @@ export function listAlarmOutbox(stateDir: string): AlarmEnvelope[] {
       if (!parsed || typeof parsed !== "object" || typeof parsed.sig !== "string") continue;
       if (!parsed.payload || typeof parsed.payload !== "object") continue;
       const eventId = parsed.payload.eventId;
-      if (typeof eventId === "string" && delivered.has(eventId)) continue;
+      if (typeof eventId !== "string" || !isSafeOutboxEventId(eventId)) continue;
+      if (delivered.has(eventId)) continue;
       out.push(parsed);
     } catch {
       // A torn file is left for the next pass; it is not delivered.
@@ -144,7 +178,7 @@ export function listAlarmOutbox(stateDir: string): AlarmEnvelope[] {
 
 export function markAlarmDelivered(stateDir: string, envelope: AlarmEnvelope, now = Date.now()): void {
   const eventId = envelope.payload.eventId;
-  if (typeof eventId !== "string" || eventId === "") return;
+  if (typeof eventId !== "string" || !isSafeOutboxEventId(eventId)) return;
   const line = {
     eventId,
     deliveredAtMs: now,

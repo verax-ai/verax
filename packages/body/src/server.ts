@@ -474,7 +474,7 @@ export async function listen(config: BodyConfig): Promise<Server> {
       downstream === undefined ? undefined : { downstream },
     );
   } catch (err) {
-    services.stopAlarms();
+    await Promise.resolve(services.stopAlarms()).catch(() => undefined);
     services.ledger.close();
     await closeAll(sessions);
     throw err;
@@ -908,23 +908,36 @@ export async function listen(config: BodyConfig): Promise<Server> {
   // That is said on stderr and goes no further: thrown from a close listener
   // it would stop the listeners after it and take the process down, and
   // thrown after a failed start it would replace the reason the start failed.
-  const closeLedger = (): void => {
+  const stopAlarms = async (): Promise<void> => {
     try {
-      services.stopAlarms();
+      await Promise.resolve(services.stopAlarms());
     } catch {
       // A stuck retry timer must not hide the ledger close.
     }
+  };
+  const closeLedger = (): void => {
     try {
       services.ledger.close();
     } catch (err) {
       process.stderr.write(`verax: ledger close: ${terminalText(err instanceof Error ? err.message : "fault")}\n`);
     }
   };
+  const rawClose = server.close.bind(server);
+  server.close = ((callback?: (err?: Error) => void) => {
+    return rawClose((err?: Error) => {
+      void stopAlarms()
+        .catch(() => undefined)
+        .then(() => {
+          closeLedger();
+          if (callback) callback(err);
+        });
+    });
+  }) as Server["close"];
   server.on("close", () => {
-    closeLedger();
     void closeAll(sessions);
   });
   const stopStart = async (): Promise<void> => {
+    await stopAlarms();
     closeLedger();
     await closeAll(sessions);
   };
