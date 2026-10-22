@@ -5,7 +5,7 @@
 // valid if the storage layout changes. Objects must live under <state>/tenants/.
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
-import { cpSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, mkdtempSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -218,8 +218,11 @@ describe("memory integrity at rest (BPM T1-T9, controls C1-C2)", () => {
     await withStore(async (s) => {
       await s.stop();
       const model = objectWith(s.state, s.fact("A", "n1"));
-      const forgedPath = model.replace(/n1(?=[^\\/]*$)/, "n9");
+      const tenants = join(s.state, "tenants");
+      const rel = model.slice(tenants.length);
+      const forgedPath = tenants + rel.replace(/n1(?!.*n1)/, "n9");
       assert.notEqual(forgedPath, model, "could not derive a sibling path for the forged record");
+      mkdirSync(dirname(forgedPath), { recursive: true });
       writeFileSync(
         forgedPath,
         readFileSync(model, "utf8").replaceAll('"n1"', '"n9"').replaceAll(s.fact("A", "n1"), "forged-fact"),
