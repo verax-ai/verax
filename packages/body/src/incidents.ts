@@ -1,5 +1,4 @@
-import { createHash, createPrivateKey, createPublicKey, randomBytes, sign, verify } from "node:crypto";
-import * as nodeCrypto from "node:crypto";
+import { createHash, createPrivateKey, createPublicKey, randomBytes, randomUUID, sign, verify } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -77,19 +76,31 @@ function uuidFromBytes(buf: Buffer): string {
   return uuidFromHex(b.toString("hex"));
 }
 
-/** randomUUID, then randomBytes, then a SHA-256 UUID of observedAt+trigger+record key. */
-export function allocateIncidentEventId(opts: {
-  observedAt: number;
-  triggerCode: string;
-  publicKeyPem: string;
-}): string {
+export type IncidentEventIdGenerators = {
+  randomUUID: () => string;
+  randomBytes: (size: number) => Buffer;
+};
+
+/**
+ * randomUUID, then randomBytes, then a SHA-256 UUID of observedAt+trigger+record key.
+ * Generators are a parameter so a failing producer can be injected; that is
+ * dependency injection, not a product-code test hook.
+ */
+export function incidentEventIdFrom(
+  opts: {
+    observedAt: number;
+    triggerCode: string;
+    publicKeyPem: string;
+  },
+  generators: IncidentEventIdGenerators,
+): string {
   try {
-    return nodeCrypto.randomUUID();
+    return generators.randomUUID();
   } catch {
     // RNG may refuse; keep going.
   }
   try {
-    return uuidFromBytes(nodeCrypto.randomBytes(16));
+    return uuidFromBytes(generators.randomBytes(16));
   } catch {
     // Same: fall through to a deterministic identity.
   }
@@ -101,6 +112,15 @@ export function allocateIncidentEventId(opts: {
   } catch {
     return uuidFromHex(createHash("sha256").update(String(opts.observedAt), "utf8").digest("hex"));
   }
+}
+
+/** Production path: the same cascade, wired to node:crypto. */
+export function allocateIncidentEventId(opts: {
+  observedAt: number;
+  triggerCode: string;
+  publicKeyPem: string;
+}): string {
+  return incidentEventIdFrom(opts, { randomUUID, randomBytes });
 }
 
 export function signIncident(payload: IncidentPayload, privateKeyPem: string): AlarmEnvelope {

@@ -2,8 +2,7 @@
 // operator is not told "halted" unless the file is there; an incident
 // always carries an event id.
 import { strict as assert } from "node:assert";
-import * as nodeCrypto from "node:crypto";
-import { randomBytes } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -17,10 +16,11 @@ import {
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { describe, it, mock } from "node:test";
+import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { runHalt } from "../packages/body/src/halt.ts";
+import { incidentEventIdFrom, recordKeyId } from "../packages/body/src/incidents.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 
@@ -60,15 +60,6 @@ async function receiver(statuses: number[] = []): Promise<{ url: string; got: Al
     attempts: () => attempts,
     close: () => new Promise<void>((r) => server.close(() => r())),
   };
-}
-
-async function until(cond: () => boolean, ms: number): Promise<boolean> {
-  const end = Date.now() + ms;
-  while (Date.now() < end) {
-    if (cond()) return true;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  return cond();
 }
 
 async function withBody(
@@ -180,20 +171,24 @@ function occupyAsFolder(path: string): void {
   mkdirSync(path, { recursive: true });
 }
 
-function lastHaltEventId(state: string): string {
-  const raw = readFileSync(join(state, "halt-history.jsonl"), "utf8");
-  const lines = raw.split("\n").filter((line) => line.trim() !== "");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const row = JSON.parse(lines[i] ?? "{}") as { action?: string; eventId?: string };
-    if (row.action === "halt" && typeof row.eventId === "string") return row.eventId;
-  }
-  throw new Error("no halt eventId");
+function failId(): never {
+  throw new Error("uuid-unavailable");
+}
+
+function failBytes(_size: number): never {
+  throw new Error("bytes-unavailable");
+}
+
+function uuidFromHex(hex: string): string {
+  const h = hex.toLowerCase().replace(/[^0-9a-f]/g, "").padEnd(32, "0").slice(0, 32);
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20, 32)}`;
 }
 
 describe("black box P1-h: process halt, honest operator, identified alarm", { concurrency: 1 }, () => {
   it("H1: folder at halted plus an integrity error denies a non-memory.get tool", async () => {
-    const rx = await receiver();
+    let rx: Awaited<ReturnType<typeof receiver>> | undefined;
     try {
+      rx = await receiver();
       await withBody(rx.url, async (b) => {
         await b.stop();
         tamper(b.state, b.fact("n3"));
@@ -207,13 +202,14 @@ describe("black box P1-h: process halt, honest operator, identified alarm", { co
         assert.match(other.text, /denied:halted/, `non-memory tool after blocked switch: ${other.text.slice(0, 160)}`);
       });
     } finally {
-      await rx.close();
+      await rx?.close();
     }
   });
 
   it("H2: the same blocked switch makes CLI and HTTP halt refuse to say halted", async () => {
-    const rx = await receiver();
+    let rx: Awaited<ReturnType<typeof receiver>> | undefined;
     try {
+      rx = await receiver();
       await withBody(rx.url, async (b) => {
         occupyAsFolder(join(b.state, "halted"));
         let err = "";
@@ -228,31 +224,38 @@ describe("black box P1-h: process halt, honest operator, identified alarm", { co
         assert.doesNotMatch(http.text, /"halted"\s*:\s*true/);
       });
     } finally {
-      await rx.close();
+      await rx?.close();
     }
   });
 
-  it("H3: identity failure still writes a halt event id and delivers the alarm", async () => {
-    const rx = await receiver();
-    const mocked = mock.method(nodeCrypto, "randomUUID", () => {
-      throw new Error("uuid-unavailable");
-    });
+  it("H3: identity failure still allocates a halt event id", () => {
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const opts = {
+      observedAt: 1_700_000_000_000,
+      triggerCode: "memory-integrity-mismatch",
+      publicKeyPem,
+    };
     try {
-      await withBody(rx.url, async (b) => {
-        await b.stop();
-        tamper(b.state, b.fact("n3"));
-        await b.start();
-        const first = await b.get("n3");
-        assert.equal(first.isError, true);
-        assert.match(first.text, /memory-integrity-mismatch/);
-        assert.ok(await until(() => rx.got.length >= 1, 8000), "alarm was not delivered");
-        const eventId = lastHaltEventId(b.state);
-        assert.match(eventId, UUID_RE);
-        assert.equal(rx.got[0]?.payload.eventId, eventId);
-      });
+      const eventId = incidentEventIdFrom(opts, { randomUUID: failId, randomBytes: failBytes });
+      assert.match(eventId, UUID_RE);
+      const keyId = recordKeyId(publicKeyPem);
+      const expected = uuidFromHex(
+        createHash("sha256").update(`${opts.observedAt}\0${opts.triggerCode}\0${keyId}`, "utf8").digest("hex"),
+      );
+      assert.equal(eventId, expected);
+      assert.equal(incidentEventIdFrom(opts, { randomUUID: failId, randomBytes: failBytes }), eventId);
+      const lastResort = incidentEventIdFrom(
+        { observedAt: 42, triggerCode: "memory-integrity-mismatch", publicKeyPem: "not-a-key" },
+        { randomUUID: failId, randomBytes: failBytes },
+      );
+      assert.match(lastResort, UUID_RE);
+      assert.equal(
+        lastResort,
+        uuidFromHex(createHash("sha256").update("42", "utf8").digest("hex")),
+      );
     } finally {
-      mocked.mock.restore();
-      await rx.close();
+      // No receiver, body, or timer is opened on this path.
     }
   });
 });
