@@ -500,9 +500,11 @@ same millisecond still get two ids.
 2. Run `verax memory reattest <stateDir>` with the same key and head
    configuration the body will use.
 3. Then start the body. The first read of an unre-attested legacy
-   record stops the body and `verax resume` asks for passkey approval.
+   record stops the body. `verax resume <stateDir>` lifts the halt as
+   the OS user who runs it; `POST /api/resume` asks for a passkey once
+   an operator is registered.
 4. If the body is already halted, reattest does not lift that halt.
-   After reattest, an authorized `verax resume` is still required.
+   After reattest, a resume is still required.
 
 Limits: an attacker who can write the machine can delete the `halted` file
 and the outbox; an independent external observer is a later stage (P4).
