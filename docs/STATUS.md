@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.6.1
+## Capability matrix — 0.7.0
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.6.1, and in the MCP registry as
+`@verax-ai/inventory` 0.7.0, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -390,7 +390,7 @@ the rule and name the hosts it may reach in `egress`.
 Guards: `policy-unknown-keys`, `policy-snapshot-unknown-keys`,
 `attack-r26-egress-unused`. Published in 0.5.0.
 
-## Memory integrity halt and signed alarm — unreleased
+## Memory integrity halt and signed alarm — since 0.7.0
 
 On a detected memory integrity failure, Verax stops new gateway calls and
 delivers a signed alarm to the configured webhook, retrying until the
@@ -500,9 +500,11 @@ same millisecond still get two ids.
 2. Run `verax memory reattest <stateDir>` with the same key and head
    configuration the body will use.
 3. Then start the body. The first read of an unre-attested legacy
-   record stops the body and `verax resume` asks for passkey approval.
+   record stops the body. `verax resume <stateDir>` lifts the halt as
+   the OS user who runs it; `POST /api/resume` asks for a passkey once
+   an operator is registered.
 4. If the body is already halted, reattest does not lift that halt.
-   After reattest, an authorized `verax resume` is still required.
+   After reattest, a resume is still required.
 
 Limits: an attacker who can write the machine can delete the `halted` file
 and the outbox; an independent external observer is a later stage (P4).
