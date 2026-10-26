@@ -11,6 +11,7 @@ The image installs the published [`@verax-ai/body`](https://www.npmjs.com/packag
 It is not the isolated install. Under `verax install` the boundary is a separate OS account the agent cannot read; here it is the container and whoever controls the Docker host.
 
 - Tags: `latest`, and one tag per release that matches the npm version of `@verax-ai/body`.
+- Built for `linux/amd64` and `linux/arm64`, each on its own architecture (releases up to 0.7.0: `linux/amd64` only).
 - Runs as the `node` user, not as root.
 - The ledger, keys and approvals live in the volume `/var/lib/verax` (`VERAX_STATE_DIR`).
 - Listens on `0.0.0.0:8787` (`VERAX_BIND`) and speaks MCP over Streamable HTTP at `/mcp`.
