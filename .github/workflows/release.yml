@@ -17,6 +17,13 @@ name: release
 # npm, then installs them from npm in an empty directory. Nothing runs on push.
 # The MCP registry record is a separate step, mcp-registry.yml, once npm
 # answers for the new version.
+#
+# Only the publish job holds id-token: write, and it runs no repository or
+# dependency code: it downloads the three tarballs the build job packed and
+# hands them to npm with --ignore-scripts. Installing, building, testing and
+# packing happen in the build job, which cannot mint a publish credential.
+# That narrows what runs next to the credential; it does not make the build
+# output immune to a dependency that runs during the build.
 
 on:
   workflow_dispatch:
@@ -61,20 +68,20 @@ jobs:
           name: sbom-${{ steps.version.outputs.version }}
           path: sbom/verax-${{ steps.version.outputs.version }}.cdx.json
           if-no-files-found: error
-  publish:
-    needs: sbom
+  # Everything that runs code: install, build, pack, test. No id-token here.
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
       contents: read
-      id-token: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          # Trusted publishing needs npm 11.5.1 or newer; Node 24 carries it.
           # No dependency cache: a release resolves from nothing.
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
@@ -91,24 +98,7 @@ jobs:
           else
             echo "confirm matched check"
           fi
-      - name: npm is new enough for trusted publishing
-        run: |
-          v="$(npm --version)"
-          echo "npm $v"
-          node -e '
-            const [a, b, c] = process.argv[1].split(".").map(Number);
-            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
-              console.error(`npm ${process.argv[1]} is older than 11.5.1, which trusted publishing needs`);
-              process.exit(1);
-            }
-          ' "$v"
       - run: npm ci --ignore-scripts
-      # The panel browser tests drive a real Chromium; the suite must carry it too.
-      - run: npx playwright install --with-deps chromium
-      # The same proof the suite gives on main, on the exact tree that is about
-      # to be sent, plus what the tarballs themselves install to.
-      - run: npm test
-      - run: npm run pack:smoke
       - name: the three packages carry one version, and server.json agrees
         id: version
         run: |
@@ -128,6 +118,34 @@ jobs:
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "version $v"
+      # Packed before the tests run, and kept before the tests run, so the
+      # tarballs that are published are the ones packed from the checkout.
+      # Each package's prepack builds it.
+      - name: pack the three tarballs
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-tarballs
+          npm pack -w @verax-ai/inventory -w @verax-ai/proxy -w @verax-ai/body --pack-destination release-tarballs
+          cd release-tarballs
+          for p in inventory proxy body; do
+            test -s "verax-ai-$p-$VERSION.tgz" || { echo "verax-ai-$p-$VERSION.tgz was not packed"; exit 1; }
+          done
+          sha256sum ./*.tgz > SHA256SUMS
+          cat SHA256SUMS
+      - name: keep the tarballs as an artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-tarballs-${{ steps.version.outputs.version }}
+          path: release-tarballs/
+          if-no-files-found: error
+      # The panel browser tests drive a real Chromium; the suite must carry it too.
+      - run: npx playwright install --with-deps chromium
+      # The same proof the suite gives on main, on the exact tree that is about
+      # to be sent, plus what the tarballs themselves install to.
+      - run: npm test
+      - run: npm run pack:smoke
       # Trusted publishing is configured on a package's own settings page,
       # which exists only after a first publish. A package that has never been
       # published fails here, not halfway through the loop.
@@ -165,29 +183,77 @@ jobs:
           fi
       - name: check mode stops here
         if: ${{ inputs.confirm == 'check' }}
-        run: echo "check mode - nothing was sent to npm"
+        run: echo "check mode - nothing will be sent to npm"
+  # Holds id-token: write. No checkout and no install: it hands npm the
+  # tarballs the build job packed, and nothing of theirs runs.
+  publish:
+    needs: [sbom, build]
+    if: ${{ inputs.confirm == 'publish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Trusted publishing needs npm 11.5.1 or newer; Node 24 carries it.
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: npm is new enough for trusted publishing
+        run: |
+          v="$(npm --version)"
+          echo "npm $v"
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            if (a < 11 || (a === 11 && (b < 5 || (b === 5 && c < 1)))) {
+              console.error(`npm ${process.argv[1]} is older than 11.5.1, which trusted publishing needs`);
+              process.exit(1);
+            }
+          ' "$v"
+      - name: the tarballs the build job packed
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-tarballs-${{ needs.build.outputs.version }}
+          path: release-tarballs
+      - name: the tarballs are the ones the build job hashed
+        run: |
+          set -euo pipefail
+          cd release-tarballs
+          sha256sum -c SHA256SUMS
       # Dependency order: body asks for proxy and inventory by name.
       - name: send them in dependency order
-        if: ${{ inputs.confirm == 'publish' }}
         run: |
           set -e
-          v="${{ steps.version.outputs.version }}"
-          for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
-            if npm view "$p@$v" version >/dev/null 2>&1; then
-              echo "=== $p@$v already on npm, not sent again ==="
+          v="${{ needs.build.outputs.version }}"
+          for p in inventory proxy body; do
+            if npm view "@verax-ai/$p@$v" version >/dev/null 2>&1; then
+              echo "=== @verax-ai/$p@$v already on npm, not sent again ==="
               continue
             fi
-            echo "=== $p ==="
-            npm publish -w "$p" --provenance --access public
+            echo "=== @verax-ai/$p ==="
+            npm publish "release-tarballs/verax-ai-$p-$v.tgz" --provenance --access public --ignore-scripts
           done
+  # Reads the release back from npm. No id-token.
+  verify:
+    needs: [build, publish]
+    if: ${{ inputs.confirm == 'publish' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
       # npm is read-after-write eventual in both directions: the package
       # document has answered minutes before the tarball, and the tarball
       # minutes before the document. Both are asked, under one deadline.
       - name: npm answers with this version
-        if: ${{ inputs.confirm == 'publish' }}
         run: |
           set -e
-          v="${{ steps.version.outputs.version }}"
+          v="${{ needs.build.outputs.version }}"
           deadline=$((SECONDS + 480))
           for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
             got=""
@@ -204,10 +270,9 @@ jobs:
             echo "  $p@$v -> $got"
           done
       - name: every tarball of this version answers
-        if: ${{ inputs.confirm == 'publish' }}
         run: |
           set -e
-          v="${{ steps.version.outputs.version }}"
+          v="${{ needs.build.outputs.version }}"
           deadline=$((SECONDS + 480))
           for p in @verax-ai/inventory @verax-ai/proxy @verax-ai/body; do
             tarball="$(npm view "$p@$v" dist.tarball)"
@@ -227,10 +292,9 @@ jobs:
       # The proof from the destination: an empty directory, the registry, the
       # installed bin, and npm's own check of the attestations.
       - name: a clean install from the registry
-        if: ${{ inputs.confirm == 'publish' }}
         run: |
           set -e
-          v="${{ steps.version.outputs.version }}"
+          v="${{ needs.build.outputs.version }}"
           dir="$(mktemp -d)"
           cd "$dir"
           printf '{"name":"verax-release-probe","private":true,"version":"1.0.0","type":"module"}\n' > package.json

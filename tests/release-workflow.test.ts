@@ -13,7 +13,7 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const path = join(root, ".github", "workflows", "release.yml");
 const yml = existsSync(path) ? readFileSync(path, "utf8") : "";
 
-const PUBLISH_ORDER = ["@verax-ai/inventory", "@verax-ai/proxy", "@verax-ai/body"];
+const PUBLISH_ORDER = ["inventory", "proxy", "body"];
 
 function namedStep(text: string, title: string): string {
   const start = text.indexOf(`- name: ${title}`);
@@ -21,6 +21,21 @@ function namedStep(text: string, title: string): string {
   const rest = text.slice(start + 1);
   const next = rest.search(/\n      - /);
   return next >= 0 ? text.slice(start, start + 1 + next) : text.slice(start);
+}
+
+/** The text of one job, from its key at two spaces of indent to the next job's key. */
+function job(text: string, name: string): string {
+  const start = text.search(new RegExp(`^  ${name}:\\s*$`, "m"));
+  assert.ok(start >= 0, `job "${name}" is gone`);
+  const rest = text.slice(start + 1);
+  const next = rest.search(/\n  [a-z][a-z0-9_-]*:\s*\n/);
+  return next >= 0 ? text.slice(start, start + 1 + next) : text.slice(start);
+}
+
+/** Every job key under `jobs:`. */
+function jobNames(text: string): string[] {
+  const body = text.slice(text.search(/^jobs:\s*$/m));
+  return [...body.matchAll(/^  ([a-z][a-z0-9_-]*):\s*$/gm)].map((m) => m[1]!);
 }
 
 describe("release.yml, the only path that publishes to npm from this repository", () => {
@@ -46,27 +61,52 @@ describe("release.yml, the only path that publishes to npm from this repository"
   });
 
   it("check mode never reaches the publish or the readback", () => {
-    for (const title of [
-      "send them in dependency order",
-      "npm answers with this version",
-      "every tarball of this version answers",
-      "a clean install from the registry",
-    ]) {
-      assert.match(
-        namedStep(yml, title),
-        /if: \$\{\{ inputs\.confirm == 'publish' \}\}/,
-        `step "${title}" is not confined to confirm=publish`,
-      );
+    for (const [name, titles] of [
+      ["publish", ["send them in dependency order"]],
+      ["verify", ["npm answers with this version", "every tarball of this version answers", "a clean install from the registry"]],
+    ] as const) {
+      const text = job(yml, name);
+      assert.match(text, /^    if: \$\{\{ inputs\.confirm == 'publish' \}\}$/m, `job "${name}" is not confined to confirm=publish`);
+      for (const title of titles) {
+        assert.ok(text.includes(`- name: ${title}`), `step "${title}" is not in the ${name} job`);
+      }
     }
   });
 
   it("publishes the three packages in dependency order", () => {
     const send = namedStep(yml, "send them in dependency order");
-    const found = PUBLISH_ORDER.map((p) => send.indexOf(p));
-    for (let i = 0; i < PUBLISH_ORDER.length; i += 1) {
-      assert.ok(found[i] >= 0, `${PUBLISH_ORDER[i]} is not published`);
-      if (i > 0) assert.ok(found[i] > found[i - 1], `${PUBLISH_ORDER[i]} is sent before ${PUBLISH_ORDER[i - 1]}`);
+    assert.match(send, new RegExp(`for p in ${PUBLISH_ORDER.join(" ")}; do`), "the publish loop is not inventory, proxy, body");
+    assert.match(send, /npm publish "release-tarballs\/verax-ai-\$p-\$v\.tgz"/, "publish does not send the packed tarball");
+  });
+
+  it("only the publish job holds id-token, and it runs no repository or dependency code", () => {
+    // A dependency that runs during the suite could otherwise mint a publish
+    // credential. The publish job gets the tarballs and npm, nothing else.
+    const holders = jobNames(yml).filter((name) => /^\s+id-token: write\s*$/m.test(job(yml, name)));
+    assert.deepEqual(holders, ["publish"], `id-token: write is held by ${holders.join(", ") || "no job"}`);
+    const publish = job(yml, "publish");
+    for (const [pattern, what] of [
+      [/actions\/checkout@/, "a checkout"],
+      [/\bnpm ci\b/, "npm ci"],
+      [/\bnpm install\b/, "npm install"],
+      [/\bnpm test\b/, "npm test"],
+      [/\bnpm run\b/, "npm run"],
+      [/\bnpm pack\b/, "npm pack"],
+      [/\bnpx\b/, "npx"],
+    ] as const) {
+      assert.doesNotMatch(publish, pattern, `the publish job runs ${what}`);
     }
+    assert.match(namedStep(yml, "send them in dependency order"), /--ignore-scripts/, "publish runs the tarballs' scripts");
+    assert.match(namedStep(yml, "the tarballs are the ones the build job hashed"), /sha256sum -c SHA256SUMS/, "the tarballs are not checked against the build job's hashes");
+  });
+
+  it("packs and keeps the tarballs before the suite runs", () => {
+    const build = job(yml, "build");
+    const pack = build.indexOf("- name: pack the three tarballs");
+    const keep = build.indexOf("- name: keep the tarballs as an artifact");
+    const suite = build.indexOf("- run: npm test");
+    assert.ok(pack >= 0 && keep > pack && suite > keep, "the tarballs are not packed and kept before npm test");
+    assert.match(namedStep(yml, "pack the three tarballs"), /sha256sum \.\/\*\.tgz > SHA256SUMS/, "the packed tarballs are not hashed");
   });
 
   it("proves the tree before anything is sent: the suite and pack:smoke come before publish", () => {
