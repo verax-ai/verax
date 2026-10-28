@@ -60,7 +60,7 @@ export function dataClassMapHasLocal(
   return Object.values(map).some((choice) => choice === "local");
 }
 
-const FILE_TYPE_TOKEN_SPLIT = /[\s"'`,;|&<>`]+/;
+const FILE_TYPE_TOKEN_SPLIT = /[\s"'`,;|&<>()[\]{}$=]+/;
 
 function lastMeaningfulSegment(text: string): string | undefined {
   const trimmed = text.replace(/[/\\]+$/u, "");

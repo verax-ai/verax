@@ -45,9 +45,11 @@ below is a test in `packages/proxy/tests/data-classes.test.ts`.
   unmasked.
 - **Refusals**, each a signed deny and the tool is not reached:
   `data-class-block:<class>`, `data-class-local:<class>`,
-  `file-type-block:<ext>` (after cutting a URL query or fragment,
-  percent-decoding, dropping an NTFS stream suffix and trailing dots or
-  spaces), `data-class-key:<class>` (a key cannot be masked),
+  `file-type-block:<ext>` (each string is split into tokens on whitespace,
+  quotes and shell punctuation; in each token a URL query or fragment is
+  cut, escapes are decoded, an NTFS stream suffix, trailing separators and
+  dot segments are dropped; this is a filter on names as they appear, not a
+  boundary: a name the agent encodes or renames is not caught), `data-class-key:<class>` (a key cannot be masked),
   `data-class-meta:<class>` (a class in `_ref` or `_inputs`),
   `data-class-unscanned` (a key that could not be scanned; or a value that
   could not be scanned when a class is chosen `block` or `local` and none is

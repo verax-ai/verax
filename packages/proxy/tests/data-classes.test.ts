@@ -368,6 +368,10 @@ describe("data classes: the gate", () => {
       "keys/server.pem/.",
       "\"C:\\keys\\server.pem\"",
       "a.txt,keys/server.pem",
+      "$(cat keys/server.pem)",
+      "x=keys/server.pem",
+      "[keys/server.pem]",
+      "{keys/server.pem}",
     ];
     const { proxy, received } = harness(policyV2({ fileTypes: { block: [".pem"] } }), names.map((_, i) => `r-t${i}`));
     for (const [i, body] of names.entries()) {
