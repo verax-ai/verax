@@ -1,6 +1,9 @@
-# Data classes v1 — design, not built
+# Data classes v1
 
-Status: design only. Nothing in this document is in the tree.
+Status: the first step of the order of work below (text classes on tool-call
+arguments, the file-type block, signed counts) is in the tree; see "What is in
+the tree". The panel, audio, photos, operator pattern classes and
+`resultClasses` are design only.
 
 ## What it is for
 
@@ -12,7 +15,7 @@ class the choice is one of four:
 | Choice | What happens to a call that carries it |
 |---|---|
 | **allow** | passes unchanged |
-| **mask** | the value is replaced by a label (`[MASKED_EMAIL]`) before the call is forwarded |
+| **mask** | the value is replaced by a label (`[MASKED_PII]`) before the call is forwarded |
 | **local** | the call runs only against a tool the operator marked as local; to any other tool it is refused |
 | **block** | the call is refused |
 
@@ -23,20 +26,47 @@ that way: **this covers tool calls that pass through the Verax gate**. Text
 the agent writes straight to its model, files it reads with its own
 process, and calls to tools that are not behind Verax are outside it.
 
-## What exists today (measured on main 7d7ca51)
+## What is in the tree
 
-- A policy rule (`packages/proxy/src/policy.ts`, `asRule`) reads `id`,
-  `tool`, `requires`, `text`, and optionally `mode`, `spend`, `egress`.
-  There is no class, mask or file-type field, in the rule or in
-  `types.ts`.
-- `asRule` copies the keys it knows and **ignores any other key**. A rule
-  written today with a `dataClasses` key would load and do nothing. The
-  first change therefore makes an unknown key a load error (or bumps the
-  document `version` and refuses unknown keys under the new version), so an
-  operator cannot believe masking is on when it is not.
-- Egress is already decided per tool (`HOST_EXTRACTORS`, named per tool,
-  no sniffing of arbitrary arguments). Data classes follow the same rule:
-  a tool's arguments are read where the operator says, not guessed.
+`packages/proxy/src/data-classes.ts`, called from `proxy.ts`; every point
+below is a test in `packages/proxy/tests/data-classes.test.ts`.
+
+- **Policy.** A `version: 2` document may carry `dataClasses` (class →
+  `allow` / `mask` / `local` / `block`), `localTools`, `fileTypes.block`,
+  `scanCharCap`, and per-rule `dataClasses` that override the document's
+  choice for that rule's tool. Class names are Conarium's span classes; an
+  unknown name or choice, or `local` without `localTools`, stops the load.
+  Under `version: 1` these keys are refused, and arguments are forwarded as
+  before.
+- **What is scanned.** Every string, object key and number in the call's
+  arguments, at any depth, and Verax's own `_ref` and `_inputs`. This
+  differs from the egress rule above: classes are not read only where an
+  extractor points, because a value that is not scanned would leave
+  unmasked.
+- **Refusals**, each a signed deny and the tool is not reached:
+  `data-class-block:<class>`, `data-class-local:<class>`,
+  `file-type-block:<ext>` (after cutting a URL query or fragment,
+  percent-decoding, dropping an NTFS stream suffix and trailing dots or
+  spaces), `data-class-key:<class>` (a key cannot be masked),
+  `data-class-meta:<class>` (a class in `_ref` or `_inputs`),
+  `data-class-unscanned` (a key that could not be scanned; or a value that
+  could not be scanned when a class is chosen `block` or `local` and none is
+  chosen `mask`, since with a `mask` class that value is replaced whole
+  instead), `data-class-error` (the masker threw).
+  Arguments nested deeper than 64 levels are refused before the request is
+  hashed (`data-class-unscanned`, or `arguments-too-deep` under version 1).
+- **Masking.** `mask` classes are replaced, regions the masker covers
+  without a class are always replaced, and a string over the scan cap is
+  replaced whole. The decision keeps `requestHash` over the arguments as
+  sent; its inputs carry `dataClasses: { masked, forwardedHash }`, counts
+  and a hash, never a value.
+- **Approval.** A deferred call is gated before the operator is asked. The
+  operator's allow names the forwarded (masked) call. The retry after
+  approval gates again and is refused with `data-class-changed` when the
+  call the policy would now forward differs from the one approved.
+
+Not built: operator pattern classes (`{ choice, pattern }`), `resultClasses`,
+the panel, audio and photos.
 
 ## The masking engine: Conarium, as a dependency
 
@@ -48,18 +78,16 @@ values, URL credentials, bearer tokens — plus operator patterns compiled
 with ReDoS checks (`compileCustomPatterns`). Text over the scan cap is
 replaced whole rather than scanned partly.
 
-Measured constraint: the package's `main` is `dist/index.js`, the MCP
-server entrypoint, which starts the server when imported. The masking
-module is reachable only as an internal path (`dist/mask-text.js`), and
-the package has no `exports` map. Verax should not import an internal
-path. The order is:
-
-1. Conarium publishes the pipeline as a library entry (an `exports`
-   subpath such as `@conarium-ai/core/mask`, or a small `@conarium-ai/mask`
-   package) with no side effects on import.
-2. Verax depends on that entry, pinned to an exact version, the way it pins
-   `@cedulon/*`. The code is not copied: one masking implementation, so a
-   detector fixed in Conarium is fixed in Verax.
+Done in Conarium 0.3.3: the pipeline is published as
+`@conarium-ai/mask`, built from the same source as `@conarium-ai/core`,
+with no side effects on import and two dependencies
+(`@eslint-community/regexpp`, `re2js`). `@conarium-ai/core` was not used
+because it brings the gateway's server and database dependencies.
+`maskField` reports what it found per class (`classes`), what it replaced
+(`masked`), and masks only the classes it is asked to (`only`).
+`packages/proxy` pins `@conarium-ai/mask` to an exact version, the way it
+pins `@cedulon/*`. The code is not copied: one masking implementation, so a
+detector fixed in Conarium is fixed in Verax.
 
 Running Conarium as a downstream child does not fit here: a downstream
 child is a tool the agent calls; masking has to sit inside the gate, on
