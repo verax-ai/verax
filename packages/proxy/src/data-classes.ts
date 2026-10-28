@@ -60,9 +60,12 @@ export function dataClassMapHasLocal(
   return Object.values(map).some((choice) => choice === "local");
 }
 
-function lastPathSegment(text: string): string {
-  const parts = text.split(/[/\\]/);
-  return parts[parts.length - 1] ?? text;
+const FILE_TYPE_TOKEN_SPLIT = /[\s"'`,;|&<>`]+/;
+
+function lastMeaningfulSegment(text: string): string | undefined {
+  const trimmed = text.replace(/[/\\]+$/u, "");
+  const parts = trimmed.split(/[/\\]/).filter((seg) => seg !== "" && seg !== "." && seg !== "..");
+  return parts.length === 0 ? undefined : parts[parts.length - 1];
 }
 
 function cutQueryAndFragment(text: string): string {
@@ -106,17 +109,28 @@ function nameHasListedExtension(name: string, listed: string): boolean {
   return lower.length >= ext.length && lower.endsWith(ext);
 }
 
-function blockedFileType(text: string, blocked: readonly string[]): string | undefined {
-  if (blocked.length === 0) return undefined;
+function blockedFileTypeInToken(text: string, blocked: readonly string[]): string | undefined {
   const stripped = cutQueryAndFragment(text);
   for (const candidate of decodeCandidates(stripped)) {
-    const segment = lastPathSegment(cutQueryAndFragment(candidate));
+    const segment = lastMeaningfulSegment(cutQueryAndFragment(candidate));
+    if (segment === undefined) continue;
     for (const raw of ntfsNameCandidates(segment)) {
       const name = trimTrailingDotsAndSpaces(raw);
+      if (name === "" || name === "." || name === "..") continue;
       for (const listed of blocked) {
         if (nameHasListedExtension(name, listed)) return listed;
       }
     }
+  }
+  return undefined;
+}
+
+function blockedFileType(text: string, blocked: readonly string[]): string | undefined {
+  if (blocked.length === 0) return undefined;
+  const tokens = text.split(FILE_TYPE_TOKEN_SPLIT).filter((token) => token.length > 0);
+  for (const token of tokens) {
+    const hit = blockedFileTypeInToken(token, blocked);
+    if (hit !== undefined) return hit;
   }
   return undefined;
 }

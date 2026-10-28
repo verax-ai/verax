@@ -1,4 +1,7 @@
 import { strict as assert } from "node:assert";
+import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import { verifyDecisionRecord } from "@cedulon/core";
 
@@ -6,7 +9,8 @@ import { approvePending } from "../src/approvals.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { loadPolicy } from "../src/policy.ts";
 import { createProxy } from "../src/proxy.ts";
-import { MemoryLedger } from "../src/ledger.ts";
+import { diskProbe } from "../src/disk.ts";
+import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import type { Principal, ToolCall } from "../src/types.ts";
 import { EFFECT_SIGNER, RECORD_SIGNER, queuedNonce, tickingNow } from "./helpers.ts";
 
@@ -354,6 +358,62 @@ describe("data classes: the gate", () => {
     assert.match(out.content[0]?.text ?? "", /^denied:data-class-/);
     const [rec] = await ledger.decisions();
     assert.equal(rec?.claims.decision, "deny");
+  });
+
+  // Security review of PR #247.
+  it("a blocked extension inside a command, after a trailing slash or a dot segment, is refused", async () => {
+    const names = [
+      "cat keys/server.pem && echo ok",
+      "keys/server.pem/",
+      "keys/server.pem/.",
+      "\"C:\\keys\\server.pem\"",
+      "a.txt,keys/server.pem",
+    ];
+    const { proxy, received } = harness(policyV2({ fileTypes: { block: [".pem"] } }), names.map((_, i) => `r-t${i}`));
+    for (const [i, body] of names.entries()) {
+      const out = await proxy.call({ name: "memory.put", arguments: { id: `t${i}`, body } }, P);
+      assert.equal(out.content[0]?.text, `denied:file-type-block:.pem:r-t${i}`, `not refused: ${body}`);
+    }
+    assert.equal(received.length, 0);
+  });
+
+  const filesContaining = (dir: string, needle: string): string[] =>
+    (readdirSync(dir, { recursive: true }) as string[])
+      .map((f) => join(dir, f))
+      .filter((f) => statSync(f).isFile() && readFileSync(f, "utf8").includes(needle));
+
+  const inputsCall = {
+    name: "memory.put",
+    arguments: { id: "n20", body: "ok", _inputs: [{ id: "doc-1", versionHash: "a".repeat(64), source: { note: `mail ${EMAIL}` } }] },
+  };
+  const fileProxy = (dir: string) =>
+    createProxy({
+      policy: policyV2(),
+      recordSigner: RECORD_SIGNER, effectSigner: EFFECT_SIGNER, ledger: new FileLedger(dir),
+      now: tickingNow(), nonce: queuedNonce(["h1", "h2", "h3", "h4"]),
+      resolveInput: async () => ({ versionHash: "a".repeat(64), validFromMs: 0, validUntilMs: 9_999_999_999_999 }),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+
+  it("a halted gate does not write a class from _inputs to disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-"));
+    writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
+    const out = await fileProxy(dir).call(inputsCall, P);
+    assert.match(out.content[0]?.text ?? "", /^denied:/);
+    assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
+  });
+
+  it("a gate low on disk does not write a class from _inputs to disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-disk-"));
+    const orig = diskProbe.freeBytes;
+    diskProbe.freeBytes = (probeDir) => (probeDir === dir ? 0 : orig(probeDir));
+    try {
+      const out = await fileProxy(dir).call(inputsCall, P);
+      assert.match(out.content[0]?.text ?? "", /^denied:/);
+      assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
+    } finally {
+      diskProbe.freeBytes = orig;
+    }
   });
 
   it("a version 1 policy forwards arguments untouched", async () => {

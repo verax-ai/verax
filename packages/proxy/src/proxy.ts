@@ -698,6 +698,10 @@ export function createProxy(deps: ProxyDeps) {
         : sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
+      // A class in `_inputs[].source` must not reach disk before the meta scan.
+      const preMetaInputs = deps.policy.dataClasses
+        ? inputsWithoutSource(resolved.inputs)
+        : resolved.inputs;
       async function denyIfHalted(): Promise<ToolResult | null> {
         if (!stateDir || !isProxyHalted(stateDir)) return null;
         const ref = deps.nonce();
@@ -706,7 +710,7 @@ export function createProxy(deps: ProxyDeps) {
           reasonCode: "halted",
           ref,
           requestHash,
-          inputs: resolved.inputs,
+          inputs: preMetaInputs,
           effectHash: null,
           subject: call.name,
           timestampMs,
@@ -724,7 +728,7 @@ export function createProxy(deps: ProxyDeps) {
           reasonCode: "ledger-disk-low",
           ref,
           requestHash,
-          inputs: resolved.inputs,
+          inputs: preMetaInputs,
           effectHash: null,
           subject: call.name,
           timestampMs,
