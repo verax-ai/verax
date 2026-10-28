@@ -61,6 +61,14 @@ jobs:
           icacls $root /setowner "*S-1-5-32-544" /C /Q
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "drive root $root $((Get-Acl $root).Sddl)"
+          # On the second root Authenticated Users may also modify the root
+          # itself ((A;;0x1301bf;;;AU)), and desktop refuses the root
+          # (desktop-code-writable:D:\, PR #247). The loop below stops before
+          # the root, so remove Authenticated Users' grants from the root here;
+          # this account, SYSTEM and Administrators keep theirs.
+          icacls $root /remove:g "*S-1-5-11" /C /Q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "drive root after $root $((Get-Acl $root).Sddl)"
           # The directories between the drive root and the checkout inherit from
           # the root, and the root is not the same on every hosted machine. On one
           # image version two root ACLs were measured: one lets Users read and add
