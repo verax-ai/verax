@@ -44,6 +44,17 @@ export type PolicyLimits = {
   diskFreeBytes: number;
 };
 
+export type DataClassChoice = "allow" | "mask" | "local" | "block";
+
+/** Present on a loaded version 2 policy; version 1 leaves the gate off. */
+export type DataClassConfig = {
+  document: Readonly<Record<string, DataClassChoice>>;
+  byTool: Readonly<Record<string, Readonly<Record<string, DataClassChoice>>>>;
+  localTools: readonly string[];
+  blockedFileTypes: readonly string[];
+  scanCharCap?: number;
+};
+
 export type Policy = {
   hash: string;
   approvalTtlMs: number;
@@ -56,6 +67,7 @@ export type Policy = {
   /** Statement descriptors the spend rule names for each payee, as parsed: what the hash covers. */
   descriptorsByPayee?: Readonly<Record<string, readonly string[]>>;
   rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number; dayOffsetMinutes?: number } } | null;
+  dataClasses?: DataClassConfig;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
@@ -210,6 +222,8 @@ export type DecisionInputs = {
   control?: ControlInput;
   revoke?: RevokeInput;
   operatorRemoval?: OperatorRemovalInput;
+  /** Counts and the hash of what was forwarded. Never a value or a masked text. */
+  dataClasses?: { masked: Record<string, number>; forwardedHash: string };
 };
 
 /** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */

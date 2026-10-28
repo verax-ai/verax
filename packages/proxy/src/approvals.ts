@@ -35,6 +35,9 @@ export type ApprovalRow = {
   requestHash: string;
   subject: string;
   args: Record<string, unknown>;
+  /** Masked arguments to forward after approval. Absent on older snapshots. */
+  forwardedArgs?: Record<string, unknown>;
+  dataClasses?: { masked: Record<string, number>; forwardedHash: string };
   ruleId: string | null;
   ruleText: string | null;
   inputsSummary: { count: number; ids: string[] };
@@ -443,9 +446,11 @@ async function approvePendingUnlocked(opts: {
     principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
     inputs: prior?.inputs ?? [],
     approver: approverInputs(opts),
+    ...(snap.dataClasses !== undefined ? { dataClasses: snap.dataClasses } : {}),
   };
   const inputsHash = sha256Canonical(inputs);
-  const effectHash = sha256Canonical(effectDescriptor(snap.subject, snap.args));
+  const dispatchArgs = snap.forwardedArgs ?? snap.args;
+  const effectHash = sha256Canonical(effectDescriptor(snap.subject, dispatchArgs));
   await inputsLog.append(allowRef, inputs);
   await opts.ledger.appendDecisionChained((prevRecordHash) =>
     signDecisionRecord(

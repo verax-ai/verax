@@ -27,6 +27,7 @@ import {
   noteTenantRef,
   type LedgerWriter,
 } from "./ledger.ts";
+import { argumentDepth, gateDataClasses, MAX_ARGUMENT_DEPTH, scanCallMeta } from "./data-classes.ts";
 import { terminalText } from "./policy.ts";
 import { spokenReason } from "./spoken-reason.ts";
 import { tenantKey } from "./tenant.ts";
@@ -215,6 +216,18 @@ function toolCallOf(call: ToolCall): ToolCall {
   delete args._inputs;
   delete args._ref;
   return { name: call.name, arguments: args };
+}
+
+function inputsWithoutSource(inputs: DecisionInputs): DecisionInputs {
+  return {
+    ...inputs,
+    inputs: inputs.inputs.map((row) => ({
+      id: row.id,
+      versionHash: row.versionHash,
+      validFromMs: row.validFromMs,
+      validUntilMs: row.validUntilMs,
+    })),
+  };
 }
 
 export function createProxy(deps: ProxyDeps) {
@@ -679,9 +692,16 @@ export function createProxy(deps: ProxyDeps) {
         await syncControlRecords();
       }
       const dispatched = toolCallOf(call);
-      const requestHash = sha256Canonical(dispatched);
+      const tooDeep = argumentDepth(call.arguments) > MAX_ARGUMENT_DEPTH;
+      const requestHash = tooDeep
+        ? sha256Canonical({ name: dispatched.name, tooDeep: true })
+        : sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
+      // A class in `_inputs[].source` must not reach disk before the meta scan.
+      const preMetaInputs = deps.policy.dataClasses
+        ? inputsWithoutSource(resolved.inputs)
+        : resolved.inputs;
       async function denyIfHalted(): Promise<ToolResult | null> {
         if (!stateDir || !isProxyHalted(stateDir)) return null;
         const ref = deps.nonce();
@@ -690,7 +710,7 @@ export function createProxy(deps: ProxyDeps) {
           reasonCode: "halted",
           ref,
           requestHash,
-          inputs: resolved.inputs,
+          inputs: preMetaInputs,
           effectHash: null,
           subject: call.name,
           timestampMs,
@@ -708,7 +728,7 @@ export function createProxy(deps: ProxyDeps) {
           reasonCode: "ledger-disk-low",
           ref,
           requestHash,
-          inputs: resolved.inputs,
+          inputs: preMetaInputs,
           effectHash: null,
           subject: call.name,
           timestampMs,
@@ -724,6 +744,38 @@ export function createProxy(deps: ProxyDeps) {
         {
           const halted = await denyIfHalted();
           if (halted) return { kind: "done", result: halted };
+        }
+        if (tooDeep) {
+          const reasonCode = deps.policy.dataClasses ? "data-class-unscanned" : "arguments-too-deep";
+          const ref = deps.nonce();
+          await writeRecord({
+            decision: "deny",
+            reasonCode,
+            ref,
+            requestHash,
+            inputs: { principal: principalInputs(principal), inputs: [] },
+            effectHash: null,
+            subject: call.name,
+            timestampMs,
+          });
+          return { kind: "done", result: denied(reasonCode, ref) };
+        }
+        if (deps.policy.dataClasses) {
+          const metaReason = scanCallMeta(call, deps.policy.dataClasses);
+          if (metaReason) {
+            const ref = deps.nonce();
+            await writeRecord({
+              decision: "deny",
+              reasonCode: metaReason,
+              ref,
+              requestHash,
+              inputs: inputsWithoutSource(resolved.inputs),
+              effectHash: null,
+              subject: call.name,
+              timestampMs,
+            });
+            return { kind: "done", result: denied(metaReason, ref) };
+          }
         }
         if (given === "invalid") {
           const ref = deps.nonce();
@@ -906,13 +958,52 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("tenant-mismatch", denyRef) };
                 }
+                const toRun =
+                  snap?.forwardedArgs !== undefined
+                    ? { name: dispatched.name, arguments: snap.forwardedArgs }
+                    : dispatched;
+                if (deps.policy.dataClasses) {
+                  const classGated = gateDataClasses(dispatched, deps.policy.dataClasses);
+                  if (classGated.action === "deny") {
+                    return {
+                      kind: "done",
+                      result: await signedRetryDeny(
+                        classGated.reasonCode,
+                        requestHash,
+                        resolved.inputs,
+                        timestampMs,
+                        call.name,
+                        scopedRef,
+                      ),
+                    };
+                  }
+                  if (classGated.action === "forward") {
+                    const snapHash =
+                      snap?.forwardedArgs !== undefined
+                        ? sha256Canonical({ name: dispatched.name, arguments: snap.forwardedArgs })
+                        : undefined;
+                    if (snapHash !== classGated.dataClasses.forwardedHash) {
+                      return {
+                        kind: "done",
+                        result: await signedRetryDeny(
+                          "data-class-changed",
+                          requestHash,
+                          resolved.inputs,
+                          timestampMs,
+                          call.name,
+                          scopedRef,
+                        ),
+                      };
+                    }
+                  }
+                }
                 if (stateDir && isProxyHalted(stateDir)) {
                   return {
                     kind: "done",
-                    result: await recordHaltedAfterAllow(allow.ref, dispatched, principal),
+                    result: await recordHaltedAfterAllow(allow.ref, toRun, principal),
                   };
                 }
-                return launchInner(dispatched, principal, allow.ref, scopedRef, boundRows);
+                return launchInner(toRun, principal, allow.ref, scopedRef, boundRows);
               }
               return { kind: "done", result: deferred(given) };
             }
@@ -986,6 +1077,25 @@ export function createProxy(deps: ProxyDeps) {
           decision = "deny";
           reasonCode = "tenant-mismatch";
         }
+        let forwarded = dispatched;
+        let recordInputs = resolved.inputs;
+        let snapshotForwarded: Record<string, unknown> | undefined;
+        let snapshotDataClasses: DecisionInputs["dataClasses"] | undefined;
+        if (decision === "allow" || decision === "defer") {
+          const classGated = gateDataClasses(dispatched, deps.policy.dataClasses);
+          if (classGated.action === "deny") {
+            decision = "deny";
+            reasonCode = classGated.reasonCode;
+          } else if (classGated.action === "forward") {
+            forwarded = { name: dispatched.name, arguments: classGated.arguments };
+            if (decision === "allow") {
+              recordInputs = { ...resolved.inputs, dataClasses: classGated.dataClasses };
+            } else {
+              snapshotForwarded = classGated.arguments;
+              snapshotDataClasses = classGated.dataClasses;
+            }
+          }
+        }
         const ref = typeof given === "string" ? scopedClaimsRef(principal, given) : deps.nonce();
         // What the brain is told: its own `_ref`, so a retry carries the same key back.
         const shown = typeof given === "string" ? given : ref;
@@ -995,8 +1105,8 @@ export function createProxy(deps: ProxyDeps) {
           reasonCode,
           ref,
           requestHash,
-          inputs: resolved.inputs,
-          effectHash: allow ? sha256Canonical(effectDescriptor(dispatched.name, dispatched.arguments)) : null,
+          inputs: recordInputs,
+          effectHash: allow ? sha256Canonical(effectDescriptor(forwarded.name, forwarded.arguments)) : null,
           subject: call.name,
           timestampMs,
         });
@@ -1013,6 +1123,8 @@ export function createProxy(deps: ProxyDeps) {
             requestHash,
             subject: dispatched.name,
             args: dispatched.arguments,
+            ...(snapshotForwarded !== undefined ? { forwardedArgs: snapshotForwarded } : {}),
+            ...(snapshotDataClasses !== undefined ? { dataClasses: snapshotDataClasses } : {}),
             ruleId: verdict.rule,
             ruleText: rule?.text ?? null,
             inputsSummary: {
@@ -1033,9 +1145,9 @@ export function createProxy(deps: ProxyDeps) {
           return { kind: "done", result: denied(reasonCode, shown, call) };
         }
         if (stateDir && isProxyHalted(stateDir)) {
-          return { kind: "done", result: await recordHaltedAfterAllow(ref, dispatched, principal) };
+          return { kind: "done", result: await recordHaltedAfterAllow(ref, forwarded, principal) };
         }
-        return launchInner(dispatched, principal, ref, ref, resolved.inputs.inputs);
+        return launchInner(forwarded, principal, ref, ref, resolved.inputs.inputs);
       });
 
       if (plan.kind === "done") return plan.result;
