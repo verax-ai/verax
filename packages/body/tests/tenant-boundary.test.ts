@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { explain, tenantKey } from "@verax-ai/proxy";
+import type { ToolResult } from "@verax-ai/proxy";
 
 import { runDoctor } from "../src/doctor.ts";
 import { createBodyServices } from "../src/wiring.ts";
@@ -28,8 +29,9 @@ function testKeys() {
   };
 }
 
-function parse(result: { content: { text: string }[] }): Record<string, unknown> {
-  return JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+function parse(result: ToolResult): Record<string, unknown> {
+  const first = result.content[0];
+  return JSON.parse(first?.type === "text" ? first.text : "{}") as Record<string, unknown>;
 }
 
 const writerA = {

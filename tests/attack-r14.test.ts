@@ -16,6 +16,7 @@ import {
   MemoryLedger,
   verifyLedger,
 } from "@verax-ai/proxy";
+import type { ToolResult } from "@verax-ai/proxy";
 
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import {
@@ -37,8 +38,8 @@ function ownerDir(prefix: string): string {
   return dir;
 }
 
-function textOf(result: { content: { text: string }[] }): string {
-  return result.content.map((part) => part.text).join("");
+function textOf(result: ToolResult): string {
+  return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
 const linuxEnv = {
@@ -379,7 +380,7 @@ describe("attack R14", () => {
       const slow = proxy.call({ name: "memory.get", arguments: { id: "slow" } }, principal);
       for (let i = 0; i < 50 && !started; i += 1) await new Promise((resolve) => setTimeout(resolve, 5));
       assert.equal(started, true);
-      let queued: { content: { text: string }[] } | undefined;
+      let queued: Parameters<typeof textOf>[0] | undefined;
       const waiting = proxy.call({ name: "memory.get", arguments: { id: "next" } }, principal).then((result) => {
         queued = result;
       });

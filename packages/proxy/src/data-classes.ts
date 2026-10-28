@@ -25,7 +25,7 @@ export const SPAN_CLASSES: readonly SpanClass[] = [
 const SPAN_CLASS_SET = new Set<string>(SPAN_CLASSES);
 const CHOICES = new Set<string>(["allow", "mask", "local", "block"]);
 /** Conarium's default when the policy does not set `scanCharCap`. */
-const DEFAULT_SCAN_CHAR_CAP = 16_384;
+export const DEFAULT_SCAN_CHAR_CAP = 16_384;
 /** Nested objects or arrays deeper than this cannot be hashed or scanned safely. */
 export const MAX_ARGUMENT_DEPTH = 64;
 

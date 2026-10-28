@@ -19,9 +19,21 @@ export type ToolCall = {
   arguments: Record<string, unknown>;
 };
 
-/** Same shape as `@cedulon/mcp-guard`. claimedHash is a side field; it does not enter the ledger or audit. */
+export type TextContent = { type: "text"; text: string };
+export type MediaContent = { type: "image" | "audio"; data: string; mimeType: string; text?: undefined };
+export type ResultContent = TextContent | MediaContent;
+
+export function isTextContent(block: ResultContent): block is TextContent {
+  return block.type === "text";
+}
+
+export function isMediaContent(block: ResultContent): block is MediaContent {
+  return block.type === "image" || block.type === "audio";
+}
+
+/** Same shape as `@cedulon/mcp-guard`, plus image and audio blocks as MCP tools return them. claimedHash is a side field; it does not enter the ledger or audit. */
 export type ToolResult = {
-  content: { type: "text"; text: string }[];
+  content: ResultContent[];
   isError: boolean;
   claimedHash?: string;
   /** Adapter-verified downstream extract. Side field: excluded from resultHash and the agent response. */
@@ -45,6 +57,7 @@ export type PolicyLimits = {
 };
 
 export type DataClassChoice = "allow" | "mask" | "local" | "block";
+export type ResultClassChoice = "allow" | "mask" | "block";
 
 /** Present on a loaded version 2 policy; version 1 leaves the gate off. */
 export type DataClassConfig = {
@@ -53,6 +66,25 @@ export type DataClassConfig = {
   localTools: readonly string[];
   blockedFileTypes: readonly string[];
   scanCharCap?: number;
+};
+
+export type ResultClassConfig = {
+  document: Readonly<Record<string, ResultClassChoice>>;
+  byTool: Readonly<Record<string, Readonly<Record<string, ResultClassChoice>>>>;
+};
+
+export type AudioChoice = "allow" | "transcribe" | "withhold";
+export type ImageChoice = "allow" | "withhold";
+
+export type TranscriberConfig = {
+  command: readonly string[];
+  timeoutMs: number;
+};
+
+export type MediaConfig = {
+  audio?: AudioChoice;
+  image?: ImageChoice;
+  transcriber?: TranscriberConfig;
 };
 
 export type Policy = {
@@ -68,6 +100,8 @@ export type Policy = {
   descriptorsByPayee?: Readonly<Record<string, readonly string[]>>;
   rule(id: string | null): { id: string; text: string; spend?: { dailyMaxMinor?: number; dayOffsetMinutes?: number } } | null;
   dataClasses?: DataClassConfig;
+  resultClasses?: ResultClassConfig;
+  media?: MediaConfig;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";
@@ -224,6 +258,15 @@ export type DecisionInputs = {
   operatorRemoval?: OperatorRemovalInput;
   /** Counts and the hash of what was forwarded. Never a value or a masked text. */
   dataClasses?: { masked: Record<string, number>; forwardedHash: string };
+  /** Ref of the call whose result this record is about. */
+  resultOf?: string;
+  /** Counts and the hash of what the agent received. Never a value or transcript text. */
+  resultClasses?: {
+    masked: Record<string, number>;
+    transcribed: number;
+    withheld: Record<string, number>;
+    returnedHash: string;
+  };
 };
 
 /** How an operator's approval reached the ledger: a person at `verax approve`, a non-interactive `--from-script` run, or the body's `/api/approve`. */

@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { generateKeyPairSync } from "node:crypto";
 
+import type { ToolResult } from "@verax-ai/proxy";
+
 import { createBodyServices } from "../src/wiring.ts";
 
 const policyFile = join(
@@ -26,8 +28,9 @@ function testKeys() {
   };
 }
 
-function parse(result: { content: { text: string }[] }): Record<string, unknown> {
-  return JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown>;
+function parse(result: ToolResult): Record<string, unknown> {
+  const first = result.content[0];
+  return JSON.parse(first?.type === "text" ? first.text : "{}") as Record<string, unknown>;
 }
 
 describe("P1-2 memory id stays inside memoryDir", () => {
