@@ -1,7 +1,8 @@
 import { parseIJson } from "@cedulon/core";
+import { dataClassMapHasLocal, parseDataClassMap } from "./data-classes.ts";
 import { defaultDiskFreeBytes } from "./disk.ts";
 import { sha256Canonical } from "./hash.ts";
-import type { Policy, PolicyDecision, PolicyEvalCtx, PolicyLimits, Principal, ToolCall } from "./types.ts";
+import type { DataClassChoice, Policy, PolicyDecision, PolicyEvalCtx, PolicyLimits, Principal, ToolCall } from "./types.ts";
 
 export type PolicySpend = {
   maxAmountMinor: number;
@@ -25,10 +26,11 @@ export type PolicyRule = {
   mode?: "allow" | "approve";
   spend?: PolicySpend;
   egress?: true;
+  dataClasses?: Readonly<Record<string, DataClassChoice>>;
 };
 
 export type PolicyDocument = {
-  version: 1;
+  version: 1 | 2;
   default: "deny";
   approvalTtlMs?: number;
   egress?: readonly string[];
@@ -39,6 +41,10 @@ export type PolicyDocument = {
     dailyMax?: number;
     diskFreeBytes?: number;
   };
+  dataClasses?: Readonly<Record<string, DataClassChoice>>;
+  localTools?: readonly string[];
+  fileTypes?: { block: readonly string[] };
+  scanCharCap?: number;
   rules: PolicyRule[];
 };
 
@@ -88,7 +94,9 @@ export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => 
 const DEFAULT_APPROVAL_TTL_MS = 86_400_000;
 
 const DOCUMENT_KEYS = new Set(["version", "default", "rules", "egress", "approvalTtlMs", "limits", "requireInputs"]);
+const DOCUMENT_KEYS_V2 = new Set([...DOCUMENT_KEYS, "dataClasses", "localTools", "fileTypes", "scanCharCap"]);
 const RULE_KEYS = new Set(["id", "tool", "requires", "text", "mode", "spend", "egress"]);
+const RULE_KEYS_V2 = new Set([...RULE_KEYS, "dataClasses"]);
 const SPEND_KEYS = new Set(["maxAmountMinor", "currency", "payees", "dailyMaxMinor", "dayOffsetMinutes", "descriptors"]);
 const LIMIT_KEYS = new Set(["ratePerMinute", "dailyMax", "diskFreeBytes"]);
 
@@ -114,7 +122,7 @@ function rejectUnknownKeys(
   }
 }
 
-function asRule(raw: unknown, index: number, options: PolicyParseOptions): PolicyRule {
+function asRule(raw: unknown, index: number, options: PolicyParseOptions, version: 1 | 2): PolicyRule {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`policy-rule-invalid:${index}`);
   }
@@ -122,7 +130,7 @@ function asRule(raw: unknown, index: number, options: PolicyParseOptions): Polic
   if (typeof rec.id !== "string" || rec.id === "") {
     throw new Error(`policy-rule-id:${index}`);
   }
-  rejectUnknownKeys(rec, RULE_KEYS, `policy-rule-unknown-key:${rec.id}`, options);
+  rejectUnknownKeys(rec, version === 2 ? RULE_KEYS_V2 : RULE_KEYS, `policy-rule-unknown-key:${rec.id}`, options);
   if (typeof rec.tool !== "string" || rec.tool === "") {
     throw new Error(`policy-rule-tool:${rec.id}`);
   }
@@ -171,6 +179,9 @@ function asRule(raw: unknown, index: number, options: PolicyParseOptions): Polic
     // The gate reads this tool's host, and only under the mark. Without it
     // the call would reach any host, so the rule does not load.
     throw new Error(`policy-rule-egress-unmarked:${rec.id}`);
+  }
+  if (version === 2 && rec.dataClasses !== undefined) {
+    rule.dataClasses = parseDataClassMap(rec.dataClasses);
   }
   return rule;
 }
@@ -302,9 +313,14 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
     throw new Error("policy-not-object");
   }
   const rec = raw as Record<string, unknown>;
-  rejectUnknownKeys(rec, DOCUMENT_KEYS, "policy-unknown-key", options);
-  if (rec.version !== 1) {
-    throw new Error("policy-version");
+  const version: 1 | 2 | undefined = rec.version === 2 ? 2 : rec.version === 1 ? 1 : undefined;
+  if (version === 2) {
+    rejectUnknownKeys(rec, DOCUMENT_KEYS_V2, "policy-unknown-key", options);
+  } else {
+    rejectUnknownKeys(rec, DOCUMENT_KEYS, "policy-unknown-key", options);
+    if (version !== 1) {
+      throw new Error("policy-version");
+    }
   }
   if (rec.default !== "deny") {
     throw new Error("policy-default-not-deny");
@@ -313,9 +329,9 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
     throw new Error("policy-rules");
   }
   const document: PolicyDocument = {
-    version: 1,
+    version: version ?? 1,
     default: "deny",
-    rules: rec.rules.map((rule, index) => asRule(rule, index, options)),
+    rules: rec.rules.map((rule, index) => asRule(rule, index, options, version ?? 1)),
   };
   if (rec.egress !== undefined) {
     if (
@@ -351,8 +367,59 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
     }
     document.requireInputs = true;
   }
+  if (version === 2) {
+    if (rec.dataClasses !== undefined) {
+      document.dataClasses = parseDataClassMap(rec.dataClasses);
+    }
+    if (rec.localTools !== undefined) {
+      document.localTools = asLocalTools(rec.localTools);
+    }
+    if (rec.fileTypes !== undefined) {
+      document.fileTypes = asFileTypes(rec.fileTypes);
+    }
+    if (rec.scanCharCap !== undefined) {
+      if (
+        typeof rec.scanCharCap !== "number" ||
+        !Number.isInteger(rec.scanCharCap) ||
+        rec.scanCharCap <= 0
+      ) {
+        throw new Error("policy-scan-char-cap");
+      }
+      document.scanCharCap = rec.scanCharCap;
+    }
+    const localUsed =
+      dataClassMapHasLocal(document.dataClasses) ||
+      document.rules.some((rule) => dataClassMapHasLocal(rule.dataClasses));
+    if (localUsed && (document.localTools === undefined || document.localTools.length === 0)) {
+      throw new Error("policy-data-class-local-tools");
+    }
+  }
   rejectDuplicateRules(document.rules);
   return document;
+}
+
+function asLocalTools(raw: unknown): string[] {
+  if (!Array.isArray(raw) || raw.some((t) => typeof t !== "string" || t === "")) {
+    throw new Error("policy-data-class-local-tools");
+  }
+  return raw as string[];
+}
+
+function asFileTypes(raw: unknown): { block: string[] } {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("policy-file-types");
+  }
+  const rec = raw as Record<string, unknown>;
+  for (const key of Object.keys(rec)) {
+    if (key !== "block") throw new Error("policy-file-types");
+  }
+  if (!Array.isArray(rec.block)) throw new Error("policy-file-types");
+  for (const ext of rec.block) {
+    if (typeof ext !== "string" || !ext.startsWith(".") || ext !== ext.toLowerCase() || ext.length < 2) {
+      throw new Error("policy-file-types");
+    }
+  }
+  return { block: rec.block as string[] };
 }
 
 function rejectDuplicateRules(rules: readonly PolicyRule[]): void {
@@ -415,6 +482,21 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
     approvalTtlMs: document.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS,
     limits,
     ...(document.requireInputs ? { requireInputs: true as const } : {}),
+    ...(document.version === 2
+      ? {
+          dataClasses: {
+            document: document.dataClasses ?? {},
+            byTool: Object.fromEntries(
+              document.rules
+                .filter((rule) => rule.dataClasses !== undefined)
+                .map((rule) => [rule.tool, rule.dataClasses!]),
+            ),
+            localTools: document.localTools ?? [],
+            blockedFileTypes: [...(document.fileTypes?.block ?? [])],
+            ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
+          },
+        }
+      : {}),
     rule(id: string | null) {
       if (id === null) return null;
       const found = document.rules.find((r) => r.id === id);
