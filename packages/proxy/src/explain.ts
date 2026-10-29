@@ -332,8 +332,9 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     const resultHashByRef = new Map<string, string>();
     const effectClassByRef = new Map<string, string>();
     for (const e of effects) {
+      if (e.row.effectClass === "duplicate-effect") continue;
       if (typeof e.resultHash === "string") resultHashByRef.set(e.row.ref, e.resultHash);
-      if (e.row.effectClass !== "duplicate-effect") effectClassByRef.set(e.row.ref, e.row.effectClass);
+      if (typeof e.row.effectClass === "string") effectClassByRef.set(e.row.ref, e.row.effectClass);
     }
     let namedCount = 0;
     for (const rec of decisions) {

@@ -279,6 +279,37 @@ describe("verifyLedger — result records", () => {
     }
   });
 
+  it("a duplicate-effect row does not overwrite the call's resultHash", async () => {
+    const dir = await ledgerWithResultRecord();
+    const ledger = new FileLedger(dir);
+    ledger.effectSigner = EFFECT_SIGNER;
+    try {
+      await assert.rejects(
+        () =>
+          ledger.appendEffect(
+            {
+              ref: "r-1",
+              effectHash: "ab".repeat(32),
+              effectClass: "media.read",
+              timestampMs: 99,
+              actor: "brain-1",
+            },
+            "self",
+            "0".repeat(64),
+          ),
+        /duplicate-effect:r-1/,
+      );
+    } finally {
+      ledger.close();
+    }
+    const verified = await verifyLedger(dir, { boundaryAllowanceMs: 0 });
+    assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+    assert.ok(
+      !verified.problems.some((p) => p.startsWith("result-record-mismatch ")),
+      JSON.stringify(verified.problems),
+    );
+  });
+
   it("refuses a result record whose decision is not allow or deny", async () => {
     const dir = await ledgerWithResultRecord();
     rewriteLastDecision(dir, (rec) =>

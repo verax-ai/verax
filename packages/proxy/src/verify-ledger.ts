@@ -1599,8 +1599,9 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   const effectClassByRef = new Map<string, string>();
   for (const e of effectRows) {
     if (typeof e.row?.ref !== "string") continue;
+    if (e.row.effectClass === "duplicate-effect") continue;
     if (typeof e.resultHash === "string") resultHashByRef.set(e.row.ref, e.resultHash);
-    if (typeof e.row.effectClass === "string" && e.row.effectClass !== "duplicate-effect") {
+    if (typeof e.row.effectClass === "string") {
       effectClassByRef.set(e.row.ref, e.row.effectClass);
     }
   }
