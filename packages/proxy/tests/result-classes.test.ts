@@ -167,6 +167,26 @@ describe("result classes: the policy document", () => {
 });
 
 describe("result classes: text results", () => {
+  it("media without resultClasses leaves text blocks untouched", async () => {
+    const dash = "2026\u20132027";
+    const long = `${"x".repeat(100)} ${dash}`;
+    const returns = result([{ type: "text", text: long }, AUDIO_BLOCK]);
+    const { proxy } = harness(
+      policy({ media: { audio: "withhold", image: "withhold" }, scanCharCap: 64 }),
+      returns,
+    );
+    const res = await proxy.call(CALL, P);
+    const texts = blocks(res).filter((b) => b.type === "text");
+    assert.ok(
+      texts.some((b) => b.text === long),
+      `the text block was rewritten: ${JSON.stringify(texts)}`,
+    );
+    assert.ok(
+      texts.some((b) => b.text === "[audio withheld]"),
+      `the audio block was not withheld: ${JSON.stringify(texts)}`,
+    );
+  });
+
   it("without resultClasses or media a result is returned unchanged, media blocks as media", async () => {
     const returns = result([{ type: "text", text: `TC ${TCKN}` }, AUDIO_BLOCK, IMAGE_BLOCK]);
     const { proxy, ledger } = harness(policy({ dataClasses: { email: "mask" } }), returns);

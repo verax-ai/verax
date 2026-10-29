@@ -607,17 +607,21 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
     ...(document.requireInputs ? { requireInputs: true as const } : {}),
     ...(document.version === 2
       ? {
-          dataClasses: {
-            document: document.dataClasses ?? {},
-            byTool: Object.fromEntries(
-              document.rules
-                .filter((rule) => rule.dataClasses !== undefined)
-                .map((rule) => [rule.tool, rule.dataClasses!]),
-            ),
-            localTools: document.localTools ?? [],
-            blockedFileTypes: [...(document.fileTypes?.block ?? [])],
-            ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
-          },
+          ...(document.dataClasses !== undefined || document.rules.some((rule) => rule.dataClasses !== undefined)
+            ? {
+                dataClasses: {
+                  document: document.dataClasses ?? {},
+                  byTool: Object.fromEntries(
+                    document.rules
+                      .filter((rule) => rule.dataClasses !== undefined)
+                      .map((rule) => [rule.tool, rule.dataClasses!]),
+                  ),
+                  localTools: document.localTools ?? [],
+                  blockedFileTypes: [...(document.fileTypes?.block ?? [])],
+                  ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
+                },
+              }
+            : {}),
           ...(document.resultClasses !== undefined || document.rules.some((rule) => rule.resultClasses !== undefined)
             ? {
                 resultClasses: {
@@ -631,6 +635,7 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
               }
             : {}),
           ...(document.media !== undefined ? { media: document.media } : {}),
+          ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
         }
       : {}),
     rule(id: string | null) {

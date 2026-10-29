@@ -348,7 +348,7 @@ function leaveError(original: unknown, message: string): LeavingError {
  * carry the raw text out. A throw inside this gate becomes
  * `withheld:result-class-error:<ref>`, never the original. The error comes
  * back wrapped, so awaiting the gate cannot adopt a thenable error. Call it
- * only when the policy sets `resultClasses` or `media`.
+ * only when the policy sets `resultClasses`.
  */
 export async function gateThrownError(
   err: unknown,
@@ -359,12 +359,12 @@ export async function gateThrownError(
   deps: ResultGateDeps,
 ): Promise<{ error: unknown }> {
   const { policy } = deps;
-  if (!policy.resultClasses && !policy.media) return { error: err };
+  if (!policy.resultClasses) return { error: err };
 
   try {
     const choices = choicesFor(policy, tool);
     const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
-    const cap = policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+    const cap = policy.scanCharCap ?? policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
     const masker = deps.masker ?? maskField;
     const original = err instanceof Error ? `${err.message}` : String(err);
     let leaving = original;
@@ -437,7 +437,7 @@ export async function gateResultClasses(
 
   const choices = choicesFor(policy, tool);
   const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
-  const cap = policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+  const cap = policy.scanCharCap ?? policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
   const masker = deps.masker ?? maskField;
   const classCounts: Record<string, number> = {};
   const masked: Record<string, number> = {};
@@ -449,6 +449,10 @@ export async function gateResultClasses(
 
   for (const block of result.content) {
     if (isTextContent(block)) {
+      if (!policy.resultClasses) {
+        content.push(block);
+        continue;
+      }
       let scanned;
       try {
         scanned = scanText(block.text, only, cap, masker, TEXT_MASK_PIPELINE, detectorsFor(choices));
@@ -482,6 +486,10 @@ export async function gateResultClasses(
       continue;
     }
     transcribed += 1;
+    if (!policy.resultClasses) {
+      content.push({ type: "text", text: `[audio transcript] ${transcript}` });
+      continue;
+    }
     let scanned;
     try {
       scanned = scanText(transcript, only, cap, masker, TRANSCRIPT_MASK_PIPELINE, detectorsFor(choices));

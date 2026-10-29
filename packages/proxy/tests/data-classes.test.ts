@@ -442,6 +442,23 @@ describe("data classes: the gate", () => {
     assert.match(out.content[0]?.text ?? "", /^denied:data-class-block:ip:/);
   });
 
+  it("a version 2 policy without dataClasses leaves arguments untouched", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-v2-nogate"]);
+    const dash = "2026\u20132027";
+    const args = { id: "n-v2", body: `${"x".repeat(20_000)}${dash}` };
+    await proxy.call({ name: "memory.put", arguments: args }, P);
+    assert.deepEqual(received[0]?.arguments, args);
+  });
+
   it("a version 1 policy forwards arguments untouched", async () => {
     const policy = loadPolicy(JSON.stringify({
       version: 1, default: "deny",
