@@ -2,7 +2,18 @@ import { parseIJson } from "@cedulon/core";
 import { dataClassMapHasLocal, parseDataClassMap } from "./data-classes.ts";
 import { defaultDiskFreeBytes } from "./disk.ts";
 import { sha256Canonical } from "./hash.ts";
-import type { DataClassChoice, Policy, PolicyDecision, PolicyEvalCtx, PolicyLimits, Principal, ToolCall } from "./types.ts";
+import type {
+  DataClassChoice,
+  MediaConfig,
+  Policy,
+  PolicyDecision,
+  PolicyEvalCtx,
+  PolicyLimits,
+  Principal,
+  ResultClassChoice,
+  ToolCall,
+  TranscriberConfig,
+} from "./types.ts";
 
 export type PolicySpend = {
   maxAmountMinor: number;
@@ -27,6 +38,7 @@ export type PolicyRule = {
   spend?: PolicySpend;
   egress?: true;
   dataClasses?: Readonly<Record<string, DataClassChoice>>;
+  resultClasses?: Readonly<Record<string, ResultClassChoice>>;
 };
 
 export type PolicyDocument = {
@@ -42,6 +54,8 @@ export type PolicyDocument = {
     diskFreeBytes?: number;
   };
   dataClasses?: Readonly<Record<string, DataClassChoice>>;
+  resultClasses?: Readonly<Record<string, ResultClassChoice>>;
+  media?: MediaConfig;
   localTools?: readonly string[];
   fileTypes?: { block: readonly string[] };
   scanCharCap?: number;
@@ -94,9 +108,19 @@ export const HOST_EXTRACTORS: Record<string, (args: Record<string, unknown>) => 
 const DEFAULT_APPROVAL_TTL_MS = 86_400_000;
 
 const DOCUMENT_KEYS = new Set(["version", "default", "rules", "egress", "approvalTtlMs", "limits", "requireInputs"]);
-const DOCUMENT_KEYS_V2 = new Set([...DOCUMENT_KEYS, "dataClasses", "localTools", "fileTypes", "scanCharCap"]);
+const DOCUMENT_KEYS_V2 = new Set([
+  ...DOCUMENT_KEYS,
+  "dataClasses",
+  "resultClasses",
+  "media",
+  "localTools",
+  "fileTypes",
+  "scanCharCap",
+]);
 const RULE_KEYS = new Set(["id", "tool", "requires", "text", "mode", "spend", "egress"]);
-const RULE_KEYS_V2 = new Set([...RULE_KEYS, "dataClasses"]);
+const RULE_KEYS_V2 = new Set([...RULE_KEYS, "dataClasses", "resultClasses"]);
+const DEFAULT_TRANSCRIBER_TIMEOUT_MS = 60_000;
+const MAX_TRANSCRIBER_TIMEOUT_MS = 600_000;
 const SPEND_KEYS = new Set(["maxAmountMinor", "currency", "payees", "dailyMaxMinor", "dayOffsetMinutes", "descriptors"]);
 const LIMIT_KEYS = new Set(["ratePerMinute", "dailyMax", "diskFreeBytes"]);
 
@@ -182,6 +206,9 @@ function asRule(raw: unknown, index: number, options: PolicyParseOptions, versio
   }
   if (version === 2 && rec.dataClasses !== undefined) {
     rule.dataClasses = parseDataClassMap(rec.dataClasses);
+  }
+  if (version === 2 && rec.resultClasses !== undefined) {
+    rule.resultClasses = parseResultClassMap(rec.resultClasses);
   }
   return rule;
 }
@@ -387,6 +414,12 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
       }
       document.scanCharCap = rec.scanCharCap;
     }
+    if (rec.resultClasses !== undefined) {
+      document.resultClasses = parseResultClassMap(rec.resultClasses);
+    }
+    if (rec.media !== undefined) {
+      document.media = parseMedia(rec.media);
+    }
     const localUsed =
       dataClassMapHasLocal(document.dataClasses) ||
       document.rules.some((rule) => dataClassMapHasLocal(rule.dataClasses));
@@ -396,6 +429,96 @@ export function parsePolicyDocument(json: unknown, options: PolicyParseOptions =
   }
   rejectDuplicateRules(document.rules);
   return document;
+}
+
+function parseResultClassMap(raw: unknown): Record<string, ResultClassChoice> {
+  const map = parseDataClassMap(raw);
+  const out: Record<string, ResultClassChoice> = {};
+  for (const [name, choice] of Object.entries(map)) {
+    if (choice === "local") throw new Error(`policy-result-class-local:${name}`);
+    out[name] = choice;
+  }
+  return out;
+}
+
+function countToken(haystack: string, needle: string): number {
+  if (needle === "") return 0;
+  let n = 0;
+  let from = 0;
+  while (from <= haystack.length) {
+    const at = haystack.indexOf(needle, from);
+    if (at === -1) return n;
+    n += 1;
+    from = at + needle.length;
+  }
+  return n;
+}
+
+function parseTranscriber(raw: unknown): TranscriberConfig {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("policy-media-transcriber");
+  }
+  const rec = raw as Record<string, unknown>;
+  for (const key of Object.keys(rec)) {
+    if (key !== "command" && key !== "timeoutMs") throw new Error(`policy-media-transcriber:${key}`);
+  }
+  if (
+    !Array.isArray(rec.command) ||
+    rec.command.length === 0 ||
+    rec.command.some((part) => typeof part !== "string")
+  ) {
+    throw new Error("policy-media-transcriber");
+  }
+  const command = rec.command as string[];
+  let fileMarks = 0;
+  for (const part of command) fileMarks += countToken(part, "{file}");
+  if (fileMarks !== 1) throw new Error("policy-media-transcriber");
+  let timeoutMs = DEFAULT_TRANSCRIBER_TIMEOUT_MS;
+  if (rec.timeoutMs !== undefined) {
+    if (
+      typeof rec.timeoutMs !== "number" ||
+      !Number.isInteger(rec.timeoutMs) ||
+      rec.timeoutMs <= 0 ||
+      rec.timeoutMs > MAX_TRANSCRIBER_TIMEOUT_MS
+    ) {
+      throw new Error("policy-media-transcriber");
+    }
+    timeoutMs = rec.timeoutMs;
+  }
+  return { command, timeoutMs };
+}
+
+function parseMedia(raw: unknown): MediaConfig {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("policy-media");
+  }
+  const rec = raw as Record<string, unknown>;
+  const out: MediaConfig = {};
+  for (const [kind, value] of Object.entries(rec)) {
+    if (kind === "transcriber") {
+      out.transcriber = parseTranscriber(value);
+      continue;
+    }
+    if (kind === "audio") {
+      if (value !== "allow" && value !== "transcribe" && value !== "withhold") {
+        throw new Error("policy-media-choice:audio");
+      }
+      out.audio = value;
+      continue;
+    }
+    if (kind === "image") {
+      if (value !== "allow" && value !== "withhold") {
+        throw new Error("policy-media-choice:image");
+      }
+      out.image = value;
+      continue;
+    }
+    throw new Error(`policy-media-kind:${kind}`);
+  }
+  if (out.audio === "transcribe" && out.transcriber === undefined) {
+    throw new Error("policy-media-transcriber");
+  }
+  return out;
 }
 
 function asLocalTools(raw: unknown): string[] {
@@ -495,6 +618,19 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
             blockedFileTypes: [...(document.fileTypes?.block ?? [])],
             ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
           },
+          ...(document.resultClasses !== undefined || document.rules.some((rule) => rule.resultClasses !== undefined)
+            ? {
+                resultClasses: {
+                  document: document.resultClasses ?? {},
+                  byTool: Object.fromEntries(
+                    document.rules
+                      .filter((rule) => rule.resultClasses !== undefined)
+                      .map((rule) => [rule.tool, rule.resultClasses!]),
+                  ),
+                },
+              }
+            : {}),
+          ...(document.media !== undefined ? { media: document.media } : {}),
         }
       : {}),
     rule(id: string | null) {

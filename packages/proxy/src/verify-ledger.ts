@@ -740,6 +740,7 @@ function allowsWithoutEffect(
   attested: readonly SignedDecisionRecord[],
   rowRefs: ReadonlySet<string>,
   allowanceMs: number,
+  resultRefs: ReadonlySet<string> = new Set(),
 ): { findings: string[]; deferred: string[] } {
   let newest = -Infinity;
   for (const r of attested) {
@@ -752,12 +753,68 @@ function allowsWithoutEffect(
     const ref = r.claims.ref;
     if (r.claims.decision !== "allow" || typeof ref !== "string" || seen.has(ref)) continue;
     seen.add(ref);
+    if (resultRefs.has(ref)) continue;
     if (rowRefs.has(ref)) continue;
     const t = r.claims.timestampMs;
     if (typeof t === "number" && newest - t <= allowanceMs) deferred.push(ref);
     else findings.push(ref);
   }
   return { findings, deferred };
+}
+
+type ResultRecordMeta = {
+  resultOf: string;
+  resultClasses: unknown;
+};
+
+/** Decisions whose inputs say they are about a result, not a new allow. */
+function resultRecordMetaByRef(paths: readonly string[], problems: string[]): Map<string, ResultRecordMeta> {
+  const map = new Map<string, ResultRecordMeta>();
+  for (const path of paths) {
+    for (const row of readJsonl(path, problems)) {
+      if (!row || typeof row !== "object" || Array.isArray(row)) continue;
+      const { ref, inputs } = row as { ref?: unknown; inputs?: unknown };
+      if (typeof ref !== "string" || inputs === null || typeof inputs !== "object" || Array.isArray(inputs)) {
+        continue;
+      }
+      const resultOf = (inputs as { resultOf?: unknown }).resultOf;
+      if (typeof resultOf !== "string") continue;
+      map.set(ref, {
+        resultOf,
+        resultClasses: (inputs as { resultClasses?: unknown }).resultClasses,
+      });
+    }
+  }
+  return map;
+}
+
+function positiveIntMap(raw: unknown): boolean {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+  for (const n of Object.values(raw as Record<string, unknown>)) {
+    if (typeof n !== "number" || !Number.isInteger(n) || n <= 0) return false;
+  }
+  return true;
+}
+
+function resultClassesShapeOk(raw: unknown): boolean {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return false;
+  const o = raw as {
+    returnedHash?: unknown;
+    masked?: unknown;
+    withheld?: unknown;
+    transcribed?: unknown;
+  };
+  if (typeof o.returnedHash !== "string" || !/^[0-9a-f]{64}$/.test(o.returnedHash)) return false;
+  if (!positiveIntMap(o.masked) || !positiveIntMap(o.withheld)) return false;
+  if (typeof o.transcribed !== "number" || !Number.isInteger(o.transcribed) || o.transcribed < 0) {
+    return false;
+  }
+  return true;
+}
+
+function subjectMatchesNamedCall(subject: unknown, effectClass: string | undefined): boolean {
+  if (typeof subject !== "string" || effectClass === undefined) return false;
+  return subject === effectClass || `${subject}:threw` === effectClass;
 }
 
 function tailStatement(
@@ -1484,12 +1541,60 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (ref !== null) boundPrimaryRefs.add(ref);
   }
 
+  const resultMeta = resultRecordMetaByRef(files.inputs, problems);
   const unbound = allowsWithoutEffect(
     attested,
     primarySeen,
     opts.boundaryAllowanceMs ?? DEFAULT_BOUNDARY_ALLOWANCE_MS,
+    new Set(resultMeta.keys()),
   );
   problems.push(...unbound.findings.map((ref) => `decision-without-effect ${ref}`));
+  const resultHashByRef = new Map<string, string>();
+  const effectClassByRef = new Map<string, string>();
+  for (const e of effectRows) {
+    if (typeof e.row?.ref !== "string") continue;
+    if (typeof e.resultHash === "string") resultHashByRef.set(e.row.ref, e.resultHash);
+    if (typeof e.row.effectClass === "string" && e.row.effectClass !== "duplicate-effect") {
+      effectClassByRef.set(e.row.ref, e.row.effectClass);
+    }
+  }
+  // A result record is a statement about a call, not an allow that needs its
+  // own effect row. Besides resultOf / requestHash, the decision is allow or
+  // deny, an allow repeats that hash as effectHash, a deny carries none,
+  // returnedHash is 64 lowercase hex, counts are integers (masked/withheld
+  // positive, transcribed ≥ 0), subject matches the named call's effectClass
+  // (`:threw` allowed), and at most one result record names a call. Any of
+  // those failing is `result-record-mismatch <ref>`.
+  const namedByCall = new Map<string, string[]>();
+  for (const [ref, meta] of resultMeta) {
+    const list = namedByCall.get(meta.resultOf) ?? [];
+    list.push(ref);
+    namedByCall.set(meta.resultOf, list);
+  }
+  for (const rec of attested) {
+    const ref = rec.claims.ref;
+    if (typeof ref !== "string") continue;
+    const meta = resultMeta.get(ref);
+    if (meta === undefined) continue;
+    const expected = resultHashByRef.get(meta.resultOf);
+    const decision = rec.claims.decision;
+    const effectOk =
+      decision === "allow"
+        ? rec.claims.effectHash === rec.claims.requestHash
+        : decision === "deny"
+          ? rec.claims.effectHash === null
+          : false;
+    if (
+      expected === undefined ||
+      rec.claims.requestHash !== expected ||
+      !effectOk ||
+      !resultClassesShapeOk(meta.resultClasses) ||
+      !subjectMatchesNamedCall(rec.claims.subject, effectClassByRef.get(meta.resultOf)) ||
+      (namedByCall.get(meta.resultOf) ?? []).length > 1
+    ) {
+      problems.push(`result-record-mismatch ${ref}`);
+    }
+  }
 
   const indexed = indexStatement(dir, refler);
   const effectCompleteness = noteEffectCompleteness(indexed.effectRefs, boundPrimaryRefs, problems);

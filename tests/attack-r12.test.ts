@@ -27,6 +27,7 @@ import {
   tenantKey,
   verifyLedger,
 } from "@verax-ai/proxy";
+import type { ToolResult } from "@verax-ai/proxy";
 
 import { auditExplain } from "../packages/body/src/tools/audit.ts";
 import { createBodyServices } from "../packages/body/src/wiring.ts";
@@ -53,8 +54,8 @@ function testKeys() {
   };
 }
 
-function textOf(result: { content: { text: string }[] }): string {
-  return result.content.map((part) => part.text).join("");
+function textOf(result: ToolResult): string {
+  return result.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
 describe("attack R12", () => {

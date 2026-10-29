@@ -28,10 +28,12 @@ import {
   type LedgerWriter,
 } from "./ledger.ts";
 import { argumentDepth, gateDataClasses, MAX_ARGUMENT_DEPTH, scanCallMeta } from "./data-classes.ts";
+import { gateResultClasses, gateThrownError } from "./result-classes.ts";
 import { terminalText } from "./policy.ts";
 import { spokenReason } from "./spoken-reason.ts";
 import { tenantKey } from "./tenant.ts";
 import type { DecisionInputRow, DecisionInputs, Ledger, Principal, ProxyDeps, ToolCall, ToolResult } from "./types.ts";
+import { isTextContent } from "./types.ts";
 
 function scopedClaimsRef(principal: Principal, raw: string): string {
   if (principal.iss || principal.tenant || principal.org) {
@@ -112,7 +114,7 @@ function effectUnrecorded(ref: string): ToolResult {
 }
 
 function isEffectUnrecorded(result: ToolResult): boolean {
-  return result.content.some((part) => part.text.startsWith("effect-unrecorded:"));
+  return result.content.some((part) => isTextContent(part) && part.text.startsWith("effect-unrecorded:"));
 }
 
 async function replayAfterEffect(ledger: Ledger, ref: string): Promise<ToolResult> {
@@ -396,6 +398,7 @@ export function createProxy(deps: ProxyDeps) {
     try {
       result = await deps.inner(frozenCall, principal, ref, bound);
     } catch (err) {
+      const resultHash = sha256Canonical(thrownPayload(err));
       const row: EffectRow = {
         ref,
         effectHash: thrownHash,
@@ -404,12 +407,20 @@ export function createProxy(deps: ProxyDeps) {
         actor: principal.brain,
       };
       try {
-        await deps.ledger.appendEffect(row, "self", sha256Canonical(thrownPayload(err)));
+        await deps.ledger.appendEffect(row, "self", resultHash);
         effectRecorded.ok = true;
       } catch (writeErr) {
         throw writeErr;
       }
-      throw err;
+      // Without result classes the tool's own error leaves, untouched and not awaited.
+      if (!deps.policy.resultClasses && !deps.policy.media) throw err;
+      const gated = await gateThrownError(err, dispatchedName, ref, resultHash, principal, {
+        policy: deps.policy,
+        nonce: deps.nonce,
+        now: deps.now,
+        writeRecord,
+      });
+      throw gated.error;
     }
     const row: EffectRow = {
       ref,
@@ -419,12 +430,13 @@ export function createProxy(deps: ProxyDeps) {
       actor: principal.brain,
     };
     const { effectReceipt, ...normalResult } = result;
+    const resultHash = sha256Canonical(normalResult);
     const signedRow = effectReceipt?.body?.effects?.[0];
     const external = effectReceipt?.body?.effects?.length === 1 && signedRow?.ref === ref &&
       signedRow.effectHash === dispatchedHash && signedRow.effectClass === dispatchedName;
     try {
-      if (external) await deps.ledger.appendEffect(signedRow!, "third-party", sha256Canonical(normalResult), effectReceipt);
-      else await deps.ledger.appendEffect(row, "self", sha256Canonical(normalResult));
+      if (external) await deps.ledger.appendEffect(signedRow!, "third-party", resultHash, effectReceipt);
+      else await deps.ledger.appendEffect(row, "self", resultHash);
       effectRecorded.ok = true;
     } catch {
       // The tool already returned. A failed effect write is not a throw of the
@@ -432,7 +444,12 @@ export function createProxy(deps: ProxyDeps) {
       // stays false) and a restart answers outcome-unknown instead of running again.
       return effectUnrecorded(ref);
     }
-    return normalResult;
+    return gateResultClasses(normalResult, dispatchedName, ref, resultHash, principal, {
+      policy: deps.policy,
+      nonce: deps.nonce,
+      now: deps.now,
+      writeRecord,
+    });
   }
 
   async function resolveInputs(

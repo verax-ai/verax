@@ -292,17 +292,23 @@ export function parseDownstreamDocument(raw: string, bodyPublicKeyPems: readonly
 function asTextResult(raw: unknown): ToolResult {
   const rec: Record<string, unknown> =
     raw !== null && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
-  const content: { type: "text"; text: string }[] = [];
+  const content: ToolResult["content"] = [];
   const items: unknown[] = Array.isArray(rec.content) ? rec.content : [];
   for (const item of items) {
-    if (
-      item !== null &&
-      typeof item === "object" &&
-      (item as { type?: unknown }).type === "text" &&
-      typeof (item as { text?: unknown }).text === "string"
-    ) {
-      content.push({ type: "text", text: (item as { text: string }).text });
-      continue;
+    if (item !== null && typeof item === "object") {
+      const block = item as Record<string, unknown>;
+      if (block.type === "text" && typeof block.text === "string") {
+        content.push({ type: "text", text: block.text });
+        continue;
+      }
+      if (
+        (block.type === "image" || block.type === "audio") &&
+        typeof block.data === "string" &&
+        typeof block.mimeType === "string"
+      ) {
+        content.push({ type: block.type, data: block.data, mimeType: block.mimeType });
+        continue;
+      }
     }
     content.push({ type: "text", text: JSON.stringify(item) });
   }
@@ -832,5 +838,5 @@ export async function openDownstream(
 }
 
 function textOf(result: ToolResult): string {
-  return result.content.map((c) => c.text).join("");
+  return result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
 }

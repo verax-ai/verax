@@ -1,9 +1,10 @@
 # Data classes v1
 
-Status: the first step of the order of work below (text classes on tool-call
-arguments, the file-type block, signed counts) is in the tree; see "What is in
-the tree". The panel, audio, photos, operator pattern classes and
-`resultClasses` are design only.
+Status: step 1 of the order of work (text classes on tool-call arguments,
+the file-type block, signed counts) and step 3 (audio, with `resultClasses`)
+are in the tree; see "What is in the tree". The panel (2) and photos (4)
+are not. Transcripts are masked with Conarium's `speech` pipeline
+(`@conarium-ai/mask` 0.3.5).
 
 ## What it is for
 
@@ -67,8 +68,75 @@ below is a test in `packages/proxy/tests/data-classes.test.ts`.
   approval gates again and is refused with `data-class-changed` when the
   call the policy would now forward differs from the one approved.
 
-Not built: operator pattern classes (`{ choice, pattern }`), `resultClasses`,
-the panel, audio and photos.
+`packages/proxy/src/result-classes.ts`, called from `runInner` in `proxy.ts`
+after the effect row is written; every point below is a test in
+`packages/proxy/tests/result-classes.test.ts` except a throw from the
+masker, which is
+`packages/proxy/tests/result-classes-error.test.ts`.
+
+- **Policy.** A `version: 2` document may carry `resultClasses` (class →
+  `allow` / `mask` / `block`) and `media` (`audio` → `allow` / `transcribe` /
+  `withhold`, `image` → `allow` / `withhold`, and `transcriber` when audio is
+  `transcribe`). `local` is refused: a result is already here. A rule may
+  carry its own `resultClasses`. Under `version: 1` both keys are refused.
+- **Text results.** Text blocks are masked with the merged `resultClasses`.
+  A block over the scan cap is split at line breaks into pieces under the
+  cap; a single line over the cap is replaced whole. A line of exactly the
+  cap followed by a break is scanned without the break, and the break is
+  put back. A `block` class in a text block or a transcript withholds the
+  whole result (`withheld:result-class-block:<class>:<ref>`); the tool has
+  already run. A throw from the masker while scanning a text block or a
+  transcript withholds the whole result
+  (`withheld:result-class-error:<ref>`) and writes a signed deny
+  (`result-class-error`).
+- **Error text.** When the policy sets `resultClasses` or `media`, a throw
+  that leaves `runInner` has its message scanned as a text block. A `block`
+  class becomes `withheld:result-class-block:<class>:<ref>`; a masker throw
+  becomes `withheld:result-class-error:<ref>`. The error that leaves is a
+  new object with the masked message, the original's prototype (so
+  `instanceof` still holds), and no cause or other fields beyond
+  `prefix`/`tool`; a non-Error throw becomes an Error. A throw inside the
+  error gate itself is `withheld:result-class-error:<ref>`, never the
+  original. The `:threw` row is written first, over the original payload.
+  When the message changed, a result record is chained: `returnedHash`
+  over `{ error: <message as it leaves> }`, `requestHash` the `:threw`
+  row's `resultHash`. Without those keys, errors leave as before.
+- **Media.** `body` keeps `image` and `audio` blocks as blocks when `data`
+  and `mimeType` are strings; other block types stay JSON text. Without
+  `resultClasses` and `media`, results are not changed. Once either key is
+  set, a kind the document does not name is `withhold`. `transcribe` writes
+  the bytes into a temporary directory, starts `command[0]` without a shell
+  (it must be an executable; on Windows a `.cmd` or `.bat` cannot be
+  started this way) with `{file}` replaced, masks the stdout with
+  `resultClasses` under the `text` pipeline, and replaces the block as
+  `[audio transcript] <masked text>`. A timeout, a non-zero exit, empty
+  output or output over the scan cap is `[audio withheld: transcriber-failed]`.
+  On a timeout the transcriber is stopped with its process group (on
+  Windows, with node's job object); a process that leaves its group is not.
+  On a timeout or output over the cap the call ends at once: the child's
+  stdout and stderr are destroyed and the gate does not wait for `close`.
+  The temporary directory is removed after the run; if that fails, one
+  stderr line names the directory.
+- **Record.** The effect row's `resultHash` is the hash of the result as the
+  tool returned it. When the gate changes or withholds anything, a chained
+  decision names the call in `inputs.resultOf` and carries
+  `inputs.resultClasses: { masked, transcribed, withheld, returnedHash }`:
+  counts and the hash of what the agent received, never a value or
+  transcript. An `allow` carries the effect row's `resultHash` as its
+  `effectHash` too, because a signed allow needs an effect hash; a `deny`
+  carries none. Ledger verification reads that record as a statement about a
+  result (`result-record-mismatch` when `resultOf` or `requestHash` does not
+  match the call's effect row; when the decision is not `allow` or `deny`;
+  when an `allow`'s `effectHash` is not its `requestHash` or a `deny`'s is
+  not null; when `returnedHash` is not 64 lowercase hex; when `masked` or
+  `withheld` is not a map of positive integers or `transcribed` is not a
+  non-negative integer; when `subject` is not the named call's
+  `effectClass`, `:threw` allowed for an error; or when two result records
+  name the same call). If the record cannot be written, the result is not
+  delivered (`result-unrecorded:<ref>`).
+
+Not built: operator pattern classes (`{ choice, pattern }`), the panel,
+and photos.
 
 ## The masking engine: Conarium, as a dependency
 
@@ -86,7 +154,8 @@ with no side effects on import and two dependencies
 (`@eslint-community/regexpp`, `re2js`). `@conarium-ai/core` was not used
 because it brings the gateway's server and database dependencies.
 `maskField` reports what it found per class (`classes`), what it replaced
-(`masked`), and masks only the classes it is asked to (`only`).
+(`masked`), and masks only the classes it is asked to (`only`). Conarium
+0.3.4 adds `pipeline: 'speech'`, which Verax uses for transcripts.
 `packages/proxy` pins `@conarium-ai/mask` to an exact version, the way it
 pins `@cedulon/*`. The code is not copied: one masking implementation, so a
 detector fixed in Conarium is fixed in Verax.
@@ -124,14 +193,14 @@ every call's arguments.
 - `local` needs a list of tools the operator marks as local (for example a
   downstream child started by `command`); a call to anything else that
   carries the class is refused with `data-class-local`.
-- `fileTypes.block` reads file names and paths only where a tool's
-  extractor says arguments hold them, the same way egress reads hosts.
+- `fileTypes.block` is checked on every string of the arguments, split
+  into tokens as "What is in the tree" says.
 
 ## Order inside the gate
 
 1. Policy decides allow, defer or deny as today.
-2. For an allow, the class scan runs on the arguments the extractor names.
-   A `block` class or a blocked file type turns the allow into a signed deny
+2. For an allow, the class scan runs on every string, key and number of the
+   arguments and on `_ref` and `_inputs`. A `block` class or a blocked file type turns the allow into a signed deny
    (`data-class-block:<class>`, `file-type-block:<ext>`). A `local` class to
    a non-local tool is a signed deny.
 3. Otherwise `mask` classes are replaced, and the **masked** arguments are
@@ -141,14 +210,136 @@ every call's arguments.
    per class (`masked: { email: 2 }`), never the values. A reader can then
    check that what left matches `forwardedHash`, and the record says what
    was removed without repeating it.
-5. Results coming back can be scanned the same way before the agent sees
-   them (`resultClasses`, same choices except `local`), recorded the same
-   way.
+5. Results coming back are scanned before the agent sees them
+   (`resultClasses`); see "Results and audio".
 
 `requestHash` over the original arguments is a hash of personal data; see
 `docs/design/erasure.md` for why that hash should become keyed. The two
 designs meet there: data classes say what did not leave; erasure says what
 was kept and can be destroyed.
+
+## Results and audio (step 3)
+
+**Measured first.** A local speech model on Turkish, one Windows machine, two
+synthetic recordings that carry a test ID number, an IBAN, an e-mail address
+and a phone number. `faster-whisper` with `large-v3-turbo` on the recording
+read the way people say numbers: the text masker then caught the ID number
+and the phone number; the IBAN was masked but its last digits were split off
+and left; the e-mail address lost its `@` and was not recognised. The `small`
+model gave the masker nothing it caught. So transcripts need harsher rules
+than typed text (below), and the claim stays "masks what it recognises".
+
+**Which way audio crosses the gate.** MCP tools return audio and images as
+result content blocks (`{ "type": "audio", "data": <base64>, "mimeType": … }`);
+the reference filesystem server's `read_media_file` does. Today `body` turns
+every block that is not text into JSON text, so a recording reaches the agent,
+and from there its model, as base64 text, and no result is scanned. A tool
+that takes audio as an argument cannot be handed a transcript instead, so
+step 3 works on results. Audio in arguments stays under the rules above: a
+base64 string over the scan cap is replaced whole when a class is masked, or
+refused as unscanned.
+
+**Media blocks keep their type.** `body` passes `image` and `audio` blocks
+through as blocks (`type`, `data`, `mimeType`); other block types stay JSON
+text as today. Without `resultClasses` and `media` in the policy, results are
+not changed, so the agent receives images and audio as media instead of as
+JSON text.
+
+**Policy.** Version 2 adds two keys:
+
+```json
+"resultClasses": { "tckn": "mask", "iban": "mask", "email": "mask", "phone": "mask" },
+"media": {
+  "audio": "transcribe",
+  "image": "withhold",
+  "transcriber": { "command": ["transcribe-local", "{file}"], "timeoutMs": 60000 }
+}
+```
+
+- `resultClasses`: class → `allow`, `mask` or `block`, the class names of
+  `dataClasses`. `local` is refused at load: a result is already here. A
+  rule may carry its own `resultClasses` for its tool.
+- `media.audio`: `allow` (the block reaches the agent as audio),
+  `transcribe`, or `withhold` (the block is replaced by a label).
+  `media.image`: `allow` or `withhold` until step 4. Once `resultClasses` or
+  `media` is set, a media kind it does not name is `withhold`.
+- `transcribe` needs `media.transcriber.command`: an array of strings with
+  `{file}` in exactly one of them, run without a shell. Without it the load
+  stops.
+
+**Transcribe.** The block's bytes are written into a new temporary directory
+only the current user can read; `command[0]` is started without a shell, so
+it must be an executable (on Windows a `.cmd` or `.bat` cannot be started
+this way); `{file}` is replaced; its standard output, UTF-8 and trimmed, is
+the transcript; the directory is removed after the run, and if that fails
+one stderr line names it. On a timeout the transcriber is stopped with its
+process group (on Windows, with node's job object); a process that leaves
+its group is not. On a timeout or output over the cap the call ends at
+once: the child's stdout and stderr are destroyed and the gate does not
+wait for `close`. The transcript is
+masked with `resultClasses` and replaces the block as text:
+`[audio transcript] <masked text>`. A timeout, a non-zero exit, empty
+output, or output over the scan cap replaces the block with
+`[audio withheld: transcriber-failed]`. Once `transcribe` or `withhold` is
+chosen, the audio block does not reach the agent in any case. The
+transcriber runs on this machine; Verax does not check what it does with
+the file, the same trust it gives `localTools`.
+
+**Text results.** Text blocks are masked with `resultClasses`. A result is
+often longer than the scan cap (a file, a query), so a text block over the
+cap is split at line breaks into pieces under the cap and each piece is
+scanned; a single line over the cap is replaced whole. A line of exactly
+the cap followed by a break is scanned without the break, and the break is
+put back. A value that spans two pieces is not recognised. A throw from
+the masker while scanning a text block or a transcript withholds the whole
+result (`withheld:result-class-error:<ref>`) and writes a signed deny
+(`result-class-error`), the same as on the argument side (`data-class-error`).
+
+**Error text.** When the policy sets `resultClasses` or `media`, a throw
+that leaves `runInner` has its message scanned as a text block. A `block`
+class becomes `withheld:result-class-block:<class>:<ref>`; a masker throw
+becomes `withheld:result-class-error:<ref>`. The error that leaves is a
+new object with the masked message, the original's prototype (so
+`instanceof` still holds), and no cause or other fields beyond
+`prefix`/`tool`; a non-Error throw becomes an Error. A throw inside the
+error gate itself is `withheld:result-class-error:<ref>`, never the
+original. The `:threw` row is written first, over the original payload.
+When the message changed, a result record is chained: `returnedHash`
+over `{ error: <message as it leaves> }`, `requestHash` the `:threw`
+row's `resultHash`. Without those keys, errors leave as before.
+
+**Block.** A `block` class in a text block or a transcript withholds the
+whole result: the agent gets `withheld:result-class-block:<class>:<ref>` as
+an error. The tool has already run, and its effect row stands.
+
+**Record.** The effect row's `resultHash` stays the hash of the result as the
+tool returned it. When the gate changes or withholds anything, a signed
+decision record is chained with its own ref: `inputs.resultOf` names the
+call's ref, its `requestHash` is that effect row's `resultHash`, and
+`inputs.resultClasses` carries `{ masked, transcribed, withheld,
+returnedHash }`: counts, and the hash of what the agent received, never a
+value or transcript text. An `allow` carries the effect row's `resultHash`
+as its `effectHash` too, because a signed allow needs an effect hash; a
+`deny` carries none. Ledger verification reads it as a statement about a
+result, not as an allow that needs an effect row, and holds the record to
+those hashes and counts, to a decision of `allow` or `deny`, to `subject`
+matching the named call's `effectClass` (`:threw` allowed for an error),
+and to at most one result record naming a call (`result-record-mismatch`).
+If it cannot be written,
+the result is not delivered (`result-unrecorded:<ref>`).
+
+**Speech rules, in Conarium.** In a transcript, digits come split by hyphens
+and spaces and the `@` can be lost. These rules are Conarium's `speech`
+pipeline (`@conarium-ai/mask` 0.3.5), so the `text` rules do not move. What
+it masks and what it leaves is stated once, in Conarium's
+`docs/API-STABILITY.md` row for `pipeline: 'speech'`, not here. Transcripts
+use it (`TRANSCRIPT_MASK_PIPELINE` in `packages/proxy/src/result-classes.ts`);
+text results and a tool's error text keep `text`, because the speech rules
+would mask an order number of 7 or more digits or a spaced amount.
+
+**Not in step 3:** images beyond `allow` and `withhold` (step 4), audio in
+arguments beyond the whole-field rules, and transcription anywhere but the
+machine Verax runs on.
 
 ## Order of work
 
@@ -158,8 +349,8 @@ was kept and can be destroyed.
    policy document, the body loads it as today.
 3. Audio: a recording does not leave. It is transcribed on the machine,
    the transcript goes through the same classes, and either the masked
-   transcript or nothing is forwarded. Measure a local speech model's
-   accuracy on Turkish before promising this.
+   transcript or nothing reaches the agent; see "Results and audio", which
+   also brings `resultClasses` for text results.
 4. Photos: blur faces and document regions before forwarding. A detector
    choice and its error rate are measured before this is offered.
 

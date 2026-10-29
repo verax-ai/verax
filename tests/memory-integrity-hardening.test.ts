@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { tenantKey, verifyLedger } from "@verax-ai/proxy";
+import type { ToolResult } from "@verax-ai/proxy";
 
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { runDoctor } from "../packages/body/src/doctor.ts";
@@ -43,11 +44,12 @@ function testKeys() {
   };
 }
 
-function parse(result: { isError?: boolean; content: { text: string }[] }): {
+function parse(result: ToolResult): {
   isError: boolean;
   data: Record<string, unknown>;
 } {
-  return { isError: result.isError === true, data: JSON.parse(result.content[0]?.text ?? "{}") as Record<string, unknown> };
+  const first = result.content[0];
+  return { isError: result.isError === true, data: JSON.parse(first?.type === "text" ? first.text : "{}") as Record<string, unknown> };
 }
 
 function filesUnder(dir: string): string[] {
