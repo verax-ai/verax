@@ -108,7 +108,7 @@ masker, which is
   the bytes into a temporary directory, starts `command[0]` without a shell
   (it must be an executable; on Windows a `.cmd` or `.bat` cannot be
   started this way) with `{file}` replaced, masks the stdout with
-  `resultClasses` under the `text` pipeline, and replaces the block as
+  `resultClasses` under the `speech` pipeline, and replaces the block as
   `[audio transcript] <masked text>`. A timeout, a non-zero exit, empty
   output or output over the scan cap is `[audio withheld: transcriber-failed]`.
   On a timeout the transcriber is stopped with its process group (on
