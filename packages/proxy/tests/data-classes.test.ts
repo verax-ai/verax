@@ -509,6 +509,63 @@ describe("data classes: the gate", () => {
     }
   });
 
+  it("editing forwardedArgs on a deferred call is hash-mismatch, not an allow of a different call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-bind-"));
+    const ledger = new FileLedger(dir);
+    const received: ToolCall[] = [];
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused", "dc-bind-allow"]),
+        inner: async (call) => {
+          received.push(structuredClone({ name: call.name, arguments: call.arguments }));
+          return { content: [{ type: "text", text: "ok" }], isError: false };
+        },
+      });
+      const call = { name: "memory.put", arguments: { id: "n-bind", body: `mail ${EMAIL}`, _ref: "dc-bind" } };
+      await proxy.call(call, P);
+      const defer = (await ledger.decisions())[0];
+      const inputs = await proxy.inputsLog.get("dc-bind");
+      assert.ok(inputs?.dataClasses?.forwardedHash, "the signed defer did not commit to a forwardedHash");
+      assert.equal(sha256Canonical(inputs), defer!.claims.inputsHash);
+
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending, "no pending approval");
+      const other = { id: "n-bind", body: "other" };
+      await proxy.approvals.append({
+        ...pending,
+        args: other,
+        forwardedArgs: other,
+        dataClasses: {
+          masked: pending.dataClasses?.masked ?? {},
+          forwardedHash: sha256Canonical({ name: "memory.put", arguments: other }),
+        },
+      });
+
+      const result = await approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: tickingNow(1_000),
+        nonce: queuedNonce(["dc-bind-allow"]),
+        ref: "dc-bind",
+        approverId: "op-1",
+        via: "cli",
+        policyHash: defer!.claims.policyHash,
+        approvals: proxy.approvals,
+        inputsLog: proxy.inputsLog,
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, "hash-mismatch");
+      assert.equal(received.length, 0, `a different call was sent: ${JSON.stringify(received)}`);
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("a deferred call takes amount, payee and currency from the forwarded arguments", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-dc-payee-"));
     const ledger = new FileLedger(dir);

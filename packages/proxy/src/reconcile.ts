@@ -4,8 +4,9 @@ import { join } from "node:path";
 
 import type { EffectRow } from "@cedulon/effect-extract";
 
-import type { ApprovalRow } from "./approvals.ts";
+import { approvalArgsBound, approvalDispatchArgs, type ApprovalRow } from "./approvals.ts";
 import { sha256Canonical } from "./hash.ts";
+import type { DecisionInputs } from "./types.ts";
 import { readLedgerManifest, requireLedgerPiecePath } from "./ledger-manifest.ts";
 import type { LedgerEffect } from "./types.ts";
 
@@ -287,8 +288,8 @@ function decisionPaths(dir: string): string[] {
   return existsSync(tek) ? [tek] : [];
 }
 
-function readDecisionLines(stateDir: string): { ref?: unknown; requestHash?: unknown }[] {
-  const claims: { ref?: unknown; requestHash?: unknown }[] = [];
+function readDecisionLines(stateDir: string): { ref?: unknown; requestHash?: unknown; inputsHash?: unknown }[] {
+  const claims: { ref?: unknown; requestHash?: unknown; inputsHash?: unknown }[] = [];
   for (const path of decisionPaths(stateDir)) {
     let text = "";
     try {
@@ -299,11 +300,61 @@ function readDecisionLines(stateDir: string): { ref?: unknown; requestHash?: unk
     }
     for (const line of text.split("\n")) {
       if (line === "") continue;
-      const row = JSON.parse(line) as { claims?: { ref?: unknown; requestHash?: unknown } };
+      const row = JSON.parse(line) as { claims?: { ref?: unknown; requestHash?: unknown; inputsHash?: unknown } };
       claims.push(row.claims ?? {});
     }
   }
   return claims;
+}
+
+function inputPaths(dir: string): string[] {
+  const manifest = readLedgerManifest(dir);
+  if (manifest && Array.isArray(manifest.pieces) && manifest.pieces.length > 0) {
+    return manifest.pieces
+      .map((p) => requireLedgerPiecePath(dir, p.inputs))
+      .filter((p) => existsSync(p));
+  }
+  const tek = join(dir, "inputs.jsonl");
+  return existsSync(tek) ? [tek] : [];
+}
+
+/**
+ * forwardedHash on the inputs row each decision's inputsHash names, keyed by
+ * that decision's ref. Same files as `loadDecisionRequestHashesFromDir`.
+ */
+export function loadSignedForwardedHashesFromDir(stateDir: string): Map<string, string> {
+  const wanted = new Map<string, string>();
+  for (const claims of readDecisionLines(stateDir)) {
+    if (typeof claims.ref !== "string" || typeof claims.inputsHash !== "string") continue;
+    wanted.set(claims.ref, claims.inputsHash);
+  }
+  const out = new Map<string, string>();
+  if (wanted.size === 0) return out;
+  const seen = new Set<string>();
+  for (const path of [...inputPaths(stateDir)].reverse()) {
+    let text = "";
+    try {
+      text = readFileSync(path, "utf8");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw err;
+    }
+    const lines = text.split("\n");
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const line = lines[i];
+      if (line === "") continue;
+      const row = JSON.parse(line) as { ref?: unknown; inputs?: DecisionInputs };
+      if (typeof row.ref !== "string" || seen.has(row.ref)) continue;
+      const expected = wanted.get(row.ref);
+      if (expected === undefined) continue;
+      seen.add(row.ref);
+      if (row.inputs === undefined || sha256Canonical(row.inputs) !== expected) continue;
+      const hash = row.inputs.dataClasses?.forwardedHash;
+      if (typeof hash === "string" && hash !== "") out.set(row.ref, hash);
+      if (seen.size === wanted.size) return out;
+    }
+  }
+  return out;
 }
 
 /** Decision refs, read the same way `verifyLedger` lists decision files. */
@@ -376,18 +427,15 @@ function boundApproval(
   effect: LedgerEffect,
   approvals: readonly ApprovalRow[] | undefined,
   requestHashes: ReadonlyMap<string, string> | undefined,
+  forwardedHashes?: ReadonlyMap<string, string>,
 ): ApprovalRow | undefined {
   if (!requestHashes) return undefined;
   const signed = requestHashes.get(effect.row.ref);
   if (typeof signed !== "string" || signed === "") return undefined;
   const snap = approvalForEffect(approvals, effect.row.ref);
   if (!snap) return undefined;
-  const rowHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
-  const bound =
-    snap.dataClasses !== undefined
-      ? rowHash === snap.dataClasses.forwardedHash && snap.requestHash === signed
-      : rowHash === signed;
-  if (!bound) return undefined;
+  const signedForwarded = forwardedHashes?.get(snap.ref);
+  if (!approvalArgsBound(snap, signed, signedForwarded)) return undefined;
   return snap;
 }
 
@@ -395,10 +443,13 @@ function effectAmount(
   effect: LedgerEffect,
   approvals: readonly ApprovalRow[] | undefined,
   requestHashes: ReadonlyMap<string, string> | undefined,
+  forwardedHashes?: ReadonlyMap<string, string>,
 ): { amountMinor?: number; currency?: string } {
-  const snap = boundApproval(effect, approvals, requestHashes);
-  const amountMinor = snap && typeof snap.args.amountMinor === "number" ? snap.args.amountMinor : undefined;
-  const currency = snap && typeof snap.args.currency === "string" ? snap.args.currency : undefined;
+  const snap = boundApproval(effect, approvals, requestHashes, forwardedHashes);
+  if (!snap) return {};
+  const args = approvalDispatchArgs(snap);
+  const amountMinor = typeof args.amountMinor === "number" ? args.amountMinor : undefined;
+  const currency = typeof args.currency === "string" ? args.currency : undefined;
   return { amountMinor, currency };
 }
 
@@ -428,11 +479,13 @@ function descriptorsFor(
   approvals: readonly ApprovalRow[] | undefined,
   byPayee: Readonly<Record<string, readonly string[]>> | undefined,
   requestHashes: ReadonlyMap<string, string> | undefined,
+  forwardedHashes?: ReadonlyMap<string, string>,
 ): readonly string[] | undefined {
   if (!byPayee) return undefined;
-  const snap = boundApproval(effect, approvals, requestHashes);
-  const payee = snap && typeof snap.args.payee === "string" ? snap.args.payee : undefined;
-  if (!payee) return undefined;
+  const snap = boundApproval(effect, approvals, requestHashes, forwardedHashes);
+  if (!snap) return undefined;
+  const payee = approvalDispatchArgs(snap).payee;
+  if (typeof payee !== "string") return undefined;
   const stamps = byPayee[payee];
   return stamps && stamps.length > 0 ? stamps : undefined;
 }
@@ -460,6 +513,8 @@ export function reconcile(
     decisionRefs?: ReadonlySet<string>;
     /** Effect ref to the requestHash on the signed decision of that ref. */
     decisionRequestHashes?: ReadonlyMap<string, string>;
+    /** Approval-row ref to the forwardedHash on that defer's signed inputs. */
+    decisionForwardedHashes?: ReadonlyMap<string, string>;
   },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;
@@ -535,7 +590,12 @@ export function reconcile(
         ghost.push(asGhost(marked, effects));
         continue;
       }
-      const fromSnap = effectAmount(effects[idx]!, opts?.approvals, opts?.decisionRequestHashes);
+      const fromSnap = effectAmount(
+        effects[idx]!,
+        opts?.approvals,
+        opts?.decisionRequestHashes,
+        opts?.decisionForwardedHashes,
+      );
       const gate = amountGate(row, fromSnap);
       if (gate === "unknown") {
         ghost.push(asGhost(marked, effects, "amount-unknown"));
@@ -559,7 +619,13 @@ export function reconcile(
     const near = effects.findIndex((e, i) => {
       if (used.has(i) || !decided(e) || e.row.effectClass !== row.subject) return false;
       if (Math.abs(row.occurredAtMs - e.row.timestampMs) > rowTol) return false;
-      const stamps = descriptorsFor(e, opts?.approvals, opts?.descriptorsByPayee, opts?.decisionRequestHashes);
+      const stamps = descriptorsFor(
+        e,
+        opts?.approvals,
+        opts?.descriptorsByPayee,
+        opts?.decisionRequestHashes,
+        opts?.decisionForwardedHashes,
+      );
       if (stamps) {
         const text = row.descriptor ?? "";
         if (!descriptorHits(text, stamps)) {
@@ -567,7 +633,7 @@ export function reconcile(
           return false;
         }
       }
-      const fromSnap = effectAmount(e, opts?.approvals, opts?.decisionRequestHashes);
+      const fromSnap = effectAmount(e, opts?.approvals, opts?.decisionRequestHashes, opts?.decisionForwardedHashes);
       const gate = amountGate(row, fromSnap);
       if (gate === "unknown") {
         unknownNear = true;

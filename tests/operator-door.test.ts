@@ -1410,9 +1410,18 @@ describe("operator door", () => {
     });
     assert.equal(heldSpend({ ...row, subject: "spend", amount: 12.5, args: {} })?.amountMinor, null);
     assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: "1250" } })?.amountMinor, null);
-    // What was stored when the call was held is what is shown, as at the terminal.
-    assert.equal(heldSpend({ ...row, subject: "spend", payee: "stored", args: { payee: "argued" } })?.payee, "stored");
-    assert.equal(heldSpend({ ...row, subject: "spend", currency: "EUR", args: { currency: "USD" } })?.currency, "EUR");
+    // What will be sent is what is shown, as at the terminal.
+    assert.equal(heldSpend({ ...row, subject: "spend", payee: "stored", args: { payee: "argued" } })?.payee, "argued");
+    assert.equal(heldSpend({ ...row, subject: "spend", currency: "EUR", args: { currency: "USD" } })?.currency, "USD");
+    assert.equal(
+      heldSpend({
+        ...row,
+        subject: "spend",
+        args: { payee: "argued" },
+        forwardedArgs: { payee: "sent", currency: "TRY", amountMinor: 40, reference: "r" },
+      })?.payee,
+      "sent",
+    );
     assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: 40 } })?.amountMinor, 40);
     assert.equal(heldSpend({ ...row, subject: "memory.put", amount: 5, payee: "x", args: {} }), null);
   });

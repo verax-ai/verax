@@ -5,6 +5,7 @@ import {
   loadApprovalsFromDir,
   loadDecisionRefsFromDir,
   loadDecisionRequestHashesFromDir,
+  loadSignedForwardedHashesFromDir,
   loadEffectsFromDir,
   loadPolicy,
   parseCardCsv,
@@ -238,6 +239,7 @@ export function runReconcile(
     const effects = loadEffectsFromDir(parsed.stateDir);
     const decisionRefs = loadDecisionRefsFromDir(parsed.stateDir);
     const decisionRequestHashes = loadDecisionRequestHashesFromDir(parsed.stateDir);
+    const decisionForwardedHashes = loadSignedForwardedHashesFromDir(parsed.stateDir);
     const loaded =
       parsed.channel === "card" ? loadDescriptorsFromDir(parsed.stateDir) : undefined;
     const descriptorsByPayee = loaded?.descriptorsByPayee;
@@ -246,6 +248,7 @@ export function runReconcile(
       window: parsed.window,
       decisionRefs,
       decisionRequestHashes,
+      decisionForwardedHashes,
       approvals: parsed.channel === "card" ? loadApprovalsFromDir(parsed.stateDir) : undefined,
       skipped: card?.skipped,
       ...(descriptorsByPayee && Object.keys(descriptorsByPayee).length > 0

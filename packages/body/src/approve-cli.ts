@@ -3,6 +3,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import {
+  approvalDispatchArgs,
   approvePending,
   approvalsLogFor,
   createApprovalBudgetGuard,
@@ -116,7 +117,8 @@ function spendPrompt(row: ApprovalRow, spend: HeldSpend, amount: number): string
 
 function argumentPrompt(row: ApprovalRow): string {
   const lines = [quotedField("tool", row.subject)];
-  for (const key of Object.keys(row.args).sort()) lines.push(quotedField(key, row.args[key]));
+  const args = approvalDispatchArgs(row);
+  for (const key of Object.keys(args).sort()) lines.push(quotedField(key, args[key]));
   return lines.join("");
 }
 

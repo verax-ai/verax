@@ -3,10 +3,13 @@ import { signDecisionRecord } from "@cedulon/core";
 import type { DecisionKind } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
 import {
+  approvalDispatchArgs,
+  approvalDispatchHash,
   approvePending,
   approvalsLogFor,
   createApprovalBudgetGuard,
   drainApprovalCommands,
+  signedApprovalDispatchHash,
   spentTodayMinorOf,
 } from "./approvals.ts";
 import { SerialQueue } from "./serial-queue.ts";
@@ -993,10 +996,30 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("tenant-mismatch", denyRef) };
                 }
-                const toRun =
-                  snap?.forwardedArgs !== undefined
-                    ? { name: dispatched.name, arguments: snap.forwardedArgs }
-                    : dispatched;
+                const toRun = snap
+                  ? { name: dispatched.name, arguments: approvalDispatchArgs(snap) }
+                  : dispatched;
+                if (snap) {
+                  const signedDispatch = await signedApprovalDispatchHash(
+                    deps.ledger,
+                    inputsLog,
+                    scopedRef,
+                    existing.requestHash,
+                  );
+                  if (signedDispatch === null || approvalDispatchHash(snap) !== signedDispatch) {
+                    return {
+                      kind: "done",
+                      result: await signedRetryDeny(
+                        "hash-mismatch",
+                        requestHash,
+                        resolved.inputs,
+                        timestampMs,
+                        call.name,
+                        scopedRef,
+                      ),
+                    };
+                  }
+                }
                 if (deps.policy.dataClasses) {
                   const classGated = gateDataClasses(dispatched, deps.policy.dataClasses);
                   if (classGated.action === "deny") {
@@ -1013,10 +1036,9 @@ export function createProxy(deps: ProxyDeps) {
                     };
                   }
                   if (classGated.action === "forward") {
-                    const snapHash =
-                      snap?.forwardedArgs !== undefined
-                        ? sha256Canonical({ name: dispatched.name, arguments: snap.forwardedArgs })
-                        : undefined;
+                    const snapHash = snap
+                      ? approvalDispatchHash(snap)
+                      : sha256Canonical({ name: dispatched.name, arguments: dispatched.arguments });
                     if (snapHash !== classGated.dataClasses.forwardedHash) {
                       return {
                         kind: "done",
@@ -1123,9 +1145,8 @@ export function createProxy(deps: ProxyDeps) {
             reasonCode = classGated.reasonCode;
           } else if (classGated.action === "forward") {
             forwarded = { name: dispatched.name, arguments: classGated.arguments };
-            if (decision === "allow") {
-              recordInputs = { ...resolved.inputs, dataClasses: classGated.dataClasses };
-            } else {
+            recordInputs = { ...resolved.inputs, dataClasses: classGated.dataClasses };
+            if (decision === "defer") {
               snapshotForwarded = classGated.arguments;
               snapshotDataClasses = classGated.dataClasses;
             }

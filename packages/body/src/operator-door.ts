@@ -22,7 +22,7 @@ import { rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
+import { approvalDispatchArgs, loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
 
 import { asAssertion } from "./approval-signature.ts";
 import { readBearer } from "./auth.ts";
@@ -445,7 +445,7 @@ export async function openOperatorDoor(opts: {
               ref: row.ref,
               requestHash: row.requestHash,
               tool: row.subject,
-              args: row.args,
+              args: approvalDispatchArgs(row),
               agent: row.brain,
               rule: row.ruleText,
               ...(row.createdAtMs !== undefined ? { createdAtMs: row.createdAtMs } : {}),

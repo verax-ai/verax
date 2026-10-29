@@ -8,6 +8,8 @@ export { FileLedger, MemoryLedger, readLedgerTail, lockHolderAlive, lockState, l
 export { indexCoverage, listPieceFiles } from "./ledger-manifest.ts";
 export { explain } from "./explain.ts";
 export {
+  approvalArgsBound,
+  approvalDispatchArgs,
   approvePending,
   approvalsLogFor,
   createApprovalBudgetGuard,
@@ -17,6 +19,7 @@ export {
 export {
   loadDecisionRefsFromDir,
   loadDecisionRequestHashesFromDir,
+  loadSignedForwardedHashesFromDir,
   loadEffectsFromDir,
   parseCardCsv,
   parseChannelJsonl,

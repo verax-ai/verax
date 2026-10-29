@@ -13,11 +13,13 @@ import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./ht
 import { openOperatorDoor } from "./operator-door.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
 import {
+  approvalArgsBound,
+  approvalDispatchArgs,
   explain,
   LedgerDenyUnrecorded,
   loadApprovalsFromDir,
   loadDecisionRequestHashesFromDir,
-  sha256Canonical,
+  loadSignedForwardedHashesFromDir,
   terminalText,
   type ApprovalRow,
   type LedgerCounts,
@@ -232,25 +234,25 @@ function approvalsForLedger(stateDir: string): Array<Omit<ApprovalRow, "amount" 
   payee?: unknown;
 }> {
   const requestHashes = loadDecisionRequestHashesFromDir(stateDir);
+  const forwardedHashes = loadSignedForwardedHashesFromDir(stateDir);
   return loadApprovalsFromDir(stateDir).map((row) => {
     const signed = requestHashes.get(row.ref);
-    const rowHash = sha256Canonical({ name: row.subject, arguments: row.args });
     const bound =
       typeof signed === "string" &&
       signed !== "" &&
-      (row.dataClasses !== undefined
-        ? rowHash === row.dataClasses.forwardedHash && row.requestHash === signed
-        : rowHash === signed);
+      approvalArgsBound(row, signed, forwardedHashes.get(row.ref));
+    const shown = approvalDispatchArgs(row);
     if (!bound) {
       const { amount: _amount, currency: _currency, payee: _payee, ...rest } = row;
-      return { ...rest, bound: false };
+      return { ...rest, bound: false, args: shown };
     }
     return {
       ...row,
       bound: true,
-      amount: row.args.amountMinor,
-      currency: row.args.currency,
-      payee: row.args.payee,
+      args: shown,
+      amount: shown.amountMinor,
+      currency: shown.currency,
+      payee: shown.payee,
     };
   });
 }

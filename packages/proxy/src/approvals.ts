@@ -53,6 +53,45 @@ export type ApprovalRow = {
   allowRef?: string;
 };
 
+/** Arguments the operator is shown and that a retry will send. */
+export function approvalDispatchArgs(row: Pick<ApprovalRow, "args" | "forwardedArgs">): Record<string, unknown> {
+  return row.forwardedArgs ?? row.args;
+}
+
+export function approvalDispatchHash(row: Pick<ApprovalRow, "subject" | "args" | "forwardedArgs">): string {
+  return sha256Canonical({ name: row.subject, arguments: approvalDispatchArgs(row) });
+}
+
+/**
+ * Hash the signed defer committed to for what will be sent. Null when the
+ * inputs row no longer hashes to the record — fail closed.
+ */
+export async function signedApprovalDispatchHash(
+  ledger: Ledger,
+  inputsLog: InputsLog,
+  ref: string,
+  fallbackRequestHash: string,
+): Promise<string | null> {
+  const rec = (await ledger.decisions()).find((d) => d.claims.ref === ref);
+  if (!rec) return fallbackRequestHash;
+  if (typeof rec.claims.inputsHash !== "string") return fallbackRequestHash;
+  const inputs = await inputsLog.get(ref);
+  if (!inputs || sha256Canonical(inputs) !== rec.claims.inputsHash) return null;
+  return inputs.dataClasses?.forwardedHash ?? fallbackRequestHash;
+}
+
+export function approvalArgsBound(
+  row: Pick<ApprovalRow, "subject" | "args" | "forwardedArgs" | "requestHash" | "dataClasses">,
+  signedRequestHash: string,
+  signedForwardedHash?: string,
+): boolean {
+  if (row.requestHash !== signedRequestHash) return false;
+  const dispatchHash = approvalDispatchHash(row);
+  if (signedForwardedHash !== undefined) return dispatchHash === signedForwardedHash;
+  if (row.dataClasses !== undefined) return false;
+  return dispatchHash === signedRequestHash;
+}
+
 export type ApprovalsLog = {
   append(row: ApprovalRow): Promise<void>;
   get(ref: string): Promise<ApprovalRow | null>;
@@ -395,10 +434,9 @@ async function approvePendingUnlocked(opts: {
     return alreadyResolved(hit?.kind === "allow" ? hit.ref : snap?.allowRef);
   }
   if (!snap) return { ok: false, reason: "snapshot-missing" };
-  const argsHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
-  const argsMatch =
-    snap.dataClasses !== undefined ? argsHash === snap.dataClasses.forwardedHash : argsHash === snap.requestHash;
-  if (!argsMatch || snap.requestHash !== defer.requestHash) {
+  const dispatchHash = approvalDispatchHash(snap);
+  const signedDispatch = await signedApprovalDispatchHash(opts.ledger, inputsLog, opts.ref, defer.requestHash);
+  if (signedDispatch === null || dispatchHash !== signedDispatch || snap.requestHash !== defer.requestHash) {
     return { ok: false, reason: "hash-mismatch" };
   }
   if (opts.now() > snap.expiresAtMs) {
@@ -451,7 +489,7 @@ async function approvePendingUnlocked(opts: {
     ...(snap.dataClasses !== undefined ? { dataClasses: snap.dataClasses } : {}),
   };
   const inputsHash = sha256Canonical(inputs);
-  const dispatchArgs = snap.forwardedArgs ?? snap.args;
+  const dispatchArgs = approvalDispatchArgs(snap);
   const effectHash = sha256Canonical(effectDescriptor(snap.subject, dispatchArgs));
   await inputsLog.append(allowRef, inputs);
   await opts.ledger.appendDecisionChained((prevRecordHash) =>
@@ -485,10 +523,10 @@ async function approvePendingUnlocked(opts: {
     const resultHash = sha256Canonical({
       authorized: true,
       ref: allowRef,
-      amountMinor: snap.args.amountMinor,
-      currency: snap.args.currency,
-      payee: snap.args.payee,
-      reference: snap.args.reference,
+      amountMinor: dispatchArgs.amountMinor,
+      currency: dispatchArgs.currency,
+      payee: dispatchArgs.payee,
+      reference: dispatchArgs.reference,
     });
     await opts.ledger.appendEffect(
       {
