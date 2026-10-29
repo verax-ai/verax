@@ -393,6 +393,17 @@ describe("result classes: text results", () => {
     assert.equal(caught.message, "withheld:result-class-block:tckn:e-1");
   });
 
+  it("a whole-field mask with a block class withholds the result", async () => {
+    const line = `${"x".repeat(80)} TC ${TCKN}`;
+    const returns = result([{ type: "text", text: line }, { type: "text", text: "other block" }]);
+    const { proxy } = harness(policy({ resultClasses: { tckn: "block" }, scanCharCap: 64 }), returns);
+    const res = await proxy.call(CALL, P);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /withheld:result-class-block:tckn:/);
+    assert.ok(!textOf(res).includes("other block"), `the other block reached the agent: ${textOf(res)}`);
+    assert.ok(!textOf(res).includes("[MASKED_PII]"), `a whole-field mask left as text: ${textOf(res)}`);
+  });
+
   it("a block class in a text result withholds the whole result; the tool ran and its effect stands", async () => {
     const returns = result([{ type: "text", text: `TC ${TCKN}` }, { type: "text", text: "second block" }]);
     const { proxy, ledger, calls } = harness(policy({ resultClasses: { tckn: "block", email: "mask" } }), returns);

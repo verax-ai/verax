@@ -88,6 +88,21 @@ function firstBlocked(
   return undefined;
 }
 
+function firstBlockChoice(choices: Record<string, ResultClassChoice>): SpanClass | undefined {
+  for (const cls of SPAN_CLASSES) {
+    if (choices[cls] === "block") return cls;
+  }
+  return undefined;
+}
+
+function blockedOrUnscanned(
+  classes: Record<string, number>,
+  masked: Record<string, number>,
+  choices: Record<string, ResultClassChoice>,
+): SpanClass | undefined {
+  return firstBlocked(classes, choices) ?? ((masked.whole ?? 0) > 0 ? firstBlockChoice(choices) : undefined);
+}
+
 function splitTextForScan(text: string, cap: number): string[] {
   if (text.length <= cap) return [text];
   const lines = text.split("\n");
@@ -361,7 +376,7 @@ export async function gateThrownError(
     try {
       const scanned = scanText(original, only, cap, masker, TEXT_MASK_PIPELINE, detectorsFor(choices));
       addCounts(masked, scanned.masked);
-      const blocked = firstBlocked(scanned.classes, choices);
+      const blocked = blockedOrUnscanned(scanned.classes, scanned.masked, choices);
       if (blocked) {
         leaving = `withheld:result-class-block:${blocked}:${callRef}`;
         decision = "deny";
@@ -479,7 +494,7 @@ export async function gateResultClasses(
     content.push({ type: "text", text: `[audio transcript] ${scanned.text}` });
   }
 
-  const blocked = scanFailed ? undefined : firstBlocked(classCounts, choices);
+  const blocked = scanFailed ? undefined : blockedOrUnscanned(classCounts, masked, choices);
   const gated: ToolResult = scanFailed
     ? classError(callRef)
     : blocked
