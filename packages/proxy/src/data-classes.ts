@@ -147,6 +147,11 @@ function choicesFor(config: DataClassConfig, tool: string): Record<string, DataC
   return { ...config.document, ...(config.byTool[tool] ?? {}) };
 }
 
+/** Conarium leaves the IP detector off unless the operator names `ip`. */
+export function detectorsFor(choices: Readonly<Record<string, unknown>>): { ip: true } | undefined {
+  return choices.ip !== undefined ? { ip: true } : undefined;
+}
+
 function asDecimalString(value: number | bigint): string {
   return typeof value === "bigint" ? value.toString(10) : value.toString(10);
 }
@@ -194,9 +199,11 @@ export function scanCallMeta(call: ToolCall, config: DataClassConfig): string | 
   const args = call.arguments;
   const choices = choicesFor(config, call.name);
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+  const detectors = detectorsFor(choices);
   const opts = {
     pipeline: "text" as const,
     only: [] as SpanClass[],
+    ...(detectors ? { detectors } : {}),
     ...(config.scanCharCap !== undefined ? { scanCharCap: config.scanCharCap } : {}),
   };
 
@@ -286,9 +293,11 @@ export function gateDataClasses(
   );
   const maskChosen = only.length > 0;
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+  const detectors = detectorsFor(choices);
   const opts = {
     pipeline: "text" as const,
     only,
+    ...(detectors ? { detectors } : {}),
     ...(config.scanCharCap !== undefined ? { scanCharCap: config.scanCharCap } : {}),
   };
   const state: ScanState = {

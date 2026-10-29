@@ -420,6 +420,14 @@ describe("data classes: the gate", () => {
     }
   });
 
+  it("an IP class is detected when the policy names it", async () => {
+    const policy = policyV2({ dataClasses: { ip: "block" } });
+    const { proxy, received } = harness(policy, ["r-ip"]);
+    const out = await proxy.call({ name: "memory.put", arguments: { id: "n-ip", body: "host 192.168.1.1" } }, P);
+    assert.equal(received.length, 0, `an IP address reached the tool: ${JSON.stringify(received)}`);
+    assert.match(out.content[0]?.text ?? "", /^denied:data-class-block:ip:/);
+  });
+
   it("a version 1 policy forwards arguments untouched", async () => {
     const policy = loadPolicy(JSON.stringify({
       version: 1, default: "deny",

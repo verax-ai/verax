@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { maskField, type SpanClass } from "@conarium-ai/mask";
 
-import { DEFAULT_SCAN_CHAR_CAP, SPAN_CLASSES } from "./data-classes.ts";
+import { DEFAULT_SCAN_CHAR_CAP, detectorsFor, SPAN_CLASSES } from "./data-classes.ts";
 import { sha256Canonical } from "./hash.ts";
 import { terminalText } from "./policy.ts";
 import type { DecisionKind } from "@cedulon/core";
@@ -116,6 +116,7 @@ function scanText(
   cap: number,
   masker: ResultMasker,
   pipeline: MaskPipeline,
+  detectors?: { ip: true },
 ): { text: string; classes: Record<string, number>; masked: Record<string, number> } {
   const pieces = splitTextForScan(text, cap);
   const classes: Record<string, number> = {};
@@ -123,7 +124,12 @@ function scanText(
   const out: string[] = [];
   for (const piece of pieces) {
     const { body, suffix } = dropScanBreak(piece);
-    const result = masker(body, { pipeline, only, scanCharCap: cap });
+    const result = masker(body, {
+      pipeline,
+      only,
+      scanCharCap: cap,
+      ...(detectors ? { detectors } : {}),
+    });
     out.push(`${result.text}${suffix}`);
     addCounts(classes, result.classes);
     addCounts(masked, result.masked);
@@ -353,7 +359,7 @@ export async function gateThrownError(
     let scanFailed = false;
 
     try {
-      const scanned = scanText(original, only, cap, masker, TEXT_MASK_PIPELINE);
+      const scanned = scanText(original, only, cap, masker, TEXT_MASK_PIPELINE, detectorsFor(choices));
       addCounts(masked, scanned.masked);
       const blocked = firstBlocked(scanned.classes, choices);
       if (blocked) {
@@ -430,7 +436,7 @@ export async function gateResultClasses(
     if (isTextContent(block)) {
       let scanned;
       try {
-        scanned = scanText(block.text, only, cap, masker, TEXT_MASK_PIPELINE);
+        scanned = scanText(block.text, only, cap, masker, TEXT_MASK_PIPELINE, detectorsFor(choices));
       } catch {
         scanFailed = true;
         break;
@@ -463,7 +469,7 @@ export async function gateResultClasses(
     transcribed += 1;
     let scanned;
     try {
-      scanned = scanText(transcript, only, cap, masker, TRANSCRIPT_MASK_PIPELINE);
+      scanned = scanText(transcript, only, cap, masker, TRANSCRIPT_MASK_PIPELINE, detectorsFor(choices));
     } catch {
       scanFailed = true;
       break;

@@ -176,6 +176,14 @@ describe("result classes: text results", () => {
     assert.equal(await resultRecord(proxy, ledger, "r-1"), null);
   });
 
+  it("an IP class in a text result is blocked when the policy names it", async () => {
+    const returns = result([{ type: "text", text: "host 192.168.1.1" }]);
+    const { proxy } = harness(policy({ resultClasses: { ip: "block" } }), returns);
+    const res = await proxy.call(CALL, P);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /withheld:result-class-block:ip:/);
+  });
+
   it("masks a class in a text result; the signed record counts it and hashes what the agent received", async () => {
     const returns = result([{ type: "text", text: `Musteri TC ${TCKN}, e-posta ${EMAIL}, tutar 1.250,00 TL` }]);
     const { proxy, ledger } = harness(policy({ resultClasses: { tckn: "mask", email: "mask" } }), returns);
