@@ -192,6 +192,24 @@ describe("result classes: text results", () => {
     );
   });
 
+  it("a rule-level resultClasses does not run the masker on a tool that names no class", async () => {
+    const dash = "2026\u20132027";
+    const long = `${"x".repeat(20_000)}${dash}`;
+    const pol = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope.", resultClasses: { email: "mask" } },
+          { id: "media-read", tool: "media.read", requires: ["verax:read"], text: "Reading needs the read scope." },
+        ],
+      }),
+    );
+    const { proxy } = harness(pol, result([{ type: "text", text: long }]));
+    const res = await proxy.call(CALL, P);
+    assert.equal(textOf(res), long, `the text result was rewritten: ${textOf(res)}`);
+  });
+
   it("without resultClasses or media a result is returned unchanged, media blocks as media", async () => {
     const returns = result([{ type: "text", text: `TC ${TCKN}` }, AUDIO_BLOCK, IMAGE_BLOCK]);
     const { proxy, ledger } = harness(policy({ dataClasses: { email: "mask" } }), returns);

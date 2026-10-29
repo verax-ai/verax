@@ -135,8 +135,8 @@ function blockedFileType(text: string, blocked: readonly string[]): string | und
   return undefined;
 }
 
-function namedClassMaps(config: DataClassConfig): boolean {
-  return Object.keys(config.document).length > 0 || Object.keys(config.byTool).length > 0;
+function restrictsChoices(choices: Record<string, DataClassChoice>): boolean {
+  return Object.values(choices).some((choice) => choice === "mask" || choice === "block" || choice === "local");
 }
 
 function firstBlockedFileType(value: unknown, blocked: readonly string[]): string | undefined {
@@ -226,9 +226,9 @@ function restrictedClass(
  * A class whose choice is not `allow` is `data-class-meta:<class>`.
  */
 export function scanCallMeta(call: ToolCall, config: DataClassConfig): string | null {
-  if (!namedClassMaps(config)) return null;
-  const args = call.arguments;
   const choices = choicesFor(config, call.name);
+  if (!restrictsChoices(choices)) return null;
+  const args = call.arguments;
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
   const detectors = detectorsFor(choices);
   const opts = {
@@ -316,13 +316,12 @@ export function gateDataClasses(
   config: DataClassConfig | undefined,
 ): DataClassGateResult {
   if (!config) return { action: "unchanged" };
-  if (!namedClassMaps(config)) {
+  const choices = choicesFor(config, call.name);
+  if (!restrictsChoices(choices)) {
     const fileType = firstBlockedFileType(call.arguments, config.blockedFileTypes);
     if (fileType !== undefined) return { action: "deny", reasonCode: `file-type-block:${fileType}` };
     return { action: "unchanged" };
   }
-
-  const choices = choicesFor(config, call.name);
   const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
   const hasBlockOrLocal = SPAN_CLASSES.some(
     (cls) => choices[cls] === "block" || choices[cls] === "local",

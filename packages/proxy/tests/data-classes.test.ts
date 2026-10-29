@@ -658,6 +658,24 @@ describe("data classes: the gate", () => {
     assert.match(out.content[0]?.text ?? "", /^denied:data-class-block:ip:/);
   });
 
+  it("a rule-level dataClasses does not run the masker on a tool that names no class", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope.", dataClasses: { email: "mask" } },
+          { id: "memory-get", tool: "memory.get", requires: ["verax:read"], text: "Reading memory needs the read scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-other-tool"]);
+    const dash = "2026\u20132027";
+    const args = { id: "n-other", body: `${"x".repeat(20_000)}${dash}` };
+    await proxy.call({ name: "memory.get", arguments: args }, P);
+    assert.deepEqual(received[0]?.arguments, args);
+  });
+
   it("a version 2 policy without dataClasses leaves arguments untouched", async () => {
     const policy = loadPolicy(
       JSON.stringify({

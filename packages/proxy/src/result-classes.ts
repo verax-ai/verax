@@ -62,6 +62,10 @@ function choicesFor(policy: Policy, tool: string): Record<string, ResultClassCho
   return { ...policy.resultClasses.document, ...(policy.resultClasses.byTool[tool] ?? {}) };
 }
 
+function restrictsChoices(choices: Record<string, ResultClassChoice>): boolean {
+  return Object.values(choices).some((choice) => choice === "mask" || choice === "block");
+}
+
 function addCounts(into: Record<string, number>, add: Record<string, number> | undefined): void {
   if (!add) return;
   for (const [key, n] of Object.entries(add)) {
@@ -363,6 +367,7 @@ export async function gateThrownError(
 
   try {
     const choices = choicesFor(policy, tool);
+    if (!restrictsChoices(choices)) return { error: err };
     const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
     const cap = policy.scanCharCap ?? policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
     const masker = deps.masker ?? maskField;
@@ -436,6 +441,7 @@ export async function gateResultClasses(
   if (!policy.resultClasses && !policy.media) return result;
 
   const choices = choicesFor(policy, tool);
+  const scanTextResults = restrictsChoices(choices);
   const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
   const cap = policy.scanCharCap ?? policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
   const masker = deps.masker ?? maskField;
@@ -449,7 +455,7 @@ export async function gateResultClasses(
 
   for (const block of result.content) {
     if (isTextContent(block)) {
-      if (!policy.resultClasses) {
+      if (!policy.resultClasses || !scanTextResults) {
         content.push(block);
         continue;
       }
@@ -486,7 +492,7 @@ export async function gateResultClasses(
       continue;
     }
     transcribed += 1;
-    if (!policy.resultClasses) {
+    if (!policy.resultClasses || !scanTextResults) {
       content.push({ type: "text", text: `[audio transcript] ${transcript}` });
       continue;
     }
