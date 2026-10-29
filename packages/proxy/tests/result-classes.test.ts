@@ -148,6 +148,10 @@ describe("result classes: the policy document", () => {
       /transcriber/,
     );
     assert.throws(
+      () => policy({ media: { audio: "transcribe", transcriber: { command: ["t{file}", "x"] } } }),
+      /transcriber/,
+    );
+    assert.throws(
       () => policy({ media: { audio: "transcribe", transcriber: { command: ["t", "{file}", "{file}"] } } }),
       /transcriber/,
     );

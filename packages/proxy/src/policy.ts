@@ -470,6 +470,9 @@ function parseTranscriber(raw: unknown): TranscriberConfig {
     throw new Error("policy-media-transcriber");
   }
   const command = rec.command as string[];
+  if (command[0] !== undefined && command[0].includes("{file}")) {
+    throw new Error("policy-media-transcriber");
+  }
   let fileMarks = 0;
   for (const part of command) fileMarks += countToken(part, "{file}");
   if (fileMarks !== 1) throw new Error("policy-media-transcriber");
