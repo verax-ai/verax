@@ -390,6 +390,37 @@ describe("operator door", () => {
     }
   });
 
+  it("D6b a row edited on disk is not listed and not approved: the body would approve its own copy", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      await hold(body, "door-d6b");
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const [row] = await waitingAt(body.doorPort, token);
+      assert.ok(row, "nothing was waiting");
+      const path = join(body.stateDir, "approvals.jsonl");
+      const lines = readFileSync(path, "utf8")
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line) as { ref: string; args: Record<string, unknown> });
+      const onDisk = lines.filter((line) => line.ref === row.ref).at(-1);
+      assert.ok(onDisk);
+      onDisk.args = { ...onDisk.args, id: "harmless" };
+      writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+      assert.deepEqual(await waitingAt(body.doorPort, token), []);
+      const assertion = await approvalAssertion(body.doorPort, token, passkey, row.ref);
+      const refused = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: row.ref, requestHash: row.requestHash, assertion },
+      });
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.equal(refused.body.error, "row-unbound");
+    } finally {
+      await body.close();
+    }
+  });
+
   it("D7 an approval through the door verifies from the files alone and names the door's origin", async () => {
     const passkey = mintSoftwarePasskey();
     const body = await openBody(passkey);

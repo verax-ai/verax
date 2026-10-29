@@ -12,14 +12,12 @@ import { isLoopbackHost, type BodyConfig } from "./config.ts";
 import { contentLengthOverLimit, MAX_BODY_BYTES, readJsonBody, send } from "./http-io.ts";
 import { openOperatorDoor } from "./operator-door.ts";
 import { handleApprove, handleApproveChallenge, handleControl, type OperatorRequest } from "./operator-handlers.ts";
+import { boundOnDisk } from "./approval-bound.ts";
 import {
-  approvalArgsBound,
   approvalDispatchArgs,
   explain,
   LedgerDenyUnrecorded,
   loadApprovalsFromDir,
-  loadDecisionRequestHashesFromDir,
-  loadSignedForwardedHashesFromDir,
   terminalText,
   type ApprovalRow,
   type LedgerCounts,
@@ -233,14 +231,9 @@ function approvalsForLedger(stateDir: string): Array<Omit<ApprovalRow, "amount" 
   currency?: unknown;
   payee?: unknown;
 }> {
-  const requestHashes = loadDecisionRequestHashesFromDir(stateDir);
-  const forwardedHashes = loadSignedForwardedHashesFromDir(stateDir);
+  const isBound = boundOnDisk(stateDir);
   return loadApprovalsFromDir(stateDir).map((row) => {
-    const signed = requestHashes.get(row.ref);
-    const bound =
-      typeof signed === "string" &&
-      signed !== "" &&
-      approvalArgsBound(row, signed, forwardedHashes.get(row.ref));
+    const bound = isBound(row);
     const shown = approvalDispatchArgs(row);
     if (!bound) {
       const { amount: _amount, currency: _currency, payee: _payee, ...rest } = row;

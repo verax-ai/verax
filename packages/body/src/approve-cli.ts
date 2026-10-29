@@ -15,6 +15,7 @@ import {
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
+import { boundOnDisk } from "./approval-bound.ts";
 import { EX_CONFIG } from "./config.ts";
 import { heldSpend, type HeldSpend } from "./held-spend.ts";
 import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, elevatedStateDirRefusal, readWindowsMachineRoots, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal, type ToolExec, type WindowsMachineRoots } from "./install.ts";
@@ -262,6 +263,12 @@ export async function runApprove(
     if (!waiting) {
       writeErr("approve-unknown-ref\n");
       return 78;
+    }
+    // The prompt shows the row on disk; a running body approves its own copy.
+    // Only a row the signed defer names is shown.
+    if (!boundOnDisk(stateDir)(waiting)) {
+      writeErr("approve-row-unbound\n");
+      return 1;
     }
     const spend = heldSpend(waiting);
     if (spend) {
