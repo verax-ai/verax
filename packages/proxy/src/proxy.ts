@@ -1139,7 +1139,7 @@ export function createProxy(deps: ProxyDeps) {
             ref,
             requestHash,
             subject: dispatched.name,
-            args: dispatched.arguments,
+            args: forwarded.arguments,
             ...(snapshotForwarded !== undefined ? { forwardedArgs: snapshotForwarded } : {}),
             ...(snapshotDataClasses !== undefined ? { dataClasses: snapshotDataClasses } : {}),
             ruleId: verdict.rule,

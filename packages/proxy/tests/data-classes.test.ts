@@ -434,6 +434,31 @@ describe("data classes: the gate", () => {
     assert.match(out.content[0]?.text ?? "", /^denied:data-class-unscanned:/);
   });
 
+  it("a deferred call stores the masked arguments, not the raw ones", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-approve-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call({ name: "memory.put", arguments: { id: "n-def", body: `mail ${EMAIL}`, _ref: "dc-store" } }, P);
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending, "no pending approval");
+      const stored = JSON.stringify(pending.args);
+      assert.ok(!stored.includes(EMAIL), `the e-mail address is in the stored args: ${stored}`);
+      assert.ok(stored.includes("[MASKED_PII]"), `the stored args were not the forwarded ones: ${stored}`);
+      assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("an IP class is detected when the policy names it", async () => {
     const policy = policyV2({ dataClasses: { ip: "block" } });
     const { proxy, received } = harness(policy, ["r-ip"]);

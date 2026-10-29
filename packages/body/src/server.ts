@@ -235,7 +235,12 @@ function approvalsForLedger(stateDir: string): Array<Omit<ApprovalRow, "amount" 
   return loadApprovalsFromDir(stateDir).map((row) => {
     const signed = requestHashes.get(row.ref);
     const rowHash = sha256Canonical({ name: row.subject, arguments: row.args });
-    const bound = typeof signed === "string" && signed !== "" && rowHash === signed;
+    const bound =
+      typeof signed === "string" &&
+      signed !== "" &&
+      (row.dataClasses !== undefined
+        ? rowHash === row.dataClasses.forwardedHash && row.requestHash === signed
+        : rowHash === signed);
     if (!bound) {
       const { amount: _amount, currency: _currency, payee: _payee, ...rest } = row;
       return { ...rest, bound: false };

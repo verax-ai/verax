@@ -395,8 +395,10 @@ async function approvePendingUnlocked(opts: {
     return alreadyResolved(hit?.kind === "allow" ? hit.ref : snap?.allowRef);
   }
   if (!snap) return { ok: false, reason: "snapshot-missing" };
-  const requestHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
-  if (requestHash !== defer.requestHash || requestHash !== snap.requestHash) {
+  const argsHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
+  const argsMatch =
+    snap.dataClasses !== undefined ? argsHash === snap.dataClasses.forwardedHash : argsHash === snap.requestHash;
+  if (!argsMatch || snap.requestHash !== defer.requestHash) {
     return { ok: false, reason: "hash-mismatch" };
   }
   if (opts.now() > snap.expiresAtMs) {

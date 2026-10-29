@@ -383,7 +383,11 @@ function boundApproval(
   const snap = approvalForEffect(approvals, effect.row.ref);
   if (!snap) return undefined;
   const rowHash = sha256Canonical({ name: snap.subject, arguments: snap.args });
-  if (rowHash !== signed) return undefined;
+  const bound =
+    snap.dataClasses !== undefined
+      ? rowHash === snap.dataClasses.forwardedHash && snap.requestHash === signed
+      : rowHash === signed;
+  if (!bound) return undefined;
   return snap;
 }
 
