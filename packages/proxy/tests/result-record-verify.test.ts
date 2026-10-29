@@ -193,6 +193,40 @@ describe("verifyLedger — result records", () => {
     await assertResultMismatch(dir);
   });
 
+  it("a later inputs row under the same ref does not shadow the row the record signed", async () => {
+    const dir = await ledgerWithResultRecord();
+    const inpPath = jsonlFiles(dir, "inputs.jsonl")[0];
+    assert.ok(inpPath, "no inputs.jsonl");
+    const lines = readFileSync(inpPath, "utf8").split("\n").filter((line) => line !== "");
+    let resultRef: string | undefined;
+    let correct: unknown;
+    const rewritten = lines.map((line) => {
+      const row = JSON.parse(line) as { ref?: string; inputs?: { resultOf?: string; resultClasses?: unknown } };
+      if (row.inputs?.resultOf && row.inputs.resultClasses) {
+        resultRef = row.ref;
+        correct = structuredClone(row.inputs);
+        row.inputs.resultOf = "wrong-call";
+      }
+      return JSON.stringify(row);
+    });
+    assert.ok(resultRef && correct, "no result inputs row");
+    writeFileSync(inpPath, `${rewritten.join("\n")}\n`, "utf8");
+    rewriteLastDecision(dir, (rec) =>
+      signDecisionRecord(
+        { ...rec.claims, inputsHash: hashInputs(dir, resultRef!) },
+        RECORD_SIGNER.privateKeyPem,
+        RECORD_SIGNER.publicKeyPem,
+      ),
+    );
+    appendFileSync(inpPath, `${JSON.stringify({ ref: resultRef, inputs: correct })}\n`);
+    const verified = await verifyLedger(dir, { boundaryAllowanceMs: 0 });
+    assert.equal(verified.ok, false, JSON.stringify(verified.problems));
+    assert.ok(
+      verified.problems.some((p) => p.startsWith("result-record-mismatch ")),
+      JSON.stringify(verified.problems),
+    );
+  });
+
   it("refuses a result record whose decision is not allow or deny", async () => {
     const dir = await ledgerWithResultRecord();
     rewriteLastDecision(dir, (rec) =>
