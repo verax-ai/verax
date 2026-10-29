@@ -224,6 +224,32 @@ describe("result classes: text results", () => {
     assert.ok(!out.includes(TCKN));
   });
 
+  it("text results and error text keep the text pipeline; only transcripts use speech", async () => {
+    const plain = "Siparis no 1234567, tutar 1 250 000 TL, kontrol et dosya nokta com";
+    const { proxy } = harness(policy({ resultClasses: ALL_MASK }), result([{ type: "text", text: plain }]));
+    assert.equal(textOf(await proxy.call(CALL, P)), plain);
+
+    const failing = createProxy({
+      policy: policy({ resultClasses: ALL_MASK }),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger: new MemoryLedger(),
+      now: tickingNow(),
+      nonce: queuedNonce(["e-1", "e-2", "e-3"]),
+      inner: async () => {
+        throw new Error(`lookup failed: ${plain}`);
+      },
+    });
+    let caught: unknown;
+    try {
+      await failing.call(CALL, P);
+    } catch (err) {
+      caught = err;
+    }
+    assert.ok(caught instanceof Error, "the tool's throw did not reach the caller as an error");
+    assert.ok(caught.message.includes(plain), `error text was read with speech rules: ${caught.message}`);
+  });
+
   it("a tool's error text is masked like a result before it leaves the gate", async () => {
     const failing = createProxy({
       policy: policy({ resultClasses: { tckn: "mask", email: "mask" } }),

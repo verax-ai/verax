@@ -19,8 +19,11 @@ import type {
 } from "./types.ts";
 import { isMediaContent, isTextContent } from "./types.ts";
 
-/** Transcripts use Conarium's speech pipeline (split digit runs, spoken addresses). */
-const RESULT_MASK_PIPELINE = "speech" as const;
+/** Text results and error text use Conarium's text pipeline. */
+const TEXT_MASK_PIPELINE = "text" as const;
+/** Transcripts use its speech pipeline (split digit runs, spoken addresses); its harsher rules would over-mask plain text. */
+const TRANSCRIPT_MASK_PIPELINE = "speech" as const;
+type MaskPipeline = typeof TEXT_MASK_PIPELINE | typeof TRANSCRIPT_MASK_PIPELINE;
 
 export type ResultRecordWriter = (opts: {
   decision: DecisionKind;
@@ -112,6 +115,7 @@ function scanText(
   only: SpanClass[],
   cap: number,
   masker: ResultMasker,
+  pipeline: MaskPipeline,
 ): { text: string; classes: Record<string, number>; masked: Record<string, number> } {
   const pieces = splitTextForScan(text, cap);
   const classes: Record<string, number> = {};
@@ -119,7 +123,7 @@ function scanText(
   const out: string[] = [];
   for (const piece of pieces) {
     const { body, suffix } = dropScanBreak(piece);
-    const result = masker(body, { pipeline: RESULT_MASK_PIPELINE, only, scanCharCap: cap });
+    const result = masker(body, { pipeline, only, scanCharCap: cap });
     out.push(`${result.text}${suffix}`);
     addCounts(classes, result.classes);
     addCounts(masked, result.masked);
@@ -349,7 +353,7 @@ export async function gateThrownError(
     let scanFailed = false;
 
     try {
-      const scanned = scanText(original, only, cap, masker);
+      const scanned = scanText(original, only, cap, masker, TEXT_MASK_PIPELINE);
       addCounts(masked, scanned.masked);
       const blocked = firstBlocked(scanned.classes, choices);
       if (blocked) {
@@ -426,7 +430,7 @@ export async function gateResultClasses(
     if (isTextContent(block)) {
       let scanned;
       try {
-        scanned = scanText(block.text, only, cap, masker);
+        scanned = scanText(block.text, only, cap, masker, TEXT_MASK_PIPELINE);
       } catch {
         scanFailed = true;
         break;
@@ -459,7 +463,7 @@ export async function gateResultClasses(
     transcribed += 1;
     let scanned;
     try {
-      scanned = scanText(transcript, only, cap, masker);
+      scanned = scanText(transcript, only, cap, masker, TRANSCRIPT_MASK_PIPELINE);
     } catch {
       scanFailed = true;
       break;

@@ -333,7 +333,9 @@ and spaces and the `@` can be lost. These rules are Conarium's `speech`
 pipeline (`@conarium-ai/mask` 0.3.4), so the `text` rules do not move. What
 it masks and what it leaves is stated once, in Conarium's
 `docs/API-STABILITY.md` row for `pipeline: 'speech'`, not here. Transcripts
-use it (`RESULT_MASK_PIPELINE` in `packages/proxy/src/result-classes.ts`).
+use it (`TRANSCRIPT_MASK_PIPELINE` in `packages/proxy/src/result-classes.ts`);
+text results and a tool's error text keep `text`, because the speech rules
+would mask an order number of 7 or more digits or a spaced amount.
 
 **Not in step 3:** images beyond `allow` and `withhold` (step 4), audio in
 arguments beyond the whole-field rules, and transcription anywhere but the
