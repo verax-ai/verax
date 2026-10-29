@@ -402,6 +402,39 @@ describe("data classes: the gate", () => {
       inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
     });
 
+  it("a halted gate does not write a class from an inputs id to disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-id-"));
+    writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
+    const out = await fileProxy(dir).call(
+      {
+        name: "memory.put",
+        arguments: { id: "n-halt-id", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+      },
+      P,
+    );
+    assert.match(out.content[0]?.text ?? "", /^denied:/);
+    assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+  });
+
+  it("a gate low on disk does not write a class from an inputs id to disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-disk-id-"));
+    const orig = diskProbe.freeBytes;
+    diskProbe.freeBytes = (probeDir) => (probeDir === dir ? 0 : orig(probeDir));
+    try {
+      const out = await fileProxy(dir).call(
+        {
+          name: "memory.put",
+          arguments: { id: "n-disk-id", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+        },
+        P,
+      );
+      assert.match(out.content[0]?.text ?? "", /^denied:/);
+      assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+    } finally {
+      diskProbe.freeBytes = orig;
+    }
+  });
+
   it("a halted gate does not write a class from _inputs to disk", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-"));
     writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });

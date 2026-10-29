@@ -715,7 +715,24 @@ export function createProxy(deps: ProxyDeps) {
         : sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
-      // A class in `_inputs[].source` must not reach disk before the meta scan.
+      // A class in `_inputs` (id, source, nested strings) must not reach disk.
+      if (deps.policy.dataClasses) {
+        const metaReason = scanCallMeta(call, deps.policy.dataClasses);
+        if (metaReason) {
+          const ref = deps.nonce();
+          await writeRecord({
+            decision: "deny",
+            reasonCode: metaReason,
+            ref,
+            requestHash,
+            inputs: { principal: principalInputs(principal), inputs: [] },
+            effectHash: null,
+            subject: call.name,
+            timestampMs,
+          });
+          return denied(metaReason, ref);
+        }
+      }
       const preMetaInputs = deps.policy.dataClasses
         ? inputsWithoutSource(resolved.inputs)
         : resolved.inputs;
@@ -786,7 +803,7 @@ export function createProxy(deps: ProxyDeps) {
               reasonCode: metaReason,
               ref,
               requestHash,
-              inputs: inputsWithoutSource(resolved.inputs),
+              inputs: { principal: principalInputs(principal), inputs: [] },
               effectHash: null,
               subject: call.name,
               timestampMs,
