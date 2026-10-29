@@ -719,27 +719,16 @@ export function createProxy(deps: ProxyDeps) {
         : sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
-      // A class in `_inputs` (id, source, nested strings) must not reach disk.
-      if (deps.policy.dataClasses) {
-        const metaReason = scanCallMeta(call, deps.policy.dataClasses);
-        if (metaReason) {
-          const ref = deps.nonce();
-          await writeRecord({
-            decision: "deny",
-            reasonCode: metaReason,
-            ref,
-            requestHash,
-            inputs: { principal: principalInputs(principal), inputs: [] },
-            effectHash: null,
-            subject: call.name,
-            timestampMs,
-          });
-          return denied(metaReason, ref);
-        }
-      }
-      const preMetaInputs = deps.policy.dataClasses
-        ? inputsWithoutSource(resolved.inputs)
-        : resolved.inputs;
+      // A class in `_inputs` must not reach disk on the halt or disk-low
+      // record. Scan here only to scrub; the deny reason stays 0.7.0's.
+      const metaReason = deps.policy.dataClasses
+        ? scanCallMeta(call, deps.policy.dataClasses)
+        : null;
+      const preMetaInputs = metaReason
+        ? { principal: principalInputs(principal), inputs: [] }
+        : deps.policy.dataClasses
+          ? inputsWithoutSource(resolved.inputs)
+          : resolved.inputs;
       async function denyIfHalted(): Promise<ToolResult | null> {
         if (!stateDir || !isProxyHalted(stateDir)) return null;
         const ref = deps.nonce();

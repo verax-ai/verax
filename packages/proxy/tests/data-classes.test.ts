@@ -8,7 +8,7 @@ import { verifyDecisionRecord } from "@cedulon/core";
 import { approvePending } from "../src/approvals.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { loadPolicy } from "../src/policy.ts";
-import { createProxy } from "../src/proxy.ts";
+import { createProxy, LedgerDenyUnrecorded } from "../src/proxy.ts";
 import { diskProbe } from "../src/disk.ts";
 import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import type { Principal, ToolCall } from "../src/types.ts";
@@ -470,6 +470,63 @@ describe("data classes: the gate", () => {
       assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
     } finally {
       diskProbe.freeBytes = orig;
+    }
+  });
+
+  it("a halted gate with a class in _inputs is still denied:halted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-order-"));
+    writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
+    const out = await fileProxy(dir).call(
+      {
+        name: "memory.put",
+        arguments: { id: "n-halt-order", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+      },
+      P,
+    );
+    assert.match(out.content[0]?.text ?? "", /^denied:halted:/);
+    assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+  });
+
+  it("a disk-low gate with a class in _inputs still throws LedgerDenyUnrecorded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-disk-order-"));
+    const ledger = new FileLedger(dir);
+    const orig = diskProbe.freeBytes;
+    diskProbe.freeBytes = (probeDir) => (probeDir === dir ? 0 : orig(probeDir));
+    const origAppend = ledger.appendDecisionChained.bind(ledger);
+    ledger.appendDecisionChained = async () => {
+      throw new Error("ENOSPC");
+    };
+    const proxy = createProxy({
+      policy: policyV2(),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["h1", "h2"]),
+      resolveInput: async () => ({ versionHash: "a".repeat(64), validFromMs: 0, validUntilMs: 9_999_999_999_999 }),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    try {
+      await assert.rejects(
+        () =>
+          proxy.call(
+            {
+              name: "memory.put",
+              arguments: { id: "n-disk-order", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+            },
+            P,
+          ),
+        (err: unknown) => {
+          assert.ok(err instanceof LedgerDenyUnrecorded);
+          assert.equal(err.reasonCode, "ledger-disk-low");
+          return true;
+        },
+      );
+      assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+    } finally {
+      ledger.appendDecisionChained = origAppend;
+      diskProbe.freeBytes = orig;
+      ledger.close();
     }
   });
 
