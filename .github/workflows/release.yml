@@ -221,7 +221,9 @@ jobs:
           set -euo pipefail
           cd release-tarballs
           sha256sum -c SHA256SUMS
-      # Dependency order: body asks for proxy and inventory by name.
+      # Dependency order: body asks for proxy and inventory by name. The path
+      # starts with ./ because npm reads `dir/file.tgz` as a GitHub
+      # owner/repo spec and tries to fetch it over git.
       - name: send them in dependency order
         run: |
           set -e
@@ -232,7 +234,7 @@ jobs:
               continue
             fi
             echo "=== @verax-ai/$p ==="
-            npm publish "release-tarballs/verax-ai-$p-$v.tgz" --provenance --access public --ignore-scripts
+            npm publish "./release-tarballs/verax-ai-$p-$v.tgz" --provenance --access public --ignore-scripts
           done
   # Reads the release back from npm. No id-token.
   verify:
