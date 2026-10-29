@@ -46,7 +46,8 @@ below is a test in `packages/proxy/tests/data-classes.test.ts`.
   unmasked.
 - **Refusals**, each a signed deny and the tool is not reached:
   `data-class-block:<class>`, `data-class-local:<class>`,
-  `file-type-block:<ext>` (each string is split into tokens on whitespace,
+  `file-type-block:<ext>` (in the arguments and in `_ref` / `_inputs`, with
+  or without classes; each string is split into tokens on whitespace,
   quotes and shell punctuation; in each token a URL query or fragment is
   cut, escapes are decoded, an NTFS stream suffix, trailing separators and
   dot segments are dropped; this is a filter on names as they appear, not a
@@ -57,8 +58,10 @@ below is a test in `packages/proxy/tests/data-classes.test.ts`.
   is `mask`; when the only restrict class is `mask`, that value is replaced
   whole), `data-class-error` (the masker threw).
   Arguments nested deeper than 64 levels are refused before the request is
-  hashed (`data-class-unscanned`) only when the class gate runs. Version 1
-  has no class gate and forwards a deep argument as 0.7.0 did.
+  hashed (`data-class-unscanned`) whenever the policy names `dataClasses`
+  (at the top or on any rule) or `fileTypes`, on every tool, including a tool
+  whose own classes are all `allow`. Version 1, and a version 2 policy with
+  neither key, forward a deep argument as 0.7.0 did.
 - **Masking.** `mask` classes are replaced, regions the masker covers
   without a class are always replaced, and a string over the scan cap is
   replaced whole. The decision keeps `requestHash` over the arguments as
@@ -90,9 +93,10 @@ masker, which is
   transcript withholds the whole result
   (`withheld:result-class-error:<ref>`) and writes a signed deny
   (`result-class-error`).
-- **Error text.** When the policy sets `resultClasses`, a throw that leaves
-  `runInner` has its message scanned as a text block. `media` alone does
-  not gate error text; the tool's own error leaves. A `block`
+- **Error text.** When the tool's `resultClasses` name a `mask` or `block`
+  class, a throw that leaves `runInner` has its message scanned as a text
+  block. Otherwise (no `resultClasses`, `media` alone, or only `allow` for
+  this tool) the tool's own error leaves unchanged. A `block`
   class becomes `withheld:result-class-block:<class>:<ref>`; a masker throw
   becomes `withheld:result-class-error:<ref>`. The error that leaves is a
   new object with the masked message, the original's prototype (so
@@ -102,7 +106,7 @@ masker, which is
   original. The `:threw` row is written first, over the original payload.
   When the message changed, a result record is chained: `returnedHash`
   over `{ error: <message as it leaves> }`, `requestHash` the `:threw`
-  row's `resultHash`. Without `resultClasses`, errors leave as before.
+  row's `resultHash`. Without such a class, errors leave as before.
 - **Media.** `body` keeps `image` and `audio` blocks as blocks when `data`
   and `mimeType` are strings; other block types stay JSON text. Without
   `resultClasses` and `media`, results are not changed. Once either key is
@@ -111,7 +115,9 @@ masker, which is
   (it must be an executable; on Windows a `.cmd` or `.bat` cannot be
   started this way) with `{file}` replaced, masks the stdout with
   `resultClasses` under the `speech` pipeline, and replaces the block as
-  `[audio transcript] <masked text>`. A timeout, a non-zero exit, empty
+  `[audio transcript] <masked text>`. When the tool's `resultClasses` name
+  no `mask` or `block` class, text blocks and the transcript are not
+  scanned: `[audio transcript] <text>`. A timeout, a non-zero exit, empty
   output or output over the scan cap is `[audio withheld: transcriber-failed]`.
   On a timeout the transcriber is stopped with its process group (on
   Windows, with node's job object); a process that leaves its group is not.
@@ -280,7 +286,8 @@ its group is not. On a timeout or output over the cap the call ends at
 once: the child's stdout and stderr are destroyed and the gate does not
 wait for `close`. The transcript is
 masked with `resultClasses` and replaces the block as text:
-`[audio transcript] <masked text>`. A timeout, a non-zero exit, empty
+`[audio transcript] <masked text>`; when the tool's `resultClasses` name no
+`mask` or `block` class it is not scanned. A timeout, a non-zero exit, empty
 output, or output over the scan cap replaces the block with
 `[audio withheld: transcriber-failed]`. Once `transcribe` or `withhold` is
 chosen, the audio block does not reach the agent in any case. The
@@ -297,9 +304,10 @@ the masker while scanning a text block or a transcript withholds the whole
 result (`withheld:result-class-error:<ref>`) and writes a signed deny
 (`result-class-error`), the same as on the argument side (`data-class-error`).
 
-**Error text.** When the policy sets `resultClasses`, a throw that leaves
-`runInner` has its message scanned as a text block. `media` alone does
-not gate error text; the tool's own error leaves. A `block`
+**Error text.** When the tool's `resultClasses` name a `mask` or `block`
+class, a throw that leaves `runInner` has its message scanned as a text
+block. Otherwise (no `resultClasses`, `media` alone, or only `allow` for
+this tool) the tool's own error leaves unchanged. A `block`
 class becomes `withheld:result-class-block:<class>:<ref>`; a masker throw
 becomes `withheld:result-class-error:<ref>`. The error that leaves is a
 new object with the masked message, the original's prototype (so
@@ -309,7 +317,7 @@ error gate itself is `withheld:result-class-error:<ref>`, never the
 original. The `:threw` row is written first, over the original payload.
 When the message changed, a result record is chained: `returnedHash`
 over `{ error: <message as it leaves> }`, `requestHash` the `:threw`
-row's `resultHash`. Without `resultClasses`, errors leave as before.
+row's `resultHash`. Without such a class, errors leave as before.
 
 **Block.** A `block` class in a text block or a transcript withholds the
 whole result: the agent gets `withheld:result-class-block:<class>:<ref>` as
