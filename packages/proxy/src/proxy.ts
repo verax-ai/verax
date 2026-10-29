@@ -1150,9 +1150,9 @@ export function createProxy(deps: ProxyDeps) {
         }
         if (decision === "defer") {
           const rule = deps.policy.rule(verdict.rule);
-          const amount = dispatched.name === "spend" ? dispatched.arguments.amountMinor : dispatched.arguments.amount;
-          const payee = dispatched.arguments.payee;
-          const currency = dispatched.arguments.currency;
+          const amount = forwarded.name === "spend" ? forwarded.arguments.amountMinor : forwarded.arguments.amount;
+          const payee = forwarded.arguments.payee;
+          const currency = forwarded.arguments.currency;
           await approvals.append({
             ref,
             requestHash,

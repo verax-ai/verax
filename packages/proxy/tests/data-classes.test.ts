@@ -509,6 +509,33 @@ describe("data classes: the gate", () => {
     }
   });
 
+  it("a deferred call takes amount, payee and currency from the forwarded arguments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-payee-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call(
+        { name: "memory.put", arguments: { payee: EMAIL, amount: 10, currency: "TRY", _ref: "dc-payee" } },
+        P,
+      );
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending, "no pending approval");
+      const stored = JSON.stringify(pending);
+      assert.ok(!stored.includes(EMAIL), `the e-mail address is on the approval row: ${stored}`);
+      assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
+    } finally {
+      ledger.close();
+    }
+  });
+
   it("an IP class is detected when the policy names it", async () => {
     const policy = policyV2({ dataClasses: { ip: "block" } });
     const { proxy, received } = harness(policy, ["r-ip"]);
