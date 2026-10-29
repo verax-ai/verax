@@ -53,11 +53,12 @@ below is a test in `packages/proxy/tests/data-classes.test.ts`.
   boundary: a name the agent encodes or renames is not caught), `data-class-key:<class>` (a key cannot be masked),
   `data-class-meta:<class>` (a class in `_ref` or `_inputs`),
   `data-class-unscanned` (a key that could not be scanned; or a value that
-  could not be scanned when a class is chosen `block` or `local` and none is
-  chosen `mask`, since with a `mask` class that value is replaced whole
-  instead), `data-class-error` (the masker threw).
+  could not be scanned when any class is `block` or `local`, even if another
+  is `mask`; when the only restrict class is `mask`, that value is replaced
+  whole), `data-class-error` (the masker threw).
   Arguments nested deeper than 64 levels are refused before the request is
-  hashed (`data-class-unscanned`, or `arguments-too-deep` under version 1).
+  hashed (`data-class-unscanned`) only when the class gate runs. Version 1
+  has no class gate and forwards a deep argument as 0.7.0 did.
 - **Masking.** `mask` classes are replaced, regions the masker covers
   without a class are always replaced, and a string over the scan cap is
   replaced whole. The decision keeps `requestHash` over the arguments as
@@ -89,8 +90,9 @@ masker, which is
   transcript withholds the whole result
   (`withheld:result-class-error:<ref>`) and writes a signed deny
   (`result-class-error`).
-- **Error text.** When the policy sets `resultClasses` or `media`, a throw
-  that leaves `runInner` has its message scanned as a text block. A `block`
+- **Error text.** When the policy sets `resultClasses`, a throw that leaves
+  `runInner` has its message scanned as a text block. `media` alone does
+  not gate error text; the tool's own error leaves. A `block`
   class becomes `withheld:result-class-block:<class>:<ref>`; a masker throw
   becomes `withheld:result-class-error:<ref>`. The error that leaves is a
   new object with the masked message, the original's prototype (so
@@ -100,7 +102,7 @@ masker, which is
   original. The `:threw` row is written first, over the original payload.
   When the message changed, a result record is chained: `returnedHash`
   over `{ error: <message as it leaves> }`, `requestHash` the `:threw`
-  row's `resultHash`. Without those keys, errors leave as before.
+  row's `resultHash`. Without `resultClasses`, errors leave as before.
 - **Media.** `body` keeps `image` and `audio` blocks as blocks when `data`
   and `mimeType` are strings; other block types stay JSON text. Without
   `resultClasses` and `media`, results are not changed. Once either key is
@@ -263,9 +265,9 @@ JSON text.
   `transcribe`, or `withhold` (the block is replaced by a label).
   `media.image`: `allow` or `withhold` until step 4. Once `resultClasses` or
   `media` is set, a media kind it does not name is `withhold`.
-- `transcribe` needs `media.transcriber.command`: an array of strings with
-  `{file}` in exactly one of them, run without a shell. Without it the load
-  stops.
+- `transcribe` needs `media.transcriber.command`: an array of strings, run
+  without a shell, with `{file}` in exactly one argument and not in the
+  executable (`command[0]`). Without it the load stops.
 
 **Transcribe.** The block's bytes are written into a new temporary directory
 only the current user can read; `command[0]` is started without a shell, so
@@ -295,8 +297,9 @@ the masker while scanning a text block or a transcript withholds the whole
 result (`withheld:result-class-error:<ref>`) and writes a signed deny
 (`result-class-error`), the same as on the argument side (`data-class-error`).
 
-**Error text.** When the policy sets `resultClasses` or `media`, a throw
-that leaves `runInner` has its message scanned as a text block. A `block`
+**Error text.** When the policy sets `resultClasses`, a throw that leaves
+`runInner` has its message scanned as a text block. `media` alone does
+not gate error text; the tool's own error leaves. A `block`
 class becomes `withheld:result-class-block:<class>:<ref>`; a masker throw
 becomes `withheld:result-class-error:<ref>`. The error that leaves is a
 new object with the masked message, the original's prototype (so
@@ -306,7 +309,7 @@ error gate itself is `withheld:result-class-error:<ref>`, never the
 original. The `:threw` row is written first, over the original payload.
 When the message changed, a result record is chained: `returnedHash`
 over `{ error: <message as it leaves> }`, `requestHash` the `:threw`
-row's `resultHash`. Without those keys, errors leave as before.
+row's `resultHash`. Without `resultClasses`, errors leave as before.
 
 **Block.** A `block` class in a text block or a transcript withholds the
 whole result: the agent gets `withheld:result-class-block:<class>:<ref>` as
