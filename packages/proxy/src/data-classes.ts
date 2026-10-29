@@ -291,7 +291,6 @@ export function gateDataClasses(
   const hasBlockOrLocal = SPAN_CLASSES.some(
     (cls) => choices[cls] === "block" || choices[cls] === "local",
   );
-  const maskChosen = only.length > 0;
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
   const detectors = detectorsFor(choices);
   const opts = {
@@ -320,7 +319,9 @@ export function gateDataClasses(
       const unscanned = couldNotScan(text, result, effectiveCap);
       if (unscanned && state.error === null) {
         // A key cannot be rewritten; an unscanned key is always a deny.
-        if (kind === "key" || (hasBlockOrLocal && !maskChosen)) {
+        // A value the masker could not scan, while any class is block or
+        // local, is a deny even if another class is mask.
+        if (kind === "key" || hasBlockOrLocal) {
           state.error = "data-class-unscanned";
         }
       }

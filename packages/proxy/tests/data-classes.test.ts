@@ -144,7 +144,10 @@ describe("data classes: the gate", () => {
   });
 
   it("text over the scan cap is replaced whole, and the record says so", async () => {
-    const { proxy, received } = harness(policyV2({ scanCharCap: 64 }), ["r-cap"]);
+    const { proxy, received } = harness(
+      policyV2({ dataClasses: { email: "mask", iban: "mask" }, scanCharCap: 64 }),
+      ["r-cap"],
+    );
     await proxy.call({ name: "memory.put", arguments: { id: "n6", body: `${"x".repeat(100)} ${EMAIL}` } }, P);
     const sent = JSON.stringify(received[0]);
     assert.ok(!sent.includes(EMAIL), `the e-mail address reached the tool: ${sent}`);
@@ -418,6 +421,17 @@ describe("data classes: the gate", () => {
     } finally {
       diskProbe.freeBytes = orig;
     }
+  });
+
+  it("an unscanned field is denied when any class is block, even if another is mask", async () => {
+    const policy = policyV2({ dataClasses: { email: "mask", tckn: "block" } });
+    const { proxy, received } = harness(policy, ["r-unscanned-mix"]);
+    const out = await proxy.call(
+      { name: "memory.put", arguments: { id: "n-mix", body: `${"x".repeat(20_000)} ${TCKN}` } },
+      P,
+    );
+    assert.equal(received.length, 0, `an unscanned blocked field reached the tool: ${JSON.stringify(received)}`);
+    assert.match(out.content[0]?.text ?? "", /^denied:data-class-unscanned:/);
   });
 
   it("an IP class is detected when the policy names it", async () => {
