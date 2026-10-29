@@ -143,6 +143,23 @@ describe("data classes: the gate", () => {
     assert.equal(result.content[0]?.text, "denied:file-type-block:.pem:r-file");
   });
 
+  it("a blocked file type is refused when the policy has no dataClasses", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        fileTypes: { block: [".pem"] },
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-file-nodc"]);
+    const result = await proxy.call({ name: "memory.put", arguments: { body: "C:/keys/Server.PEM" } }, P);
+    assert.equal(received.length, 0);
+    assert.equal(result.content[0]?.text, "denied:file-type-block:.pem:r-file-nodc");
+  });
+
   it("text over the scan cap is replaced whole, and the record says so", async () => {
     const { proxy, received } = harness(
       policyV2({ dataClasses: { email: "mask", iban: "mask" }, scanCharCap: 64 }),

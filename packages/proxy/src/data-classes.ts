@@ -135,6 +135,36 @@ function blockedFileType(text: string, blocked: readonly string[]): string | und
   return undefined;
 }
 
+function namedClassMaps(config: DataClassConfig): boolean {
+  return Object.keys(config.document).length > 0 || Object.keys(config.byTool).length > 0;
+}
+
+function firstBlockedFileType(value: unknown, blocked: readonly string[]): string | undefined {
+  if (blocked.length === 0) return undefined;
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (typeof cur === "string") {
+      const hit = blockedFileType(cur, blocked);
+      if (hit !== undefined) return hit;
+      continue;
+    }
+    if (Array.isArray(cur)) {
+      for (const item of cur) stack.push(item);
+      continue;
+    }
+    if (cur !== null && typeof cur === "object") {
+      const rec = cur as Record<string, unknown>;
+      for (const key of Object.keys(rec)) {
+        const keyHit = blockedFileType(key, blocked);
+        if (keyHit !== undefined) return keyHit;
+        stack.push(rec[key]);
+      }
+    }
+  }
+  return undefined;
+}
+
 function addCounts(into: Record<string, number>, add: Record<string, number> | undefined): void {
   if (!add) return;
   for (const [key, n] of Object.entries(add)) {
@@ -196,6 +226,7 @@ function restrictedClass(
  * A class whose choice is not `allow` is `data-class-meta:<class>`.
  */
 export function scanCallMeta(call: ToolCall, config: DataClassConfig): string | null {
+  if (!namedClassMaps(config)) return null;
   const args = call.arguments;
   const choices = choicesFor(config, call.name);
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
@@ -285,6 +316,11 @@ export function gateDataClasses(
   config: DataClassConfig | undefined,
 ): DataClassGateResult {
   if (!config) return { action: "unchanged" };
+  if (!namedClassMaps(config)) {
+    const fileType = firstBlockedFileType(call.arguments, config.blockedFileTypes);
+    if (fileType !== undefined) return { action: "deny", reasonCode: `file-type-block:${fileType}` };
+    return { action: "unchanged" };
+  }
 
   const choices = choicesFor(config, call.name);
   const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");

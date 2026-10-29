@@ -610,7 +610,9 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
     ...(document.requireInputs ? { requireInputs: true as const } : {}),
     ...(document.version === 2
       ? {
-          ...(document.dataClasses !== undefined || document.rules.some((rule) => rule.dataClasses !== undefined)
+          ...(document.dataClasses !== undefined ||
+          document.fileTypes !== undefined ||
+          document.rules.some((rule) => rule.dataClasses !== undefined)
             ? {
                 dataClasses: {
                   document: document.dataClasses ?? {},
