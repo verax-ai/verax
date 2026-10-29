@@ -215,12 +215,14 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     throw new Error(`explain-unknown-ref:${ref}`);
   }
   const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
-  const inputsDoc =
-    record.claims.ref && typeof record.claims.inputsHash === "string"
-      ? await inputsMatchingHash(inputsLog, record.claims.ref, record.claims.inputsHash)
-      : record.claims.ref
-        ? await inputsLog.get(record.claims.ref)
-        : null;
+  // The row inputsHash names. When none does, the last row for the ref is
+  // read so a tampered row is an inputs-hash-mismatch, not a missing document.
+  const inputsDoc = !record.claims.ref
+    ? null
+    : typeof record.claims.inputsHash === "string"
+      ? ((await inputsMatchingHash(inputsLog, record.claims.ref, record.claims.inputsHash)) ??
+        (await inputsLog.get(record.claims.ref)))
+      : await inputsLog.get(record.claims.ref);
   const resultOf = typeof inputsDoc?.resultOf === "string" ? inputsDoc.resultOf : undefined;
   const effect =
     effects.find((e) => e.row.ref === (resultOf ?? ref) && e.row.effectClass !== "duplicate-effect") ?? null;

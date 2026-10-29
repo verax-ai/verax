@@ -223,12 +223,18 @@ function restrictedClass(
 
 /**
  * Scan Verax's own `_ref` / `_inputs` (ids, sources, every nested string).
- * A class whose choice is not `allow` is `data-class-meta:<class>`.
+ * A blocked file type is `file-type-block:<ext>`, as on the arguments, whatever
+ * the classes; a class whose choice is not `allow` is `data-class-meta:<class>`.
  */
 export function scanCallMeta(call: ToolCall, config: DataClassConfig): string | null {
+  const args = call.arguments;
+  for (const key of ["_ref", "_inputs"]) {
+    if (!Object.prototype.hasOwnProperty.call(args, key)) continue;
+    const fileType = firstBlockedFileType(args[key], config.blockedFileTypes);
+    if (fileType !== undefined) return `file-type-block:${fileType}`;
+  }
   const choices = choicesFor(config, call.name);
   if (!restrictsChoices(choices)) return null;
-  const args = call.arguments;
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
   const detectors = detectorsFor(choices);
   const opts = {

@@ -321,17 +321,19 @@ function inputPaths(dir: string): string[] {
 /**
  * forwardedHash on the inputs row each decision's inputsHash names, keyed by
  * that decision's ref. Same files as `loadDecisionRequestHashesFromDir`.
+ * Null when no inputs row on disk hashes to the decision: a row appended
+ * after it, or an edited one, does not stand in for it.
  */
-export function loadSignedForwardedHashesFromDir(stateDir: string): Map<string, string> {
+export function loadSignedForwardedHashesFromDir(stateDir: string): Map<string, string | null> {
   const wanted = new Map<string, string>();
   for (const claims of readDecisionLines(stateDir)) {
     if (typeof claims.ref !== "string" || typeof claims.inputsHash !== "string") continue;
     wanted.set(claims.ref, claims.inputsHash);
   }
-  const out = new Map<string, string>();
+  const out = new Map<string, string | null>();
   if (wanted.size === 0) return out;
-  const seen = new Set<string>();
-  for (const path of [...inputPaths(stateDir)].reverse()) {
+  const found = new Set<string>();
+  for (const path of inputPaths(stateDir)) {
     let text = "";
     try {
       text = readFileSync(path, "utf8");
@@ -339,21 +341,19 @@ export function loadSignedForwardedHashesFromDir(stateDir: string): Map<string, 
       if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw err;
     }
-    const lines = text.split("\n");
-    for (let i = lines.length - 1; i >= 0; i -= 1) {
-      const line = lines[i];
+    for (const line of text.split("\n")) {
       if (line === "") continue;
       const row = JSON.parse(line) as { ref?: unknown; inputs?: DecisionInputs };
-      if (typeof row.ref !== "string" || seen.has(row.ref)) continue;
+      if (typeof row.ref !== "string" || found.has(row.ref)) continue;
       const expected = wanted.get(row.ref);
-      if (expected === undefined) continue;
-      seen.add(row.ref);
-      if (row.inputs === undefined || sha256Canonical(row.inputs) !== expected) continue;
+      if (expected === undefined || row.inputs === undefined) continue;
+      if (sha256Canonical(row.inputs) !== expected) continue;
+      found.add(row.ref);
       const hash = row.inputs.dataClasses?.forwardedHash;
       if (typeof hash === "string" && hash !== "") out.set(row.ref, hash);
-      if (seen.size === wanted.size) return out;
     }
   }
+  for (const ref of wanted.keys()) if (!found.has(ref)) out.set(ref, null);
   return out;
 }
 
@@ -427,7 +427,7 @@ function boundApproval(
   effect: LedgerEffect,
   approvals: readonly ApprovalRow[] | undefined,
   requestHashes: ReadonlyMap<string, string> | undefined,
-  forwardedHashes?: ReadonlyMap<string, string>,
+  forwardedHashes?: ReadonlyMap<string, string | null>,
 ): ApprovalRow | undefined {
   if (!requestHashes) return undefined;
   const signed = requestHashes.get(effect.row.ref);
@@ -443,7 +443,7 @@ function effectAmount(
   effect: LedgerEffect,
   approvals: readonly ApprovalRow[] | undefined,
   requestHashes: ReadonlyMap<string, string> | undefined,
-  forwardedHashes?: ReadonlyMap<string, string>,
+  forwardedHashes?: ReadonlyMap<string, string | null>,
 ): { amountMinor?: number; currency?: string } {
   const snap = boundApproval(effect, approvals, requestHashes, forwardedHashes);
   if (!snap) return {};
@@ -479,7 +479,7 @@ function descriptorsFor(
   approvals: readonly ApprovalRow[] | undefined,
   byPayee: Readonly<Record<string, readonly string[]>> | undefined,
   requestHashes: ReadonlyMap<string, string> | undefined,
-  forwardedHashes?: ReadonlyMap<string, string>,
+  forwardedHashes?: ReadonlyMap<string, string | null>,
 ): readonly string[] | undefined {
   if (!byPayee) return undefined;
   const snap = boundApproval(effect, approvals, requestHashes, forwardedHashes);
@@ -514,7 +514,7 @@ export function reconcile(
     /** Effect ref to the requestHash on the signed decision of that ref. */
     decisionRequestHashes?: ReadonlyMap<string, string>;
     /** Approval-row ref to the forwardedHash on that defer's signed inputs. */
-    decisionForwardedHashes?: ReadonlyMap<string, string>;
+    decisionForwardedHashes?: ReadonlyMap<string, string | null>;
   },
 ): ReconcileReport {
   const toleranceMs = opts?.toleranceMs ?? 60_000;

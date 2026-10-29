@@ -1,11 +1,12 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { verifyDecisionRecord } from "@cedulon/core";
 
-import { approvePending } from "../src/approvals.ts";
+import { approvalArgsBound, approvePending, createApprovalBudgetGuard } from "../src/approvals.ts";
+import { loadDecisionRequestHashesFromDir, loadSignedForwardedHashesFromDir } from "../src/reconcile.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { loadPolicy } from "../src/policy.ts";
 import { createProxy, LedgerDenyUnrecorded } from "../src/proxy.ts";
@@ -621,6 +622,220 @@ describe("data classes: the gate", () => {
     } finally {
       ledger.close();
     }
+  });
+
+  it("an approval signs the class counts of the signed defer, not the approvals row's", async () => {
+    const ledger = new MemoryLedger();
+    const proxy = createProxy({
+      policy: policyV2({}, { mode: "approve" }),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["unused"]),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    await proxy.call({ name: "memory.put", arguments: { id: "n-counts", body: `mail ${EMAIL}`, _ref: "dc-counts" } }, P);
+    const signedClasses = (await proxy.inputsLog.get("dc-counts"))?.dataClasses;
+    assert.ok(signedClasses, "the defer carried no dataClasses");
+    const pending = (await proxy.approvals.listPending())[0];
+    assert.ok(pending?.dataClasses, "no pending approval with dataClasses");
+    await proxy.approvals.append({
+      ...pending,
+      dataClasses: { ...pending.dataClasses, masked: { email: 999 } },
+    });
+    const result = await approvePending({
+      ledger,
+      recordSigner: RECORD_SIGNER,
+      now: tickingNow(1_000),
+      nonce: queuedNonce(["dc-counts-allow"]),
+      ref: "dc-counts",
+      approverId: "op-1",
+      via: "cli",
+      policyHash: (await ledger.decisions())[0]!.claims.policyHash,
+      approvals: proxy.approvals,
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const allowInputs = await proxy.inputsLog.get("dc-counts-allow");
+    assert.deepEqual(allowInputs?.dataClasses, signedClasses);
+  });
+
+  it("the daily cap counts the amount that will be sent, not the unbound args copy", async () => {
+    const DAY1 = Date.UTC(2026, 9, 1, 12);
+    const DAY2 = DAY1 + 86_400_000;
+    let nowMs = DAY1;
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        approvalTtlMs: 3 * 86_400_000,
+        dataClasses: { email: "mask" },
+        rules: [
+          {
+            id: "spend-cap",
+            tool: "spend",
+            requires: ["verax:pay"],
+            mode: "approve",
+            text: "Spends need operator approval.",
+            spend: { maxAmountMinor: 1_000, currency: "TRY", payees: ["true-ads"], dailyMaxMinor: 100 },
+          },
+        ],
+      }),
+    );
+    const ledger = new MemoryLedger();
+    const proxy = createProxy({
+      policy,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: () => nowMs,
+      nonce: queuedNonce(["unused-1", "unused-2"]),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    const payer: Principal = { brain: "brain-1", scopes: new Set(["verax:pay"]) };
+    const spend = (ref: string) => ({
+      name: "spend",
+      arguments: { amountMinor: 60, currency: "TRY", payee: "true-ads", reference: `inv ${EMAIL}`, _ref: ref },
+    });
+    await proxy.call(spend("cap-1"), payer);
+    nowMs = DAY2;
+    await proxy.call(spend("cap-2"), payer);
+    const guard = createApprovalBudgetGuard({ policy, approvals: proxy.approvals, now: () => nowMs, ledger });
+    const approve = (ref: string) =>
+      approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: () => nowMs,
+        nonce: queuedNonce([`${ref}-allow`]),
+        ref,
+        approverId: "op-1",
+        via: "cli",
+        policyHash: policy.hash,
+        approvals: proxy.approvals,
+        inputsLog: proxy.inputsLog,
+        budgetGuard: guard,
+      });
+    const first = await approve("cap-1");
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const second = (await proxy.approvals.listPending()).find((row) => row.ref === "cap-2");
+    assert.ok(second?.forwardedArgs, "the masked spend has no forwardedArgs");
+    await proxy.approvals.append({ ...second, args: { ...second.args, amountMinor: 0 } });
+    const result = await approve("cap-2");
+    assert.equal(result.ok, false, `a 60 + 60 spend passed a 100 cap: ${JSON.stringify(result)}`);
+    if (!result.ok) assert.equal(result.reason, "budget-exceeded");
+  });
+
+  it("an inputs row appended after the defer does not unbind it: the raw row stays unbound", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-loader-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      const raw = { id: "n-loader", body: `mail ${EMAIL}` };
+      await proxy.call({ name: "memory.put", arguments: { ...raw, _ref: "dc-loader" } }, P);
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending?.forwardedArgs, "the masked call has no forwardedArgs");
+      const { forwardedArgs: _f, dataClasses: _d, ...rest } = pending;
+      const edited = { ...rest, args: raw };
+      appendFileSync(
+        join(dir, "inputs.jsonl"),
+        `${JSON.stringify({ ref: "dc-loader", inputs: { principal: { brain: "b", scopes: [] }, inputs: [] } })}\n`,
+      );
+      const signedRequest = loadDecisionRequestHashesFromDir(dir).get("dc-loader");
+      assert.ok(signedRequest);
+      const forwarded = loadSignedForwardedHashesFromDir(dir).get("dc-loader");
+      assert.equal(approvalArgsBound(edited, signedRequest, forwarded), false, "the raw arguments read as bound");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("an approved call retried with no approvals row does not send the raw arguments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-norow-"));
+    const raw = { id: "n-norow", body: `mail ${EMAIL}` };
+    let ledger = new FileLedger(dir);
+    try {
+      const first = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await first.call({ name: "memory.put", arguments: { ...raw, _ref: "dc-norow" } }, P);
+      const approved = await approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: tickingNow(1_000),
+        nonce: queuedNonce(["dc-norow-allow"]),
+        ref: "dc-norow",
+        approverId: "op-1",
+        via: "cli",
+        policyHash: (await ledger.decisions())[0]!.claims.policyHash,
+        approvals: first.approvals,
+        inputsLog: first.inputsLog,
+      });
+      assert.equal(approved.ok, true, JSON.stringify(approved));
+      ledger.close();
+      rmSync(join(dir, "approvals.jsonl"), { force: true });
+
+      ledger = new FileLedger(dir);
+      const received: ToolCall[] = [];
+      const relaxed = createProxy({
+        policy: policyV2({ dataClasses: { email: "allow" } }, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(2_000),
+        nonce: queuedNonce(["retry-deny"]),
+        inner: async (call) => {
+          received.push(structuredClone({ name: call.name, arguments: call.arguments }));
+          return { content: [{ type: "text", text: "ok" }], isError: false };
+        },
+      });
+      await relaxed.call({ name: "memory.put", arguments: { ...raw, _ref: "dc-norow" } }, P);
+      assert.ok(
+        !JSON.stringify(received).includes(EMAIL),
+        `the raw arguments were sent after the operator approved the masked ones: ${JSON.stringify(received)}`,
+      );
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("a blocked file type in _inputs is refused and does not reach the inputs log", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        fileTypes: { block: [".pem"] },
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-meta-pem"]);
+    const result = await proxy.call(
+      {
+        name: "memory.put",
+        arguments: { id: "n-meta-pem", body: "ok", _inputs: [{ id: "keys/Server.PEM", versionHash: "a".repeat(64) }] },
+      },
+      P,
+    );
+    assert.equal(received.length, 0, `the call reached the tool: ${JSON.stringify(received)}`);
+    assert.equal(result.content[0]?.text, "denied:file-type-block:.pem:r-meta-pem");
+    const stored = JSON.stringify(await proxy.inputsLog.get("r-meta-pem"));
+    assert.ok(!stored.includes("Server.PEM"), `the blocked name reached the inputs log: ${stored}`);
   });
 
   it("a deferred call takes amount, payee and currency from the forwarded arguments", async () => {

@@ -9,7 +9,7 @@ import {
   approvalsLogFor,
   createApprovalBudgetGuard,
   drainApprovalCommands,
-  signedApprovalDispatchHash,
+  signedApprovalDispatch,
   spentTodayMinorOf,
 } from "./approvals.ts";
 import { SerialQueue } from "./serial-queue.ts";
@@ -988,26 +988,24 @@ export function createProxy(deps: ProxyDeps) {
                 const toRun = snap
                   ? { name: dispatched.name, arguments: approvalDispatchArgs(snap) }
                   : dispatched;
-                if (snap) {
-                  const signedDispatch = await signedApprovalDispatchHash(
-                    deps.ledger,
-                    inputsLog,
-                    scopedRef,
-                    existing.requestHash,
-                  );
-                  if (signedDispatch === null || approvalDispatchHash(snap) !== signedDispatch) {
-                    return {
-                      kind: "done",
-                      result: await signedRetryDeny(
-                        "hash-mismatch",
-                        requestHash,
-                        resolved.inputs,
-                        timestampMs,
-                        call.name,
-                        scopedRef,
-                      ),
-                    };
-                  }
+                // What is sent is what the signed defer committed to, with or
+                // without an approvals row: a missing row does not send the raw call.
+                const signedDispatch = await signedApprovalDispatch(deps.ledger, inputsLog, scopedRef, existing);
+                if (
+                  signedDispatch === null ||
+                  sha256Canonical({ name: toRun.name, arguments: toRun.arguments }) !== signedDispatch.hash
+                ) {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      "hash-mismatch",
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
                 }
                 if (deps.policy.dataClasses) {
                   const classGated = gateDataClasses(dispatched, deps.policy.dataClasses);

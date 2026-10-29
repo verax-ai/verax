@@ -26,7 +26,7 @@ import { appendDurable, lookupDecisionByRef, lookupResolvedBy, noteResolution } 
 import { effectDescriptor, sha256Canonical } from "./hash.ts";
 import { terminalText } from "./policy.ts";
 import { isProxyHalted } from "./process-halt.ts";
-import { inputsLogFor } from "./inputs.ts";
+import { inputsLogFor, inputsMatchingHash } from "./inputs.ts";
 import { SerialQueue } from "./serial-queue.ts";
 import type { ApprovalChannel, ApprovalSignature, DecisionInputs, InputsLog, Ledger, Policy, RecordSigner } from "./types.ts";
 
@@ -63,31 +63,46 @@ export function approvalDispatchHash(row: Pick<ApprovalRow, "subject" | "args" |
 }
 
 /**
- * Hash the signed defer committed to for what will be sent. Null when the
- * inputs row no longer hashes to the record — fail closed.
+ * What the signed defer committed to: the hash of what will be sent, and the
+ * inputs row its inputsHash names (null on a record that has no inputsHash).
+ * Null when no inputs row hashes to the record — fail closed. The defer comes
+ * from the ref index; only an index line written before 0.8.0, which does not
+ * carry inputsHash, sends this to the decision log.
  */
-export async function signedApprovalDispatchHash(
+export async function signedApprovalDispatch(
   ledger: Ledger,
   inputsLog: InputsLog,
   ref: string,
-  fallbackRequestHash: string,
-): Promise<string | null> {
-  const rec = (await ledger.decisions()).find((d) => d.claims.ref === ref);
-  if (!rec) return fallbackRequestHash;
-  if (typeof rec.claims.inputsHash !== "string") return fallbackRequestHash;
-  const inputs = await inputsLog.get(ref);
-  if (!inputs || sha256Canonical(inputs) !== rec.claims.inputsHash) return null;
-  return inputs.dataClasses?.forwardedHash ?? fallbackRequestHash;
+  defer: { requestHash: string; inputsHash?: string },
+): Promise<{ hash: string; inputs: DecisionInputs | null } | null> {
+  let inputsHash = defer.inputsHash;
+  if (inputsHash === undefined) {
+    const rec = (await ledger.decisions()).find((d) => d.claims.ref === ref);
+    if (!rec) return null;
+    if (typeof rec.claims.inputsHash !== "string") return { hash: defer.requestHash, inputs: null };
+    inputsHash = rec.claims.inputsHash;
+  }
+  const inputs = await inputsMatchingHash(inputsLog, ref, inputsHash);
+  if (!inputs) return null;
+  return { hash: inputs.dataClasses?.forwardedHash ?? defer.requestHash, inputs };
 }
 
+/**
+ * True when the approvals row is the call the signed defer names.
+ * `signedForwardedHash` is null when the defer's inputs row is not on disk,
+ * or no longer hashes to the record: nothing is bound then.
+ */
 export function approvalArgsBound(
   row: Pick<ApprovalRow, "subject" | "args" | "forwardedArgs" | "requestHash" | "dataClasses">,
   signedRequestHash: string,
-  signedForwardedHash?: string,
+  signedForwardedHash?: string | null,
 ): boolean {
   if (row.requestHash !== signedRequestHash) return false;
+  if (signedForwardedHash === null) return false;
   const dispatchHash = approvalDispatchHash(row);
-  if (signedForwardedHash !== undefined) return dispatchHash === signedForwardedHash;
+  if (signedForwardedHash !== undefined) {
+    return dispatchHash === signedForwardedHash && row.dataClasses?.forwardedHash === signedForwardedHash;
+  }
   if (row.dataClasses !== undefined) return false;
   return dispatchHash === signedRequestHash;
 }
@@ -273,8 +288,9 @@ export function spentTodayMinorOf(
     } else {
       continue;
     }
-    if (row.args.currency !== currency) continue;
-    const amt = row.args.amountMinor;
+    const args = approvalDispatchArgs(row);
+    if (args.currency !== currency) continue;
+    const amt = args.amountMinor;
     if (typeof amt === "number") sum += amt;
   }
   return sum;
@@ -294,8 +310,11 @@ export function createApprovalBudgetGuard(opts: {
     if (rule === null) return { ok: false, reason: "rule-missing" };
     const dailyMax = rule.spend?.dailyMaxMinor;
     if (dailyMax === undefined) return { ok: true };
-    const currency = typeof snap.args.currency === "string" ? snap.args.currency : "";
-    const amount = typeof snap.args.amountMinor === "number" ? snap.args.amountMinor : 0;
+    // The amount that will be sent: approvePending checked its hash against the
+    // signed defer. `args` alone is not bound when forwardedArgs is present.
+    const sent = approvalDispatchArgs(snap);
+    const currency = typeof sent.currency === "string" ? sent.currency : "";
+    const amount = typeof sent.amountMinor === "number" ? sent.amountMinor : 0;
     // Sibling pending rows are not authorized yet. Counting them here would
     // deadlock two 100-unit pendings against a later 150 cap. A pending row
     // whose ref the ledger already resolved as allow was authorized; the
@@ -435,8 +454,8 @@ async function approvePendingUnlocked(opts: {
   }
   if (!snap) return { ok: false, reason: "snapshot-missing" };
   const dispatchHash = approvalDispatchHash(snap);
-  const signedDispatch = await signedApprovalDispatchHash(opts.ledger, inputsLog, opts.ref, defer.requestHash);
-  if (signedDispatch === null || dispatchHash !== signedDispatch || snap.requestHash !== defer.requestHash) {
+  const signed = await signedApprovalDispatch(opts.ledger, inputsLog, opts.ref, defer);
+  if (signed === null || dispatchHash !== signed.hash || snap.requestHash !== defer.requestHash) {
     return { ok: false, reason: "hash-mismatch" };
   }
   if (opts.now() > snap.expiresAtMs) {
@@ -481,12 +500,14 @@ async function approvePendingUnlocked(opts: {
     if (!guarded.ok) return guarded;
   }
   const allowRef = opts.nonce();
-  const prior = await inputsLog.get(opts.ref);
+  // The class counts the allow signs come from the signed defer, not from the
+  // approvals row, which nothing signs.
+  const prior = signed.inputs ?? (await inputsLog.get(opts.ref));
   const inputs: DecisionInputs = {
     principal: prior?.principal ?? { brain: snap.brain, scopes: [] },
     inputs: prior?.inputs ?? [],
     approver: approverInputs(opts),
-    ...(snap.dataClasses !== undefined ? { dataClasses: snap.dataClasses } : {}),
+    ...(signed.inputs?.dataClasses !== undefined ? { dataClasses: signed.inputs.dataClasses } : {}),
   };
   const inputsHash = sha256Canonical(inputs);
   const dispatchArgs = approvalDispatchArgs(snap);
