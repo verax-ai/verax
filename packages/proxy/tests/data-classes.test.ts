@@ -517,6 +517,24 @@ describe("data classes: the gate", () => {
     assert.deepEqual(received[0]?.arguments, args);
   });
 
+  it("a version 1 policy forwards a 65-level argument as 0.7.0 did", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 1,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    let body: unknown = "ok";
+    for (let i = 0; i < 65; i++) body = { a: body };
+    const { proxy, received } = harness(policy, ["r-v1-deep"]);
+    const out = await proxy.call({ name: "memory.put", arguments: { id: "n-deep", body } }, P);
+    assert.equal(out.isError, false, `version 1 refused a deep argument: ${out.content[0]?.text}`);
+    assert.equal(received.length, 1);
+  });
+
   it("a version 1 policy forwards arguments untouched", async () => {
     const policy = loadPolicy(JSON.stringify({
       version: 1, default: "deny",

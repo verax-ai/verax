@@ -709,7 +709,8 @@ export function createProxy(deps: ProxyDeps) {
         await syncControlRecords();
       }
       const dispatched = toolCallOf(call);
-      const tooDeep = argumentDepth(call.arguments) > MAX_ARGUMENT_DEPTH;
+      const tooDeep =
+        deps.policy.dataClasses !== undefined && argumentDepth(call.arguments) > MAX_ARGUMENT_DEPTH;
       const requestHash = tooDeep
         ? sha256Canonical({ name: dispatched.name, tooDeep: true })
         : sha256Canonical(dispatched);
@@ -780,7 +781,7 @@ export function createProxy(deps: ProxyDeps) {
           if (halted) return { kind: "done", result: halted };
         }
         if (tooDeep) {
-          const reasonCode = deps.policy.dataClasses ? "data-class-unscanned" : "arguments-too-deep";
+          const reasonCode = "data-class-unscanned";
           const ref = deps.nonce();
           await writeRecord({
             decision: "deny",
