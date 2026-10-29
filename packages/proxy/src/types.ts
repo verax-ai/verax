@@ -102,6 +102,8 @@ export type Policy = {
   dataClasses?: DataClassConfig;
   resultClasses?: ResultClassConfig;
   media?: MediaConfig;
+  /** Document `scanCharCap`. Results read it even when no `dataClasses` key is set. */
+  scanCharCap?: number;
 };
 
 export type WitnessClass = "self" | "same-org" | "third-party" | "regulated";

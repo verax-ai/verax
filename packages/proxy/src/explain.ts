@@ -3,11 +3,12 @@ import { findDecisionRecordChainBreak } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
 import { approvalsLogFor, type ApprovalsLog } from "./approvals.ts";
 import { sha256Canonical } from "./hash.ts";
-import { inputsLogFor } from "./inputs.ts";
+import { inputsLogFor, inputsMatchingHash } from "./inputs.ts";
 import { lookupResolvedBy } from "./ledger.ts";
 import { loadCheckpoints } from "./checkpoints.ts";
 import { samePublicKey, thirdPartyReceiptCoversRow } from "./third-party.ts";
 import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger, LedgerEffect } from "./types.ts";
+import { resultRecordIsMismatch } from "./verify-ledger.ts";
 
 async function pairFor(
   ledger: Ledger,
@@ -31,7 +32,10 @@ async function pairFor(
     }
     return { defer: null, resolution: null };
   }
-  const own = await inputsLog.get(ref);
+  const own =
+    typeof record.claims.inputsHash === "string"
+      ? await inputsMatchingHash(inputsLog, ref, record.claims.inputsHash)
+      : await inputsLog.get(ref);
   if (own?.approver?.resolves) {
     const defer = decisions.find((d) => d.claims.ref === own.approver?.resolves) ?? null;
     return { defer, resolution: record };
@@ -100,6 +104,20 @@ function auditedRows(
     rows.push(extractSettlementRow(presentedExtract));
   }
   return rows;
+}
+
+function dropResultRecordMissingEffect(
+  findings: Finding[],
+  record: SignedDecisionRecord,
+  resultOf: string | undefined,
+  effect: LedgerEffect | null,
+): Finding[] {
+  if (typeof resultOf !== "string" || !effect || effect.row.ref !== resultOf) return findings;
+  if (typeof effect.resultHash === "string" && record.claims.requestHash !== effect.resultHash) {
+    return findings;
+  }
+  const ref = record.claims.ref;
+  return findings.filter((finding) => !(finding.id === ref && finding.code === "receipt-without-settlement"));
 }
 
 function dropBoundHaltedClassMismatch(
@@ -196,7 +214,18 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   if (!record) {
     throw new Error(`explain-unknown-ref:${ref}`);
   }
-  const effect = effects.find((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect") ?? null;
+  const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
+  // The row inputsHash names. When none does, the last row for the ref is
+  // read so a tampered row is an inputs-hash-mismatch, not a missing document.
+  const inputsDoc = !record.claims.ref
+    ? null
+    : typeof record.claims.inputsHash === "string"
+      ? ((await inputsMatchingHash(inputsLog, record.claims.ref, record.claims.inputsHash)) ??
+        (await inputsLog.get(record.claims.ref)))
+      : await inputsLog.get(record.claims.ref);
+  const resultOf = typeof inputsDoc?.resultOf === "string" ? inputsDoc.resultOf : undefined;
+  const effect =
+    effects.find((e) => e.row.ref === (resultOf ?? ref) && e.row.effectClass !== "duplicate-effect") ?? null;
   const userExtract = opts?.extract;
   const presentedExtract = userExtract ?? effect?.receipt;
   const extractPresented = Boolean(presentedExtract);
@@ -234,19 +263,29 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
         ),
       ]
     : [];
-  const applicable = dropBoundHaltedClassMismatch(
-    dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
-    decisions,
-    effects,
-    ref,
-    presentedExtract,
+  const applicable = dropResultRecordMissingEffect(
+    dropBoundHaltedClassMismatch(
+      dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
+      decisions,
+      effects,
+      ref,
+      presentedExtract,
+    ),
+    record,
+    resultOf,
+    effect,
   );
-  const applicableWarnings = dropBoundHaltedClassMismatch(
-    dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
-    decisions,
-    effects,
-    ref,
-    presentedExtract,
+  const applicableWarnings = dropResultRecordMissingEffect(
+    dropBoundHaltedClassMismatch(
+      dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
+      decisions,
+      effects,
+      ref,
+      presentedExtract,
+    ),
+    record,
+    resultOf,
+    effect,
   );
   const refFindings = applicable.filter((f) => f.id === ref);
   const issuerFinding =
@@ -282,9 +321,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const issuerMismatch = applicable.concat(applicableWarnings).some(
     (f) => f.code === "issuer-key-mismatch" || (pinned && f.code === "unauthenticated-issuer"),
   );
-  const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
   const approvals = approvalsLogFor(ledger);
-  const inputsDoc = record.claims.ref ? await inputsLog.get(record.claims.ref) : null;
   const inputsMismatch = Boolean(
     inputsDoc &&
       typeof record.claims.inputsHash === "string" &&
@@ -292,6 +329,32 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   );
   const inputsMissing =
     typeof record.claims.inputsHash === "string" && inputsDoc === null;
+  let resultMismatch = false;
+  if (typeof inputsDoc?.resultOf === "string") {
+    const resultHashByRef = new Map<string, string>();
+    const effectClassByRef = new Map<string, string>();
+    for (const e of effects) {
+      if (e.row.effectClass === "duplicate-effect") continue;
+      if (typeof e.resultHash === "string") resultHashByRef.set(e.row.ref, e.resultHash);
+      if (typeof e.row.effectClass === "string") effectClassByRef.set(e.row.ref, e.row.effectClass);
+    }
+    let namedCount = 0;
+    for (const rec of decisions) {
+      if (typeof rec.claims.ref !== "string" || typeof rec.claims.inputsHash !== "string") continue;
+      const other =
+        rec.claims.ref === record.claims.ref
+          ? inputsDoc
+          : await inputsMatchingHash(inputsLog, rec.claims.ref, rec.claims.inputsHash);
+      if (other?.resultOf === inputsDoc.resultOf) namedCount += 1;
+    }
+    resultMismatch = resultRecordIsMismatch(
+      record,
+      { resultOf: inputsDoc.resultOf, resultClasses: inputsDoc.resultClasses },
+      resultHashByRef,
+      effectClassByRef,
+      namedCount,
+    );
+  }
   if (inputsMissing) conditions.push("inputs document missing");
   const haltedUnbound =
     effect !== null &&
@@ -304,6 +367,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     !issuerMismatch &&
     !inputsMismatch &&
     !inputsMissing &&
+    !resultMismatch &&
     !haltedUnbound;
   const code = chainBreak
     ? "receipt-chain-break"
@@ -311,24 +375,29 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
       ? "inputs-hash-mismatch"
       : inputsMissing
         ? "inputs-document-missing"
-        : haltedUnbound
-          ? (hit?.code ?? "effect-class-mismatch")
-          : (hit?.code ?? null);
+        : resultMismatch
+          ? "result-record-mismatch"
+          : haltedUnbound
+            ? (hit?.code ?? "effect-class-mismatch")
+            : (hit?.code ?? null);
   const detail = chainBreak
     ? `receipt-chain-break at ${breakAt ?? "unknown"} (${brk?.reason ?? "broken"})`
     : inputsMismatch
       ? "inputs document hash does not match claims.inputsHash"
       : inputsMissing
         ? "claims.inputsHash is on the record; the inputs document is not on disk"
-        : haltedUnbound && !hit
-          ? "halted effect is not bound to the same allow"
-          : (hit?.detail ?? null);
+        : resultMismatch
+          ? "result record does not bind to the named call the way verifyLedger requires"
+          : haltedUnbound && !hit
+            ? "halted effect is not bound to the same allow"
+            : (hit?.detail ?? null);
   const findingCount = chainBreak
     ? Math.max(refFindings.length, 1)
     : refFindings.length +
       (issuerMismatch && pinned ? 1 : 0) +
       (inputsMismatch ? 1 : 0) +
       (inputsMissing ? 1 : 0) +
+      (resultMismatch ? 1 : 0) +
       (haltedUnbound && refFindings.length === 0 ? 1 : 0);
   const guarantee = guaranteeWithConditions(report.guarantee, conditions);
   const summary = balanced

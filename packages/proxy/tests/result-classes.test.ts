@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { verifyDecisionRecord, type SignedDecisionRecord } from "@cedulon/core";
 
+import { explain } from "../src/explain.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import { loadPolicy } from "../src/policy.ts";
@@ -147,6 +148,10 @@ describe("result classes: the policy document", () => {
       /transcriber/,
     );
     assert.throws(
+      () => policy({ media: { audio: "transcribe", transcriber: { command: ["t{file}", "x"] } } }),
+      /transcriber/,
+    );
+    assert.throws(
       () => policy({ media: { audio: "transcribe", transcriber: { command: ["t", "{file}", "{file}"] } } }),
       /transcriber/,
     );
@@ -167,6 +172,44 @@ describe("result classes: the policy document", () => {
 });
 
 describe("result classes: text results", () => {
+  it("media without resultClasses leaves text blocks untouched", async () => {
+    const dash = "2026\u20132027";
+    const long = `${"x".repeat(100)} ${dash}`;
+    const returns = result([{ type: "text", text: long }, AUDIO_BLOCK]);
+    const { proxy } = harness(
+      policy({ media: { audio: "withhold", image: "withhold" }, scanCharCap: 64 }),
+      returns,
+    );
+    const res = await proxy.call(CALL, P);
+    const texts = blocks(res).filter((b) => b.type === "text");
+    assert.ok(
+      texts.some((b) => b.text === long),
+      `the text block was rewritten: ${JSON.stringify(texts)}`,
+    );
+    assert.ok(
+      texts.some((b) => b.text === "[audio withheld]"),
+      `the audio block was not withheld: ${JSON.stringify(texts)}`,
+    );
+  });
+
+  it("a rule-level resultClasses does not run the masker on a tool that names no class", async () => {
+    const dash = "2026\u20132027";
+    const long = `${"x".repeat(20_000)}${dash}`;
+    const pol = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope.", resultClasses: { email: "mask" } },
+          { id: "media-read", tool: "media.read", requires: ["verax:read"], text: "Reading needs the read scope." },
+        ],
+      }),
+    );
+    const { proxy } = harness(pol, result([{ type: "text", text: long }]));
+    const res = await proxy.call(CALL, P);
+    assert.equal(textOf(res), long, `the text result was rewritten: ${textOf(res)}`);
+  });
+
   it("without resultClasses or media a result is returned unchanged, media blocks as media", async () => {
     const returns = result([{ type: "text", text: `TC ${TCKN}` }, AUDIO_BLOCK, IMAGE_BLOCK]);
     const { proxy, ledger } = harness(policy({ dataClasses: { email: "mask" } }), returns);
@@ -174,6 +217,14 @@ describe("result classes: text results", () => {
     assert.equal(res.isError, false);
     assert.deepEqual(blocks(res), blocks(returns));
     assert.equal(await resultRecord(proxy, ledger, "r-1"), null);
+  });
+
+  it("an IP class in a text result is blocked when the policy names it", async () => {
+    const returns = result([{ type: "text", text: "host 192.168.1.1" }]);
+    const { proxy } = harness(policy({ resultClasses: { ip: "block" } }), returns);
+    const res = await proxy.call(CALL, P);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /withheld:result-class-block:ip:/);
   });
 
   it("masks a class in a text result; the signed record counts it and hashes what the agent received", async () => {
@@ -383,6 +434,29 @@ describe("result classes: text results", () => {
     }
     assert.ok(caught instanceof Error);
     assert.equal(caught.message, "withheld:result-class-block:tckn:e-1");
+  });
+
+  it("a whole-field mask with a block class withholds the result", async () => {
+    const line = `${"x".repeat(80)} TC ${TCKN}`;
+    const returns = result([{ type: "text", text: line }, { type: "text", text: "other block" }]);
+    const { proxy } = harness(policy({ resultClasses: { tckn: "block" }, scanCharCap: 64 }), returns);
+    const res = await proxy.call(CALL, P);
+    assert.equal(res.isError, true);
+    assert.match(textOf(res), /withheld:result-class-block:tckn:/);
+    assert.ok(!textOf(res).includes("other block"), `the other block reached the agent: ${textOf(res)}`);
+    assert.ok(!textOf(res).includes("[MASKED_PII]"), `a whole-field mask left as text: ${textOf(res)}`);
+  });
+
+  it("explain reads a result record as bound to its call's effect row", async () => {
+    const returns = result([{ type: "text", text: `TC ${TCKN}` }]);
+    const { proxy, ledger } = harness(policy({ resultClasses: { tckn: "mask" } }), returns);
+    await proxy.call(CALL, P);
+    const found = await resultRecord(proxy, ledger, "r-1");
+    assert.ok(found, "no result record");
+    const explained = await explain(ledger, found.rec.claims.ref as string);
+    assert.notEqual(explained.finding.code, "missing-effect", JSON.stringify(explained.finding));
+    assert.notEqual(explained.finding.code, "receipt-without-settlement", JSON.stringify(explained.finding));
+    assert.equal(explained.effect?.row.ref, "r-1");
   });
 
   it("a block class in a text result withholds the whole result; the tool ran and its effect stands", async () => {

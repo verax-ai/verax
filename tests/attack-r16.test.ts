@@ -366,27 +366,27 @@ describe("attack R16", () => {
   it("R16-7 each held field is its own JSON-quoted line", async () => {
     const dir = ownerDir("verax-r16-prompt-");
     const ref = "spend-ref-1";
-    const pending = {
-      ref,
-      requestHash: "abc123abc123deadbeef",
-      subject: "spend",
-      args: {
-        amountMinor: 100,
-        currency: "TRY",
-        payee: "sample-merchant",
-        reference: " payee=x",
+    // A held call, not a hand-written row: the prompt shows only a row the
+    // signed defer names.
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    const proxy = createProxy({
+      policy: loadPolicy(spendDoc(false)),
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+      ledger,
+      now: () => Date.now(),
+      nonce: () => ref,
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    await proxy.call(
+      {
+        name: "spend",
+        arguments: { amountMinor: 100, currency: "USD", payee: "sample-merchant", reference: " payee=x", _ref: ref },
       },
-      ruleId: "spend",
-      ruleText: "Spends need operator approval.",
-      inputsSummary: { count: 0, ids: [] },
-      amount: 100,
-      payee: "sample-merchant",
-      currency: "TRY",
-      expiresAtMs: Date.now() + 60_000,
-      status: "pending",
-      brain: "brain-1",
-    };
-    writeFileSync(join(dir, "approvals.jsonl"), `${JSON.stringify(pending)}\n`, "utf8");
+      { brain: "brain-1", scopes: new Set(["verax:pay"]) },
+    );
+    ledger.close();
     const out: string[] = [];
     await runApprove(
       ["approve", dir, ref],
@@ -481,10 +481,13 @@ describe("attack R16", () => {
     const lines = readFileSync(approvalsPath, "utf8")
       .split("\n")
       .filter((line) => line !== "")
-      .map((line) => JSON.parse(line) as { amount?: unknown; ref?: string });
+      .map((line) => JSON.parse(line) as { amount?: unknown; args?: Record<string, unknown>; ref?: string });
     const row = lines.find((item) => item.ref === "frac" || item.ref?.endsWith(":frac"));
-    assert.ok(row);
-    row.amount = 1.5;
+    assert.ok(row?.args);
+    // The prompt reads the amount from the arguments that will be sent, and
+    // only from a row the signed defer names. A fraction written there by hand
+    // makes the row unbound, so it is refused before anything is asked.
+    row.args.amountMinor = 1.5;
     writeFileSync(approvalsPath, `${lines.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
     let asked = false;
     const fracErr: string[] = [];
@@ -502,7 +505,7 @@ describe("attack R16", () => {
       { elevated: () => false, env: strippedEnv() },
     );
     assert.equal(frac, 1, fracErr.join(""));
-    assert.match(fracErr.join(""), /approve-amount-unreadable/);
+    assert.match(fracErr.join(""), /approve-row-unbound/);
     assert.equal(asked, false);
     const again = new FileLedger(spendDir);
     const recs = await again.decisions();
@@ -511,6 +514,55 @@ describe("attack R16", () => {
       recs.some((rec) => rec.claims.decision === "allow"),
       false,
     );
+  });
+
+  it("R16-8b a row edited on disk is refused before the prompt shows it", async () => {
+    const dir = ownerDir("verax-r16-edited-");
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    const proxy = createProxy({
+      policy: loadPolicy(MEMORY_POLICY),
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+      ledger,
+      now: () => Date.now(),
+      nonce: () => "put-edit",
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    await proxy.call(
+      { name: "memory.put", arguments: { id: "n1", body: "DELETE ALL", _ref: "put-edit" } },
+      { brain: "brain-1", scopes: new Set(["verax:memory"]) },
+    );
+    ledger.close();
+    const approvalsPath = join(dir, "approvals.jsonl");
+    const lines = readFileSync(approvalsPath, "utf8")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as { args?: Record<string, unknown>; ref?: string });
+    const row = lines.find((item) => item.ref === "put-edit" || item.ref?.endsWith(":put-edit"));
+    assert.ok(row?.args);
+    row.args.body = "harmless";
+    writeFileSync(approvalsPath, `${lines.map((item) => JSON.stringify(item)).join("\n")}\n`, "utf8");
+    let asked = false;
+    const err: string[] = [];
+    const out: string[] = [];
+    const code = await runApprove(
+      ["approve", dir, "put-edit"],
+      (line) => err.push(line),
+      (line) => out.push(line),
+      {
+        isTTY: true,
+        ask: async () => {
+          asked = true;
+          return "yes";
+        },
+      },
+      { elevated: () => false, env: strippedEnv() },
+    );
+    assert.equal(code, 1, err.join(""));
+    assert.match(err.join(""), /approve-row-unbound/);
+    assert.equal(asked, false);
+    assert.doesNotMatch(out.join(""), /harmless/);
   });
 
   it("R16-9 a checkpoint answer from another key is not stored", async () => {

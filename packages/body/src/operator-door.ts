@@ -22,8 +22,9 @@ import { rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
-import { loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
+import { approvalDispatchArgs, loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
 
+import { boundOnDisk } from "./approval-bound.ts";
 import { asAssertion } from "./approval-signature.ts";
 import { readBearer } from "./auth.ts";
 import type { OperatorDoorConfig } from "./config.ts";
@@ -437,15 +438,18 @@ export async function openOperatorDoor(opts: {
 
       if (url.pathname === "/api/waiting") {
         const at = now();
+        // A row edited on disk is not listed: what the phone shows is what
+        // the signed defer names, and that is what an approval sends.
+        const isBound = boundOnDisk(stateDir);
         const waiting = loadApprovalsFromDir(stateDir)
-          .filter((row) => row.status === "pending" && row.expiresAtMs > at)
+          .filter((row) => row.status === "pending" && row.expiresAtMs > at && isBound(row))
           .map((row) => {
             const spend = heldSpend(row);
             return {
               ref: row.ref,
               requestHash: row.requestHash,
               tool: row.subject,
-              args: row.args,
+              args: approvalDispatchArgs(row),
               agent: row.brain,
               rule: row.ruleText,
               ...(row.createdAtMs !== undefined ? { createdAtMs: row.createdAtMs } : {}),

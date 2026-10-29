@@ -13,7 +13,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runApprove } from "../packages/body/src/approve-cli.ts";
+import { heldPrompt } from "../packages/body/src/approve-cli.ts";
 import { beginPairing } from "../packages/body/src/operator-pairing.ts";
 import { memoryPut } from "../packages/body/src/tools/memory.ts";
 import { signEffectAttestation } from "../packages/proxy/src/ledger.ts";
@@ -241,11 +241,11 @@ describe("attack R4", () => {
     );
     assert.equal(verdict.reasonCode, "spend-args-invalid");
 
-    const stateDir = mkdtempSync(join(tmpdir(), "verax-attack-r4-approve-"));
-    try {
-      const ref = "spend-ref-1";
-      const pending = {
-        ref,
+    // The gate refuses it, so no signed defer can hold it and `verax approve`
+    // shows no row it does not name. The prompt text is checked on its own.
+    const shown =
+      heldPrompt({
+        ref: "spend-ref-1",
         requestHash: "abc123abc123deadbeef",
         subject: "spend",
         args: {
@@ -257,30 +257,14 @@ describe("attack R4", () => {
         ruleId: "spend-true",
         ruleText: "Spends need operator approval.",
         inputsSummary: { count: 0, ids: [] },
-        amount: 100,
-        payee: "true-ads",
-        currency: "TRY",
         expiresAtMs: Date.now() + 60_000,
         status: "pending",
         brain: "brain-1",
-      };
-      writeFileSync(join(stateDir, "approvals.jsonl"), `${JSON.stringify(pending)}\n`, "utf8");
-      const out: string[] = [];
-      await runApprove(
-        ["approve", stateDir, ref],
-        () => {},
-        (line) => out.push(line),
-        { isTTY: true, ask: async () => "100" },
-        { elevated: () => false },
-      );
-      const shown = out.join("");
-      assert.equal(shown.includes("\r"), false, JSON.stringify(shown));
-      assert.match(shown, /"payee": "true-ads"/);
-      assert.match(shown, /"reference": "inv\\rheld tool=spend payee=other-ads amount=100 currency=TRY reference=ok"/);
-      assert.equal(shown.split("\n").filter((line) => line.startsWith('"payee":')).length, 1);
-    } finally {
-      rmSync(stateDir, { recursive: true, force: true });
-    }
+      }) ?? "";
+    assert.equal(shown.includes("\r"), false, JSON.stringify(shown));
+    assert.match(shown, /"payee": "true-ads"/);
+    assert.match(shown, /"reference": "inv\\rheld tool=spend payee=other-ads amount=100 currency=TRY reference=ok"/);
+    assert.equal(shown.split("\n").filter((line) => line.startsWith('"payee":')).length, 1);
   });
 
   it("R4-3 reconcile does not match an effect that has no decision", () => {

@@ -41,6 +41,8 @@ export type LedgerIndexLine = {
   reasonCode: string;
   subject: string;
   policyHash: string;
+  /** Absent on lines written before 0.8.0; a reader then goes to the record. */
+  inputsHash?: string;
 };
 
 export type PieceFiles = {
@@ -282,6 +284,7 @@ export function parseIndexText(text: string): LedgerIndexLine[] {
       reasonCode: typeof raw.reasonCode === "string" ? raw.reasonCode : "",
       subject: typeof raw.subject === "string" ? raw.subject : "",
       policyHash: typeof raw.policyHash === "string" ? raw.policyHash : "",
+      ...(typeof raw.inputsHash === "string" ? { inputsHash: raw.inputsHash } : {}),
     });
   }
   return rows;

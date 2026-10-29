@@ -3,6 +3,7 @@ import { userInfo } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import {
+  approvalDispatchArgs,
   approvePending,
   approvalsLogFor,
   createApprovalBudgetGuard,
@@ -14,6 +15,7 @@ import {
   type ApprovalRow,
   type Policy,
 } from "@verax-ai/proxy";
+import { boundOnDisk } from "./approval-bound.ts";
 import { EX_CONFIG } from "./config.ts";
 import { heldSpend, type HeldSpend } from "./held-spend.ts";
 import { cliCodeCheckPassedAlready, defaultElevated, directoryAccess, elevatedCommandCodeRefusal, elevatedStateDirRefusal, readWindowsMachineRoots, stateDirFor, SystemToolError, unreadableSentence, windowsProgramDataRefusal, type ToolExec, type WindowsMachineRoots } from "./install.ts";
@@ -116,8 +118,24 @@ function spendPrompt(row: ApprovalRow, spend: HeldSpend, amount: number): string
 
 function argumentPrompt(row: ApprovalRow): string {
   const lines = [quotedField("tool", row.subject)];
-  for (const key of Object.keys(row.args).sort()) lines.push(quotedField(key, row.args[key]));
+  const args = approvalDispatchArgs(row);
+  for (const key of Object.keys(args).sort()) lines.push(quotedField(key, args[key]));
   return lines.join("");
+}
+
+const TYPE_AMOUNT = "Type the amount in minor units:\n";
+const TYPE_YES = "Type yes:\n";
+
+/**
+ * What the terminal prints for a held row before it asks, or null when a
+ * spend's amount cannot be read as an integer. `runApprove` shows it only for
+ * a row the signed defer names.
+ */
+export function heldPrompt(row: ApprovalRow): string | null {
+  const spend = heldSpend(row);
+  if (!spend) return `${argumentPrompt(row)}${TYPE_YES}`;
+  if (spend.amountMinor === null) return null;
+  return `${spendPrompt(row, spend, spend.amountMinor)}${TYPE_AMOUNT}`;
 }
 
 function readTypedAmount(): Promise<string> {
@@ -261,24 +279,27 @@ export async function runApprove(
       writeErr("approve-unknown-ref\n");
       return 78;
     }
-    const spend = heldSpend(waiting);
-    if (spend) {
-      const expected = spend.amountMinor;
-      if (expected === null) {
-        writeErr("approve-amount-unreadable\n");
-        return 1;
-      }
-      writeOut(spendPrompt(waiting, spend, expected));
-      writeOut("Type the amount in minor units:\n");
-      const typed = (await terminal.ask("Type the amount in minor units:\n")).trim();
+    // The prompt shows the row on disk; a running body approves its own copy.
+    // Only a row the signed defer names is shown.
+    if (!boundOnDisk(stateDir)(waiting)) {
+      writeErr("approve-row-unbound\n");
+      return 1;
+    }
+    const prompt = heldPrompt(waiting);
+    if (prompt === null) {
+      writeErr("approve-amount-unreadable\n");
+      return 1;
+    }
+    writeOut(prompt);
+    const expected = heldSpend(waiting)?.amountMinor;
+    if (typeof expected === "number") {
+      const typed = (await terminal.ask(TYPE_AMOUNT)).trim();
       if (typed !== String(expected)) {
         writeErr("approve-amount-mismatch\n");
         return 1;
       }
     } else {
-      writeOut(argumentPrompt(waiting));
-      writeOut("Type yes:\n");
-      const typed = (await terminal.ask("Type yes:\n")).trim();
+      const typed = (await terminal.ask(TYPE_YES)).trim();
       if (typed !== "yes") {
         writeErr("approve-confirm-mismatch\n");
         return 1;

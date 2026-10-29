@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { maskField, type SpanClass } from "@conarium-ai/mask";
 
-import { DEFAULT_SCAN_CHAR_CAP, SPAN_CLASSES } from "./data-classes.ts";
+import { DEFAULT_SCAN_CHAR_CAP, detectorsFor, SPAN_CLASSES } from "./data-classes.ts";
 import { sha256Canonical } from "./hash.ts";
 import { terminalText } from "./policy.ts";
 import type { DecisionKind } from "@cedulon/core";
@@ -62,6 +62,10 @@ function choicesFor(policy: Policy, tool: string): Record<string, ResultClassCho
   return { ...policy.resultClasses.document, ...(policy.resultClasses.byTool[tool] ?? {}) };
 }
 
+function restrictsChoices(choices: Record<string, ResultClassChoice>): boolean {
+  return Object.values(choices).some((choice) => choice === "mask" || choice === "block");
+}
+
 function addCounts(into: Record<string, number>, add: Record<string, number> | undefined): void {
   if (!add) return;
   for (const [key, n] of Object.entries(add)) {
@@ -86,6 +90,21 @@ function firstBlocked(
     if ((classes[cls] ?? 0) > 0 && choices[cls] === "block") return cls;
   }
   return undefined;
+}
+
+function firstBlockChoice(choices: Record<string, ResultClassChoice>): SpanClass | undefined {
+  for (const cls of SPAN_CLASSES) {
+    if (choices[cls] === "block") return cls;
+  }
+  return undefined;
+}
+
+function blockedOrUnscanned(
+  classes: Record<string, number>,
+  masked: Record<string, number>,
+  choices: Record<string, ResultClassChoice>,
+): SpanClass | undefined {
+  return firstBlocked(classes, choices) ?? ((masked.whole ?? 0) > 0 ? firstBlockChoice(choices) : undefined);
 }
 
 function splitTextForScan(text: string, cap: number): string[] {
@@ -116,6 +135,7 @@ function scanText(
   cap: number,
   masker: ResultMasker,
   pipeline: MaskPipeline,
+  detectors?: { ip: true },
 ): { text: string; classes: Record<string, number>; masked: Record<string, number> } {
   const pieces = splitTextForScan(text, cap);
   const classes: Record<string, number> = {};
@@ -123,7 +143,12 @@ function scanText(
   const out: string[] = [];
   for (const piece of pieces) {
     const { body, suffix } = dropScanBreak(piece);
-    const result = masker(body, { pipeline, only, scanCharCap: cap });
+    const result = masker(body, {
+      pipeline,
+      only,
+      scanCharCap: cap,
+      ...(detectors ? { detectors } : {}),
+    });
     out.push(`${result.text}${suffix}`);
     addCounts(classes, result.classes);
     addCounts(masked, result.masked);
@@ -327,7 +352,7 @@ function leaveError(original: unknown, message: string): LeavingError {
  * carry the raw text out. A throw inside this gate becomes
  * `withheld:result-class-error:<ref>`, never the original. The error comes
  * back wrapped, so awaiting the gate cannot adopt a thenable error. Call it
- * only when the policy sets `resultClasses` or `media`.
+ * only when the policy sets `resultClasses`.
  */
 export async function gateThrownError(
   err: unknown,
@@ -338,12 +363,13 @@ export async function gateThrownError(
   deps: ResultGateDeps,
 ): Promise<{ error: unknown }> {
   const { policy } = deps;
-  if (!policy.resultClasses && !policy.media) return { error: err };
+  if (!policy.resultClasses) return { error: err };
 
   try {
     const choices = choicesFor(policy, tool);
+    if (!restrictsChoices(choices)) return { error: err };
     const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
-    const cap = policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+    const cap = policy.scanCharCap ?? policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
     const masker = deps.masker ?? maskField;
     const original = err instanceof Error ? `${err.message}` : String(err);
     let leaving = original;
@@ -353,9 +379,9 @@ export async function gateThrownError(
     let scanFailed = false;
 
     try {
-      const scanned = scanText(original, only, cap, masker, TEXT_MASK_PIPELINE);
+      const scanned = scanText(original, only, cap, masker, TEXT_MASK_PIPELINE, detectorsFor(choices));
       addCounts(masked, scanned.masked);
-      const blocked = firstBlocked(scanned.classes, choices);
+      const blocked = blockedOrUnscanned(scanned.classes, scanned.masked, choices);
       if (blocked) {
         leaving = `withheld:result-class-block:${blocked}:${callRef}`;
         decision = "deny";
@@ -415,8 +441,9 @@ export async function gateResultClasses(
   if (!policy.resultClasses && !policy.media) return result;
 
   const choices = choicesFor(policy, tool);
+  const scanTextResults = restrictsChoices(choices);
   const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
-  const cap = policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+  const cap = policy.scanCharCap ?? policy.dataClasses?.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
   const masker = deps.masker ?? maskField;
   const classCounts: Record<string, number> = {};
   const masked: Record<string, number> = {};
@@ -428,9 +455,13 @@ export async function gateResultClasses(
 
   for (const block of result.content) {
     if (isTextContent(block)) {
+      if (!policy.resultClasses || !scanTextResults) {
+        content.push(block);
+        continue;
+      }
       let scanned;
       try {
-        scanned = scanText(block.text, only, cap, masker, TEXT_MASK_PIPELINE);
+        scanned = scanText(block.text, only, cap, masker, TEXT_MASK_PIPELINE, detectorsFor(choices));
       } catch {
         scanFailed = true;
         break;
@@ -461,9 +492,13 @@ export async function gateResultClasses(
       continue;
     }
     transcribed += 1;
+    if (!policy.resultClasses || !scanTextResults) {
+      content.push({ type: "text", text: `[audio transcript] ${transcript}` });
+      continue;
+    }
     let scanned;
     try {
-      scanned = scanText(transcript, only, cap, masker, TRANSCRIPT_MASK_PIPELINE);
+      scanned = scanText(transcript, only, cap, masker, TRANSCRIPT_MASK_PIPELINE, detectorsFor(choices));
     } catch {
       scanFailed = true;
       break;
@@ -473,7 +508,7 @@ export async function gateResultClasses(
     content.push({ type: "text", text: `[audio transcript] ${scanned.text}` });
   }
 
-  const blocked = scanFailed ? undefined : firstBlocked(classCounts, choices);
+  const blocked = scanFailed ? undefined : blockedOrUnscanned(classCounts, masked, choices);
   const gated: ToolResult = scanFailed
     ? classError(callRef)
     : blocked

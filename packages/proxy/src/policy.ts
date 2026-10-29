@@ -470,6 +470,9 @@ function parseTranscriber(raw: unknown): TranscriberConfig {
     throw new Error("policy-media-transcriber");
   }
   const command = rec.command as string[];
+  if (command[0] !== undefined && command[0].includes("{file}")) {
+    throw new Error("policy-media-transcriber");
+  }
   let fileMarks = 0;
   for (const part of command) fileMarks += countToken(part, "{file}");
   if (fileMarks !== 1) throw new Error("policy-media-transcriber");
@@ -607,17 +610,23 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
     ...(document.requireInputs ? { requireInputs: true as const } : {}),
     ...(document.version === 2
       ? {
-          dataClasses: {
-            document: document.dataClasses ?? {},
-            byTool: Object.fromEntries(
-              document.rules
-                .filter((rule) => rule.dataClasses !== undefined)
-                .map((rule) => [rule.tool, rule.dataClasses!]),
-            ),
-            localTools: document.localTools ?? [],
-            blockedFileTypes: [...(document.fileTypes?.block ?? [])],
-            ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
-          },
+          ...(document.dataClasses !== undefined ||
+          document.fileTypes !== undefined ||
+          document.rules.some((rule) => rule.dataClasses !== undefined)
+            ? {
+                dataClasses: {
+                  document: document.dataClasses ?? {},
+                  byTool: Object.fromEntries(
+                    document.rules
+                      .filter((rule) => rule.dataClasses !== undefined)
+                      .map((rule) => [rule.tool, rule.dataClasses!]),
+                  ),
+                  localTools: document.localTools ?? [],
+                  blockedFileTypes: [...(document.fileTypes?.block ?? [])],
+                  ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
+                },
+              }
+            : {}),
           ...(document.resultClasses !== undefined || document.rules.some((rule) => rule.resultClasses !== undefined)
             ? {
                 resultClasses: {
@@ -631,6 +640,7 @@ export function loadPolicy(json: unknown, options: PolicyParseOptions = {}): Pol
               }
             : {}),
           ...(document.media !== undefined ? { media: document.media } : {}),
+          ...(document.scanCharCap !== undefined ? { scanCharCap: document.scanCharCap } : {}),
         }
       : {}),
     rule(id: string | null) {

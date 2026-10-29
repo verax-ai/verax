@@ -8,6 +8,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { approvalsLogFor, approvePending, createApprovalBudgetGuard, loadApprovalsFromDir, terminalText } from "@verax-ai/proxy";
 
+import { boundOnDisk } from "./approval-bound.ts";
 import { approvalChallenge, gateApprovalSignature } from "./approval-signature.ts";
 import { gateControlSignature, nextControlChallenge } from "./control-signature.ts";
 import { haltBody, readHalt, resumeBody } from "./halt.ts";
@@ -192,6 +193,12 @@ export async function handleApprove(ctx: OperatorRequest): Promise<void> {
   // only true when something checks it.
   if (waiting.requestHash !== sawHash) {
     send(res, 409, { error: "stale", requestHash: waiting.requestHash });
+    return;
+  }
+  // The row on disk is what the phone showed; the body approves its own copy.
+  // A row the signed defer does not name is not approved.
+  if (!boundOnDisk(stateDir)(waiting)) {
+    send(res, 409, { error: "row-unbound" });
     return;
   }
   const deferRecord = await signedDefer(services.ledger, ref);

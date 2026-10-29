@@ -1,14 +1,15 @@
 import { strict as assert } from "node:assert";
-import { mkdtempSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 import { verifyDecisionRecord } from "@cedulon/core";
 
-import { approvePending } from "../src/approvals.ts";
+import { approvalArgsBound, approvePending, createApprovalBudgetGuard } from "../src/approvals.ts";
+import { loadDecisionRequestHashesFromDir, loadSignedForwardedHashesFromDir } from "../src/reconcile.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { loadPolicy } from "../src/policy.ts";
-import { createProxy } from "../src/proxy.ts";
+import { createProxy, LedgerDenyUnrecorded } from "../src/proxy.ts";
 import { diskProbe } from "../src/disk.ts";
 import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import type { Principal, ToolCall } from "../src/types.ts";
@@ -143,8 +144,28 @@ describe("data classes: the gate", () => {
     assert.equal(result.content[0]?.text, "denied:file-type-block:.pem:r-file");
   });
 
+  it("a blocked file type is refused when the policy has no dataClasses", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        fileTypes: { block: [".pem"] },
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-file-nodc"]);
+    const result = await proxy.call({ name: "memory.put", arguments: { body: "C:/keys/Server.PEM" } }, P);
+    assert.equal(received.length, 0);
+    assert.equal(result.content[0]?.text, "denied:file-type-block:.pem:r-file-nodc");
+  });
+
   it("text over the scan cap is replaced whole, and the record says so", async () => {
-    const { proxy, received } = harness(policyV2({ scanCharCap: 64 }), ["r-cap"]);
+    const { proxy, received } = harness(
+      policyV2({ dataClasses: { email: "mask", iban: "mask" }, scanCharCap: 64 }),
+      ["r-cap"],
+    );
     await proxy.call({ name: "memory.put", arguments: { id: "n6", body: `${"x".repeat(100)} ${EMAIL}` } }, P);
     const sent = JSON.stringify(received[0]);
     assert.ok(!sent.includes(EMAIL), `the e-mail address reached the tool: ${sent}`);
@@ -399,6 +420,39 @@ describe("data classes: the gate", () => {
       inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
     });
 
+  it("a halted gate does not write a class from an inputs id to disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-id-"));
+    writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
+    const out = await fileProxy(dir).call(
+      {
+        name: "memory.put",
+        arguments: { id: "n-halt-id", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+      },
+      P,
+    );
+    assert.match(out.content[0]?.text ?? "", /^denied:/);
+    assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+  });
+
+  it("a gate low on disk does not write a class from an inputs id to disk", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-disk-id-"));
+    const orig = diskProbe.freeBytes;
+    diskProbe.freeBytes = (probeDir) => (probeDir === dir ? 0 : orig(probeDir));
+    try {
+      const out = await fileProxy(dir).call(
+        {
+          name: "memory.put",
+          arguments: { id: "n-disk-id", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+        },
+        P,
+      );
+      assert.match(out.content[0]?.text ?? "", /^denied:/);
+      assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+    } finally {
+      diskProbe.freeBytes = orig;
+    }
+  });
+
   it("a halted gate does not write a class from _inputs to disk", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-"));
     writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
@@ -418,6 +472,458 @@ describe("data classes: the gate", () => {
     } finally {
       diskProbe.freeBytes = orig;
     }
+  });
+
+  it("a halted gate with a class in _inputs is still denied:halted", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-halt-order-"));
+    writeFileSync(join(dir, "halted"), "", { encoding: "utf8" });
+    const out = await fileProxy(dir).call(
+      {
+        name: "memory.put",
+        arguments: { id: "n-halt-order", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+      },
+      P,
+    );
+    assert.match(out.content[0]?.text ?? "", /^denied:halted:/);
+    assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+  });
+
+  it("a disk-low gate with a class in _inputs still throws LedgerDenyUnrecorded", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-disk-order-"));
+    const ledger = new FileLedger(dir);
+    const orig = diskProbe.freeBytes;
+    diskProbe.freeBytes = (probeDir) => (probeDir === dir ? 0 : orig(probeDir));
+    const origAppend = ledger.appendDecisionChained.bind(ledger);
+    ledger.appendDecisionChained = async () => {
+      throw new Error("ENOSPC");
+    };
+    const proxy = createProxy({
+      policy: policyV2(),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["h1", "h2"]),
+      resolveInput: async () => ({ versionHash: "a".repeat(64), validFromMs: 0, validUntilMs: 9_999_999_999_999 }),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    try {
+      await assert.rejects(
+        () =>
+          proxy.call(
+            {
+              name: "memory.put",
+              arguments: { id: "n-disk-order", body: "ok", _inputs: [{ id: TCKN, versionHash: "a".repeat(64) }] },
+            },
+            P,
+          ),
+        (err: unknown) => {
+          assert.ok(err instanceof LedgerDenyUnrecorded);
+          assert.equal(err.reasonCode, "ledger-disk-low");
+          return true;
+        },
+      );
+      assert.deepEqual(filesContaining(dir, TCKN), [], "the TCKN was written to disk");
+    } finally {
+      ledger.appendDecisionChained = origAppend;
+      diskProbe.freeBytes = orig;
+      ledger.close();
+    }
+  });
+
+  it("an unscanned field is denied when any class is block, even if another is mask", async () => {
+    const policy = policyV2({ dataClasses: { email: "mask", tckn: "block" } });
+    const { proxy, received } = harness(policy, ["r-unscanned-mix"]);
+    const out = await proxy.call(
+      { name: "memory.put", arguments: { id: "n-mix", body: `${"x".repeat(20_000)} ${TCKN}` } },
+      P,
+    );
+    assert.equal(received.length, 0, `an unscanned blocked field reached the tool: ${JSON.stringify(received)}`);
+    assert.match(out.content[0]?.text ?? "", /^denied:data-class-unscanned:/);
+  });
+
+  it("a deferred call stores the masked arguments, not the raw ones", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-approve-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call({ name: "memory.put", arguments: { id: "n-def", body: `mail ${EMAIL}`, _ref: "dc-store" } }, P);
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending, "no pending approval");
+      const stored = JSON.stringify(pending.args);
+      assert.ok(!stored.includes(EMAIL), `the e-mail address is in the stored args: ${stored}`);
+      assert.ok(stored.includes("[MASKED_PII]"), `the stored args were not the forwarded ones: ${stored}`);
+      assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("editing forwardedArgs on a deferred call is hash-mismatch, not an allow of a different call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-bind-"));
+    const ledger = new FileLedger(dir);
+    const received: ToolCall[] = [];
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused", "dc-bind-allow"]),
+        inner: async (call) => {
+          received.push(structuredClone({ name: call.name, arguments: call.arguments }));
+          return { content: [{ type: "text", text: "ok" }], isError: false };
+        },
+      });
+      const call = { name: "memory.put", arguments: { id: "n-bind", body: `mail ${EMAIL}`, _ref: "dc-bind" } };
+      await proxy.call(call, P);
+      const defer = (await ledger.decisions())[0];
+      const inputs = await proxy.inputsLog.get("dc-bind");
+      assert.ok(inputs?.dataClasses?.forwardedHash, "the signed defer did not commit to a forwardedHash");
+      assert.equal(sha256Canonical(inputs), defer!.claims.inputsHash);
+
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending, "no pending approval");
+      const other = { id: "n-bind", body: "other" };
+      await proxy.approvals.append({
+        ...pending,
+        args: other,
+        forwardedArgs: other,
+        dataClasses: {
+          masked: pending.dataClasses?.masked ?? {},
+          forwardedHash: sha256Canonical({ name: "memory.put", arguments: other }),
+        },
+      });
+
+      const result = await approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: tickingNow(1_000),
+        nonce: queuedNonce(["dc-bind-allow"]),
+        ref: "dc-bind",
+        approverId: "op-1",
+        via: "cli",
+        policyHash: defer!.claims.policyHash,
+        approvals: proxy.approvals,
+        inputsLog: proxy.inputsLog,
+      });
+      assert.equal(result.ok, false);
+      assert.equal(result.reason, "hash-mismatch");
+      assert.equal(received.length, 0, `a different call was sent: ${JSON.stringify(received)}`);
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("an approval signs the class counts of the signed defer, not the approvals row's", async () => {
+    const ledger = new MemoryLedger();
+    const proxy = createProxy({
+      policy: policyV2({}, { mode: "approve" }),
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: tickingNow(),
+      nonce: queuedNonce(["unused"]),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    await proxy.call({ name: "memory.put", arguments: { id: "n-counts", body: `mail ${EMAIL}`, _ref: "dc-counts" } }, P);
+    const signedClasses = (await proxy.inputsLog.get("dc-counts"))?.dataClasses;
+    assert.ok(signedClasses, "the defer carried no dataClasses");
+    const pending = (await proxy.approvals.listPending())[0];
+    assert.ok(pending?.dataClasses, "no pending approval with dataClasses");
+    await proxy.approvals.append({
+      ...pending,
+      dataClasses: { ...pending.dataClasses, masked: { email: 999 } },
+    });
+    const result = await approvePending({
+      ledger,
+      recordSigner: RECORD_SIGNER,
+      now: tickingNow(1_000),
+      nonce: queuedNonce(["dc-counts-allow"]),
+      ref: "dc-counts",
+      approverId: "op-1",
+      via: "cli",
+      policyHash: (await ledger.decisions())[0]!.claims.policyHash,
+      approvals: proxy.approvals,
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(result.ok, true, JSON.stringify(result));
+    const allowInputs = await proxy.inputsLog.get("dc-counts-allow");
+    assert.deepEqual(allowInputs?.dataClasses, signedClasses);
+  });
+
+  it("the daily cap counts the amount that will be sent, not the unbound args copy", async () => {
+    const DAY1 = Date.UTC(2026, 9, 1, 12);
+    const DAY2 = DAY1 + 86_400_000;
+    let nowMs = DAY1;
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        approvalTtlMs: 3 * 86_400_000,
+        dataClasses: { email: "mask" },
+        rules: [
+          {
+            id: "spend-cap",
+            tool: "spend",
+            requires: ["verax:pay"],
+            mode: "approve",
+            text: "Spends need operator approval.",
+            spend: { maxAmountMinor: 1_000, currency: "TRY", payees: ["true-ads"], dailyMaxMinor: 100 },
+          },
+        ],
+      }),
+    );
+    const ledger = new MemoryLedger();
+    const proxy = createProxy({
+      policy,
+      recordSigner: RECORD_SIGNER,
+      effectSigner: EFFECT_SIGNER,
+      ledger,
+      now: () => nowMs,
+      nonce: queuedNonce(["unused-1", "unused-2"]),
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    const payer: Principal = { brain: "brain-1", scopes: new Set(["verax:pay"]) };
+    const spend = (ref: string) => ({
+      name: "spend",
+      arguments: { amountMinor: 60, currency: "TRY", payee: "true-ads", reference: `inv ${EMAIL}`, _ref: ref },
+    });
+    await proxy.call(spend("cap-1"), payer);
+    nowMs = DAY2;
+    await proxy.call(spend("cap-2"), payer);
+    const guard = createApprovalBudgetGuard({ policy, approvals: proxy.approvals, now: () => nowMs, ledger });
+    const approve = (ref: string) =>
+      approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: () => nowMs,
+        nonce: queuedNonce([`${ref}-allow`]),
+        ref,
+        approverId: "op-1",
+        via: "cli",
+        policyHash: policy.hash,
+        approvals: proxy.approvals,
+        inputsLog: proxy.inputsLog,
+        budgetGuard: guard,
+      });
+    const first = await approve("cap-1");
+    assert.equal(first.ok, true, JSON.stringify(first));
+    const second = (await proxy.approvals.listPending()).find((row) => row.ref === "cap-2");
+    assert.ok(second?.forwardedArgs, "the masked spend has no forwardedArgs");
+    await proxy.approvals.append({ ...second, args: { ...second.args, amountMinor: 0 } });
+    const result = await approve("cap-2");
+    assert.equal(result.ok, false, `a 60 + 60 spend passed a 100 cap: ${JSON.stringify(result)}`);
+    if (!result.ok) assert.equal(result.reason, "budget-exceeded");
+  });
+
+  it("an inputs row appended after the defer does not unbind it: the raw row stays unbound", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-loader-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      const raw = { id: "n-loader", body: `mail ${EMAIL}` };
+      await proxy.call({ name: "memory.put", arguments: { ...raw, _ref: "dc-loader" } }, P);
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending?.forwardedArgs, "the masked call has no forwardedArgs");
+      const { forwardedArgs: _f, dataClasses: _d, ...rest } = pending;
+      const edited = { ...rest, args: raw };
+      appendFileSync(
+        join(dir, "inputs.jsonl"),
+        `${JSON.stringify({ ref: "dc-loader", inputs: { principal: { brain: "b", scopes: [] }, inputs: [] } })}\n`,
+      );
+      const signedRequest = loadDecisionRequestHashesFromDir(dir).get("dc-loader");
+      assert.ok(signedRequest);
+      const forwarded = loadSignedForwardedHashesFromDir(dir).get("dc-loader");
+      assert.equal(approvalArgsBound(edited, signedRequest, forwarded), false, "the raw arguments read as bound");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("an approved call retried with no approvals row does not send the raw arguments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-norow-"));
+    const raw = { id: "n-norow", body: `mail ${EMAIL}` };
+    let ledger = new FileLedger(dir);
+    try {
+      const first = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await first.call({ name: "memory.put", arguments: { ...raw, _ref: "dc-norow" } }, P);
+      const approved = await approvePending({
+        ledger,
+        recordSigner: RECORD_SIGNER,
+        now: tickingNow(1_000),
+        nonce: queuedNonce(["dc-norow-allow"]),
+        ref: "dc-norow",
+        approverId: "op-1",
+        via: "cli",
+        policyHash: (await ledger.decisions())[0]!.claims.policyHash,
+        approvals: first.approvals,
+        inputsLog: first.inputsLog,
+      });
+      assert.equal(approved.ok, true, JSON.stringify(approved));
+      ledger.close();
+      rmSync(join(dir, "approvals.jsonl"), { force: true });
+
+      ledger = new FileLedger(dir);
+      const received: ToolCall[] = [];
+      const relaxed = createProxy({
+        policy: policyV2({ dataClasses: { email: "allow" } }, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(2_000),
+        nonce: queuedNonce(["retry-deny"]),
+        inner: async (call) => {
+          received.push(structuredClone({ name: call.name, arguments: call.arguments }));
+          return { content: [{ type: "text", text: "ok" }], isError: false };
+        },
+      });
+      await relaxed.call({ name: "memory.put", arguments: { ...raw, _ref: "dc-norow" } }, P);
+      assert.ok(
+        !JSON.stringify(received).includes(EMAIL),
+        `the raw arguments were sent after the operator approved the masked ones: ${JSON.stringify(received)}`,
+      );
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("a blocked file type in _inputs is refused and does not reach the inputs log", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        fileTypes: { block: [".pem"] },
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-meta-pem"]);
+    const result = await proxy.call(
+      {
+        name: "memory.put",
+        arguments: { id: "n-meta-pem", body: "ok", _inputs: [{ id: "keys/Server.PEM", versionHash: "a".repeat(64) }] },
+      },
+      P,
+    );
+    assert.equal(received.length, 0, `the call reached the tool: ${JSON.stringify(received)}`);
+    assert.equal(result.content[0]?.text, "denied:file-type-block:.pem:r-meta-pem");
+    const stored = JSON.stringify(await proxy.inputsLog.get("r-meta-pem"));
+    assert.ok(!stored.includes("Server.PEM"), `the blocked name reached the inputs log: ${stored}`);
+  });
+
+  it("a deferred call takes amount, payee and currency from the forwarded arguments", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-dc-payee-"));
+    const ledger = new FileLedger(dir);
+    try {
+      const proxy = createProxy({
+        policy: policyV2({}, { mode: "approve" }),
+        recordSigner: RECORD_SIGNER,
+        effectSigner: EFFECT_SIGNER,
+        ledger,
+        now: tickingNow(),
+        nonce: queuedNonce(["unused"]),
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call(
+        { name: "memory.put", arguments: { payee: EMAIL, amount: 10, currency: "TRY", _ref: "dc-payee" } },
+        P,
+      );
+      const pending = (await proxy.approvals.listPending())[0];
+      assert.ok(pending, "no pending approval");
+      const stored = JSON.stringify(pending);
+      assert.ok(!stored.includes(EMAIL), `the e-mail address is on the approval row: ${stored}`);
+      assert.deepEqual(filesContaining(dir, EMAIL), [], "the e-mail address was written to disk");
+    } finally {
+      ledger.close();
+    }
+  });
+
+  it("an IP class is detected when the policy names it", async () => {
+    const policy = policyV2({ dataClasses: { ip: "block" } });
+    const { proxy, received } = harness(policy, ["r-ip"]);
+    const out = await proxy.call({ name: "memory.put", arguments: { id: "n-ip", body: "host 192.168.1.1" } }, P);
+    assert.equal(received.length, 0, `an IP address reached the tool: ${JSON.stringify(received)}`);
+    assert.match(out.content[0]?.text ?? "", /^denied:data-class-block:ip:/);
+  });
+
+  it("a rule-level dataClasses does not run the masker on a tool that names no class", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope.", dataClasses: { email: "mask" } },
+          { id: "memory-get", tool: "memory.get", requires: ["verax:read"], text: "Reading memory needs the read scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-other-tool"]);
+    const dash = "2026\u20132027";
+    const args = { id: "n-other", body: `${"x".repeat(20_000)}${dash}` };
+    await proxy.call({ name: "memory.get", arguments: args }, P);
+    assert.deepEqual(received[0]?.arguments, args);
+  });
+
+  it("a version 2 policy without dataClasses leaves arguments untouched", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 2,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    const { proxy, received } = harness(policy, ["r-v2-nogate"]);
+    const dash = "2026\u20132027";
+    const args = { id: "n-v2", body: `${"x".repeat(20_000)}${dash}` };
+    await proxy.call({ name: "memory.put", arguments: args }, P);
+    assert.deepEqual(received[0]?.arguments, args);
+  });
+
+  it("a version 1 policy forwards a 65-level argument as 0.7.0 did", async () => {
+    const policy = loadPolicy(
+      JSON.stringify({
+        version: 1,
+        default: "deny",
+        rules: [
+          { id: "memory-put", tool: "memory.put", requires: ["verax:memory"], text: "Writing memory needs the memory scope." },
+        ],
+      }),
+    );
+    let body: unknown = "ok";
+    for (let i = 0; i < 65; i++) body = { a: body };
+    const { proxy, received } = harness(policy, ["r-v1-deep"]);
+    const out = await proxy.call({ name: "memory.put", arguments: { id: "n-deep", body } }, P);
+    assert.equal(out.isError, false, `version 1 refused a deep argument: ${out.content[0]?.text}`);
+    assert.equal(received.length, 1);
   });
 
   it("a version 1 policy forwards arguments untouched", async () => {

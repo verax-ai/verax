@@ -762,14 +762,44 @@ function allowsWithoutEffect(
   return { findings, deferred };
 }
 
-type ResultRecordMeta = {
+export type ResultRecordMeta = {
   resultOf: string;
   resultClasses: unknown;
 };
 
+/** The same checks verifyLedger applies to a result record. */
+export function resultRecordIsMismatch(
+  rec: SignedDecisionRecord,
+  meta: ResultRecordMeta,
+  resultHashByRef: ReadonlyMap<string, string>,
+  effectClassByRef: ReadonlyMap<string, string>,
+  namedCount: number,
+): boolean {
+  const expected = resultHashByRef.get(meta.resultOf);
+  const decision = rec.claims.decision;
+  const effectOk =
+    decision === "allow"
+      ? rec.claims.effectHash === rec.claims.requestHash
+      : decision === "deny"
+        ? rec.claims.effectHash === null
+        : false;
+  return (
+    expected === undefined ||
+    rec.claims.requestHash !== expected ||
+    !effectOk ||
+    !resultClassesShapeOk(meta.resultClasses) ||
+    !subjectMatchesNamedCall(rec.claims.subject, effectClassByRef.get(meta.resultOf)) ||
+    namedCount > 1
+  );
+}
+
 /** Decisions whose inputs say they are about a result, not a new allow. */
-function resultRecordMetaByRef(paths: readonly string[], problems: string[]): Map<string, ResultRecordMeta> {
-  const map = new Map<string, ResultRecordMeta>();
+function resultRecordMetaByRef(
+  paths: readonly string[],
+  records: readonly SignedDecisionRecord[],
+  problems: string[],
+): Map<string, ResultRecordMeta> {
+  const rowsByRef = new Map<string, { hash: string; resultOf: string; resultClasses: unknown }[]>();
   for (const path of paths) {
     for (const row of readJsonl(path, problems)) {
       if (!row || typeof row !== "object" || Array.isArray(row)) continue;
@@ -779,11 +809,27 @@ function resultRecordMetaByRef(paths: readonly string[], problems: string[]): Ma
       }
       const resultOf = (inputs as { resultOf?: unknown }).resultOf;
       if (typeof resultOf !== "string") continue;
-      map.set(ref, {
-        resultOf,
-        resultClasses: (inputs as { resultClasses?: unknown }).resultClasses,
-      });
+      let hash: string;
+      try {
+        hash = sha256Canonical(inputs);
+      } catch {
+        continue;
+      }
+      const list = rowsByRef.get(ref) ?? [];
+      list.push({ hash, resultOf, resultClasses: (inputs as { resultClasses?: unknown }).resultClasses });
+      rowsByRef.set(ref, list);
     }
+  }
+  const map = new Map<string, ResultRecordMeta>();
+  for (const rec of records) {
+    const ref = rec.claims.ref;
+    const expected = rec.claims.inputsHash;
+    if (typeof ref !== "string" || typeof expected !== "string") continue;
+    const rows = rowsByRef.get(ref);
+    if (!rows) continue;
+    const hit = rows.find((row) => row.hash === expected);
+    if (!hit) continue;
+    map.set(ref, { resultOf: hit.resultOf, resultClasses: hit.resultClasses });
   }
   return map;
 }
@@ -1541,7 +1587,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (ref !== null) boundPrimaryRefs.add(ref);
   }
 
-  const resultMeta = resultRecordMetaByRef(files.inputs, problems);
+  const resultMeta = resultRecordMetaByRef(files.inputs, records, problems);
   const unbound = allowsWithoutEffect(
     attested,
     primarySeen,
@@ -1553,8 +1599,9 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
   const effectClassByRef = new Map<string, string>();
   for (const e of effectRows) {
     if (typeof e.row?.ref !== "string") continue;
+    if (e.row.effectClass === "duplicate-effect") continue;
     if (typeof e.resultHash === "string") resultHashByRef.set(e.row.ref, e.resultHash);
-    if (typeof e.row.effectClass === "string" && e.row.effectClass !== "duplicate-effect") {
+    if (typeof e.row.effectClass === "string") {
       effectClassByRef.set(e.row.ref, e.row.effectClass);
     }
   }
@@ -1576,21 +1623,14 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (typeof ref !== "string") continue;
     const meta = resultMeta.get(ref);
     if (meta === undefined) continue;
-    const expected = resultHashByRef.get(meta.resultOf);
-    const decision = rec.claims.decision;
-    const effectOk =
-      decision === "allow"
-        ? rec.claims.effectHash === rec.claims.requestHash
-        : decision === "deny"
-          ? rec.claims.effectHash === null
-          : false;
     if (
-      expected === undefined ||
-      rec.claims.requestHash !== expected ||
-      !effectOk ||
-      !resultClassesShapeOk(meta.resultClasses) ||
-      !subjectMatchesNamedCall(rec.claims.subject, effectClassByRef.get(meta.resultOf)) ||
-      (namedByCall.get(meta.resultOf) ?? []).length > 1
+      resultRecordIsMismatch(
+        rec,
+        meta,
+        resultHashByRef,
+        effectClassByRef,
+        (namedByCall.get(meta.resultOf) ?? []).length,
+      )
     ) {
       problems.push(`result-record-mismatch ${ref}`);
     }

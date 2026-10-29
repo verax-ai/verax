@@ -540,6 +540,28 @@ as before with one change: an image or audio block a downstream tool returns
 now reaches the agent as an image or audio block. In 0.7.0 the body turned
 it into JSON text, so the agent saw the base64 bytes as text.
 
+### Known limits in 0.8.0
+
+- Once a policy names `dataClasses` (at the top or on any rule) or
+  `fileTypes`, an argument nested deeper than 64 levels is refused
+  (`data-class-unscanned`) on every tool, and the halt and disk-low records
+  leave `source` off `_inputs`, including for a tool whose own classes are
+  all `allow`. Both fail closed; neither happens without those keys.
+- `approvals.jsonl` is not signed. Every row an approval, the terminal, the
+  operator door or the ledger API uses is held to the signed defer, but the
+  daily cap still sums the amounts of earlier approved rows as the file
+  states them.
+- `explain()` of a result record checks that record and its binding to the
+  call; findings on the call itself are reported by `explain()` of the call
+  and by `verax verify`.
+- `verax verify` keys result records by ref. Two signed result records under
+  one ref count as one when it checks that a call has at most one; producing
+  them takes the record key.
+- The in-memory inputs log used by tests keeps one row per ref.
+- To hold a row to its signed defer, `verax approve`, the operator door's
+  list and its approve read the decision and inputs files whole on each
+  request; on a large ledger that is a full read per request.
+
 Guards: `data-classes`, `result-classes`, `result-classes-error`,
 `result-record-verify`, `downstream-media`.
 

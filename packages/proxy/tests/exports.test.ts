@@ -31,6 +31,8 @@ const ALLOWED = new Set([
   "MemoryLedger",
   "explain",
   "approvePending",
+  "approvalArgsBound",
+  "approvalDispatchArgs",
   "approvalsLogFor",
   // HTTP and CLI approve doors share the spend daily-max check; the factory
   // lives next to approvePending so both pass the same function.
@@ -47,6 +49,9 @@ const ALLOWED = new Set([
   // The ledger API and card reconcile read the request hash on the decision
   // of a ref. The loader lists the same decision files.
   "loadDecisionRequestHashesFromDir",
+  // The ledger API and card reconcile read the forwardedHash the signed
+  // defer committed to, from the inputs row its inputsHash names.
+  "loadSignedForwardedHashesFromDir",
   "tenantKey",
   "spokenReason",
   "checkpointsPath",

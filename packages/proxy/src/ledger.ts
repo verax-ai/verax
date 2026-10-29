@@ -274,6 +274,8 @@ export type DecisionIndexRow = {
   subject: string;
   policyHash: string;
   timestampMs: number;
+  /** Absent when the record has none, or the index line predates 0.8.0. */
+  inputsHash?: string;
 };
 
 export type ResolutionHit = { ref: string; kind: "allow" | "expired" };
@@ -288,6 +290,7 @@ function indexRowOf(signed: SignedDecisionRecord): DecisionIndexRow | null {
     subject: signed.claims.subject,
     policyHash: signed.claims.policyHash,
     timestampMs: signed.claims.timestampMs,
+    ...(typeof signed.claims.inputsHash === "string" ? { inputsHash: signed.claims.inputsHash } : {}),
   };
 }
 
@@ -761,6 +764,7 @@ export class FileLedger implements Ledger {
       subject: line.subject,
       policyHash: line.policyHash,
       timestampMs: line.ts,
+      ...(line.inputsHash !== undefined ? { inputsHash: line.inputsHash } : {}),
     };
     this.byRef.set(line.ref, row);
     if (line.tenantRef !== "") this.byRef.set(`${line.tenantRef}:${line.ref}`, row);
@@ -822,6 +826,7 @@ export class FileLedger implements Ledger {
           reasonCode: row.reasonCode,
           subject: row.subject,
           policyHash: row.policyHash,
+          ...(row.inputsHash !== undefined ? { inputsHash: row.inputsHash } : {}),
         });
       }
     }
@@ -862,6 +867,7 @@ export class FileLedger implements Ledger {
       reasonCode: row.reasonCode,
       subject: row.subject,
       policyHash: row.policyHash,
+      ...(row.inputsHash !== undefined ? { inputsHash: row.inputsHash } : {}),
     };
     await appendPlain(indexPath(this.dir), lineOf(line));
     this.applyIndexLine(line);

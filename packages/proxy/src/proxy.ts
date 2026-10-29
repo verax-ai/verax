@@ -3,10 +3,13 @@ import { signDecisionRecord } from "@cedulon/core";
 import type { DecisionKind } from "@cedulon/core";
 import type { EffectRow } from "@cedulon/effect-extract";
 import {
+  approvalDispatchArgs,
+  approvalDispatchHash,
   approvePending,
   approvalsLogFor,
   createApprovalBudgetGuard,
   drainApprovalCommands,
+  signedApprovalDispatch,
   spentTodayMinorOf,
 } from "./approvals.ts";
 import { SerialQueue } from "./serial-queue.ts";
@@ -709,16 +712,23 @@ export function createProxy(deps: ProxyDeps) {
         await syncControlRecords();
       }
       const dispatched = toolCallOf(call);
-      const tooDeep = argumentDepth(call.arguments) > MAX_ARGUMENT_DEPTH;
+      const tooDeep =
+        deps.policy.dataClasses !== undefined && argumentDepth(call.arguments) > MAX_ARGUMENT_DEPTH;
       const requestHash = tooDeep
         ? sha256Canonical({ name: dispatched.name, tooDeep: true })
         : sha256Canonical(dispatched);
       const timestampMs = deps.now();
       const resolved = await resolveInputs(call, principal, timestampMs);
-      // A class in `_inputs[].source` must not reach disk before the meta scan.
-      const preMetaInputs = deps.policy.dataClasses
-        ? inputsWithoutSource(resolved.inputs)
-        : resolved.inputs;
+      // A class in `_inputs` must not reach disk on the halt or disk-low
+      // record. Scan here only to scrub; the deny reason stays 0.7.0's.
+      const metaReason = deps.policy.dataClasses
+        ? scanCallMeta(call, deps.policy.dataClasses)
+        : null;
+      const preMetaInputs = metaReason
+        ? { principal: principalInputs(principal), inputs: [] }
+        : deps.policy.dataClasses
+          ? inputsWithoutSource(resolved.inputs)
+          : resolved.inputs;
       async function denyIfHalted(): Promise<ToolResult | null> {
         if (!stateDir || !isProxyHalted(stateDir)) return null;
         const ref = deps.nonce();
@@ -763,7 +773,7 @@ export function createProxy(deps: ProxyDeps) {
           if (halted) return { kind: "done", result: halted };
         }
         if (tooDeep) {
-          const reasonCode = deps.policy.dataClasses ? "data-class-unscanned" : "arguments-too-deep";
+          const reasonCode = "data-class-unscanned";
           const ref = deps.nonce();
           await writeRecord({
             decision: "deny",
@@ -786,7 +796,7 @@ export function createProxy(deps: ProxyDeps) {
               reasonCode: metaReason,
               ref,
               requestHash,
-              inputs: inputsWithoutSource(resolved.inputs),
+              inputs: { principal: principalInputs(principal), inputs: [] },
               effectHash: null,
               subject: call.name,
               timestampMs,
@@ -975,10 +985,28 @@ export function createProxy(deps: ProxyDeps) {
                   });
                   return { kind: "done", result: denied("tenant-mismatch", denyRef) };
                 }
-                const toRun =
-                  snap?.forwardedArgs !== undefined
-                    ? { name: dispatched.name, arguments: snap.forwardedArgs }
-                    : dispatched;
+                const toRun = snap
+                  ? { name: dispatched.name, arguments: approvalDispatchArgs(snap) }
+                  : dispatched;
+                // What is sent is what the signed defer committed to, with or
+                // without an approvals row: a missing row does not send the raw call.
+                const signedDispatch = await signedApprovalDispatch(deps.ledger, inputsLog, scopedRef, existing);
+                if (
+                  signedDispatch === null ||
+                  sha256Canonical({ name: toRun.name, arguments: toRun.arguments }) !== signedDispatch.hash
+                ) {
+                  return {
+                    kind: "done",
+                    result: await signedRetryDeny(
+                      "hash-mismatch",
+                      requestHash,
+                      resolved.inputs,
+                      timestampMs,
+                      call.name,
+                      scopedRef,
+                    ),
+                  };
+                }
                 if (deps.policy.dataClasses) {
                   const classGated = gateDataClasses(dispatched, deps.policy.dataClasses);
                   if (classGated.action === "deny") {
@@ -995,10 +1023,9 @@ export function createProxy(deps: ProxyDeps) {
                     };
                   }
                   if (classGated.action === "forward") {
-                    const snapHash =
-                      snap?.forwardedArgs !== undefined
-                        ? sha256Canonical({ name: dispatched.name, arguments: snap.forwardedArgs })
-                        : undefined;
+                    const snapHash = snap
+                      ? approvalDispatchHash(snap)
+                      : sha256Canonical({ name: dispatched.name, arguments: dispatched.arguments });
                     if (snapHash !== classGated.dataClasses.forwardedHash) {
                       return {
                         kind: "done",
@@ -1105,9 +1132,8 @@ export function createProxy(deps: ProxyDeps) {
             reasonCode = classGated.reasonCode;
           } else if (classGated.action === "forward") {
             forwarded = { name: dispatched.name, arguments: classGated.arguments };
-            if (decision === "allow") {
-              recordInputs = { ...resolved.inputs, dataClasses: classGated.dataClasses };
-            } else {
+            recordInputs = { ...resolved.inputs, dataClasses: classGated.dataClasses };
+            if (decision === "defer") {
               snapshotForwarded = classGated.arguments;
               snapshotDataClasses = classGated.dataClasses;
             }
@@ -1132,14 +1158,14 @@ export function createProxy(deps: ProxyDeps) {
         }
         if (decision === "defer") {
           const rule = deps.policy.rule(verdict.rule);
-          const amount = dispatched.name === "spend" ? dispatched.arguments.amountMinor : dispatched.arguments.amount;
-          const payee = dispatched.arguments.payee;
-          const currency = dispatched.arguments.currency;
+          const amount = forwarded.name === "spend" ? forwarded.arguments.amountMinor : forwarded.arguments.amount;
+          const payee = forwarded.arguments.payee;
+          const currency = forwarded.arguments.currency;
           await approvals.append({
             ref,
             requestHash,
             subject: dispatched.name,
-            args: dispatched.arguments,
+            args: forwarded.arguments,
             ...(snapshotForwarded !== undefined ? { forwardedArgs: snapshotForwarded } : {}),
             ...(snapshotDataClasses !== undefined ? { dataClasses: snapshotDataClasses } : {}),
             ruleId: verdict.rule,

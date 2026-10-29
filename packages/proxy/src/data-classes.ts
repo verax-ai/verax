@@ -135,6 +135,36 @@ function blockedFileType(text: string, blocked: readonly string[]): string | und
   return undefined;
 }
 
+function restrictsChoices(choices: Record<string, DataClassChoice>): boolean {
+  return Object.values(choices).some((choice) => choice === "mask" || choice === "block" || choice === "local");
+}
+
+function firstBlockedFileType(value: unknown, blocked: readonly string[]): string | undefined {
+  if (blocked.length === 0) return undefined;
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const cur = stack.pop();
+    if (typeof cur === "string") {
+      const hit = blockedFileType(cur, blocked);
+      if (hit !== undefined) return hit;
+      continue;
+    }
+    if (Array.isArray(cur)) {
+      for (const item of cur) stack.push(item);
+      continue;
+    }
+    if (cur !== null && typeof cur === "object") {
+      const rec = cur as Record<string, unknown>;
+      for (const key of Object.keys(rec)) {
+        const keyHit = blockedFileType(key, blocked);
+        if (keyHit !== undefined) return keyHit;
+        stack.push(rec[key]);
+      }
+    }
+  }
+  return undefined;
+}
+
 function addCounts(into: Record<string, number>, add: Record<string, number> | undefined): void {
   if (!add) return;
   for (const [key, n] of Object.entries(add)) {
@@ -145,6 +175,11 @@ function addCounts(into: Record<string, number>, add: Record<string, number> | u
 
 function choicesFor(config: DataClassConfig, tool: string): Record<string, DataClassChoice> {
   return { ...config.document, ...(config.byTool[tool] ?? {}) };
+}
+
+/** Conarium leaves the IP detector off unless the operator names `ip`. */
+export function detectorsFor(choices: Readonly<Record<string, unknown>>): { ip: true } | undefined {
+  return choices.ip !== undefined ? { ip: true } : undefined;
 }
 
 function asDecimalString(value: number | bigint): string {
@@ -188,15 +223,24 @@ function restrictedClass(
 
 /**
  * Scan Verax's own `_ref` / `_inputs` (ids, sources, every nested string).
- * A class whose choice is not `allow` is `data-class-meta:<class>`.
+ * A blocked file type is `file-type-block:<ext>`, as on the arguments, whatever
+ * the classes; a class whose choice is not `allow` is `data-class-meta:<class>`.
  */
 export function scanCallMeta(call: ToolCall, config: DataClassConfig): string | null {
   const args = call.arguments;
+  for (const key of ["_ref", "_inputs"]) {
+    if (!Object.prototype.hasOwnProperty.call(args, key)) continue;
+    const fileType = firstBlockedFileType(args[key], config.blockedFileTypes);
+    if (fileType !== undefined) return `file-type-block:${fileType}`;
+  }
   const choices = choicesFor(config, call.name);
+  if (!restrictsChoices(choices)) return null;
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+  const detectors = detectorsFor(choices);
   const opts = {
     pipeline: "text" as const,
     only: [] as SpanClass[],
+    ...(detectors ? { detectors } : {}),
     ...(config.scanCharCap !== undefined ? { scanCharCap: config.scanCharCap } : {}),
   };
 
@@ -278,17 +322,22 @@ export function gateDataClasses(
   config: DataClassConfig | undefined,
 ): DataClassGateResult {
   if (!config) return { action: "unchanged" };
-
   const choices = choicesFor(config, call.name);
+  if (!restrictsChoices(choices)) {
+    const fileType = firstBlockedFileType(call.arguments, config.blockedFileTypes);
+    if (fileType !== undefined) return { action: "deny", reasonCode: `file-type-block:${fileType}` };
+    return { action: "unchanged" };
+  }
   const only = SPAN_CLASSES.filter((cls) => choices[cls] === "mask");
   const hasBlockOrLocal = SPAN_CLASSES.some(
     (cls) => choices[cls] === "block" || choices[cls] === "local",
   );
-  const maskChosen = only.length > 0;
   const effectiveCap = config.scanCharCap ?? DEFAULT_SCAN_CHAR_CAP;
+  const detectors = detectorsFor(choices);
   const opts = {
     pipeline: "text" as const,
     only,
+    ...(detectors ? { detectors } : {}),
     ...(config.scanCharCap !== undefined ? { scanCharCap: config.scanCharCap } : {}),
   };
   const state: ScanState = {
@@ -311,7 +360,9 @@ export function gateDataClasses(
       const unscanned = couldNotScan(text, result, effectiveCap);
       if (unscanned && state.error === null) {
         // A key cannot be rewritten; an unscanned key is always a deny.
-        if (kind === "key" || (hasBlockOrLocal && !maskChosen)) {
+        // A value the masker could not scan, while any class is block or
+        // local, is a deny even if another class is mask.
+        if (kind === "key" || hasBlockOrLocal) {
           state.error = "data-class-unscanned";
         }
       }

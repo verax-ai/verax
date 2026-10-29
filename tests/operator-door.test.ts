@@ -390,6 +390,37 @@ describe("operator door", () => {
     }
   });
 
+  it("D6b a row edited on disk is not listed and not approved: the body would approve its own copy", async () => {
+    const passkey = mintSoftwarePasskey();
+    const body = await openBody(passkey);
+    try {
+      await hold(body, "door-d6b");
+      const token = (await signIn(body.doorPort, passkey)).body.token as string;
+      const [row] = await waitingAt(body.doorPort, token);
+      assert.ok(row, "nothing was waiting");
+      const path = join(body.stateDir, "approvals.jsonl");
+      const lines = readFileSync(path, "utf8")
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line) as { ref: string; args: Record<string, unknown> });
+      const onDisk = lines.filter((line) => line.ref === row.ref).at(-1);
+      assert.ok(onDisk);
+      onDisk.args = { ...onDisk.args, id: "harmless" };
+      writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+
+      assert.deepEqual(await waitingAt(body.doorPort, token), []);
+      const assertion = await approvalAssertion(body.doorPort, token, passkey, row.ref);
+      const refused = await call(body.doorPort, "POST", "/api/approve", {
+        token,
+        body: { ref: row.ref, requestHash: row.requestHash, assertion },
+      });
+      assert.equal(refused.status, 409, JSON.stringify(refused.body));
+      assert.equal(refused.body.error, "row-unbound");
+    } finally {
+      await body.close();
+    }
+  });
+
   it("D7 an approval through the door verifies from the files alone and names the door's origin", async () => {
     const passkey = mintSoftwarePasskey();
     const body = await openBody(passkey);
@@ -1410,9 +1441,18 @@ describe("operator door", () => {
     });
     assert.equal(heldSpend({ ...row, subject: "spend", amount: 12.5, args: {} })?.amountMinor, null);
     assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: "1250" } })?.amountMinor, null);
-    // What was stored when the call was held is what is shown, as at the terminal.
-    assert.equal(heldSpend({ ...row, subject: "spend", payee: "stored", args: { payee: "argued" } })?.payee, "stored");
-    assert.equal(heldSpend({ ...row, subject: "spend", currency: "EUR", args: { currency: "USD" } })?.currency, "EUR");
+    // What will be sent is what is shown, as at the terminal.
+    assert.equal(heldSpend({ ...row, subject: "spend", payee: "stored", args: { payee: "argued" } })?.payee, "argued");
+    assert.equal(heldSpend({ ...row, subject: "spend", currency: "EUR", args: { currency: "USD" } })?.currency, "USD");
+    assert.equal(
+      heldSpend({
+        ...row,
+        subject: "spend",
+        args: { payee: "argued" },
+        forwardedArgs: { payee: "sent", currency: "TRY", amountMinor: 40, reference: "r" },
+      })?.payee,
+      "sent",
+    );
     assert.equal(heldSpend({ ...row, subject: "spend", args: { amountMinor: 40 } })?.amountMinor, 40);
     assert.equal(heldSpend({ ...row, subject: "memory.put", amount: 5, payee: "x", args: {} }), null);
   });
