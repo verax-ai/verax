@@ -558,6 +558,9 @@ it into JSON text, so the agent saw the base64 bytes as text.
   one ref count as one when it checks that a call has at most one; producing
   them takes the record key.
 - The in-memory inputs log used by tests keeps one row per ref.
+- To hold a row to its signed defer, `verax approve`, the operator door's
+  list and its approve read the decision and inputs files whole on each
+  request; on a large ledger that is a full read per request.
 
 Guards: `data-classes`, `result-classes`, `result-classes-error`,
 `result-record-verify`, `downstream-media`.
