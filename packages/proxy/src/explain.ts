@@ -3,11 +3,12 @@ import { findDecisionRecordChainBreak } from "@cedulon/core";
 import type { SignedDecisionRecord } from "@cedulon/core";
 import { approvalsLogFor, type ApprovalsLog } from "./approvals.ts";
 import { sha256Canonical } from "./hash.ts";
-import { inputsLogFor } from "./inputs.ts";
+import { inputsLogFor, inputsMatchingHash } from "./inputs.ts";
 import { lookupResolvedBy } from "./ledger.ts";
 import { loadCheckpoints } from "./checkpoints.ts";
 import { samePublicKey, thirdPartyReceiptCoversRow } from "./third-party.ts";
 import type { ExplainOpts, ExplainPair, ExplainResult, ExplainWarning, InputsLog, Ledger, LedgerEffect } from "./types.ts";
+import { resultRecordIsMismatch } from "./verify-ledger.ts";
 
 async function pairFor(
   ledger: Ledger,
@@ -31,7 +32,10 @@ async function pairFor(
     }
     return { defer: null, resolution: null };
   }
-  const own = await inputsLog.get(ref);
+  const own =
+    typeof record.claims.inputsHash === "string"
+      ? await inputsMatchingHash(inputsLog, ref, record.claims.inputsHash)
+      : await inputsLog.get(ref);
   if (own?.approver?.resolves) {
     const defer = decisions.find((d) => d.claims.ref === own.approver?.resolves) ?? null;
     return { defer, resolution: record };
@@ -211,7 +215,12 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     throw new Error(`explain-unknown-ref:${ref}`);
   }
   const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
-  const inputsDoc = record.claims.ref ? await inputsLog.get(record.claims.ref) : null;
+  const inputsDoc =
+    record.claims.ref && typeof record.claims.inputsHash === "string"
+      ? await inputsMatchingHash(inputsLog, record.claims.ref, record.claims.inputsHash)
+      : record.claims.ref
+        ? await inputsLog.get(record.claims.ref)
+        : null;
   const resultOf = typeof inputsDoc?.resultOf === "string" ? inputsDoc.resultOf : undefined;
   const effect =
     effects.find((e) => e.row.ref === (resultOf ?? ref) && e.row.effectClass !== "duplicate-effect") ?? null;
@@ -318,6 +327,31 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   );
   const inputsMissing =
     typeof record.claims.inputsHash === "string" && inputsDoc === null;
+  let resultMismatch = false;
+  if (typeof inputsDoc?.resultOf === "string") {
+    const resultHashByRef = new Map<string, string>();
+    const effectClassByRef = new Map<string, string>();
+    for (const e of effects) {
+      if (typeof e.resultHash === "string") resultHashByRef.set(e.row.ref, e.resultHash);
+      if (e.row.effectClass !== "duplicate-effect") effectClassByRef.set(e.row.ref, e.row.effectClass);
+    }
+    let namedCount = 0;
+    for (const rec of decisions) {
+      if (typeof rec.claims.ref !== "string" || typeof rec.claims.inputsHash !== "string") continue;
+      const other =
+        rec.claims.ref === record.claims.ref
+          ? inputsDoc
+          : await inputsMatchingHash(inputsLog, rec.claims.ref, rec.claims.inputsHash);
+      if (other?.resultOf === inputsDoc.resultOf) namedCount += 1;
+    }
+    resultMismatch = resultRecordIsMismatch(
+      record,
+      { resultOf: inputsDoc.resultOf, resultClasses: inputsDoc.resultClasses },
+      resultHashByRef,
+      effectClassByRef,
+      namedCount,
+    );
+  }
   if (inputsMissing) conditions.push("inputs document missing");
   const haltedUnbound =
     effect !== null &&
@@ -330,6 +364,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
     !issuerMismatch &&
     !inputsMismatch &&
     !inputsMissing &&
+    !resultMismatch &&
     !haltedUnbound;
   const code = chainBreak
     ? "receipt-chain-break"
@@ -337,24 +372,29 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
       ? "inputs-hash-mismatch"
       : inputsMissing
         ? "inputs-document-missing"
-        : haltedUnbound
-          ? (hit?.code ?? "effect-class-mismatch")
-          : (hit?.code ?? null);
+        : resultMismatch
+          ? "result-record-mismatch"
+          : haltedUnbound
+            ? (hit?.code ?? "effect-class-mismatch")
+            : (hit?.code ?? null);
   const detail = chainBreak
     ? `receipt-chain-break at ${breakAt ?? "unknown"} (${brk?.reason ?? "broken"})`
     : inputsMismatch
       ? "inputs document hash does not match claims.inputsHash"
       : inputsMissing
         ? "claims.inputsHash is on the record; the inputs document is not on disk"
-        : haltedUnbound && !hit
-          ? "halted effect is not bound to the same allow"
-          : (hit?.detail ?? null);
+        : resultMismatch
+          ? "result record does not bind to the named call the way verifyLedger requires"
+          : haltedUnbound && !hit
+            ? "halted effect is not bound to the same allow"
+            : (hit?.detail ?? null);
   const findingCount = chainBreak
     ? Math.max(refFindings.length, 1)
     : refFindings.length +
       (issuerMismatch && pinned ? 1 : 0) +
       (inputsMismatch ? 1 : 0) +
       (inputsMissing ? 1 : 0) +
+      (resultMismatch ? 1 : 0) +
       (haltedUnbound && refFindings.length === 0 ? 1 : 0);
   const guarantee = guaranteeWithConditions(report.guarantee, conditions);
   const summary = balanced

@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { sha256Canonical } from "./hash.ts";
 import { appendDurable, ledgerFs } from "./ledger.ts";
 import type { DecisionInputs, InputsLog } from "./types.ts";
 
@@ -13,6 +14,12 @@ export class MemoryInputsLog implements InputsLog {
 
   async get(ref: string): Promise<DecisionInputs | null> {
     return this.rows.get(ref) ?? null;
+  }
+
+  async getMatching(ref: string, hash: string): Promise<DecisionInputs | null> {
+    const row = this.rows.get(ref);
+    if (!row) return null;
+    return sha256Canonical(row) === hash ? row : null;
   }
 }
 
@@ -62,6 +69,39 @@ export class FileInputsLog implements InputsLog {
     }
     return found;
   }
+
+  async getMatching(ref: string, hash: string): Promise<DecisionInputs | null> {
+    let found: DecisionInputs | null = null;
+    for (const path of this.paths().all) {
+      let text: string;
+      try {
+        text = await ledgerFs.readFile(path, "utf8");
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw err;
+      }
+      for (const line of text.split("\n")) {
+        if (line === "") continue;
+        const row = JSON.parse(line) as Row;
+        if (row.ref !== ref) continue;
+        if (sha256Canonical(row.inputs) === hash) found = row.inputs;
+      }
+    }
+    return found;
+  }
+}
+
+/** The inputs row `hash` names. Last-row `get` is not this. */
+export async function inputsMatchingHash(
+  log: InputsLog,
+  ref: string,
+  hash: string,
+): Promise<DecisionInputs | null> {
+  const matching = log as InputsLog & { getMatching?: (ref: string, hash: string) => Promise<DecisionInputs | null> };
+  if (typeof matching.getMatching === "function") return matching.getMatching(ref, hash);
+  const row = await log.get(ref);
+  if (!row) return null;
+  return sha256Canonical(row) === hash ? row : null;
 }
 
 const STASH = Symbol.for("verax.inputsLog");

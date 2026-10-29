@@ -762,10 +762,36 @@ function allowsWithoutEffect(
   return { findings, deferred };
 }
 
-type ResultRecordMeta = {
+export type ResultRecordMeta = {
   resultOf: string;
   resultClasses: unknown;
 };
+
+/** The same checks verifyLedger applies to a result record. */
+export function resultRecordIsMismatch(
+  rec: SignedDecisionRecord,
+  meta: ResultRecordMeta,
+  resultHashByRef: ReadonlyMap<string, string>,
+  effectClassByRef: ReadonlyMap<string, string>,
+  namedCount: number,
+): boolean {
+  const expected = resultHashByRef.get(meta.resultOf);
+  const decision = rec.claims.decision;
+  const effectOk =
+    decision === "allow"
+      ? rec.claims.effectHash === rec.claims.requestHash
+      : decision === "deny"
+        ? rec.claims.effectHash === null
+        : false;
+  return (
+    expected === undefined ||
+    rec.claims.requestHash !== expected ||
+    !effectOk ||
+    !resultClassesShapeOk(meta.resultClasses) ||
+    !subjectMatchesNamedCall(rec.claims.subject, effectClassByRef.get(meta.resultOf)) ||
+    namedCount > 1
+  );
+}
 
 /** Decisions whose inputs say they are about a result, not a new allow. */
 function resultRecordMetaByRef(
@@ -1596,21 +1622,14 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     if (typeof ref !== "string") continue;
     const meta = resultMeta.get(ref);
     if (meta === undefined) continue;
-    const expected = resultHashByRef.get(meta.resultOf);
-    const decision = rec.claims.decision;
-    const effectOk =
-      decision === "allow"
-        ? rec.claims.effectHash === rec.claims.requestHash
-        : decision === "deny"
-          ? rec.claims.effectHash === null
-          : false;
     if (
-      expected === undefined ||
-      rec.claims.requestHash !== expected ||
-      !effectOk ||
-      !resultClassesShapeOk(meta.resultClasses) ||
-      !subjectMatchesNamedCall(rec.claims.subject, effectClassByRef.get(meta.resultOf)) ||
-      (namedByCall.get(meta.resultOf) ?? []).length > 1
+      resultRecordIsMismatch(
+        rec,
+        meta,
+        resultHashByRef,
+        effectClassByRef,
+        (namedByCall.get(meta.resultOf) ?? []).length,
+      )
     ) {
       problems.push(`result-record-mismatch ${ref}`);
     }

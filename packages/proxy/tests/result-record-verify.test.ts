@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 import { decisionRecordHash, signDecisionRecord, type SignedDecisionRecord } from "@cedulon/core";
 
+import { explain } from "../src/explain.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { FileLedger } from "../src/ledger.ts";
 import { loadPolicy } from "../src/policy.ts";
@@ -225,6 +226,57 @@ describe("verifyLedger — result records", () => {
       verified.problems.some((p) => p.startsWith("result-record-mismatch ")),
       JSON.stringify(verified.problems),
     );
+  });
+
+  it("explain refuses a result record verifyLedger rejects, and binds inputs by inputsHash", async () => {
+    const dir = await ledgerWithResultRecord();
+    const opened = new FileLedger(dir);
+    const resultRef = (await opened.decisions()).at(-1)!.claims.ref as string;
+    opened.close();
+    rewriteLastDecision(dir, (rec) =>
+      signDecisionRecord(
+        { ...rec.claims, requestHash: "0".repeat(64) },
+        RECORD_SIGNER.privateKeyPem,
+        RECORD_SIGNER.publicKeyPem,
+      ),
+    );
+    const verified = await verifyLedger(dir, { boundaryAllowanceMs: 0 });
+    assert.equal(verified.ok, false);
+    assert.ok(verified.problems.some((p) => p.startsWith("result-record-mismatch ")));
+    const ledger = new FileLedger(dir);
+    try {
+      const explained = await explain(ledger, resultRef);
+      assert.equal(explained.balanced, false, "explain accepted a result record verifyLedger rejects");
+      assert.equal(explained.finding.code, "result-record-mismatch");
+    } finally {
+      ledger.close();
+    }
+
+    const shadowDir = await ledgerWithResultRecord();
+    const inpPath = jsonlFiles(shadowDir, "inputs.jsonl")[0]!;
+    const lines = readFileSync(inpPath, "utf8").split("\n").filter((line) => line !== "");
+    let shadowRef: string | undefined;
+    let shadow: { ref: string; inputs: { resultOf: string } } | undefined;
+    for (const line of lines) {
+      const row = JSON.parse(line) as { ref?: string; inputs?: { resultOf?: string } };
+      if (typeof row.ref === "string" && typeof row.inputs?.resultOf === "string") {
+        shadowRef = row.ref;
+        shadow = { ref: row.ref, inputs: { ...row.inputs, resultOf: "wrong-call" } };
+      }
+    }
+    assert.ok(shadowRef && shadow, "no result inputs row");
+    appendFileSync(inpPath, `${JSON.stringify(shadow)}\n`);
+    const shadowLedger = new FileLedger(shadowDir);
+    try {
+      const explained = await explain(shadowLedger, shadowRef);
+      assert.notEqual(
+        (explained as { effect?: { row?: { ref?: string } } }).effect?.row?.ref,
+        "wrong-call",
+        "explain followed a later inputs row instead of the signed inputsHash",
+      );
+    } finally {
+      shadowLedger.close();
+    }
   });
 
   it("refuses a result record whose decision is not allow or deny", async () => {
