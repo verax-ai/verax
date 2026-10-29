@@ -4,14 +4,15 @@
 // today; it passes because that pass found no break.
 
 import { strict as assert } from "node:assert";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import { runApprove } from "../packages/body/src/approve-cli.ts";
+import { heldPrompt, runApprove } from "../packages/body/src/approve-cli.ts";
+import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 import { approvePending } from "../packages/proxy/src/approvals.ts";
-import { MemoryLedger } from "../packages/proxy/src/ledger.ts";
+import { FileLedger, MemoryLedger } from "../packages/proxy/src/ledger.ts";
 import { loadPolicy } from "../packages/proxy/src/policy.ts";
 import { createProxy } from "../packages/proxy/src/proxy.ts";
 import type { Principal, ToolCall } from "../packages/proxy/src/types.ts";
@@ -101,40 +102,27 @@ describe("attack R6", () => {
       assert.equal(verdict.decision, "deny", cls);
       assert.equal(verdict.reasonCode, "spend-args-invalid", cls);
 
-      const stateDir = mkdtempSync(join(tmpdir(), "verax-r6-held-"));
-      try {
-        const ref = "spend-ref-1";
-        const pending = {
-          ref,
+      // The gate refuses it, so no signed defer can hold it and `verax approve`
+      // shows no row it does not name. The prompt text is checked on its own.
+      const held =
+        heldPrompt({
+          ref: "spend-ref-1",
           requestHash: "abc123abc123deadbeef",
           subject: "spend",
           args: { amountMinor: 100, currency: "TRY", payee: "true-ads", reference },
           ruleId: "spend-true",
           ruleText: "Spends need operator approval.",
           inputsSummary: { count: 0, ids: [] },
-          amount: 100,
-          payee: "true-ads",
-          currency: "TRY",
           expiresAtMs: Date.now() + 60_000,
           status: "pending",
           brain: "brain-1",
-        };
-        writeFileSync(join(stateDir, "approvals.jsonl"), `${JSON.stringify(pending)}\n`, "utf8");
-        const out: string[] = [];
-        await runApprove(["approve", stateDir, ref], () => {}, (line) => out.push(line), {
-          isTTY: true,
-          ask: async () => "100",
-        }, { elevated: () => false });
-        // The prompt is one JSON-quoted line per field (R16-7); the reference line carries the mark.
-        const held = out.join("");
-        const hex = mark.codePointAt(0)!.toString(16).padStart(4, "0");
-        assert.equal(held.includes(mark), false, cls);
-        assert.match(held, new RegExp(`^"reference": .*\\\\u${hex}`, "m"), cls);
-        assert.match(held, /^"payee": "true-ads"$/m, cls);
-        assert.equal((held.match(/^"payee": /gm) ?? []).length, 1, cls);
-      } finally {
-        rmSync(stateDir, { recursive: true, force: true });
-      }
+        }) ?? "";
+      // The prompt is one JSON-quoted line per field (R16-7); the reference line carries the mark.
+      const hex = mark.codePointAt(0)!.toString(16).padStart(4, "0");
+      assert.equal(held.includes(mark), false, cls);
+      assert.match(held, new RegExp(`^"reference": .*\\\\u${hex}`, "m"), cls);
+      assert.match(held, /^"payee": "true-ads"$/m, cls);
+      assert.equal((held.match(/^"payee": /gm) ?? []).length, 1, cls);
     }
   });
 
@@ -149,22 +137,23 @@ describe("attack R6", () => {
     const stateDir = mkdtempSync(join(tmpdir(), "verax-r6-invisible-"));
     try {
       const ref = "spend-ref-2";
-      const pending = {
-        ref,
-        requestHash: "abc123abc123deadbeef",
-        subject: "spend",
-        args: { amountMinor: 100, currency: "TRY", payee: "true-ads", reference },
-        ruleId: "spend-true",
-        ruleText: "Spends need operator approval.",
-        inputsSummary: { count: 0, ids: [] },
-        amount: 100,
-        payee: "true-ads",
-        currency: "TRY",
-        expiresAtMs: Date.now() + 60_000,
-        status: "pending",
-        brain: "brain-1",
-      };
-      writeFileSync(join(stateDir, "approvals.jsonl"), `${JSON.stringify(pending)}\n`, "utf8");
+      // A held call: the gate lets these through, so a signed defer names them.
+      const signers = loadOrCreateSigners(stateDir);
+      const ledger = new FileLedger(stateDir);
+      const proxy = createProxy({
+        policy: loadPolicy(SPEND_POLICY),
+        recordSigner: signers.recordSigner,
+        effectSigner: signers.effectSigner,
+        ledger,
+        now: () => Date.now(),
+        nonce: () => ref,
+        inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+      });
+      await proxy.call(
+        { name: "spend", arguments: { amountMinor: 100, currency: "TRY", payee: "true-ads", reference, _ref: ref } },
+        payer,
+      );
+      ledger.close();
       const out: string[] = [];
       await runApprove(["approve", stateDir, ref], () => {}, (line) => out.push(line), {
         isTTY: true,

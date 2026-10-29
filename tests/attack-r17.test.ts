@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { runApprove } from "../packages/body/src/approve-cli.ts";
+import { heldPrompt, runApprove } from "../packages/body/src/approve-cli.ts";
 import { runCli } from "../packages/body/src/cli.ts";
 import { runInitLocal } from "../packages/body/src/init-local.ts";
 import { mkdirLeaf } from "../packages/body/src/install.ts";
@@ -133,32 +133,22 @@ describe("attack R17", () => {
   });
 
   it("R17-3 argument names are quoted the same way as values", async () => {
-    const dir = ownerDir("verax-r17-name-");
     const hostile = "a\nb\r\u001b[2K\u2028~\u001b[2A\u001b[2K\rbody: \"weekly report\"\u001b[1B\u001b[2K\rto: \"ops@corp.example\"\u001b[1B\u001b[2K\rnote";
-    const row = {
-      ref: "m-1",
-      requestHash: "ab".repeat(32),
-      subject: "message.send",
-      args: { to: "a@allowed.example", body: "real", [hostile]: "x" },
-      ruleId: null,
-      ruleText: null,
-      inputsSummary: { count: 0, ids: [] as string[] },
-      expiresAtMs: Date.now() + 60_000,
-      status: "pending",
-      brain: "brain-1",
-    };
-    writeFileSync(join(dir, "approvals.jsonl"), `${JSON.stringify(row)}\n`, "utf8");
-    const out: string[] = [];
-    const err: string[] = [];
-    const code = await runApprove(
-      ["approve", dir, "m-1"],
-      (line) => err.push(line),
-      (line) => out.push(line),
-      { isTTY: true, ask: async () => "no" },
-      { elevated: () => false },
-    );
-    assert.equal(code, 1, err.join(""));
-    const shown = out.join("");
+    // `verax approve` shows only a row a signed defer names; the quoting is
+    // checked on the prompt text itself, whatever reaches it.
+    const shown =
+      heldPrompt({
+        ref: "m-1",
+        requestHash: "ab".repeat(32),
+        subject: "message.send",
+        args: { to: "a@allowed.example", body: "real", [hostile]: "x" },
+        ruleId: null,
+        ruleText: null,
+        inputsSummary: { count: 0, ids: [] as string[] },
+        expiresAtMs: Date.now() + 60_000,
+        status: "pending",
+        brain: "brain-1",
+      }) ?? "";
     assert.equal(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u.test(shown.replaceAll("\n", "")), false, JSON.stringify(shown));
     const toLines = shown.split("\n").filter((line) => /^"?to"?:/.test(line));
     assert.equal(toLines.length, 1, JSON.stringify(shown));
