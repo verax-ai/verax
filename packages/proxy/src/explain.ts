@@ -102,6 +102,20 @@ function auditedRows(
   return rows;
 }
 
+function dropResultRecordMissingEffect(
+  findings: Finding[],
+  record: SignedDecisionRecord,
+  resultOf: string | undefined,
+  effect: LedgerEffect | null,
+): Finding[] {
+  if (typeof resultOf !== "string" || !effect || effect.row.ref !== resultOf) return findings;
+  if (typeof effect.resultHash === "string" && record.claims.requestHash !== effect.resultHash) {
+    return findings;
+  }
+  const ref = record.claims.ref;
+  return findings.filter((finding) => !(finding.id === ref && finding.code === "receipt-without-settlement"));
+}
+
 function dropBoundHaltedClassMismatch(
   findings: Finding[],
   decisions: SignedDecisionRecord[],
@@ -196,7 +210,11 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   if (!record) {
     throw new Error(`explain-unknown-ref:${ref}`);
   }
-  const effect = effects.find((e) => e.row.ref === ref && e.row.effectClass !== "duplicate-effect") ?? null;
+  const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
+  const inputsDoc = record.claims.ref ? await inputsLog.get(record.claims.ref) : null;
+  const resultOf = typeof inputsDoc?.resultOf === "string" ? inputsDoc.resultOf : undefined;
+  const effect =
+    effects.find((e) => e.row.ref === (resultOf ?? ref) && e.row.effectClass !== "duplicate-effect") ?? null;
   const userExtract = opts?.extract;
   const presentedExtract = userExtract ?? effect?.receipt;
   const extractPresented = Boolean(presentedExtract);
@@ -234,19 +252,29 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
         ),
       ]
     : [];
-  const applicable = dropBoundHaltedClassMismatch(
-    dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
-    decisions,
-    effects,
-    ref,
-    presentedExtract,
+  const applicable = dropResultRecordMissingEffect(
+    dropBoundHaltedClassMismatch(
+      dropWindow ? report.findings.filter((f) => f.code !== WINDOW_COVERAGE) : report.findings,
+      decisions,
+      effects,
+      ref,
+      presentedExtract,
+    ),
+    record,
+    resultOf,
+    effect,
   );
-  const applicableWarnings = dropBoundHaltedClassMismatch(
-    dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
-    decisions,
-    effects,
-    ref,
-    presentedExtract,
+  const applicableWarnings = dropResultRecordMissingEffect(
+    dropBoundHaltedClassMismatch(
+      dropWindow ? report.warnings.filter((f) => f.code !== WINDOW_COVERAGE) : report.warnings,
+      decisions,
+      effects,
+      ref,
+      presentedExtract,
+    ),
+    record,
+    resultOf,
+    effect,
   );
   const refFindings = applicable.filter((f) => f.id === ref);
   const issuerFinding =
@@ -282,9 +310,7 @@ export async function explain(ledger: Ledger, ref: string, opts?: ExplainOpts): 
   const issuerMismatch = applicable.concat(applicableWarnings).some(
     (f) => f.code === "issuer-key-mismatch" || (pinned && f.code === "unauthenticated-issuer"),
   );
-  const inputsLog = opts?.inputsLog ?? inputsLogFor(ledger);
   const approvals = approvalsLogFor(ledger);
-  const inputsDoc = record.claims.ref ? await inputsLog.get(record.claims.ref) : null;
   const inputsMismatch = Boolean(
     inputsDoc &&
       typeof record.claims.inputsHash === "string" &&

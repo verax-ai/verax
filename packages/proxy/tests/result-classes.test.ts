@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { verifyDecisionRecord, type SignedDecisionRecord } from "@cedulon/core";
 
+import { explain } from "../src/explain.ts";
 import { sha256Canonical } from "../src/hash.ts";
 import { FileLedger, MemoryLedger } from "../src/ledger.ts";
 import { loadPolicy } from "../src/policy.ts";
@@ -422,6 +423,18 @@ describe("result classes: text results", () => {
     assert.match(textOf(res), /withheld:result-class-block:tckn:/);
     assert.ok(!textOf(res).includes("other block"), `the other block reached the agent: ${textOf(res)}`);
     assert.ok(!textOf(res).includes("[MASKED_PII]"), `a whole-field mask left as text: ${textOf(res)}`);
+  });
+
+  it("explain reads a result record as bound to its call's effect row", async () => {
+    const returns = result([{ type: "text", text: `TC ${TCKN}` }]);
+    const { proxy, ledger } = harness(policy({ resultClasses: { tckn: "mask" } }), returns);
+    await proxy.call(CALL, P);
+    const found = await resultRecord(proxy, ledger, "r-1");
+    assert.ok(found, "no result record");
+    const explained = await explain(ledger, found.rec.claims.ref as string);
+    assert.notEqual(explained.finding.code, "missing-effect", JSON.stringify(explained.finding));
+    assert.notEqual(explained.finding.code, "receipt-without-settlement", JSON.stringify(explained.finding));
+    assert.equal(explained.effect?.row.ref, "r-1");
   });
 
   it("a block class in a text result withholds the whole result; the tool ran and its effect stands", async () => {
