@@ -76,7 +76,9 @@ describe("release.yml, the only path that publishes to npm from this repository"
   it("publishes the three packages in dependency order", () => {
     const send = namedStep(yml, "send them in dependency order");
     assert.match(send, new RegExp(`for p in ${PUBLISH_ORDER.join(" ")}; do`), "the publish loop is not inventory, proxy, body");
-    assert.match(send, /npm publish "release-tarballs\/verax-ai-\$p-\$v\.tgz"/, "publish does not send the packed tarball");
+    // npm reads `release-tarballs/x.tgz` as a GitHub owner/repo spec and runs
+    // git ls-remote on it; the 0.8.0 publish failed there. ./ makes it a file.
+    assert.match(send, /npm publish "\.\/release-tarballs\/verax-ai-\$p-\$v\.tgz"/, "publish does not send the packed tarball as a ./ path");
   });
 
   it("only the publish job holds id-token, and it runs no repository or dependency code", () => {
