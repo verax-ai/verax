@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.7.0
+## Capability matrix — 0.8.0
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.7.0, and in the MCP registry as
+`@verax-ai/inventory` 0.8.0, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -515,6 +515,33 @@ Guards: `blackbox-p1`, `blackbox-p1-url`, `blackbox-p1-durability`,
 `blackbox-p1-c`, `blackbox-p1-e`, `blackbox-p1-f`, `blackbox-p1-g`,
 `blackbox-p1-h`, `blackbox-p1-j`, `blackbox-p1-k`, `blackbox-p1-l`,
 `blackbox-p1-m`.
+
+## Data classes on arguments and results — since 0.8.0
+
+A `version: 2` policy may name data classes on a call's arguments
+(`dataClasses`: `allow`, `mask`, `local`, `block`) and on its result
+(`resultClasses`: `allow`, `mask`, `block`), and say what happens to image
+and audio blocks in a result (`media`; audio may be `transcribe`, with a
+command the operator runs on this machine). The masker is
+`@conarium-ai/mask`, pinned to an exact version (0.3.5); transcripts use its
+`speech` pipeline, text results and a tool's error text its `text` pipeline.
+A call's signed decision carries the argument counts and a hash of what was
+forwarded; each gated result leaves its own chained signed decision with
+counts and a hash of what the agent received. Neither holds a value or a
+transcript, and `verax verify` holds a result record to the call's effect
+row. Rule by rule,
+what is in the tree is `docs/design/data-classes.md` ("What is in the tree"
+and "Results and audio"); this section does not restate it.
+
+### Upgrading from 0.7.0
+
+Without `dataClasses`, `resultClasses` and `media`, calls and results leave
+as before with one change: an image or audio block a downstream tool returns
+now reaches the agent as an image or audio block. In 0.7.0 the body turned
+it into JSON text, so the agent saw the base64 bytes as text.
+
+Guards: `data-classes`, `result-classes`, `result-classes-error`,
+`result-record-verify`, `downstream-media`.
 
 ## Historical record
 
