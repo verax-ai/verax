@@ -4,7 +4,7 @@ Status: step 1 of the order of work (text classes on tool-call arguments,
 the file-type block, signed counts) and step 3 (audio, with `resultClasses`)
 are in the tree; see "What is in the tree". The panel (2) and photos (4)
 are not. Transcripts are masked with Conarium's `speech` pipeline
-(`@conarium-ai/mask` 0.3.4).
+(`@conarium-ai/mask` 0.3.5).
 
 ## What it is for
 
@@ -330,7 +330,7 @@ the result is not delivered (`result-unrecorded:<ref>`).
 
 **Speech rules, in Conarium.** In a transcript, digits come split by hyphens
 and spaces and the `@` can be lost. These rules are Conarium's `speech`
-pipeline (`@conarium-ai/mask` 0.3.4), so the `text` rules do not move. What
+pipeline (`@conarium-ai/mask` 0.3.5), so the `text` rules do not move. What
 it masks and what it leaves is stated once, in Conarium's
 `docs/API-STABILITY.md` row for `pipeline: 'speech'`, not here. Transcripts
 use it (`TRANSCRIPT_MASK_PIPELINE` in `packages/proxy/src/result-classes.ts`);
