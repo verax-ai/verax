@@ -3,7 +3,8 @@
 Status: step 1 of the order of work (text classes on tool-call arguments,
 the file-type block, signed counts) and step 3 (audio, with `resultClasses`)
 are in the tree; see "What is in the tree". The panel (2) and photos (4)
-are not. The speech rules for transcripts are Conarium's next step.
+are not. Transcripts are masked with Conarium's `speech` pipeline
+(`@conarium-ai/mask` 0.3.4).
 
 ## What it is for
 
@@ -69,8 +70,8 @@ below is a test in `packages/proxy/tests/data-classes.test.ts`.
 
 `packages/proxy/src/result-classes.ts`, called from `runInner` in `proxy.ts`
 after the effect row is written; every point below is a test in
-`packages/proxy/tests/result-classes.test.ts` except the speech-pipeline
-case, which stays `todo`, and a throw from the masker, which is
+`packages/proxy/tests/result-classes.test.ts` except a throw from the
+masker, which is
 `packages/proxy/tests/result-classes-error.test.ts`.
 
 - **Policy.** A `version: 2` document may carry `resultClasses` (class →
@@ -135,7 +136,7 @@ case, which stays `todo`, and a throw from the masker, which is
   delivered (`result-unrecorded:<ref>`).
 
 Not built: operator pattern classes (`{ choice, pattern }`), the panel,
-photos, and Conarium's `speech` pipeline for transcripts.
+and photos.
 
 ## The masking engine: Conarium, as a dependency
 
@@ -153,7 +154,8 @@ with no side effects on import and two dependencies
 (`@eslint-community/regexpp`, `re2js`). `@conarium-ai/core` was not used
 because it brings the gateway's server and database dependencies.
 `maskField` reports what it found per class (`classes`), what it replaced
-(`masked`), and masks only the classes it is asked to (`only`).
+(`masked`), and masks only the classes it is asked to (`only`). Conarium
+0.3.4 adds `pipeline: 'speech'`, which Verax uses for transcripts.
 `packages/proxy` pins `@conarium-ai/mask` to an exact version, the way it
 pins `@cedulon/*`. The code is not copied: one masking implementation, so a
 detector fixed in Conarium is fixed in Verax.
@@ -327,13 +329,11 @@ If it cannot be written,
 the result is not delivered (`result-unrecorded:<ref>`).
 
 **Speech rules, in Conarium.** In a transcript, digits come split by hyphens
-and spaces and the `@` can be lost. These rules go into Conarium's masker as
-a `speech` pipeline, so the `text` rules do not move: a run of 7 or more
-digits split by spaces or hyphens is masked without a checksum; `TR`
-followed by digits is an IBAN; a spoken `et`, `at`, `nokta` or `dot` between
-the parts of an address reads as `@` or `.`; a `name.surname.domain.tld` run
-is an e-mail candidate, its false positives measured before it ships. Until
-that pipeline is published, transcripts use `text`.
+and spaces and the `@` can be lost. These rules are Conarium's `speech`
+pipeline (`@conarium-ai/mask` 0.3.4), so the `text` rules do not move. What
+it masks and what it leaves is stated once, in Conarium's
+`docs/API-STABILITY.md` row for `pipeline: 'speech'`, not here. Transcripts
+use it (`RESULT_MASK_PIPELINE` in `packages/proxy/src/result-classes.ts`).
 
 **Not in step 3:** images beyond `allow` and `withhold` (step 4), audio in
 arguments beyond the whole-field rules, and transcription anywhere but the

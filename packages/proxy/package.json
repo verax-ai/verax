@@ -25,7 +25,7 @@
     "@cedulon/cose": "0.13.1",
     "@cedulon/effect-extract": "0.13.1",
     "@cedulon/x402-adapter": "0.13.1",
-    "@conarium-ai/mask": "0.3.3"
+    "@conarium-ai/mask": "0.3.4"
   },
   "description": "The decision proxy behind VERAX: policy, signed decision records, and the ledger they live in.",
   "homepage": "https://verax-ai.com",

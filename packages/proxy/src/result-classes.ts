@@ -19,8 +19,8 @@ import type {
 } from "./types.ts";
 import { isMediaContent, isTextContent } from "./types.ts";
 
-/** Transcripts use text until Conarium publishes the speech pipeline. */
-const RESULT_MASK_PIPELINE = "text" as const;
+/** Transcripts use Conarium's speech pipeline (split digit runs, spoken addresses). */
+const RESULT_MASK_PIPELINE = "speech" as const;
 
 export type ResultRecordWriter = (opts: {
   decision: DecisionKind;

@@ -423,20 +423,16 @@ describe("result classes: audio", () => {
     }
   });
 
-  it(
-    "transcribe: speech rules catch the IBAN tail and the e-mail address without its @",
-    { todo: "needs the speech pipeline in @conarium-ai/mask" },
-    async () => {
-      const returns = result([AUDIO_BLOCK]);
-      const { proxy } = harness(
-        policy({ resultClasses: ALL_MASK, media: { audio: "transcribe", transcriber: transcriber("ok") } }),
-        returns,
-      );
-      const out = textOf(await proxy.call(CALL, P));
-      assert.ok(!out.includes("8413-26"), `the IBAN tail reached the agent: ${out}`);
-      assert.ok(!out.includes("example.com"), `the e-mail address reached the agent: ${out}`);
-    },
-  );
+  it("transcribe: speech rules catch the IBAN tail and the e-mail address without its @", async () => {
+    const returns = result([AUDIO_BLOCK]);
+    const { proxy } = harness(
+      policy({ resultClasses: ALL_MASK, media: { audio: "transcribe", transcriber: transcriber("ok") } }),
+      returns,
+    );
+    const out = textOf(await proxy.call(CALL, P));
+    assert.ok(!out.includes("8413-26"), `the IBAN tail reached the agent: ${out}`);
+    assert.ok(!out.includes("example.com"), `the e-mail address reached the agent: ${out}`);
+  });
 
   it("withhold: the audio block is replaced by a label", async () => {
     const { proxy, ledger } = harness(policy({ resultClasses: { tckn: "mask" }, media: { audio: "withhold" } }), result([AUDIO_BLOCK]));
