@@ -115,6 +115,36 @@ const CONTROL_NOT_CHECKED: ControlSignatureReport = {
   trustNote: "control signatures were not checked",
 };
 
+/**
+ * The line a reader stops at. A bare VERIFIED reads as "not tampered with", so
+ * it is kept for a run that checked what that takes: every key from the reader,
+ * a checkpoint reaching the newest record, and a receipt from a service someone
+ * else runs, since only a checkpoint held elsewhere detects a rollback of the
+ * files. Anything less names what is missing. The exit code and `--json` are
+ * unchanged.
+ */
+function verdictLine(
+  r: VerifyResult,
+  approval: ApprovalSignatureReport,
+  control: ControlSignatureReport,
+): string {
+  if (!r.ok) return "NOT VERIFIED";
+  const fromFiles =
+    [r.trust, r.effectTrust, r.witnessTrust, r.checkpointTrust].some((trust) => trust?.source === "in-ledger") ||
+    approval.trustSource === "in-ledger" ||
+    control.trustSource === "in-ledger";
+  if (fromFiles || r.trust.source !== "pinned") return "VERIFIED (internal consistency only)";
+  const { checkpoint } = r.tail;
+  if (!checkpoint) return "VERIFIED (tail not covered: no checkpoint)";
+  if (checkpoint.receiptCount === null || checkpoint.ledgerHoldsRecord !== true) {
+    return "VERIFIED (tail not covered: the newest checkpoint does not reach a known record)";
+  }
+  const after = r.decisions - checkpoint.receiptCount;
+  if (after > 0) return `VERIFIED (tail not covered: ${after} record(s) after the newest checkpoint)`;
+  if (r.anchors.verified === 0) return "VERIFIED (rollback not checked: no anchored checkpoint)";
+  return "VERIFIED";
+}
+
 export function renderVerify(
   r: VerifyResult,
   approval: ApprovalSignatureReport = APPROVAL_NOT_CHECKED,
@@ -210,7 +240,7 @@ export function renderVerify(
     if (r.problems.length > 50) lines.push(`  … and ${r.problems.length - 50} more`);
   }
   lines.push("");
-  lines.push(r.ok ? "VERIFIED" : "NOT VERIFIED");
+  lines.push(verdictLine(r, approval, control));
   // Escape before the join. verify reads a ledger someone else wrote, and a
   // line break in that text must not become a line of its own.
   return lines.map((line) => terminalText(line)).join("\n");
