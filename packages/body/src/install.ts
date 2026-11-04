@@ -16,6 +16,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -898,7 +899,7 @@ export type PlanOpts = {
 
 export type PlanOp =
   | { op: "manifest"; dir: string }
-  | { op: "mkdir"; path: string; mode?: number }
+  | { op: "mkdir"; path: string; mode?: number; existingOk?: boolean }
   | { op: "argv"; argv: string[]; optional?: boolean; rollbackDir?: string; stdin?: string; env?: NodeJS.ProcessEnv; cwd?: string }
   | { op: "write"; path: string; contents: string; mode?: number; exclusive?: boolean }
   | { op: "lock-root"; path: string; create: boolean }
@@ -2075,12 +2076,6 @@ function windowsAccountBody(create: boolean, tempDir: string): string {
     "$plain = [Console]::In.ReadLine()",
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     "$sec = ConvertTo-SecureString -String $plain -AsPlainText -Force",
-    user,
-    "$sid = (Get-LocalUser -Name 'verax-svc').SID.Value",
-    "[Console]::Out.WriteLine(('VERAX_SVC_SID:' + $sid))",
-    "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member $sid -ErrorAction SilentlyContinue",
-    "Enable-LocalUser -Name 'verax-svc'",
-    "$star = '*' + $sid",
     "$secedit = Join-Path $env:SystemRoot 'System32\\secedit.exe'",
     `$cfg = ${cfg}`,
     `$db = ${db}`,
@@ -2090,11 +2085,22 @@ function windowsAccountBody(create: boolean, tempDir: string): string {
     "$flat = [regex]::Replace($raw, '\\\\[ \\t]*\\r?\\n', '')",
     "$prev = @()",
     "if ($flat -match 'SeBatchLogonRight\\s*=\\s*([^\\r\\n]*)') { $prev = @($Matches[1].Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' }) }",
+    // secedit drops a holder it cannot resolve from the right it is applying, and some Windows
+    // display languages export names they cannot read back. Refuse before the account, its
+    // password or any right has changed: the scheduled task still holds the old password here.
+    "foreach ($h in $prev) { $n = $h.TrimStart('*').Trim(); if ($n -notmatch '^(?i)S-1-') { try { [void](New-Object System.Security.Principal.NTAccount($n)).Translate([System.Security.Principal.SecurityIdentifier]) } catch { throw ('SeBatchLogonRight holder ' + $n + ' cannot be resolved; nothing was changed') } } }",
+    user,
+    "$sid = (Get-LocalUser -Name 'verax-svc').SID.Value",
+    "[Console]::Out.WriteLine(('VERAX_SVC_SID:' + $sid))",
+    "Remove-LocalGroupMember -SID 'S-1-5-32-545' -Member $sid -ErrorAction SilentlyContinue",
+    "Enable-LocalUser -Name 'verax-svc'",
+    "$star = '*' + $sid",
     "$want = [System.Collections.Generic.List[string]]::new()",
     "foreach ($h in $prev) { $want.Add($h) }",
     "if (-not ($want -contains $star)) { $want.Add($star) }",
     "$line = 'SeBatchLogonRight = ' + ($want -join ',')",
-    "if ($flat -match 'SeBatchLogonRight\\s*=') { $edited = [regex]::Replace($flat, 'SeBatchLogonRight\\s*=\\s*[^\\r\\n]*', $line, 1) } else { $edited = $flat.TrimEnd() + \"`r`n\" + $line + \"`r`n\" }",
+    // The template names this right alone, so secedit cannot change any other right.
+    "$edited = @('[Unicode]', 'Unicode=yes', '[Version]', 'signature=\"$CHICAGO$\"', 'Revision=1', '[Privilege Rights]', $line, '') -join \"`r`n\"",
     "[IO.File]::WriteAllText($cfg, $edited, [Text.Encoding]::Unicode)",
     psNative("& $secedit /configure /db $db /cfg $cfg /areas USER_RIGHTS | Out-Null", "secedit"),
     psNative("& $secedit /export /cfg $after /areas USER_RIGHTS | Out-Null", "secedit"),
@@ -2116,7 +2122,7 @@ function windowsAccountOps(password: string, create: boolean, tempDir: string): 
 }
 
 function windowsTaskBody(nodeBin: string, cliBin: string, envFile: string, logFile: string): string {
-  const argument = `"${cliBin}" serve --env-file "${envFile}" --log-file "${logFile}"`;
+  const argument = `"${cliBin}" serve --env-file "${envFile}" --log-file "${logFile}" --clear-stale-lock`;
   return [
     psModuleImports([
       "ScheduledTasks",
@@ -2127,9 +2133,12 @@ function windowsTaskBody(nodeBin: string, cliBin: string, envFile: string, logFi
     "if ([string]::IsNullOrEmpty($plain)) { exit 1 }",
     `$action = New-ScheduledTaskAction -Execute ${psSingle(nodeBin)} -Argument ${psSingle(argument)}`,
     "$trigger = New-ScheduledTaskTrigger -AtStartup",
-    "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)",
+    // -RestartCount does not cover a running process that dies. A start while one runs is ignored.
+    "$watch = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)",
+    // Without these the task is stopped after three days and on battery, and does not start on battery.
+    "$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries",
     "$sid = (Get-LocalUser -Name 'verax-svc').SID.Value",
-    "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger $trigger -User $sid -Password $plain -RunLevel Limited -Settings $settings -Force",
+    "Register-ScheduledTask -TaskName 'Verax Body' -Action $action -Trigger @($trigger, $watch) -User $sid -Password $plain -RunLevel Limited -Settings $settings -Force",
     "Start-ScheduledTask -TaskName 'Verax Body'",
   ].join("; ");
 }
@@ -2155,6 +2164,9 @@ function directoryOwnerSidCommand(dir: string): string {
     `(Get-Acl -LiteralPath '${literal}').GetOwner([System.Security.Principal.SecurityIdentifier]).Value`,
   );
 }
+
+/** Prints `missing` only for ERROR_FILE_NOT_FOUND (0x80070002). Access denied is 0x80070005 and stays an error. */
+const WINDOWS_TASK_LOOKUP_COMMAND = `$c = New-Object -ComObject Schedule.Service; $c.Connect(); try { [void]$c.GetFolder('\\').GetTask('${TASK_NAME}') } catch { if ($_.Exception.HResult -eq -2147024894) { [Console]::Out.Write('missing') } else { throw } }`;
 
 const WINDOWS_SERVICE_SID_COMMAND = psPrefixed(
   ["Microsoft.PowerShell.LocalAccounts"],
@@ -2187,6 +2199,7 @@ export function windowsPowerShellScripts(): WindowsPowerShellScript[] {
     { id: "directory-owner-sid", script: directoryOwnerSidCommand("C:\\ProgramData\\Verax") },
     { id: "file-owner", script: fileOwnerSidCommand("C:\\ProgramData\\Verax\\state\\keys\\record.private.pem") },
     { id: "service-sid", script: WINDOWS_SERVICE_SID_COMMAND },
+    { id: "task-lookup", script: WINDOWS_TASK_LOOKUP_COMMAND },
     { id: "profile-image-path", script: profileImagePathCommand("S-1-5-21-1001") },
     { id: "account-create", script: powerShellScript(windowsAccountBody(true, temp)) },
     { id: "account-update", script: powerShellScript(windowsAccountBody(false, temp)) },
@@ -2207,7 +2220,7 @@ function xmlEscape(value: string): string {
 }
 
 function plistText(nodeBin: string, cliBin: string, envFile: string, errFile: string, logFile: string): string {
-  const args = [nodeBin, cliBin, "serve", "--env-file", envFile, "--log-file", logFile].map((part) => `    <string>${xmlEscape(part)}</string>`);
+  const args = [nodeBin, cliBin, "serve", "--env-file", envFile, "--log-file", logFile, "--clear-stale-lock"].map((part) => `    <string>${xmlEscape(part)}</string>`);
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -2354,7 +2367,7 @@ function unitText(nodeBin: string, cliBin: string, envFile: string, stateDir: st
     "[Service]",
     "Type=simple",
     "User=verax",
-    `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile} --log-file ${logFile}`,
+    `ExecStart=${nodeBin} ${cliBin} serve --env-file ${envFile} --log-file ${logFile} --clear-stale-lock`,
     "NoNewPrivileges=yes",
     "ProtectSystem=strict",
     `ReadWritePaths=${stateDir}`,
@@ -2651,7 +2664,7 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
       { op: "argv", argv: toolArgv("chmod", ["0755", fixed.darwinStateParent], "darwin") },
     );
   }
-  ops.push({ op: "mkdir", path: paths.stateDir, mode: 0o700 });
+  ops.push({ op: "mkdir", path: paths.stateDir, mode: 0o700, ...(opts.force && opts.stateExists ? { existingOk: true } : {}) });
   if (platform === "win32") {
     const markerPath = path.win32.join(path.win32.dirname(paths.stateDir), "install.json");
     const marker = installMarkerText(opts, paths, { createdAccount: true });
@@ -2732,12 +2745,13 @@ export function planInstall(platform: InstallPlatform, env: NodeJS.ProcessEnv, o
     }
     const tokenDir = path.win32.dirname(paths.tokenPath);
     const tokenRoot = path.win32.dirname(tokenDir);
+    // Both sit under the locked Verax root and are locked again here. Uninstall leaves the root.
     ops.push(
-      { op: "mkdir", path: tokenRoot, mode: 0o755 },
+      { op: "mkdir", path: tokenRoot, mode: 0o755, existingOk: true },
       setOwner(tokenRoot),
       adminOnlyDirGrant(tokenRoot),
       resetInherit(tokenRoot),
-      { op: "mkdir", path: tokenDir, mode: 0o755 },
+      { op: "mkdir", path: tokenDir, mode: 0o755, existingOk: true },
       setOwner(tokenDir),
       tokenUserDirGrant(tokenDir, tokenWho.principal),
       resetInherit(tokenDir),
@@ -4150,7 +4164,7 @@ function applyPrivateTemp(
 function removeEmptyDirs(dirs: readonly string[]): void {
   for (const dir of [...dirs].reverse()) {
     try {
-      if (readdirSync(dir).length === 0) rmSync(dir, { recursive: false, force: true });
+      if (readdirSync(dir).length === 0) rmdirSync(dir);
     } catch {
       // Already gone, or not empty because a later step wrote there.
     }
@@ -4617,7 +4631,7 @@ async function execute(
     }
     if (step.op === "mkdir") {
       const existed = existsSync(step.path);
-      mkdirLeaf(step.path, step.mode ?? 0o755);
+      mkdirLeaf(step.path, step.mode ?? 0o755, { existingOk: step.existingOk === true });
       if (!existed && step.path === plan.codeDir) created.codeDir = true;
       if (!existed && step.path === plan.stateDir) created.stateDir = true;
       continue;
@@ -4632,6 +4646,7 @@ async function execute(
         io.stderr.write(applied.error.endsWith("\n") ? applied.error : `${applied.error}\n`);
         return finish(EX_CONFIG);
       }
+      if (step.create) createdParents.push(step.path);
       continue;
     }
     if (step.op === "argv") {
@@ -4644,6 +4659,8 @@ async function execute(
       if (powershellScriptStep(resolved, step.stdin)) {
         const failed = (ran.status ?? 1) !== 0 || stderrHasErrorMark(ran.stderr ?? "");
         if (failed && !step.optional) {
+          // The script prints the SID only after New-LocalUser succeeded, so a later failure leaves the account.
+          if (/VERAX_SVC_SID:S-1-/i.test(ran.stdout ?? "")) rememberCreatedAccount(created, resolved);
           if (step.rollbackDir) rmSync(step.rollbackDir, { recursive: true, force: true });
           const detail = redactSecrets(ran.stderr ?? "", step.argv, step.stdin).trim();
           const code = ran.status ?? 1;
@@ -6033,15 +6050,26 @@ async function runInstallBody(argv: readonly string[], hooks: InstallHooks = {})
     io.stderr.write(plan.message);
     return plan.code;
   }
+  // Refused here, not at its mkdir: by then the account step has changed a password the task still holds.
+  if (existsSync(plan.codeDir)) {
+    io.stderr.write(`refusing: ${plan.codeDir} already exists. To upgrade, run verax uninstall --keep-state first\n`);
+    return EX_CONFIG;
+  }
   return execute(plan, exec, io, platform, hooks.copyFile ?? copyFileSync, plannedEnv, hooks.healthTimeoutMs, hooks.spawnUserToken);
 }
 
-/** A non-zero tool result that means the install artifact is already gone. */
+/** A non-zero tool result that means the install artifact is already gone. `net` prints this number in every language. */
 function toolAlreadyAbsent(ran: ExecResult): boolean {
   if ((ran.status ?? 1) === 0) return false;
   const text = `${ran.stdout ?? ""}\n${ran.stderr ?? ""}`.toLowerCase();
   if (text.trim() === "") return true;
-  return /cannot find the file specified|does not exist|could not be found|could not find|no such file|not found|not loaded|isn't loaded|is not loaded/.test(text);
+  return /cannot find the file specified|does not exist|could not be found|could not find|no such file|not found|not loaded|isn't loaded|is not loaded|helpmsg 2221/.test(text);
+}
+
+/** schtasks says "not found" in the display language. The scheduler's own error number is the same in all of them. */
+function windowsTaskMissing(exec: ToolExec): boolean {
+  const ran = exec(toolArgv("powershell", ["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TASK_LOOKUP_COMMAND], "win32"));
+  return (ran.status ?? 1) === 0 && (ran.stdout ?? "").trim() === "missing";
 }
 
 /** userdel, groupdel, `net user /delete`, and `dscl -delete`. Empty output is not absence. */
@@ -6286,7 +6314,8 @@ function executeUninstall(
   if (platform === "win32") {
     const queryArgv = toolArgv("schtasks", ["/Query", "/TN", TASK_NAME], "win32");
     const query = exec(queryArgv);
-    if ((query.status ?? 1) !== 0 && !toolAlreadyAbsent(query)) {
+    const absent = toolAlreadyAbsent(query) || (query.status === 1 && windowsTaskMissing(exec));
+    if ((query.status ?? 1) !== 0 && !absent) {
       reportToolFailure(io, queryArgv, query);
       return query.status ?? 1;
     }
@@ -6565,7 +6594,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
   const userSid = platform === "win32" ? invokingSid(exec) : undefined;
   const plan = planUninstall(platform as InstallPlatform, plannedEnv, {
     keepState: parsed.keepState,
-    removeWinAccount: flags.createdAccount,
+    removeWinAccount: flags.createdAccount && !parsed.keepState,
     removeDarwinUser: flags.createdUser,
     removeDarwinGroup: flags.createdGroup,
     removeLinuxUser: flags.createdUser,
@@ -6580,7 +6609,7 @@ export async function runUninstall(argv: readonly string[], hooks: InstallHooks 
   }
   return executeUninstall(platform, plan, exec, io, {
     keepState: parsed.keepState,
-    removeWinAccount: flags.createdAccount,
+    removeWinAccount: flags.createdAccount && !parsed.keepState,
     removeDarwinUser: flags.createdUser,
     removeDarwinGroup: flags.createdGroup,
     removeLinuxUser: flags.createdUser,
@@ -6639,7 +6668,15 @@ export function liveInstalledChecks(
     const codeAcl = { stdout: textOf(codeDir), stderr: "" };
     const rootAcl = { stdout: textOf(rootDir), stderr: "" };
     const marker = path.win32.join(rootDir, "install.json");
-    return installedBoundaryChecks({
+    // The SID the install recorded, so a replaced account with the same name is not trusted.
+    const recordedSid = markerFlags(marker).accountSid;
+    const liveSid = windowsServiceSid(exec);
+    const svcSid = recordedSid ?? liveSid;
+    const accountChecks: BoundaryCheck[] =
+      recordedSid !== undefined && liveSid !== recordedSid
+        ? [{ id: "install-account", level: "fail", detail: `${VERAX_SVC} is ${liveSid ?? "missing or could not be read"}; the install recorded ${recordedSid}` }]
+        : [];
+    return [...accountChecks, ...installedBoundaryChecks({
       codeDir,
       stateDir,
       manifest,
@@ -6647,13 +6684,14 @@ export function liveInstalledChecks(
       aclText: `${acl.stdout ?? ""}\n${acl.stderr ?? ""}`,
       codeAclText: `${codeAcl.stdout ?? ""}\n${codeAcl.stderr ?? ""}`,
       fileAcls,
+      ...(svcSid ? { svcSid } : {}),
       winOwners: { state: ownerOf(stateDir), code: ownerOf(codeDir) },
       rootDir,
       rootAclText: `${rootAcl.stdout ?? ""}\n${rootAcl.stderr ?? ""}`,
       markerPresent: ourMarker(marker),
       installSource: markerSource(marker),
       autostart: task.status === 0,
-    });
+    })];
   }
   if (platform === "darwin") {
     const statName = (flag: string, dir: string): string => (exec(toolArgv("stat", ["-f", flag, dir], "darwin")).stdout ?? "").trim();

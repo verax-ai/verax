@@ -1,4 +1,5 @@
-import { appendFileSync, existsSync, readFileSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 import { lockBeatOf, lockState } from "@verax-ai/proxy";
@@ -60,14 +61,38 @@ function appendUnlockRow(stateDir: string, row: Record<string, unknown>): void {
   });
 }
 
+function lockText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/** Puts a lock moved aside back, unless a newer one took its place. Its holder then finds the lock lost and stops. */
+function restoreLock(claim: string, lockPath: string): void {
+  const text = lockText(claim);
+  try {
+    if (text !== null) writeFileSync(lockPath, text, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  } catch {
+    // A newer lock is in place.
+  }
+  rmSync(claim, { force: true });
+}
+
 export function runUnlock(
   stateDir: string,
   writeErr: (s: string) => void = (s) => process.stderr.write(s),
-  options: { force?: boolean; unlink?: (path: string) => void } = {},
+  options: { force?: boolean; unlink?: (path: string) => void; afterJudge?: () => void; beforeMove?: () => void } = {},
 ): number {
   const lockPath = join(stateDir, "ledger.lock");
   if (!existsSync(lockPath)) {
     writeErr("no-lock\n");
+    return 1;
+  }
+  const judged = lockText(lockPath);
+  if (judged === null) {
+    writeErr(existsSync(lockPath) ? "lock-unreadable\n" : "no-lock\n");
     return 1;
   }
   const existing = readLockFile(lockPath);
@@ -117,24 +142,42 @@ export function runUnlock(
     writeErr(`record-failed:${errnoCode(err)}\n`);
     return 1;
   }
-  const unlink = options.unlink ?? unlinkSync;
-  try {
-    unlink(lockPath);
-  } catch (err) {
-    const code = errnoCode(err);
+  const refuse = (result: string, line: string, error?: string): number => {
     try {
-      appendUnlockRow(stateDir, {
-        atMs: Date.now(),
-        ...base,
-        result: "unlink-failed",
-        error: code,
-      });
+      appendUnlockRow(stateDir, { atMs: Date.now(), ...base, result, ...(error ? { error } : {}) });
     } catch (recordErr) {
       writeErr(`record-failed:${errnoCode(recordErr)}\n`);
       return 1;
     }
-    writeErr(`unlink-failed:${code}\n`);
+    writeErr(line);
     return 1;
+  };
+  options.afterJudge?.();
+  // Judging can take five beats, and another start may have cleared this lock and taken its own
+  // meanwhile. A lock that already differs is not touched. Moved aside first, the lock is removed
+  // only if it is still the one that was judged.
+  if (!existsSync(lockPath)) return refuse("already-gone", "no-lock\n");
+  if (lockText(lockPath) !== judged) return refuse("lock-changed", "lock-changed\n");
+  options.beforeMove?.();
+  const claim = `${lockPath}.${randomUUID()}`;
+  try {
+    renameSync(lockPath, claim);
+  } catch (err) {
+    const code = errnoCode(err);
+    if (code === "ENOENT") return refuse("already-gone", "no-lock\n");
+    return refuse("unlink-failed", `unlink-failed:${code}\n`, code);
+  }
+  if (lockText(claim) !== judged) {
+    restoreLock(claim, lockPath);
+    return refuse("lock-changed", "lock-changed\n");
+  }
+  const unlink = options.unlink ?? unlinkSync;
+  try {
+    unlink(claim);
+  } catch (err) {
+    const code = errnoCode(err);
+    restoreLock(claim, lockPath);
+    return refuse("unlink-failed", `unlink-failed:${code}\n`, code);
   }
   try {
     appendUnlockRow(stateDir, { atMs: Date.now(), ...base, result: "removed" });
@@ -143,4 +186,14 @@ export function runUnlock(
     return 1;
   }
   return 0;
+}
+
+/**
+ * For a service manager's start, where nobody is there to run `verax unlock`. Clears what
+ * `verax unlock --force` would clear, with the same record: the manager runs one instance, so a
+ * lock that does not move has no running owner, and on Windows a reboot can hand its pid to
+ * another process. A lock that moves stays, and the ledger refuses it as before.
+ */
+export function clearStaleLockAtStart(stateDir: string, writeErr: (s: string) => void): void {
+  if (existsSync(join(stateDir, "ledger.lock"))) runUnlock(stateDir, writeErr, { force: true });
 }

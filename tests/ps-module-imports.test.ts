@@ -18,6 +18,7 @@ const CMDLET_MODULE = {
   "Compare-Object": "Microsoft.PowerShell.Utility",
   "Sort-Object": "Microsoft.PowerShell.Utility",
   "New-TimeSpan": "Microsoft.PowerShell.Utility",
+  "Get-Date": "Microsoft.PowerShell.Utility",
   "Get-Item": "Microsoft.PowerShell.Management",
   "Get-ItemProperty": "Microsoft.PowerShell.Management",
   "Join-Path": "Microsoft.PowerShell.Management",
@@ -80,6 +81,7 @@ const EXPECT_CMDLET: Record<string, string | null> = {
   "directory-owner-sid": "Get-Acl",
   "file-owner": "Get-Acl",
   "service-sid": "Get-LocalUser",
+  "task-lookup": null,
   "profile-image-path": "Get-ItemProperty",
   "account-create": "New-LocalUser",
   "account-update": "Set-LocalUser",
@@ -215,9 +217,9 @@ describe("PowerShell module imports", () => {
     const desktop = readFileSync(join(root, "desktop.ts"), "utf8");
     // readWindowsMachineRoots, windowsSddlArgv, windowsSddlBatchArgv, powershellStdin,
     // ownerModeLine, execute service SID, directoryOwnerSid, ProfileImagePath, windowsServiceSid,
-    // windowsFileOwner, and desktop localAccountSids. A new call site has to join
+    // windowsTaskMissing, windowsFileOwner, and desktop localAccountSids. A new call site has to join
     // windowsPowerShellScripts.
-    assert.equal(powershellToolCalls(install), 10, install);
+    assert.equal(powershellToolCalls(install), 11, install);
     assert.equal(powershellToolCalls(desktop), 1, desktop);
   });
 });

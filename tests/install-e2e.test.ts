@@ -66,8 +66,9 @@ describe("install-e2e workflow", () => {
 
   it("opens the operator door on each platform and enrols through it with a code the administrator asked for", () => {
     const withDoor = workflow.split(/\r?\n/).filter((line) => /install\b.*--operator-door http:\/\/localhost:8788\b/.test(line));
-    // One install per platform carries the flag; the reinstall and the refusal runs stay as they were.
-    assert.equal(withDoor.length, 3);
+    // One install per platform carries the flag, and the Windows upgrade gives it again because
+    // --force does not read it back; the reinstall and the refusal runs stay as they were.
+    assert.equal(withDoor.length, 4);
     for (const line of withDoor) {
       assert.match(line, /--from-tarballs\b/);
       assert.match(line, /--port 8801\b/);

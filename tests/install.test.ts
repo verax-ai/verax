@@ -22,6 +22,7 @@ import {
   linuxNodeLabelCheck,
   linuxSelinuxCheck,
   linuxSelinuxNodeRefusal,
+  liveInstalledChecks,
   planInstall,
   planUninstall,
   PS_ERROR_MARK,
@@ -400,6 +401,7 @@ describe("verax install plan", () => {
     assert.match(tr, /C:\\Program Files\\nodejs\\node\.exe/);
     assert.match(tr, /C:\\Program Files\\Verax\\node_modules\\@verax-ai\\body\\dist\\cli\.js/);
     assert.match(tr, /serve --env-file/);
+    assert.match(tr, /--clear-stale-lock/);
     assert.match(tr, /--log-file/);
     assert.match(tr, /body\.log/);
     assert.match(tr, /Start-ScheduledTask/);
@@ -410,6 +412,7 @@ describe("verax install plan", () => {
     const unit = linux.ops.find((op) => op.op === "write" && op.path === "/etc/systemd/system/verax.service");
     assert.ok(unit && unit.op === "write");
     assert.match(unit.contents, /ExecStart=\/usr\/bin\/node \/opt\/verax\/node_modules\/@verax-ai\/body\/dist\/cli\.js serve --env-file \/var\/lib\/verax\/verax\.env --log-file \/var\/lib\/verax\/body\.log/);
+    assert.match(unit.contents, /--clear-stale-lock/);
     const darwin = planInstall("darwin", darwinEnv, darwinOpts);
     if (!darwin.ok) throw new Error(darwin.message);
     for (const planned of [win, linux, darwin]) {
@@ -1144,6 +1147,7 @@ describe("verax install plan", () => {
     assert.match(plist.contents, /<key>UserName<\/key>\s*<string>_verax<\/string>/);
     assert.match(plist.contents, /<key>GroupName<\/key>\s*<string>_verax<\/string>/);
     assert.match(plist.contents, /<key>KeepAlive<\/key>\s*<true\/>/);
+    assert.match(plist.contents, /<string>--clear-stale-lock<\/string>/);
     assert.match(plist.contents, /<string>\/usr\/local\/bin\/node<\/string>/);
     assert.match(plist.contents, /<string>\/Library\/Verax\/code\/node_modules\/@verax-ai\/body\/dist\/cli\.js<\/string>/);
     assert.match(plist.contents, /StandardErrorPath/);
@@ -1501,6 +1505,14 @@ describe("verax install plan", () => {
     assert.match(taskScript, /New-ScheduledTaskAction/);
     assert.match(taskScript, /-RunLevel Limited/);
     assert.match(taskScript, /-RestartCount 3/);
+    // The defaults stop a task after three days and on battery, and do not start one on battery.
+    assert.match(taskScript, /-ExecutionTimeLimit \(\[TimeSpan\]::Zero\)/);
+    assert.match(taskScript, /-AllowStartIfOnBatteries/);
+    assert.match(taskScript, /-DontStopIfGoingOnBatteries/);
+    // -RestartCount does not cover a running process that dies. A start while one runs is ignored.
+    assert.match(taskScript, /-RepetitionInterval \(New-TimeSpan -Minutes 5\)/);
+    assert.match(taskScript, /-Trigger @\(\$trigger, \$watch\)/);
+    assert.doesNotMatch(taskScript, /MultipleInstances/);
     assert.match(taskScript, /Start-ScheduledTask -TaskName 'Verax Body'/);
     assert.equal(accountScript.includes(password), false);
     assert.equal(taskScript.includes(password), false);
@@ -1913,6 +1925,177 @@ describe("verax install plan", () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  async function installWithFailingAccountScript(accountStdout: string): Promise<{ code: number; deleted: boolean; rootLeft: boolean }> {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-account-fail-")));
+    let deleted = false;
+    try {
+      const code = await runInstall(["install", "--port", "8801"], {
+        platform: "win32",
+        env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
+        elevated: () => true,
+        spawnUserToken: userTokenStandIn,
+        codeProbe: () => false,
+        layout: winOpts,
+        exec: (argv, stdin) => {
+          const sddl = sddlStdout(argv, stdin);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "powershell" && argv.some((arg) => arg.includes("New-LocalUser"))) {
+            return { status: 1, stdout: accountStdout, stderr: `${PS_ERROR_MARK} secedit exited 1\n` };
+          }
+          if (tool === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (tool === "net") {
+            if (argv.includes("/delete")) {
+              deleted = true;
+              return { status: 0, stdout: "", stderr: "" };
+            }
+            return { status: 2, stdout: "", stderr: "not found\n" };
+          }
+          if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "icacls") {
+            return { status: 0, stdout: `${argv[1] ?? ""} BUILTIN\\Administrators:(F)\n  NT AUTHORITY\\SYSTEM:(F)\n`, stderr: "" };
+          }
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: () => undefined } },
+      });
+      return { code, deleted, rootLeft: existsSync(join(root, "data", "Verax")) };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("a windows account script that fails after creating the account removes the account and the root", async () => {
+    const failed = await installWithFailingAccountScript("VERAX_SVC_SID:S-1-5-21-9\n");
+    assert.equal(failed.code, 1);
+    assert.equal(failed.deleted, true);
+    assert.equal(failed.rootLeft, false);
+  });
+
+  it("a windows account script that fails before creating the account deletes no account", async () => {
+    const failed = await installWithFailingAccountScript("");
+    assert.equal(failed.code, 1);
+    assert.equal(failed.deleted, false);
+    assert.equal(failed.rootLeft, false);
+  });
+
+  it("install refuses a code directory that exists before it touches the account or its password", async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-code-exists-")));
+    const err: string[] = [];
+    let accountTouched = false;
+    try {
+      mkdirSync(join(root, "files", "Verax"), { recursive: true });
+      const code = await runInstall(["install", "--port", "8801"], {
+        platform: "win32",
+        env: { ...winEnv, ProgramData: join(root, "data"), ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
+        elevated: () => true,
+        spawnUserToken: userTokenStandIn,
+        codeProbe: () => false,
+        layout: winOpts,
+        exec: (argv, stdin) => {
+          const sddl = sddlStdout(argv, stdin);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "powershell" && argv.some((arg) => /New-LocalUser|Set-LocalUser/.test(arg))) {
+            accountTouched = true;
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (tool === "whoami") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          if (tool === "net") return { status: 2, stdout: "", stderr: "not found\n" };
+          if (tool === "fsutil") return { status: 1, stdout: "", stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        },
+        io: { stdout: { write: () => undefined }, stderr: { write: (s: string) => err.push(s) } },
+      });
+      assert.notEqual(code, 0);
+      assert.equal(accountTouched, false);
+      assert.match(err.join(""), /verax uninstall --keep-state/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("install --force accepts a state directory it is told to keep, and only then", () => {
+    const stateMkdir = (opts: Parameters<typeof planInstall>[2]): Extract<PlanOp, { op: "mkdir" }> => {
+      const found = okPlan("win32", winEnv, opts).ops.find(
+        (op): op is Extract<PlanOp, { op: "mkdir" }> => op.op === "mkdir" && /\\Verax\\state$/.test(op.path),
+      );
+      if (!found) throw new Error("missing state mkdir");
+      return found;
+    };
+    assert.equal(stateMkdir({ ...winOpts, force: true, stateExists: true, markerExists: true, veraxRootExists: true }).existingOk, true);
+    assert.notEqual(stateMkdir(winOpts).existingOk, true);
+  });
+
+  it("the agent token root and its folder may already exist: uninstall leaves the root", () => {
+    const tokenMkdirs = okPlan("win32", winEnv, winOpts).ops.filter(
+      (op): op is Extract<PlanOp, { op: "mkdir" }> => op.op === "mkdir" && op.path.includes("\\agent-token"),
+    );
+    assert.equal(tokenMkdirs.length, 2);
+    for (const op of tokenMkdirs) assert.equal(op.existingOk, true, op.path);
+  });
+
+  it("windows doctor accepts the service account the install granted and still fails a stranger", { skip: process.platform !== "win32" }, () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-doctor-svc-")));
+    try {
+      const programFiles = join(root, "files");
+      const programData = join(root, "data");
+      mkdirSync(join(programFiles, "Verax"), { recursive: true });
+      mkdirSync(join(programData, "Verax", "state"), { recursive: true });
+      const aclChecks = (liveSid: string) =>
+        liveInstalledChecks("win32", { ...winEnv, ProgramData: programData, ProgramFiles: programFiles }, (argv, stdin) => {
+          const cmd = argv.join("\n");
+          if (cmd.includes("Get-LocalUser")) return { status: 0, stdout: `${liveSid}\n`, stderr: "" };
+          if (cmd.includes("ProgramFilesDir")) {
+            return { status: 0, stdout: `SystemDrive=C:\nProgramFilesDir=${programFiles}\nProgramData=${programData}\n`, stderr: "" };
+          }
+          const sddl = sddlStdout(argv, stdin);
+          if (sddl !== null) return { status: 0, stdout: sddl, stderr: "" };
+          return { status: 0, stdout: "", stderr: "" };
+        }).filter((check) => check.id === "install-acl" || check.id === "install-code-acl" || check.id === "install-account");
+      const granted = aclChecks("S-1-5-21-1");
+      assert.ok(granted.length >= 2);
+      assert.deepEqual(granted.filter((check) => check.level !== "ok"), []);
+      assert.ok(aclChecks("S-1-5-21-2").some((check) => check.level === "fail"));
+      // A replaced account: the state names the new SID, the live name resolves to it, the marker recorded another.
+      writeFileSync(join(programData, "Verax", "install.json"), JSON.stringify({ accountSid: "S-1-5-21-2" }));
+      assert.ok(aclChecks("S-1-5-21-1").some((check) => check.level === "fail"));
+      // The account was replaced while the state still names the recorded SID: the service cannot start.
+      writeFileSync(join(programData, "Verax", "install.json"), JSON.stringify({ accountSid: "S-1-5-21-1" }));
+      const replaced = aclChecks("S-1-5-21-2");
+      assert.ok(replaced.some((check) => check.id === "install-account" && check.level === "fail"));
+      assert.deepEqual(aclChecks("S-1-5-21-1").filter((check) => check.level !== "ok"), []);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("the secedit template names SeBatchLogonRight alone, after every holder name resolved", () => {
+    const accountText = (opts: Parameters<typeof planInstall>[2]): string => {
+      const account = okPlan("win32", winEnv, opts).ops.find(
+        (op): op is Extract<PlanOp, { op: "argv" }> => op.op === "argv" && (op.argv[op.argv.length - 1] ?? "").includes("SeBatchLogonRight"),
+      );
+      if (!account) throw new Error("missing secedit script");
+      return account.argv[account.argv.length - 1] ?? "";
+    };
+    const text = accountText(winOpts);
+    const write = text.indexOf("[IO.File]::WriteAllText($cfg");
+    const configure = text.indexOf("/configure");
+    const resolve = text.indexOf("cannot be resolved");
+    assert.ok(write > 0 && configure > write && resolve > 0 && resolve < write);
+    const built = text.slice(text.indexOf("$edited ="), write);
+    assert.match(built, /\[Privilege Rights\]/);
+    assert.match(built, /signature="\$CHICAGO\$"/);
+    assert.match(built, /\$line/);
+    assert.equal(built.includes("$flat"), false);
+    // A refused name must leave the account and its password as they were.
+    assert.ok(resolve < text.indexOf("New-LocalUser"));
+    const again = accountText({ ...winOpts, winAccount: { exists: true, createdByUs: true }, markerExists: true });
+    assert.ok(again.indexOf("cannot be resolved") < again.indexOf("Set-LocalUser"));
   });
 
   it("private install temp is admin-only under ProgramData and precedes every script", () => {
@@ -2758,6 +2941,118 @@ describe("verax uninstall", () => {
     assert.match(out.join(""), /nothing to remove/);
     assert.equal(err.join(""), "");
     rmSync(root, { recursive: true, force: true });
+  });
+
+  async function uninstallOnTurkishWindows(taskLookup: string): Promise<{ code: number; out: string; err: string }> {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-uninst-tr-")));
+    const out: string[] = [];
+    const err: string[] = [];
+    try {
+      const code = await runUninstall(["uninstall"], {
+        platform: "win32",
+        env: {
+          ...winEnv,
+          ProgramFiles: join(root, "files"),
+          ProgramData: join(root, "data"),
+          USERPROFILE: join(root, "home"),
+        },
+        windowsMachineRoots: { programData: join(root, "data"), programFiles: join(root, "files") },
+        elevated: () => true,
+        codeProbe: () => false,
+        exec: (argv) => {
+          if (argv.some((arg) => arg.includes("Schedule.Service"))) return { status: 0, stdout: taskLookup, stderr: "" };
+          return { status: 1, stdout: "", stderr: "ERROR: Sistem belirtilen dosyayı bulamıyor.\n" };
+        },
+        io: ioOf(out, err),
+      });
+      return { code, out: out.join(""), err: err.join("") };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("a second uninstall on a non-English Windows reads the missing task as absent", async () => {
+    const ran = await uninstallOnTurkishWindows("missing");
+    assert.equal(ran.code, 0, ran.err);
+    assert.match(ran.out, /nothing to remove/);
+  });
+
+  it("a task the scheduler cannot confirm missing stops the uninstall, whatever schtasks said", async () => {
+    const ran = await uninstallOnTurkishWindows("");
+    assert.equal(ran.code, 1);
+    assert.match(ran.err, /schtasks exit 1/);
+  });
+
+  it("a second uninstall on a non-English Windows reads the missing account as absent", { skip: process.platform !== "win32" }, async () => {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-uninst-net-")));
+    const out: string[] = [];
+    const err: string[] = [];
+    try {
+      const data = join(root, "data");
+      mkdirSync(join(data, "Verax"), { recursive: true });
+      writeFileSync(join(data, "Verax", "install.json"), `${JSON.stringify({ createdAccount: true, accountSid: "S-1-5-21-1" })}\n`);
+      const code = await runUninstall(["uninstall"], {
+        platform: "win32",
+        env: { ...winEnv, ProgramData: data, ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: data, programFiles: join(root, "files") },
+        elevated: () => true,
+        codeProbe: () => false,
+        exec: (argv) => {
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "schtasks") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "net") return { status: 2, stdout: "", stderr: "Kullanıcı adı bulunamadı.\n\nNET HELPMSG 2221 yazarak daha fazla yardım alabilirsiniz.\n" };
+          if (tool === "powershell") return { status: 0, stdout: "", stderr: "" };
+          return { status: 1, stdout: "", stderr: "" };
+        },
+        io: ioOf(out, err),
+      });
+      assert.equal(code, 0, err.join(""));
+      assert.match(out.join(""), /nothing to remove/);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  async function uninstallWithMarker(args: string[]): Promise<{ code: number; deleted: boolean; out: string }> {
+    const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-uninst-keep-")));
+    const out: string[] = [];
+    let deleted = false;
+    try {
+      const data = join(root, "data");
+      mkdirSync(join(data, "Verax", "state"), { recursive: true });
+      writeFileSync(join(data, "Verax", "install.json"), `${JSON.stringify({ createdAccount: true, accountSid: "S-1-5-21-1" })}\n`);
+      const code = await runUninstall(args, {
+        platform: "win32",
+        env: { ...winEnv, ProgramData: data, ProgramFiles: join(root, "files"), USERPROFILE: join(root, "home") },
+        windowsMachineRoots: { programData: data, programFiles: join(root, "files") },
+        elevated: () => true,
+        codeProbe: () => false,
+        exec: (argv) => {
+          const tool = systemToolName(argv[0] ?? "");
+          if (tool === "schtasks") return { status: 1, stdout: "", stderr: "" };
+          if (tool === "net" && argv.includes("/delete")) {
+            deleted = true;
+            return { status: 0, stdout: "", stderr: "" };
+          }
+          if (tool === "net") return { status: 0, stdout: "verax-svc\n", stderr: "" };
+          if (tool === "powershell") return { status: 0, stdout: "S-1-5-21-1\n", stderr: "" };
+          return { status: 1, stdout: "", stderr: "" };
+        },
+        io: ioOf(out, []),
+      });
+      return { code, deleted, out: out.join("") };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+
+  it("uninstall --keep-state keeps the account the kept state is granted to", { skip: process.platform !== "win32" }, async () => {
+    const kept = await uninstallWithMarker(["uninstall", "--keep-state"]);
+    assert.equal(kept.code, 0, kept.out);
+    assert.equal(kept.deleted, false, kept.out);
+    const removed = await uninstallWithMarker(["uninstall"]);
+    assert.equal(removed.code, 0, removed.out);
+    assert.equal(removed.deleted, true, removed.out);
   });
 
   it("a failing schtasks or icacls step prints the tool, exit code, and stderr", async () => {
