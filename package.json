@@ -25,26 +25,26 @@
     "release:check": "node --experimental-strip-types scripts/release-check.ts"
   },
   "dependencies": {
-    "@cedulon/audit": "0.13.1",
-    "@cedulon/checkpoint": "0.13.1",
-    "@cedulon/core": "0.13.1",
-    "@cedulon/cose": "0.13.1",
-    "@cedulon/effect-extract": "0.13.1",
-    "@cedulon/x402-adapter": "0.13.1",
+    "@cedulon/audit": "0.16.0",
+    "@cedulon/checkpoint": "0.16.0",
+    "@cedulon/core": "0.16.0",
+    "@cedulon/cose": "0.16.0",
+    "@cedulon/effect-extract": "0.16.0",
+    "@cedulon/x402-adapter": "0.16.0",
     "@simplewebauthn/browser": "^14.0.0",
     "@simplewebauthn/server": "^14.0.3"
   },
   "overrides": {
-    "@cedulon/audit": "0.13.1",
-    "@cedulon/checkpoint": "0.13.1",
-    "@cedulon/core": "0.13.1",
-    "@cedulon/cose": "0.13.1",
-    "@cedulon/effect-extract": "0.13.1",
-    "@cedulon/x402-adapter": "0.13.1"
+    "@cedulon/audit": "0.16.0",
+    "@cedulon/checkpoint": "0.16.0",
+    "@cedulon/core": "0.16.0",
+    "@cedulon/cose": "0.16.0",
+    "@cedulon/effect-extract": "0.16.0",
+    "@cedulon/x402-adapter": "0.16.0"
   },
   "devDependencies": {
     "@types/node": "^22.15.3",
     "typescript": "^5.8.3",
-    "vite": "^8.3.4"
+    "vite": "^8.3.5"
   }
 }
