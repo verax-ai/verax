@@ -103,6 +103,36 @@ export type CliHooks = {
   stderr?: { write(s: string): unknown };
 };
 
+/**
+ * Left to run, these read a help flag as a path or as an argument: `verax
+ * witness --help` started a witness in a new directory named `--help`. verify,
+ * anchor and watch print their own usage.
+ */
+const ANSWERED_BY_HELP = new Set([
+  "approve",
+  "demo",
+  "desktop",
+  "doctor",
+  "downstream",
+  "halt",
+  "init",
+  "install",
+  "memory",
+  "operator",
+  "reconcile",
+  "resume",
+  "serve",
+  "uninstall",
+  "unlock",
+  "witness",
+]);
+
+function refusedAsOption(arg: string, stderr: { write(s: string): unknown }): boolean {
+  if (!arg.startsWith("-")) return false;
+  stderr.write(`unknown option: ${terminalText(arg)}\n`);
+  return true;
+}
+
 function isCliEntry(): boolean {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -127,6 +157,10 @@ export async function runCli(argv: string[], hooks: CliHooks = {}): Promise<numb
   const platform = hooks.platform ?? process.platform;
   const env = hooks.env ?? process.env;
   if (argv[0] === "--help" || argv[0] === "-h" || argv[0] === "help") {
+    stdout.write(HELP);
+    return 0;
+  }
+  if (ANSWERED_BY_HELP.has(argv[0] ?? "") && (argv.includes("--help") || argv.includes("-h"))) {
     stdout.write(HELP);
     return 0;
   }
@@ -236,6 +270,7 @@ async function dispatchCli(
       stderr.write("verax halt <stateDir>\n");
       return 78;
     }
+    if (refusedAsOption(stateDir, stderr)) return 64;
     return runHalt(stateDir, (s) => stderr.write(s));
   }
   if (argv[0] === "watch") {
@@ -256,6 +291,7 @@ async function dispatchCli(
       stderr.write("verax resume <stateDir>\n");
       return 78;
     }
+    if (refusedAsOption(stateDir, stderr)) return 64;
     return runResume(stateDir, (s) => stderr.write(s));
   }
   if (argv[0] === "unlock") {
@@ -265,6 +301,7 @@ async function dispatchCli(
       stderr.write("verax unlock [--force] <stateDir>\n");
       return 78;
     }
+    if (refusedAsOption(stateDir, stderr)) return 64;
     return runUnlock(stateDir, (s) => stderr.write(s), { force });
   }
   if (argv[0] === "init") {
@@ -366,6 +403,7 @@ async function dispatchCli(
       stderr.write("verax witness <stateDir>\n");
       return 78;
     }
+    if (refusedAsOption(stateDir, stderr)) return 64;
     await runWitness(stateDir);
     return 0;
   }
