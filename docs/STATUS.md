@@ -468,7 +468,12 @@ when the switch could not be written. `verax resume` from another
 process exits non-zero with `resume-failed: switch-path-blocked` when the
 switch path holds something that is not the halt file, because a running
 body may still hold the halt in memory. Clear the path, then resume
-through `POST /api/resume` on that body.
+through `POST /api/resume` on that body. Since 0.8.2 both commands also
+exit non-zero with `not-a-state-dir` for a path that does not exist or a
+directory holding no ledger files, and create nothing there; before that,
+`verax halt` on a mistyped path created it and answered `halted` while the
+running body kept allowing calls. An empty directory is still accepted,
+with a note, because a body started on it reads the switch.
 
 ### A halt between the allow and the run
 
