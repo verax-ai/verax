@@ -251,7 +251,7 @@ export async function verifyControlSignatures(
     cli,
     file,
     integrity,
-    line: `control signatures   signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli} · file ${file} · integrity ${integrity}${signedAfterRemovalSegment(signedAfterRemoval)}`,
+    line: `control signatures   signed-verified ${signedVerified} | signed-failed ${signedFailed} | unsigned-http ${unsignedHttp} | cli ${cli} | file ${file} | integrity ${integrity}${signedAfterRemovalSegment(signedAfterRemoval)}`,
     trustSource: trust.trustSource,
     trustNote: trust.trustNote,
   };

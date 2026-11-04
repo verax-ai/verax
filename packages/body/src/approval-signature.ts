@@ -276,7 +276,7 @@ export function passkeyRemovedAt(credentialId: string, removed: ReadonlySet<stri
 
 /** Omitted when the count is zero, so a line with none stays as it was. */
 export function signedAfterRemovalSegment(count: number): string {
-  return count > 0 ? ` · signed-after-removal ${count}` : "";
+  return count > 0 ? ` | signed-after-removal ${count}` : "";
 }
 
 /**
@@ -385,7 +385,7 @@ export async function verifyApprovalSignatures(
     } else signedFailed += 1;
   }
 
-  const originSuffix = origins.length === 0 ? "" : ` · origin ${origins.join(", ")}`;
+  const originSuffix = origins.length === 0 ? "" : ` | origin ${origins.join(", ")}`;
   const report: ApprovalSignatureReport = {
     ok: signedFailed === 0 && signedAfterRemoval === 0,
     signedVerified,
@@ -393,7 +393,7 @@ export async function verifyApprovalSignatures(
     signedAfterRemoval,
     unsignedHttp,
     cli,
-    line: `approval signatures  signed-verified ${signedVerified} · signed-failed ${signedFailed} · unsigned-http ${unsignedHttp} · cli ${cli}${other > 0 ? ` · other ${other}` : ""}${originSuffix}${signedAfterRemovalSegment(signedAfterRemoval)}`,
+    line: `approval signatures  signed-verified ${signedVerified} | signed-failed ${signedFailed} | unsigned-http ${unsignedHttp} | cli ${cli}${other > 0 ? ` | other ${other}` : ""}${originSuffix}${signedAfterRemovalSegment(signedAfterRemoval)}`,
     trustSource: trust.trustSource,
     trustNote: trust.trustNote,
   };

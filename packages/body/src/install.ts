@@ -3674,7 +3674,7 @@ async function waitHealth(port: number, timeoutMs: number, io: InstallIo, nonce:
     if (await healthOnce(port, nonce)) return true;
     const elapsed = Date.now() - start;
     while (elapsed >= nextMark && nextMark < timeoutMs) {
-      io.stderr.write(`waiting for the body (${nextMark / 1000} s)…\n`);
+      io.stderr.write(`waiting for the body (${nextMark / 1000} s)...\n`);
       nextMark += 10_000;
     }
     const left = timeoutMs - (Date.now() - start);
