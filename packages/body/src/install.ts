@@ -6320,6 +6320,8 @@ function executeUninstall(
       return query.status ?? 1;
     }
     const failed = note(query.status === 0, `scheduled task ${TASK_NAME}`, () => {
+      // First, or the repeating trigger could start an instance between /End and /Delete, which /Delete leaves running.
+      exec(toolArgv("schtasks", ["/Change", "/TN", TASK_NAME, "/DISABLE"], "win32"));
       const end = runUninstallTool(exec, io, toolArgv("schtasks", ["/End", "/TN", TASK_NAME], "win32"));
       if (end !== null) return end;
       return runUninstallTool(exec, io, toolArgv("schtasks", ["/Delete", "/TN", TASK_NAME, "/F"], "win32"));

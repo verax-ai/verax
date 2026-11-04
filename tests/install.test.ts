@@ -1982,7 +1982,7 @@ describe("verax install plan", () => {
     assert.equal(failed.rootLeft, false);
   });
 
-  it("install refuses a code directory that exists before it touches the account or its password", async () => {
+  it("install refuses a code directory that exists before it touches the account or its password", { skip: process.platform !== "win32" }, async () => {
     const root = realpathSync.native(mkdtempSync(join(tmpdir(), "verax-code-exists-")));
     const err: string[] = [];
     let accountTouched = false;

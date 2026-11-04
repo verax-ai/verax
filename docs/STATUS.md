@@ -560,8 +560,10 @@ the service, and `verax install --force`, giving any `--port`, `--days` and
 ones. The service definition then carries `--clear-stale-lock`, no longer has
 the default task limits, which stopped the service after three days and on
 battery and did not start it on battery, and tries a start every five minutes,
-because `-RestartCount` does not cover a running process that dies. A start
-while the service runs is ignored. `--force` also issues a new local
+because a killed service was not back within 100 seconds under `-RestartCount`
+alone on Windows 11. A start while the service runs is ignored. A service that
+keeps failing to start is tried again each time, and each try adds to `body.log`.
+`--force` also issues a new local
 issuer key and agent token, so clients reconnect with the new token. The record
 keys and the ledger stay. `verax install` refuses a code directory that already
 exists, before it changes the account. This order has not been run on Linux or

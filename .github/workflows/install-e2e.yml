@@ -242,6 +242,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # A service killed without warning leaves its lock behind. Nobody starts it here: the
           # scheduled task's repeating trigger does, within five minutes, and clears the lock on record.
+          $repeating = @((Get-ScheduledTask -TaskName 'Verax Body').Triggers | Where-Object { $_.Repetition.Interval -eq 'PT5M' })
+          if ($repeating.Count -ne 1) { Write-Host "::error::the task has no five-minute trigger"; exit 1 }
           Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'serve --env-file' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
           Start-Sleep -Seconds 2
           $back = $false
