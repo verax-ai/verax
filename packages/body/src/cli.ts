@@ -18,7 +18,7 @@ import { runOperator } from "./operator-cli.ts";
 import { runAnchor } from "./anchor-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
 import { runVerify } from "./verify-cli.ts";
-import { runUnlock } from "./unlock.ts";
+import { clearStaleLockAtStart, runUnlock } from "./unlock.ts";
 import { runWitness } from "./witness.ts";
 import { runWatch } from "./watch.ts";
 import { runMemoryRehead } from "./memory-rehead-cli.ts";
@@ -29,8 +29,9 @@ const HELP = `verax - the body an agent asks before it acts, and the ledger it a
 Usage: verax <command> [options]
 
   (no command)         serve MCP over Streamable HTTP at /mcp on VERAX_BIND (default 127.0.0.1:8787)
-  serve [--env-file <file>] [--log-file <file>]
+  serve [--env-file <file>] [--log-file <file>] [--clear-stale-lock]
                        same as serving, after loading KEY=VALUE lines from that file.
+                       --clear-stale-lock does what verax unlock --force does first, for a service manager's start.
                        --log-file appends this process's stdout and stderr
   init --local <stateDir> [--force] [--days N] [--port N] [--operator-door <origin>]
                        write a loopback key, one agent token, and verax.env
@@ -308,6 +309,10 @@ async function dispatchCli(
         stderr.write(`${terminalText(missingJwks)}\n`);
         return 78;
       }
+    }
+    const stateDir = process.env.VERAX_STATE_DIR;
+    if (argv.includes("--clear-stale-lock") && stateDir) {
+      clearStaleLockAtStart(stateDir, (s) => stderr.write(s));
     }
     await main();
     // main() returns once the server is listening. The open socket keeps the

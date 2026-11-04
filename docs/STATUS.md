@@ -216,7 +216,18 @@ a dead one whose pid another live process now has. Such a lock is still
 under a live pid; `verax unlock` refuses it as `still-running` and names
 it `lock-not-beating`, `verax doctor` warns, and `verax unlock --force`
 removes it with `reason: "not-beating"` in `unlocks.jsonl`. `--force`
-does not remove a lock that moves. The witness's listen file and the
+does not remove a lock that moves. A service that `verax install` set up
+starts with `serve --clear-stale-lock`, which does what `verax unlock
+--force` does, with the same record, so a lock left by a killed service
+or a Windows shutdown does not stop the next start, even when another
+process now has its pid. The service manager runs one instance, so a
+still lock has no running owner there; a body frozen past five beats
+outside that manager loses its lock, and its next append stops with
+`ledger-lost-lock`. It removes only the lock it judged. It leaves a lock
+that moves, a lock from 0.4.8 or earlier under a live pid, one it could not
+read from disk, and one it could not record removing, and the body then
+refuses to start as before.
+The witness's listen file and the
 unreleased desktop launcher do not use the beat.
 
 Guard: `stale-lock-pid-reuse`. Published in 0.5.0.
@@ -539,6 +550,24 @@ Without `dataClasses`, `resultClasses` and `media`, calls and results leave
 as before with one change: an image or audio block a downstream tool returns
 now reaches the agent as an image or audio block. In 0.7.0 the body turned
 it into JSON text, so the agent saw the base64 bytes as text.
+
+### Upgrading an installed service from 0.8.0 on Windows
+
+Update the command first: `verax uninstall --keep-state` keeps the service
+account only from 0.8.1 on. Then run `verax uninstall --keep-state`, which stops
+the service, and `verax install --force`, giving any `--port`, `--days` and
+`--operator-door` you installed with again: `--force` does not read the earlier
+ones. The service definition then carries `--clear-stale-lock`, no longer has
+the default task limits, which stopped the service after three days and on
+battery and did not start it on battery, and tries a start every five minutes,
+because a killed service was not back within 100 seconds under `-RestartCount`
+alone on Windows 11. A start while the service runs is ignored. A service that
+keeps failing to start is tried again each time, and each try adds to `body.log`.
+`--force` also issues a new local
+issuer key and agent token, so clients reconnect with the new token. The record
+keys and the ledger stay. `verax install` refuses a code directory that already
+exists, before it changes the account. This order has not been run on Linux or
+macOS, where a new install carries the new service definition.
 
 ### Known limits in 0.8.0
 

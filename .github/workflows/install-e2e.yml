@@ -240,6 +240,31 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # A service killed without warning leaves its lock behind. Nobody starts it here: the
+          # scheduled task's repeating trigger does, within five minutes, and clears the lock on record.
+          $repeating = @((Get-ScheduledTask -TaskName 'Verax Body').Triggers | Where-Object { $_.Repetition.Interval -eq 'PT5M' })
+          if ($repeating.Count -ne 1) { Write-Host "::error::the task has no five-minute trigger"; exit 1 }
+          Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object { $_.CommandLine -match 'serve --env-file' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+          Start-Sleep -Seconds 2
+          $back = $false
+          foreach ($i in 1..210) {
+            Start-Sleep -Seconds 2
+            node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
+            if ($LASTEXITCODE -eq 0) { $back = $true; break }
+          }
+          if (-not $back) { Write-Host "::error::the service did not come back by itself after a kill"; exit 1 }
+          if (-not (Select-String -LiteralPath "$env:ProgramData\Verax\state\unlocks.jsonl" -SimpleMatch -Quiet '"result":"removed"')) { Write-Host "::error::the cleared lock was not recorded"; exit 1 }
+          # The documented upgrade: uninstall keeping the state, install over it. The record keys stay.
+          $recordKey = "$env:ProgramData\Verax\state\keys\record.public.pem"
+          $keyBefore = (Get-FileHash -LiteralPath $recordKey).Hash
+          & $env:VERAX_CLI uninstall --keep-state
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::uninstall --keep-state exit $LASTEXITCODE"; exit $LASTEXITCODE }
+          & $env:VERAX_CLI install --force --from-tarballs $env:VERAX_TARBALLS --port 8801 --operator-door http://localhost:8788
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::install --force exit $LASTEXITCODE"; exit $LASTEXITCODE }
+          node -e "fetch('http://127.0.0.1:8801/healthz').then(r => process.exit(r.status === 200 ? 0 : 1)).catch(() => process.exit(1))"
+          if ($LASTEXITCODE -ne 0) { Write-Host "::error::no answer after install --force"; exit $LASTEXITCODE }
+          if ($keyBefore -ne (Get-FileHash -LiteralPath $recordKey).Hash) { Write-Host "::error::install --force changed the record key"; exit 1 }
+          $global:LASTEXITCODE = 0
           # The operator door: shut without a code, then a code an administrator asked for enrols a passkey through the service account.
           node --experimental-strip-types tests/e2e/operator-door-probe.ts http://localhost:8788 shut
           if ($LASTEXITCODE -ne 0) { Write-Host "::error::operator door is not shut as expected"; exit $LASTEXITCODE }
