@@ -207,7 +207,7 @@ export function renderVerify(
     lines.push("");
     lines.push("problems:");
     for (const p of r.problems.slice(0, 50)) lines.push(`  - ${p}`);
-    if (r.problems.length > 50) lines.push(`  … and ${r.problems.length - 50} more`);
+    if (r.problems.length > 50) lines.push(`  ... and ${r.problems.length - 50} more`);
   }
   lines.push("");
   lines.push(r.ok ? "VERIFIED" : "NOT VERIFIED");

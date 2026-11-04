@@ -206,7 +206,7 @@ describe("signed halt and resume over HTTP", () => {
       assert.equal(report.unsignedHttp, 1);
       const out = await verifyText(door.stateDir);
       assert.equal(out.code, 0, out.text);
-      assert.match(out.text, /control signatures {3}signed-verified 1 · signed-failed 0 · unsigned-http 1/);
+      assert.match(out.text, /control signatures {3}signed-verified 1 \| signed-failed 0 \| unsigned-http 1/);
     });
   });
 
@@ -231,7 +231,7 @@ describe("signed halt and resume over HTTP", () => {
       }
       const out = await verifyText(door.stateDir);
       assert.equal(out.code, 0, out.text);
-      assert.match(out.text, /signed-verified 2 · signed-failed 0 · unsigned-http 2/);
+      assert.match(out.text, /signed-verified 2 \| signed-failed 0 \| unsigned-http 2/);
     });
   });
 
@@ -414,7 +414,7 @@ describe("signed halt and resume over HTTP", () => {
       }
       const out = await verifyText(door.stateDir);
       assert.equal(out.code, 0, out.text);
-      assert.match(out.text, /signed-verified 0 · signed-failed 0 · unsigned-http 2/);
+      assert.match(out.text, /signed-verified 0 \| signed-failed 0 \| unsigned-http 2/);
     });
   });
 

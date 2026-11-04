@@ -261,7 +261,7 @@ export function runReconcile(
       const mismatch = report.ghost.filter((g) => g.reason === "amount-mismatch").length;
       const unknown = report.ghost.filter((g) => g.reason === "amount-unknown").length;
       writeErr(
-        `matched ${report.matched.length} · ghost ${report.ghost.length} · authorizedUnpaid ${report.authorizedUnpaid.length} · mismatch ${mismatch} · unknown ${unknown}\n`,
+        `matched ${report.matched.length} | ghost ${report.ghost.length} | authorizedUnpaid ${report.authorizedUnpaid.length} | mismatch ${mismatch} | unknown ${unknown}\n`,
       );
     }
     return 0;

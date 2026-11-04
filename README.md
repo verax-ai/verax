@@ -243,9 +243,9 @@ inputs: 5 record(s), each with its inputs row
 tail: no checkpoint; removing the newest records with their effects is not detectable from these files
 control: no control records
 anchors: none (no checkpoint is registered with a transparency service)
-approval signatures  signed-verified 0 · signed-failed 0 · unsigned-http 0 · cli 0
+approval signatures  signed-verified 0 | signed-failed 0 | unsigned-http 0 | cli 0
               no operator key was found in these files
-control signatures   signed-verified 0 · signed-failed 0 · unsigned-http 0 · cli 0 · file 0
+control signatures   signed-verified 0 | signed-failed 0 | unsigned-http 0 | cli 0 | file 0
 starts        1; largest gap none; previous beat missing at 1792241614080; 1 of 1 signed verify under the in-ledger record key
 
 VERIFIED

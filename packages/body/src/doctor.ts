@@ -221,7 +221,7 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
     checks.push({
       id: "panel-issuer",
       level: "warn",
-      detail: `panel last-resort issuer ${panelIssuer} differs from VERAX_ISSUER ${configuredIssuer}; the session reads authorization_servers from resource metadata — if that document is unreachable the panel will not start`,
+      detail: `panel last-resort issuer ${panelIssuer} differs from VERAX_ISSUER ${configuredIssuer}; the session reads authorization_servers from resource metadata; if that document is unreachable the panel will not start`,
     });
   }
 
