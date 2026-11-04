@@ -248,7 +248,7 @@ approval signatures  signed-verified 0 · signed-failed 0 · unsigned-http 0 · 
 control signatures   signed-verified 0 · signed-failed 0 · unsigned-http 0 · cli 0 · file 0
 starts        1; largest gap none; previous beat missing at 1792241614080; 1 of 1 signed verify under the in-ledger record key
 
-VERIFIED
+VERIFIED (internal consistency only)
 ```
 
 The demo approves nothing and halts nothing, so both signature counts are zero; an
@@ -270,6 +270,11 @@ a `same-org` row is present requires `--witness-key` as well, and pinning
 `--witness-key` while a `self` row is present requires `--effect-key` as well;
 otherwise the result is not verified. Each of those lines says the
 same thing: the files agree with each other, not that the key was ever yours.
+The last line says it too: `VERIFIED (internal consistency only)` while any key,
+operator credentials included, came from the files; `VERIFIED (tail not covered: ...)`
+while newest records have no checkpoint over them; `VERIFIED (rollback not checked:
+no anchored checkpoint)` without a receipt that verifies under `--anchor-key`; and
+`VERIFIED` with all of those in place.
 Checkpoints are signed by the witness key. Every checkpoint row is checked under one key: `--checkpoint-key <public.pem>` when you pin it, otherwise one key taken from the checkpoint file, with the same note that agreement is not trust. The tail counts only checkpoints whose signatures verified. Someone who can rewrite the files can still roll that file back to an older valid prefix together with the records after it; only a checkpoint held elsewhere detects that. `--json` prints
 the same result for a
 pipeline; the exit code is 0 when it verifies and 1 when it does not, and a

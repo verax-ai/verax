@@ -56,8 +56,8 @@ Then check the record:
 docker compose exec body verax verify /var/lib/verax
 ```
 
-It ends with `VERIFIED`: three decisions, three valid signatures, an unbroken
-chain. That verifies against the key the records carry. To check against a key
+It ends with `VERIFIED (internal consistency only)`: three decisions, three valid
+signatures, an unbroken chain, checked against the key the records carry. To check against a key
 you hold, copy `/var/lib/verax/keys/record.public.pem` out when the body is
 first installed and pass it with `--key`.
 
