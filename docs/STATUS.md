@@ -75,7 +75,10 @@ beat, not a measured outage, and wall-clock changes can affect it.
 An absent or unreadable beat, a beat older than the threshold, or one more
 than 60 seconds in the future is silence. The default `--on-silence halt`
 uses the existing halt switch and history (`by: "verax-watch"`, `via: "cli"`),
-so subsequent calls are signed denies and a restart stays halted. Recovery
+so subsequent calls are signed denies and a restart stays halted. Since 0.8.2
+a path that does not exist or a directory holding no ledger files answers
+`halt-failed` with exit 3 and nothing is created there; before that the switch
+was written to that path and the event reported `halted`. Recovery
 reports do not resume the body; the existing operator resume path applies,
 including the required passkey assertion for HTTP resume when registered.
 CLI resume retains its existing unsigned OS-user semantics.

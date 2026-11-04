@@ -64,6 +64,7 @@ const STATE_DIR_ENTRIES = new Set([
   "decisions.jsonl",
   "effects.jsonl",
   "starts.jsonl",
+  "heartbeat.json",
   "ledger.lock",
   "keys",
   "policy.json",
@@ -94,6 +95,12 @@ function checkStateDir(stateDir: string): { problem: string } | { empty: boolean
   return entries.some((name) => STATE_DIR_ENTRIES.has(name))
     ? { empty: false }
     : { problem: "no ledger files there" };
+}
+
+/** The same check for `verax watch`, which halts on its own: the refusal to print, or null. */
+export function notStateDir(stateDir: string): string | null {
+  const checked = checkStateDir(stateDir);
+  return "problem" in checked ? `not-a-state-dir: ${oneLine(stateDir)}: ${checked.problem}; nothing was halted` : null;
 }
 
 /** The switch is an empty file. A folder at the path is a blocked write, not a halt. */
