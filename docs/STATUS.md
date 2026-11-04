@@ -553,11 +553,18 @@ it into JSON text, so the agent saw the base64 bytes as text.
 
 ### Upgrading an installed service from 0.8.0 on Windows
 
-Update the command first: `verax uninstall --keep-state` keeps the service
-account only from 0.8.1 on. Then run `verax uninstall --keep-state`, which stops
-the service, and `verax install --force`, giving any `--port`, `--days` and
-`--operator-door` you installed with again: `--force` does not read the earlier
-ones. The service definition then carries `--clear-stale-lock`, no longer has
+Update the command first, in an elevated shell:
+`npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body@0.8.1`.
+`verax uninstall --keep-state` keeps the service account only from 0.8.1 on. Run
+the rest from that copy, because `--prefix` does not change `PATH`:
+`& "$env:ProgramFiles\verax-cli\verax.cmd" uninstall --keep-state`, which stops
+the service, then `& "$env:ProgramFiles\verax-cli\verax.cmd" install --force`,
+giving any `--port`, `--days` and `--operator-door` you installed with again:
+`--force` does not read the earlier ones. It also writes
+`verax.env` from those options alone, so copy out any line you added to that file,
+such as `VERAX_DOWNSTREAM`, before you start. Put it back afterwards and restart
+the service, or those tools are gone although the service answers. The policy
+file stays. The service definition then carries `--clear-stale-lock`, no longer has
 the default task limits, which stopped the service after three days and on
 battery and did not start it on battery, and tries a start every five minutes,
 because a killed service was not back within 100 seconds under `-RestartCount`
