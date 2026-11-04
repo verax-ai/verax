@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync, writeSync } from "node:fs";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
@@ -58,6 +58,42 @@ const HISTORY = "halt-history.jsonl";
 function oneLine(err: unknown): string {
   const text = err instanceof Error ? err.message : String(err);
   return text.replace(/[\r\n]+/g, " ").slice(0, 300);
+}
+
+const STATE_DIR_ENTRIES = new Set([
+  "decisions.jsonl",
+  "effects.jsonl",
+  "starts.jsonl",
+  "ledger.lock",
+  "keys",
+  "policy.json",
+  "verax.env",
+  SWITCH,
+  HISTORY,
+]);
+
+/**
+ * An operator types this path by hand, and a body only reads the switch in its
+ * own state directory. Writing the switch anywhere else would answer `halted`
+ * while the running body keeps allowing calls. An empty directory stays
+ * allowed, since a body started on it reads the switch. A directory this
+ * process may not list is left to the write that follows, which names the
+ * permission error.
+ */
+function checkStateDir(stateDir: string): { problem: string } | { empty: boolean } {
+  let entries: string[];
+  try {
+    entries = readdirSync(stateDir);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return { problem: "no such directory" };
+    if (code === "ENOTDIR") return { problem: "not a directory" };
+    return { empty: false };
+  }
+  if (entries.length === 0) return { empty: true };
+  return entries.some((name) => STATE_DIR_ENTRIES.has(name))
+    ? { empty: false }
+    : { problem: "no ledger files there" };
 }
 
 /** The switch is an empty file. A folder at the path is a blocked write, not a halt. */
@@ -242,6 +278,11 @@ export function runHalt(
     writeErr("verax halt <stateDir>\n");
     return 78;
   }
+  const checked = checkStateDir(stateDir);
+  if ("problem" in checked) {
+    writeErr(`halt-failed: not-a-state-dir: ${oneLine(stateDir)}: ${checked.problem}; nothing was halted\n`);
+    return 1;
+  }
   try {
     haltBody(stateDir, cliUser(), "cli");
   } catch (err) {
@@ -253,6 +294,7 @@ export function runHalt(
     return 1;
   }
   writeErr("halted\n");
+  if (checked.empty) writeErr("note: this directory was empty; no body has written here yet\n");
   return 0;
 }
 
@@ -263,6 +305,11 @@ export function runResume(
   if (!stateDir) {
     writeErr("verax resume <stateDir>\n");
     return 78;
+  }
+  const checked = checkStateDir(stateDir);
+  if ("problem" in checked) {
+    writeErr(`resume-failed: not-a-state-dir: ${oneLine(stateDir)}: ${checked.problem}; nothing was resumed\n`);
+    return 1;
   }
   if (isSwitchPathBlocked(stateDir)) {
     writeErr(
