@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.8.0
+## Capability matrix — 0.8.1
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.8.0, and in the MCP registry as
+`@verax-ai/inventory` 0.8.1, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -553,16 +553,24 @@ it into JSON text, so the agent saw the base64 bytes as text.
 
 ### Upgrading an installed service from 0.8.0 on Windows
 
-Update the command first: `verax uninstall --keep-state` keeps the service
-account only from 0.8.1 on. Then run `verax uninstall --keep-state`, which stops
-the service, and `verax install --force`, giving any `--port`, `--days` and
-`--operator-door` you installed with again: `--force` does not read the earlier
-ones. The service definition then carries `--clear-stale-lock`, no longer has
+Update the command first, in an elevated shell:
+`npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body@0.8.1`.
+`verax uninstall --keep-state` keeps the service account only from 0.8.1 on. Run
+the rest from that copy, because `--prefix` does not change `PATH`:
+`& "$env:ProgramFiles\verax-cli\verax.cmd" uninstall --keep-state`, which stops
+the service, then `& "$env:ProgramFiles\verax-cli\verax.cmd" install --force`,
+giving any `--port`, `--days` and `--operator-door` you installed with again:
+`--force` does not read the earlier ones. It also writes
+`verax.env` from those options alone, so copy out any line you added to that file,
+such as `VERAX_DOWNSTREAM`, before you start. Put it back afterwards and restart
+the service, or those tools are gone although the service answers. The policy
+file stays. The service definition then carries `--clear-stale-lock`, no longer has
 the default task limits, which stopped the service after three days and on
 battery and did not start it on battery, and tries a start every five minutes,
 because a killed service was not back within 100 seconds under `-RestartCount`
 alone on Windows 11. A start while the service runs is ignored. A service that
-keeps failing to start is tried again each time, and each try adds to `body.log`.
+keeps failing to start is tried again each time, and each try that can open
+`body.log` adds to it.
 `--force` also issues a new local
 issuer key and agent token, so clients reconnect with the new token. The record
 keys and the ledger stay. `verax install` refuses a code directory that already
