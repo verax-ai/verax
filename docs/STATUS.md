@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.8.1
+## Capability matrix — 0.8.2
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.8.1, and in the MCP registry as
+`@verax-ai/inventory` 0.8.2, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -559,10 +559,10 @@ as before with one change: an image or audio block a downstream tool returns
 now reaches the agent as an image or audio block. In 0.7.0 the body turned
 it into JSON text, so the agent saw the base64 bytes as text.
 
-### Upgrading an installed service from 0.8.0 on Windows
+### Upgrading an installed service from 0.8.0 or 0.8.1 on Windows
 
 Update the command first, in an elevated shell:
-`npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body@0.8.1`.
+`npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body@0.8.2`.
 `verax uninstall --keep-state` keeps the service account only from 0.8.1 on. Run
 the rest from that copy, because `--prefix` does not change `PATH`:
 `& "$env:ProgramFiles\verax-cli\verax.cmd" uninstall --keep-state`, which stops
