@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.8.0
+## Capability matrix — 0.8.1
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.8.0, and in the MCP registry as
+`@verax-ai/inventory` 0.8.1, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -562,7 +562,8 @@ the default task limits, which stopped the service after three days and on
 battery and did not start it on battery, and tries a start every five minutes,
 because a killed service was not back within 100 seconds under `-RestartCount`
 alone on Windows 11. A start while the service runs is ignored. A service that
-keeps failing to start is tried again each time, and each try adds to `body.log`.
+keeps failing to start is tried again each time, and each try that can open
+`body.log` adds to it.
 `--force` also issues a new local
 issuer key and agent token, so clients reconnect with the new token. The record
 keys and the ledger stay. `verax install` refuses a code directory that already
