@@ -127,7 +127,8 @@ describe("release.yml, the only path that publishes to npm from this repository"
       assert.ok(gate.includes(workflow), `the gate does not read ${workflow}`);
     }
     assert.match(gate, /head_sha=\$GITHUB_SHA/, "the gate does not read the commit being published");
-    assert.match(gate, /event=push/, "a run on a branch or by hand must not count");
+    assert.match(gate, /"\$GITHUB_REF" != "refs\/heads\/main"/, "the gate lets another branch publish");
+    assert.match(gate, /branch=main&event=push/, "a run on a branch or by hand must not count");
     assert.match(gate, /status=success/, "the gate does not ask for a passed run");
     assert.match(gate, /exit 1/, "the gate cannot refuse");
     const needs = job(yml, "publish").match(/^    needs: \[(.*)\]\s*$/m)?.[1] ?? "";
