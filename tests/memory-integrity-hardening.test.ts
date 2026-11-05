@@ -514,7 +514,10 @@ describe("memory integrity hardening (H1-H22)", () => {
       first.ledger.close();
       const headPath = memoryHeadPath(stateDir, resolveHeadDir(stateDir));
       const row = JSON.parse(readFileSync(headPath, "utf8")) as { sig: string };
-      writeFileSync(headPath, `${JSON.stringify({ ...row, sig: `x${row.sig.slice(1)}` })}\n`);
+      // One signature in 64 already starts with x, so the first character is changed, not set.
+      const broken = `${row.sig.startsWith("x") ? "y" : "x"}${row.sig.slice(1)}`;
+      assert.notEqual(broken, row.sig);
+      writeFileSync(headPath, `${JSON.stringify({ ...row, sig: broken })}\n`);
       const restarted = createBodyServices(opts);
       try {
         const got = await getFact(restarted, "n1");
