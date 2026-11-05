@@ -185,16 +185,21 @@ describe("registration", () => {
     const nested = Buffer.concat([honest.subarray(0, keyStart), Buffer.alloc(40, 0x81), Buffer.from([0x00])]);
     assert.equal(reason(verify(around(passkey, nested))), "public-key");
     // A good key with a label of its own that nests: shallow is read past, deep is not a key.
-    const labelled = (depth: number) => {
+    // The label goes where the one encoding puts it, after 3 and before -1.
+    const labelled = (depth: number, place: "sorted" | "last" = "sorted") => {
       let value: number | number[] = 0;
       for (let i = 0; i < depth; i += 1) value = [value] as number[];
-      const key = isoCBOR.decodeFirst<Map<number, unknown>>(passkey.publicKeyCose.slice());
-      key.set(99, value);
+      const entries = [...isoCBOR.decodeFirst<Map<number, unknown>>(passkey.publicKeyCose.slice())];
+      const at = place === "sorted" ? entries.findIndex(([label]) => label < 0) : entries.length;
+      entries.splice(at, 0, [99, value]);
+      const key = new Map(entries);
       const carrier = { ...passkey, publicKeyCose: isoCBOR.encode(key as Map<number, number>) };
       return reason(verify(around(carrier, attestedAuthData(carrier, RP_ID))));
     };
     assert.equal(labelled(2), "ok");
     assert.equal(labelled(6), "public-key");
+    // The same key with its labels out of order has a second encoding, and is not a key.
+    assert.equal(labelled(2, "last"), "public-key");
   });
 
   it("R8 what an enrolment offers is what the verifier takes, one for one", () => {
