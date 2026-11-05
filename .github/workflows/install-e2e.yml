@@ -8,6 +8,9 @@ env:
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -777,7 +780,11 @@ jobs:
           add "$(mark "$probe") the agent token works through the service"
           exit 0
 
+  # A hosted macOS runner can take hours to appear, so an ordinary pull request
+  # does not wait for this job. Main and a release pull request run it, and
+  # release.yml will not publish a commit that has not passed it on main.
   macos:
+    if: ${{ github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/') }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:

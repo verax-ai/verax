@@ -9,6 +9,9 @@ env:
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
   pull_request:
 
 permissions:
@@ -22,6 +25,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # A hosted macOS runner can take hours to appear, so an ordinary pull
+        # request does not wait for one. Main and a release pull request run
+        # macOS, and release.yml will not publish a commit that has not passed
+        # it on main.
+        exclude:
+          - os: ${{ (github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/')) && 'none' || 'macos-latest' }}
     permissions:
       contents: read
     steps:

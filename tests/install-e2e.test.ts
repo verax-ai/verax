@@ -157,6 +157,18 @@ describe("install-e2e workflow", () => {
     assert.equal(installs.length, 2);
   });
 
+  it("runs the macOS jobs on main and on a release pull request, and only there", () => {
+    const pack = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows", "pack-smoke.yml"),
+      "utf8",
+    );
+    const full = "github.event_name != 'pull_request' || startsWith(github.head_ref, 'release/')";
+    const macos = workflow.slice(workflow.indexOf("\n  macos:\n"));
+    assert.ok(macos.includes(`if: \${{ ${full} }}`), "install-e2e runs macOS on every pull request");
+    assert.match(pack, /os: \[ubuntu-latest, macos-latest, windows-latest\]/);
+    assert.ok(pack.includes(`- os: \${{ (${full}) && 'none' || 'macos-latest' }}`), "pack-smoke runs macOS on every pull request");
+  });
+
   it("installs the macOS Node under /opt/verax-node and forbids /usr/local/lib/verax-node", () => {
     const pack = readFileSync(
       join(dirname(fileURLToPath(import.meta.url)), "..", ".github", "workflows", "pack-smoke.yml"),
