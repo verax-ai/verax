@@ -14,6 +14,7 @@ const path = join(root, ".github", "workflows", "release.yml");
 const yml = existsSync(path) ? readFileSync(path, "utf8") : "";
 
 const PUBLISH_ORDER = ["inventory", "proxy", "body"];
+const GATED_WORKFLOWS = ["posix-full", "windows-full", "install-e2e", "pack-smoke"];
 
 function namedStep(text: string, title: string): string {
   const start = text.indexOf(`- name: ${title}`);
@@ -117,6 +118,28 @@ describe("release.yml, the only path that publishes to npm from this repository"
     const send = yml.indexOf("- name: send them in dependency order");
     assert.ok(suite >= 0 && suite < send, "npm test does not run before publish");
     assert.ok(smoke >= 0 && smoke < send, "pack:smoke does not run before publish");
+  });
+
+  it("publishes only a commit that passed on every platform on main", () => {
+    // A pull request can merge without its macOS jobs, so this is the step that requires them.
+    const gate = namedStep(yml, "every platform passed on this commit");
+    for (const workflow of GATED_WORKFLOWS) {
+      assert.ok(gate.includes(workflow), `the gate does not read ${workflow}`);
+    }
+    assert.match(gate, /head_sha=\$GITHUB_SHA/, "the gate does not read the commit being published");
+    assert.match(gate, /event=push/, "a run on a branch or by hand must not count");
+    assert.match(gate, /status=success/, "the gate does not ask for a passed run");
+    assert.match(gate, /exit 1/, "the gate cannot refuse");
+    const needs = job(yml, "publish").match(/^    needs: \[(.*)\]\s*$/m)?.[1] ?? "";
+    assert.ok(needs.split(", ").includes("platforms-passed"), "publish does not wait for the gate");
+    assert.doesNotMatch(job(yml, "platforms-passed"), /actions\/checkout@/, "the gate runs repository code");
+  });
+
+  it("every workflow the gate reads runs on a push to main", () => {
+    for (const workflow of GATED_WORKFLOWS) {
+      const text = readFileSync(join(root, ".github", "workflows", `${workflow}.yml`), "utf8").replace(/\r\n/g, "\n");
+      assert.match(text, /^ {2}push:\n {4}branches:\n {6}- main$/m, `${workflow} does not run on a push to main`);
+    }
   });
 
   it("holds the three packages and server.json to one version before publishing", () => {

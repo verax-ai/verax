@@ -18,6 +18,9 @@ name: release
 # The MCP registry record is a separate step, mcp-registry.yml, once npm
 # answers for the new version.
 #
+# Merging a release does not start this: wait until main's own runs of the
+# release commit have passed, macOS included, or the publish is refused.
+#
 # Only the publish job holds id-token: write, and it runs no repository or
 # dependency code: it downloads the three tarballs the build job packed and
 # hands them to npm with --ignore-scripts. Installing, building, testing and
@@ -37,6 +40,35 @@ permissions:
   contents: read
 
 jobs:
+  # A pull request can merge without its macOS jobs, because a hosted macOS
+  # runner can take hours to appear. A release cannot: the commit being
+  # published must have passed these workflows on a push to main. Only a run's
+  # latest attempt counts, so re-running what failed is enough.
+  platforms-passed:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: every platform passed on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for workflow in posix-full windows-full install-e2e pack-smoke; do
+            passed="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/$workflow.yml/runs?head_sha=$GITHUB_SHA&event=push&status=success&per_page=1" --jq .total_count)"
+            if [ "$passed" -gt 0 ]; then
+              echo "  $workflow passed on a push of $GITHUB_SHA"
+            else
+              echo "  $workflow has no passed run on a push of $GITHUB_SHA"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo "$GITHUB_SHA has not passed on every platform on main; wait for those runs or re-run what failed, then start this again"
+            exit 1
+          fi
   # SBOM installs the packed tarballs. That must not share the job that
   # holds id-token: write for trusted publishing.
   sbom:
@@ -187,7 +219,7 @@ jobs:
   # Holds id-token: write. No checkout and no install: it hands npm the
   # tarballs the build job packed, and nothing of theirs runs.
   publish:
-    needs: [sbom, build]
+    needs: [platforms-passed, sbom, build]
     if: ${{ inputs.confirm == 'publish' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
