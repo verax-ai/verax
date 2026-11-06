@@ -15,8 +15,24 @@ import {
 import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { coseFromHex, decodeCoseSign1, verifyCoseSign1 } from "@cedulon/cose";
 import { verifyEffectExtract } from "@cedulon/effect-extract";
-import { appendAnchor, checkpointsPath, listPieceFiles, signEffectAttestation, type LedgerEffect } from "@verax-ai/proxy";
-import { pendingAnchors, registerCheckpoint, serviceNameOf, serviceUrl } from "./anchor-cli.ts";
+import {
+  appendAnchor,
+  checkpointStatement,
+  checkpointsPath,
+  listPieceFiles,
+  readIssuerChain,
+  signEffectAttestation,
+  type LedgerEffect,
+} from "@verax-ai/proxy";
+import {
+  pendingAnchors,
+  registerCheckpoint,
+  registerStatement,
+  serviceNameOf,
+  serviceUrl,
+  statementIssuer,
+  type StatementIssuer,
+} from "./anchor-cli.ts";
 import { assertEd25519PublicKey } from "./keys.ts";
 import { lockHolderAlive } from "@verax-ai/proxy";
 import { pidAlive } from "./unlock.ts";
@@ -33,23 +49,47 @@ export type WitnessListen = {
   anchorService?: string;
 };
 
-/** Where `verax witness` sends each checkpoint it signs, read once at start. */
-export type WitnessAnchor = { serviceName: string; serviceKey: string | null };
+/**
+ * Where `verax witness` sends each checkpoint it signs, read once at start.
+ * With `chainPem` the witness registers each checkpoint over SCRAPI as a
+ * Signed Statement it signs as the Issuer that chain names.
+ */
+export type WitnessAnchor = { serviceName: string; serviceKey: string | null; chainPem: string | null };
 
 /**
- * `VERAX_ANCHOR_SERVICE` names the service (https; http only on loopback) and
- * `VERAX_ANCHOR_SERVICE_KEY` a file holding its public key. Neither set is no
- * anchoring. A value that is set but unusable is an error, so a witness the
- * operator meant to anchor does not start without anchoring.
+ * `VERAX_ANCHOR_SERVICE` names the service (https; http only on loopback),
+ * `VERAX_ANCHOR_SERVICE_KEY` a file holding its public key and
+ * `VERAX_ANCHOR_X5CHAIN` a PEM file holding the witness certificate chain,
+ * leaf first, which selects SCRAPI. None set is no anchoring. A value that is
+ * set but unusable is an error, so a witness the operator meant to anchor
+ * does not start without anchoring.
  */
 export function witnessAnchorFromEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): { ok: true; anchor: WitnessAnchor | null } | { ok: false; reason: string } {
   const raw = env.VERAX_ANCHOR_SERVICE?.trim() ?? "";
   const keyPath = env.VERAX_ANCHOR_SERVICE_KEY?.trim() ?? "";
+  const chainPath = env.VERAX_ANCHOR_X5CHAIN?.trim() ?? "";
   if (raw === "") {
     if (keyPath !== "") return { ok: false, reason: "VERAX_ANCHOR_SERVICE_KEY is set without VERAX_ANCHOR_SERVICE" };
+    if (chainPath !== "") return { ok: false, reason: "VERAX_ANCHOR_X5CHAIN is set without VERAX_ANCHOR_SERVICE" };
     return { ok: true, anchor: null };
+  }
+  let chainPem: string | null = null;
+  if (chainPath !== "") {
+    try {
+      chainPem = readFileSync(chainPath, "utf8");
+    } catch {
+      return { ok: false, reason: `cannot read VERAX_ANCHOR_X5CHAIN file ${chainPath}` };
+    }
+    try {
+      readIssuerChain(chainPem);
+    } catch {
+      return {
+        ok: false,
+        reason: `VERAX_ANCHOR_X5CHAIN file ${chainPath} must hold the witness certificate and at least one CA certificate, leaf first`,
+      };
+    }
   }
   const url = serviceUrl(raw);
   if (!url) {
@@ -74,7 +114,7 @@ export function witnessAnchorFromEnv(
       return { ok: false, reason: `VERAX_ANCHOR_SERVICE_KEY file ${keyPath} is not a public key` };
     }
   }
-  return { ok: true, anchor: { serviceName: serviceNameOf(url), serviceKey } };
+  return { ok: true, anchor: { serviceName: serviceNameOf(url), serviceKey, chainPem } };
 }
 
 /**
@@ -98,8 +138,24 @@ export async function anchorPendingCheckpoints(
     });
     return;
   }
+  let issuer: StatementIssuer | null = null;
+  if (anchor.chainPem !== null) {
+    const found = statementIssuer(stateDir, anchor.chainPem);
+    if (!found.ok) {
+      appendStatus(stateDir, {
+        atMs: Date.now(),
+        result: "anchor-failed",
+        service: anchor.serviceName,
+        reason: "issuer",
+      });
+      return;
+    }
+    issuer = found.issuer;
+  }
   for (const hash of pending) {
-    const got = await registerCheckpoint(anchor.serviceName, hash, anchor.serviceKey, fetchImpl);
+    const got = issuer
+      ? await registerStatement(anchor.serviceName, hash, checkpointStatement(hash, issuer.chain, issuer.keys), anchor.serviceKey, fetchImpl)
+      : await registerCheckpoint(anchor.serviceName, hash, anchor.serviceKey, fetchImpl);
     if (!got.ok) {
       appendStatus(stateDir, {
         atMs: Date.now(),
@@ -569,6 +625,15 @@ export async function runWitness(stateDir: string): Promise<void> {
       )
     : () => undefined;
   const keys = loadOrCreateWitnessKeys(stateDir);
+  if (anchor?.chainPem) {
+    // A chain for another key would start a witness whose every statement the
+    // service refuses; the operator hears it here instead.
+    const issuer = statementIssuer(stateDir, anchor.chainPem);
+    if (!issuer.ok) {
+      process.stderr.write(`witness-anchor-config: ${issuer.reason}\n`);
+      process.exit(64);
+    }
+  }
   const token = randomBytes(16).toString("hex");
   const server = createServer((req, res) => {
     void (async () => {

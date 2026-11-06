@@ -75,7 +75,8 @@ export type {
   VerifyInputs,
   VerifyAnchors,
 } from "./verify-ledger.ts";
-export { anchorEntryHash, appendAnchor, readAnchors } from "./anchors.ts";
-export type { AnchorRoute, AnchorRow } from "./anchors.ts";
-export { verifyReceipt } from "./transparency-receipt.ts";
-export type { ReceiptCheck, ReceiptStage } from "./transparency-receipt.ts";
+export { anchorEntryHash, appendAnchor, isEntryId, readAnchors } from "./anchors.ts";
+export type { AnchorRoute, AnchorRow, DigestAnchorRow, StatementAnchorRow } from "./anchors.ts";
+export { checkpointStatement, readIssuerChain } from "./signed-statement.ts";
+export { decodeCborItem, readCcfReceipt, verifyCcfReceipt, verifyReceipt } from "./transparency-receipt.ts";
+export type { CcfReceiptCheck, CcfReceiptRead, ReceiptCheck, ReceiptStage } from "./transparency-receipt.ts";

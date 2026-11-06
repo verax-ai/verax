@@ -610,6 +610,68 @@ macOS, where a new install carries the new service definition.
 Guards: `data-classes`, `result-classes`, `result-classes-error`,
 `result-record-verify`, `downstream-media`.
 
+## SCRAPI registration with a Signed Statement — unreleased
+
+`verax anchor <stateDir> --service <url> --x5chain <chain.pem>`, and for
+`verax witness` `VERAX_ANCHOR_X5CHAIN=<chain.pem>` beside
+`VERAX_ANCHOR_SERVICE`, register each checkpoint over SCRAPI instead of the
+digest route. The witness signs a Signed Statement (RFC 9943) for the
+checkpoint: a tagged COSE_Sign1 in the hash envelope shape (the payload is
+the 32-octet checkpoint hash, 258 names SHA-256, 259 `application/cose`),
+EdDSA under the witness key, with CWT claims naming the issuer
+`did:x509:0:sha256:<root certificate SHA-256>::subject:CN:<leaf CN>` and the
+subject `verax-ledger:<SHA-256 of the witness public key>`, and the chain in
+x5chain, leaf first. Only the checkpoint hash leaves the machine, as before;
+the chain travels with it. The statement is sent as
+`POST /entries?api-version=2026-03-26`. Only the entry id is read from the
+Location of the 303; the entry is then asked of the same service
+(`GET /entries/{id}`, 302 while pending) until it answers with the receipt.
+The row (`v: 2`, `route: "entries"`) keeps the statement, the entry id and
+the receipt. A refusal names the service's concise problem detail, for
+example `HTTP 400: COSE_Sign1 is not tagged`. Without a chain the digest
+route and its `v: 1` rows stay as they were.
+
+Verax does not issue certificates. The operator issues a leaf for
+`keys/witness.public.pem` and hands Verax the chain as PEM, for example with
+OpenSSL 3, where `leaf.ext` holds `basicConstraints=critical,CA:FALSE` and
+`keyUsage=critical,digitalSignature`:
+
+```
+openssl req -x509 -newkey ed25519 -nodes -keyout ca.key -out ca.pem -subj "/CN=Witness CA" -days 3650 \
+  -addext basicConstraints=critical,CA:TRUE -addext keyUsage=critical,keyCertSign
+openssl x509 -new -force_pubkey keys/witness.public.pem -subj "/CN=verax-witness" \
+  -CA ca.pem -CAkey ca.key -days 3650 -extfile leaf.ext -out leaf.pem
+cat leaf.pem ca.pem > chain.pem
+```
+
+A chain of one certificate, or one whose leaf holds another key, stops the
+witness with exit 64 and is refused by `verax anchor` with exit 64.
+
+`verax verify --anchor-key <pem>` reads a `v: 2` row offline. The statement
+must name the checkpoint, verify under the key the checkpoint verified under
+and carry that key in its x5chain leaf. The receipt must be a CCF receipt
+(vds 2, CCF_LEDGER_SHA256) whose leaf commits to the SHA-256 of the statement,
+and verify over the root its path rebuilds under the pinned key.
+
+What was run: microsoft/scitt-ccf-ledger 0.21.0 (9aac12f), built from
+source and run as a single-node development service on an AWS EC2 host
+(eu-central-1, no inbound rule), with a ledger written by a real body and
+witness on the same host. The service registered the statement after
+resolving its did:x509 against the chain and returned an ES384 receipt;
+`verax verify --require-anchored` verified it under the service identity
+key, and `ccf.cose.verify_receipt` and pyscitt `verify_transparent_statement`
+accepted the same receipt and the transparent statement the service returns
+for the entry. `tests/fixtures/anchor-ccf` holds that ledger, the receipt
+and the transparent statement.
+
+What it does not do. The development service runs with authentication off
+and a permissive registration policy, so no policy was exercised. `verify`
+does not resolve the did:x509; the service does when it registers. A receipt
+says the service's ledger holds the statement, not that the service agrees
+with what the checkpoint counts. No other SCRAPI service has been tried.
+
+Guards: `anchor-scrapi`, `signed-statement`, `ccf-receipt`.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a

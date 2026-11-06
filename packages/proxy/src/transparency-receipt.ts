@@ -263,3 +263,97 @@ export function verifyReceipt(receipt: Uint8Array, leafEntry: Uint8Array, public
   if (!verified) return { ok: false, stage: "receipt-sig", reason: "signature does not verify over the rebuilt root" };
   return { ok: true, root: root.toString("hex"), treeSize, leafIndex };
 }
+
+export type CcfReceiptCheck =
+  | { ok: true; root: string; commitEvidence: string }
+  | { ok: false; stage: ReceiptStage; reason: string };
+
+/**
+ * Checks one receipt from a CCF ledger (vds 2, CCF_LEDGER_SHA256) for one
+ * claims digest under the service key the reader holds. scitt-ccf-ledger
+ * commits to the SHA-256 of the Signed Statement it registered.
+ *
+ * The inclusion proof at 396/-1 is the CBOR map {1: leaf, 2: path}. The leaf
+ * is [internal transaction hash, commit evidence, claims digest] and hashes as
+ * SHA-256(hash || SHA-256(evidence) || digest); each path step is
+ * [left, node], hashed as SHA-256(node || acc) when left and SHA-256(acc ||
+ * node) otherwise. The signature is over the root that yields.
+ */
+export function verifyCcfReceipt(receipt: Uint8Array, claimsDigest: Uint8Array, publicKeyPem: string): CcfReceiptCheck {
+  const read = readCcfReceipt(receipt, claimsDigest);
+  if (!read.ok) return read;
+  let verified = false;
+  try {
+    verified = verifyCoseSignature(read.sign1.protectedHeader.get(1), publicKeyPem, sign1Structure(read.sign1.protectedBytes, read.root), read.sign1.signature);
+  } catch {
+    verified = false;
+  }
+  if (!verified) return { ok: false, stage: "receipt-sig", reason: "signature does not verify over the rebuilt root" };
+  return { ok: true, root: read.root.toString("hex"), commitEvidence: read.commitEvidence };
+}
+
+export type CcfReceiptRead =
+  | { ok: true; root: Buffer; commitEvidence: string; sign1: Sign1 }
+  | { ok: false; stage: ReceiptStage; reason: string };
+
+/**
+ * The root a CCF receipt yields for `claimsDigest`, with no key: a receipt
+ * that is not for this digest is refused here, and only the signature is left
+ * for `verifyCcfReceipt`.
+ */
+export function readCcfReceipt(receipt: Uint8Array, claimsDigest: Uint8Array): CcfReceiptRead {
+  if (claimsDigest.length !== 32) return { ok: false, stage: "inclusion", reason: "claims digest is not 32 octets" };
+  let sign1: Sign1;
+  try {
+    sign1 = decodeSign1(receipt);
+  } catch (err) {
+    return { ok: false, stage: "receipt-decode", reason: err instanceof Error ? err.message : String(err) };
+  }
+  const crit = sign1.protectedHeader.get(2);
+  if (crit !== undefined && (!Array.isArray(crit) || crit.length === 0 || !crit.every((l) => UNDERSTOOD.has(l)))) {
+    return { ok: false, stage: "receipt-decode", reason: "a critical header this reader does not understand" };
+  }
+  if (sign1.unprotected.has(2)) return { ok: false, stage: "receipt-decode", reason: "crit in the unprotected header" };
+  const vds = sign1.protectedHeader.get(395);
+  if (vds !== 2) return { ok: false, stage: "vds-gate", reason: `vds ${String(vds)} is not CCF_LEDGER_SHA256` };
+  const vdp = sign1.unprotected.get(396);
+  const proofs = vdp instanceof Map ? vdp.get(-1) : undefined;
+  if (!Array.isArray(proofs) || proofs.length !== 1 || !(proofs[0] instanceof Uint8Array)) {
+    return { ok: false, stage: "receipt-decode", reason: "no single inclusion proof at 396/-1" };
+  }
+  if (sign1.payload !== null) return { ok: false, stage: "receipt-decode", reason: "receipt payload is not detached" };
+  let proof: unknown;
+  try {
+    proof = decodeCborItem(proofs[0]);
+  } catch (err) {
+    return { ok: false, stage: "receipt-decode", reason: err instanceof Error ? err.message : String(err) };
+  }
+  const leaf = proof instanceof Map ? proof.get(1) : undefined;
+  const path = proof instanceof Map ? proof.get(2) : undefined;
+  if (!Array.isArray(leaf) || leaf.length !== 3 || !Array.isArray(path)) {
+    return { ok: false, stage: "receipt-decode", reason: "inclusion proof shape" };
+  }
+  const [internalHash, evidence, leafDigest] = leaf as [unknown, unknown, unknown];
+  if (
+    !(internalHash instanceof Uint8Array) ||
+    internalHash.length !== 32 ||
+    typeof evidence !== "string" ||
+    !(leafDigest instanceof Uint8Array) ||
+    leafDigest.length !== 32
+  ) {
+    return { ok: false, stage: "receipt-decode", reason: "inclusion proof leaf members" };
+  }
+  const steps: Array<[boolean, Uint8Array]> = [];
+  for (const step of path) {
+    if (!Array.isArray(step) || step.length !== 2 || typeof step[0] !== "boolean" || !(step[1] instanceof Uint8Array) || step[1].length !== 32) {
+      return { ok: false, stage: "receipt-decode", reason: "inclusion proof path members" };
+    }
+    steps.push([step[0], step[1]]);
+  }
+  if (!Buffer.from(leafDigest).equals(Buffer.from(claimsDigest))) {
+    return { ok: false, stage: "inclusion", reason: "the receipt commits to another claims digest" };
+  }
+  let root = sha256(internalHash, sha256(Buffer.from(evidence, "utf8")), leafDigest);
+  for (const [left, node] of steps) root = left ? sha256(node, root) : sha256(root, node);
+  return { ok: true, root, commitEvidence: evidence, sign1 };
+}

@@ -74,6 +74,16 @@ const ALLOWED = new Set([
   "appendAnchor",
   "readAnchors",
   "verifyReceipt",
+  // The SCRAPI route: the witness signs the Signed Statement and the body
+  // sends it, and verifyLedger reads both back, so the shape stays here.
+  "isEntryId",
+  "checkpointStatement",
+  "readIssuerChain",
+  "readCcfReceipt",
+  "verifyCcfReceipt",
+  // A service's refusal is concise problem details in CBOR; the body reads
+  // the reason with the same bounded reader the receipts go through.
+  "decodeCborItem",
   "lockState",
   "lockBeatOf",
   // The body files a removed passkey's mark and the proxy reads the marks

@@ -20,14 +20,19 @@ import { join } from "node:path";
 
 export const ANCHORS_NAME = "checkpoint-anchors.jsonl";
 
-/** `register`: the SCITT digest route; the log's leaf entry is SHA-256 of the 32 checkpoint-hash octets. */
-export type AnchorRoute = "register";
+/**
+ * `register`: the digest route; the log's leaf entry is SHA-256 of the 32
+ * checkpoint-hash octets. `entries`: SCRAPI; the witness registers a Signed
+ * Statement for the checkpoint and the row keeps it beside the receipt.
+ */
+export type AnchorRoute = "register" | "entries";
 
-export type AnchorRow = {
+/** A receipt from the digest route, over an RFC 9162 log. */
+export type DigestAnchorRow = {
   v: 1;
   checkpointHash: string;
   service: string;
-  route: AnchorRoute;
+  route: "register";
   entryHash: string;
   leafIndex: number;
   treeSize: number;
@@ -35,30 +40,61 @@ export type AnchorRow = {
   atMs: number;
 };
 
+/**
+ * A Signed Statement registered over SCRAPI and the receipt for it. The
+ * receipt commits to the SHA-256 of `statementB64`'s octets, and `entryId` is
+ * the service's name for the entry (a CCF transaction id).
+ */
+export type StatementAnchorRow = {
+  v: 2;
+  checkpointHash: string;
+  service: string;
+  route: "entries";
+  entryId: string;
+  statementB64: string;
+  receiptB64: string;
+  atMs: number;
+};
+
+export type AnchorRow = DigestAnchorRow | StatementAnchorRow;
+
 const HASH = /^[0-9a-f]{64}$/;
+const ENTRY_ID = /^[0-9]{1,20}\.[0-9]{1,20}$/;
 
 export function anchorsPath(dir: string): string {
   return join(dir, ANCHORS_NAME);
 }
 
-/** The leaf entry the service's log holds for this checkpoint under `route`. */
+/** The leaf entry the digest route's log holds for this checkpoint. */
 export function anchorEntryHash(checkpointHash: string, route: AnchorRoute): string {
   if (!HASH.test(checkpointHash)) throw new Error("anchor-checkpoint-hash");
   if (route === "register") return createHash("sha256").update(Buffer.from(checkpointHash, "hex")).digest("hex");
   throw new Error(`anchor-route-${String(route)}`);
 }
 
+/** A CCF transaction id, `<view>.<seqno>`, as SCRAPI names an entry. */
+export function isEntryId(value: unknown): value is string {
+  return typeof value === "string" && ENTRY_ID.test(value);
+}
+
 function asRow(value: unknown): AnchorRow | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const r = value as Partial<AnchorRow>;
-  if (r.v !== 1 || r.route !== "register") return null;
+  const r = value as Record<string, unknown>;
   if (typeof r.checkpointHash !== "string" || !HASH.test(r.checkpointHash)) return null;
-  if (typeof r.entryHash !== "string" || !HASH.test(r.entryHash)) return null;
   if (typeof r.service !== "string" || r.service === "") return null;
   if (typeof r.receiptB64 !== "string" || r.receiptB64 === "") return null;
-  if (!Number.isSafeInteger(r.leafIndex) || !Number.isSafeInteger(r.treeSize)) return null;
   if (typeof r.atMs !== "number") return null;
-  return r as AnchorRow;
+  if (r.v === 1 && r.route === "register") {
+    if (typeof r.entryHash !== "string" || !HASH.test(r.entryHash)) return null;
+    if (!Number.isSafeInteger(r.leafIndex) || !Number.isSafeInteger(r.treeSize)) return null;
+    return r as DigestAnchorRow;
+  }
+  if (r.v === 2 && r.route === "entries") {
+    if (!isEntryId(r.entryId)) return null;
+    if (typeof r.statementB64 !== "string" || r.statementB64 === "") return null;
+    return r as StatementAnchorRow;
+  }
+  return null;
 }
 
 /** Rows in file order. A line that is not a row is named, not skipped silently. */
