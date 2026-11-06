@@ -11,5 +11,12 @@ description = "Frozen ledger vectors: WebAuthn authenticatorData is public verif
 paths = ['''^test-vectors/v1/[^/]+/ledger/inputs\.jsonl$''']
 
 [[allowlists]]
+description = "anchor-ccf fixture ledger: authenticatorData is WebAuthn verification data and tenantKey is the SHA-256 of an issuer and subject; only those two fields, only in these files"
+condition = "AND"
+paths = ['''^tests/fixtures/anchor-ccf/ledger/(inputs|halt-history|memory-commits)\.jsonl$''']
+regexTarget = "match"
+regexes = ['''^(authenticatorData|tenantKey)"''']
+
+[[allowlists]]
 description = "Test signing keys that say so in their file name"
 paths = ['''\.TEST-KEY-NOT-A-SECRET\.pem$''']
