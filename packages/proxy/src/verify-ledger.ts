@@ -104,7 +104,7 @@
  * the answer rather than a footnote, and `publicKeyPem` lets a reader pin a
  * copy they hold themselves.
  */
-import { createPublicKey } from "node:crypto";
+import { createHash, createPublicKey } from "node:crypto";
 import { samePublicKey, thirdPartyReceiptCoversRow } from "./third-party.ts";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -125,7 +125,8 @@ import { verifyEffectExtract, type SignedEffectExtract } from "@cedulon/effect-e
 import { anchorEntryHash, readAnchors } from "./anchors.ts";
 import { checkpointsPath, readCheckpointFile } from "./checkpoints.ts";
 import { sha256Canonical } from "./hash.ts";
-import { verifyReceipt } from "./transparency-receipt.ts";
+import { readCheckpointStatement } from "./signed-statement.ts";
+import { verifyCcfReceipt, verifyReceipt } from "./transparency-receipt.ts";
 import {
   ledgerPiecePathProblem,
   readLedgerManifest,
@@ -901,6 +902,7 @@ function tailStatement(
         hash: checkpointHash(rows[i]!),
         receiptCount: typeof count === "number" ? count : null,
         endMs: typeof endMs === "number" ? endMs : null,
+        keyPem: key ?? "",
       });
     } catch {
       // A row that verified but cannot be hashed cannot be anchored either.
@@ -961,7 +963,8 @@ function tailStatement(
   };
 }
 
-type VerifiedCheckpoint = { hash: string; receiptCount: number | null; endMs: number | null };
+/** `keyPem` is the key the checkpoint verified under, which also signs its Signed Statement. */
+type VerifiedCheckpoint = { hash: string; receiptCount: number | null; endMs: number | null; keyPem: string };
 
 /**
  * How long after its window ends a checkpoint may be unanchored. The witness
@@ -1040,25 +1043,43 @@ function anchorStatement(
       problems.push(`anchor names a checkpoint the ledger does not hold: ${short}`);
       continue;
     }
-    let entry: string;
-    try {
-      entry = anchorEntryHash(row.checkpointHash, row.route);
-    } catch {
-      problems.push(`anchor route is not one this verifier reads: ${short}`);
-      continue;
-    }
-    if (entry !== row.entryHash) {
-      problems.push(`anchor entry hash is not the checkpoint's: ${short}`);
-      continue;
-    }
-    const check = verifyReceipt(Buffer.from(row.receiptB64, "base64"), Buffer.from(entry, "hex"), keyPem);
-    if (!check.ok) {
-      problems.push(`anchor receipt does not verify: ${short} (${check.stage}: ${check.reason})`);
-      continue;
-    }
-    if (check.treeSize !== row.treeSize || check.leafIndex !== row.leafIndex) {
-      problems.push(`anchor row disagrees with its receipt: ${short}`);
-      continue;
+    if (row.route === "entries") {
+      // The receipt commits to the Signed Statement, so the statement is
+      // checked first: it must name this checkpoint and be signed by the key
+      // the checkpoint verified under.
+      const statement = Buffer.from(row.statementB64, "base64");
+      const read = readCheckpointStatement(statement, row.checkpointHash, checkpoint.keyPem);
+      if (!read.ok) {
+        problems.push(`anchor statement is not this checkpoint's: ${short} (${read.reason})`);
+        continue;
+      }
+      const digest = createHash("sha256").update(statement).digest();
+      const check = verifyCcfReceipt(Buffer.from(row.receiptB64, "base64"), digest, keyPem);
+      if (!check.ok) {
+        problems.push(`anchor receipt does not verify: ${short} (${check.stage}: ${check.reason})`);
+        continue;
+      }
+    } else {
+      let entry: string;
+      try {
+        entry = anchorEntryHash(row.checkpointHash, row.route);
+      } catch {
+        problems.push(`anchor route is not one this verifier reads: ${short}`);
+        continue;
+      }
+      if (entry !== row.entryHash) {
+        problems.push(`anchor entry hash is not the checkpoint's: ${short}`);
+        continue;
+      }
+      const check = verifyReceipt(Buffer.from(row.receiptB64, "base64"), Buffer.from(entry, "hex"), keyPem);
+      if (!check.ok) {
+        problems.push(`anchor receipt does not verify: ${short} (${check.stage}: ${check.reason})`);
+        continue;
+      }
+      if (check.treeSize !== row.treeSize || check.leafIndex !== row.leafIndex) {
+        problems.push(`anchor row disagrees with its receipt: ${short}`);
+        continue;
+      }
     }
     verified += 1;
     anchoredHashes.add(row.checkpointHash);

@@ -138,6 +138,16 @@ the directory to compare; only asking the service shows it, and `verify`
 does not ask it yet. A witness that cannot reach the service writes
 `anchor-failed` and keeps signing; the gap shows as unanchored checkpoints.
 
+Unreleased: given a certificate chain (`VERAX_ANCHOR_X5CHAIN`, or
+`verax anchor --x5chain`), the witness registers a Signed Statement over
+SCRAPI instead of the bare hash. The statement carries the chain, so the
+service's log keeps the names in those certificates (the leaf CN and the
+CA) for as long as it keeps the entry, and they are as public as that log.
+The service checks the did:x509 issuer against the chain when it registers
+the statement; `verify` checks the statement's signature and its leaf key,
+not the chain. Whoever holds the witness key can sign statements in that
+issuer's name, as they can sign checkpoints.
+
 Since 0.5.0: start rows are signed by the record key and each names the
 SHA-256 of the row before it. `verax verify` names a changed gap, a row
 removed from the middle, or an unsigned row after a signed one. Rows removed
