@@ -269,6 +269,26 @@ wherever the operator starts it; `verax install` does not start a witness.
 
 Guard: `auto-anchor`. Published in 0.5.0.
 
+## Hosted anchoring with a token — unreleased
+
+`@verax-ai/anchor-service` (`verax-anchor-service`) is a small Transparency
+Service that speaks the same `POST /register` route the client already uses.
+It answers only callers that present a bearer token listed (by SHA-256 digest)
+in `VERAX_ANCHOR_SVC_TOKENS`. The service signs COSE receipts with the Ed25519
+key in `VERAX_ANCHOR_SVC_SIGNING_KEY` and appends leaf rows to
+`VERAX_ANCHOR_SVC_STORE`. A receipt shows that this checkpoint hash was
+registered by the time of the receipt; it does not show that the ledger is
+complete, and the operator still chooses what to send.
+
+`verax anchor … --token-file <file>` and `verax witness` with
+`VERAX_ANCHOR_TOKEN_FILE` send that file's content as `Authorization: Bearer …`
+on every request to the service. The token is never accepted on the command
+line and is not written to `checkpoint-anchors.jsonl`, `witness-status.jsonl`,
+`witness.listen.json`, doctor output, or error messages. A 401 from the
+service is reported as `unauthorized`, not `unreachable`.
+
+Guard: `hosted-anchor-token`. Unreleased.
+
 ## Signed start rows — since 0.5.0
 
 A body started by `verax serve` writes v2 start rows: the v1 fields plus
