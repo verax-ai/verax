@@ -48,6 +48,17 @@ you once the issue is confirmed.
 
 No valid report yet.
 
+## Supported versions
+
+A security fix is published in the latest release.
+
+A customer on the Business tier or above also receives the fix for the
+release they run, for 12 months after that release's publication date, as
+a patch release on the same line. Before 1.0 a line is a minor version:
+0.8.x is one line.
+
+Response times are in the customer's contract, not in this file.
+
 ## Scope
 
 In scope: the published packages under `@verax-ai/*` and the
