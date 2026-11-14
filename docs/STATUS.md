@@ -696,9 +696,11 @@ malformed dates, `--from` after `--to`, overwrite) exit 64.
 
 What it does not show. It counts what is in the ledger. A call that never
 passed through the gate is not in it. A count is not a judgement that a
-decision was right. Argument values, payee names, amounts, prompts and
-operator names do not appear; tool names and counts only. Operator identity
-appears only as the hash the ledger already holds.
+decision was right. A held call is counted by the time it was held. A
+checkpoint is counted when its coverage overlaps the window. Argument
+values, payee names, amounts, prompts and operator names do not appear;
+tool names and counts only. Operator identity appears only as the hash the
+ledger already holds.
 
 Guards: `report`.
 
