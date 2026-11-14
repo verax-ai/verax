@@ -17,6 +17,7 @@ import { endProcess, main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
 import { runAnchor } from "./anchor-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
+import { runReport } from "./report-cli.ts";
 import { runVerify } from "./verify-cli.ts";
 import { clearStaleLockAtStart, runUnlock } from "./unlock.ts";
 import { runWitness } from "./witness.ts";
@@ -63,6 +64,9 @@ Usage: verax <command> [options]
   reconcile <args>     compare the ledger against a statement
   verify <stateDir>    read a ledger back without a body: signatures, chain,
                        effect binding, which key answered, and approval signatures
+  report <stateDir> --from <YYYY-MM-DD> --to <YYYY-MM-DD> [--out <file.html>] [--json]
+                       period counts from the ledger offline: decisions, approvals,
+                       checkpoints, and the same verification verdict as verify
   anchor <stateDir> --service <url>
                        register each checkpoint's hash with a transparency service
                        someone else runs and keep its receipt for verify --anchor-key
@@ -106,7 +110,7 @@ export type CliHooks = {
 /**
  * Left to run, these read a help flag as a path or as an argument: `verax
  * witness --help` started a witness in a new directory named `--help`. verify,
- * anchor and watch print their own usage.
+ * report, anchor and watch print their own usage.
  */
 const ANSWERED_BY_HELP = new Set([
   "approve",
@@ -386,6 +390,9 @@ async function dispatchCli(
   }
   if (argv[0] === "verify") {
     return runVerify(argv.slice(1), (s) => stdout.write(`${s}\n`));
+  }
+  if (argv[0] === "report") {
+    return runReport(argv.slice(1), (s) => stdout.write(`${s}\n`));
   }
   if (argv[0] === "anchor") {
     return runAnchor(argv.slice(1), (s) => stdout.write(`${s}\n`));
