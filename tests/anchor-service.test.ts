@@ -48,7 +48,7 @@ type Harness = {
   token: string;
 };
 
-async function startHarness(): Promise<Harness> {
+async function startHarness(env: NodeJS.ProcessEnv = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "verax-asvc-"));
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -69,6 +69,7 @@ async function startHarness(): Promise<Harness> {
     VERAX_ANCHOR_SVC_STORE: storePath,
     VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
     VERAX_ANCHOR_SVC_PORT: "0",
+    ...env,
   });
   const service = await startService(config);
   return { dir, service, tokenFile, keyFile: pubFile, storePath, publicKeyPem, token: TOKEN };
@@ -316,6 +317,70 @@ describe("hosted anchor service", () => {
       }
     } finally {
       rmSync(stateDir, { recursive: true, force: true });
+      await stopHarness(h);
+    }
+  });
+
+  it("a request over the rate limit is 429 and leaves the store unchanged", async () => {
+    const h = await startHarness({ VERAX_ANCHOR_SVC_RATE: "1" });
+    try {
+      const first = await registerCheckpoint(h.service.url, "55".repeat(32), h.publicKeyPem, fetch, Date.now, h.token);
+      assert.equal(first.ok, true);
+      const before = storeBytes(h.storePath);
+      const res = await fetch(`${h.service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${h.token}`,
+        },
+        body: JSON.stringify({ capsule_id: "66".repeat(32) }),
+      });
+      assert.equal(res.status, 429);
+      assert.deepEqual(await res.json(), { error: "rate-limited" });
+      assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("a non-JSON content-type is 400 and leaves the store unchanged", async () => {
+    const h = await startHarness();
+    try {
+      writeFileSync(h.storePath, "", "utf8");
+      const before = storeBytes(h.storePath);
+      const res = await fetch(`${h.service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "text/plain",
+          authorization: `Bearer ${h.token}`,
+        },
+        body: JSON.stringify({ capsule_id: "77".repeat(32) }),
+      });
+      assert.equal(res.status, 400);
+      assert.deepEqual(await res.json(), { error: "bad-content-type" });
+      assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("a body over the size limit is 400 and leaves the store unchanged", async () => {
+    const h = await startHarness();
+    try {
+      writeFileSync(h.storePath, "", "utf8");
+      const before = storeBytes(h.storePath);
+      const res = await fetch(`${h.service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${h.token}`,
+        },
+        body: "x".repeat(4 * 1024 + 1),
+      });
+      assert.equal(res.status, 400);
+      assert.deepEqual(await res.json(), { error: "body-too-large" });
+      assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
       await stopHarness(h);
     }
   });
