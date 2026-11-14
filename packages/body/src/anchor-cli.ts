@@ -64,7 +64,7 @@ export function readAnchorTokenFile(path: string): { ok: true; token: string } |
     return { ok: false, reason: `cannot read token file ${path}` };
   }
   const token = raw.trim();
-  if (token.length < 20 || token.length > 512 || !/^[\x20-\x7e]+$/.test(token)) {
+  if (token.length < 20 || token.length > 512 || !/^[\x21-\x7e]+$/.test(token)) {
     return { ok: false, reason: "token file must hold 20 to 512 printable ASCII characters" };
   }
   return { ok: true, token };

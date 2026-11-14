@@ -397,4 +397,22 @@ describe("verax anchor", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("a --token-file with whitespace inside the token is a usage error", async () => {
+    const dir = copyLedger(false);
+    const tokenFile = join(dir, "spaced.txt");
+    writeFileSync(tokenFile, "token with spaces inside!!\n", "utf8");
+    try {
+      const out: string[] = [];
+      const code = await runAnchor(
+        [dir, "--service", "https://witness.example", "--token-file", tokenFile],
+        (s) => out.push(s),
+        fakeService(answer, []),
+      );
+      assert.equal(code, 64);
+      assert.match(out.join("\n"), /20 to 512 printable ASCII/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
