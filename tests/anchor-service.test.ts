@@ -16,7 +16,12 @@ import { fileURLToPath } from "node:url";
 
 import { verifyLedger, verifyReceipt } from "@verax-ai/proxy";
 
-import { loadConfig, startService, type RunningService } from "../packages/anchor-service/src/index.ts";
+import {
+  appendStore,
+  loadConfig,
+  startService,
+  type RunningService,
+} from "../packages/anchor-service/src/index.ts";
 import { pendingAnchors, registerCheckpoint, runAnchor } from "../packages/body/src/anchor-cli.ts";
 import { runVerify } from "../packages/body/src/verify-cli.ts";
 
@@ -382,6 +387,65 @@ describe("hosted anchor service", () => {
       assert.ok(storeBytes(h.storePath).equals(before));
     } finally {
       await stopHarness(h);
+    }
+  });
+
+  it("a failed store write answers 500, leaves the leaf index, and keeps prior receipts valid", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-fail-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privatePem, "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    let failNext = false;
+    const service = await startService(config, {
+      appendRow: (path, row) => {
+        if (failNext) throw new Error("store-write-failed");
+        appendStore(path, row);
+      },
+    });
+    try {
+      const prior = await registerCheckpoint(service.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(prior.ok, true);
+      if (!prior.ok || prior.row.v !== 1) return;
+      const priorReceipt = prior.row.receiptB64;
+      const priorEntry = prior.row.entryHash;
+
+      failNext = true;
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(res.status, 500);
+      assert.deepEqual(await res.json(), { error: "internal" });
+
+      failNext = false;
+      const next = await registerCheckpoint(service.url, "bb".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(next.ok, true);
+      if (!next.ok || next.row.v !== 1) return;
+      assert.equal(next.row.leafIndex, 1);
+      assert.equal(next.row.treeSize, 2);
+
+      const check = verifyReceipt(Buffer.from(priorReceipt, "base64"), Buffer.from(priorEntry, "hex"), publicKeyPem);
+      assert.equal(check.ok, true, check.ok ? "" : check.reason);
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

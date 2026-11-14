@@ -4,7 +4,7 @@
  * file is read back in order; a line that does not parse or breaks the
  * expected shape refuses to load.
  */
-import { appendFileSync, closeSync, existsSync, openSync, readFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
 
 import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
@@ -66,5 +66,11 @@ export function loadStore(path: string): MerkleLog {
 }
 
 export function appendStore(path: string, row: StoreRow): void {
-  appendFileSync(path, `${JSON.stringify(row)}\n`, { encoding: "utf8" });
+  const fd = openSync(path, "a");
+  try {
+    writeSync(fd, `${JSON.stringify(row)}\n`, null, "utf8");
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
 }
