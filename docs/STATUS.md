@@ -276,9 +276,11 @@ Service that speaks the same `POST /register` route the client already uses.
 It answers only callers that present a bearer token listed (by SHA-256 digest)
 in `VERAX_ANCHOR_SVC_TOKENS`. The service signs COSE receipts with the Ed25519
 key in `VERAX_ANCHOR_SVC_SIGNING_KEY` and appends leaf rows to
-`VERAX_ANCHOR_SVC_STORE`. A receipt shows that this checkpoint hash was
-registered by the time of the receipt; it does not show that the ledger is
-complete, and the operator still chooses what to send.
+`VERAX_ANCHOR_SVC_STORE`. A receipt names the time the service signed it
+(CWT `iat` in the protected header), so the hash was registered no later
+than that time by the service's clock; it does not show that the ledger is
+complete, and the operator still chooses what to send. `verax verify` does
+not print this time yet.
 
 `verax anchor … --token-file <file>` and `verax witness` with
 `VERAX_ANCHOR_TOKEN_FILE` send that file's content as `Authorization: Bearer …`

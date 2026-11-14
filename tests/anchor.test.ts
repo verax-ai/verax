@@ -179,6 +179,14 @@ describe("anchors in verify", () => {
     assert.equal(check.ok ? null : check.stage, "vds-gate");
   });
 
+  it("a receipt without a CWT Claims header still verifies and reports no signing time", () => {
+    const without = resignedReceipt(new Map<unknown, unknown>([[1, -8], [395, 1]]));
+    const check = verifyReceipt(without.receipt, without.entry, without.keyPem);
+    assert.equal(check.ok, true, check.ok ? "" : check.reason);
+    if (!check.ok) return;
+    assert.equal("issuedAtSec" in check, false);
+  });
+
   it("a receipt that marks a header critical is refused unless this reader understands it", () => {
     const understood = resignedReceipt(new Map<unknown, unknown>([[1, -8], [395, 1], [2, [395]]]));
     assert.equal(verifyReceipt(understood.receipt, understood.entry, understood.keyPem).ok, true);

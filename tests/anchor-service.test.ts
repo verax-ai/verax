@@ -15,7 +15,9 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { verifyLedger, verifyReceipt } from "@verax-ai/proxy";
+import { decodeSign1 } from "../packages/proxy/src/transparency-receipt.ts";
 
+import { CborTag, encodeCbor } from "../packages/anchor-service/src/cbor.ts";
 import {
   appendStore,
   loadConfig,
@@ -385,6 +387,51 @@ describe("hosted anchor service", () => {
       assert.equal(res.status, 400);
       assert.deepEqual(await res.json(), { error: "body-too-large" });
       assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("a service receipt carries a signing time that verifyReceipt reports", async () => {
+    const h = await startHarness();
+    try {
+      const beforeSec = Math.floor(Date.now() / 1000);
+      const got = await registerCheckpoint(h.service.url, "cc".repeat(32), h.publicKeyPem, fetch, Date.now, h.token);
+      const afterSec = Math.floor(Date.now() / 1000);
+      assert.equal(got.ok, true);
+      if (!got.ok || got.row.v !== 1) return;
+      const check = verifyReceipt(
+        Buffer.from(got.row.receiptB64, "base64"),
+        Buffer.from(got.row.entryHash, "hex"),
+        h.publicKeyPem,
+      );
+      assert.equal(check.ok, true, check.ok ? "" : check.reason);
+      if (!check.ok) return;
+      assert.equal(typeof check.issuedAtSec, "number");
+      assert.ok(check.issuedAtSec! >= beforeSec && check.issuedAtSec! <= afterSec);
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("changing the signing time in the protected bytes fails the signature check", async () => {
+    const h = await startHarness();
+    try {
+      const got = await registerCheckpoint(h.service.url, "dd".repeat(32), h.publicKeyPem, fetch, Date.now, h.token);
+      assert.equal(got.ok, true);
+      if (!got.ok || got.row.v !== 1) return;
+      const sign1 = decodeSign1(Buffer.from(got.row.receiptB64, "base64"));
+      const hdr = new Map(sign1.protectedHeader);
+      const cwt = new Map(hdr.get(15) as Map<unknown, unknown>);
+      cwt.set(6, (cwt.get(6) as number) + 60);
+      hdr.set(15, cwt);
+      const protectedBytes = encodeCbor(hdr);
+      const tampered = encodeCbor(
+        new CborTag(18, [protectedBytes, sign1.unprotected, null, new Uint8Array(sign1.signature)]),
+      );
+      const check = verifyReceipt(tampered, Buffer.from(got.row.entryHash, "hex"), h.publicKeyPem);
+      assert.equal(check.ok, false);
+      assert.equal(check.ok ? null : check.stage, "receipt-sig");
     } finally {
       await stopHarness(h);
     }
