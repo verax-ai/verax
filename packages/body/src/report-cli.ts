@@ -35,7 +35,7 @@ export const EX_USAGE = 64;
 const DAY_MS = 86_400_000;
 
 const WHAT_NOT_SHOWN =
-  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right.";
+  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. A held call is counted by the time it was held. A checkpoint is counted when its coverage overlaps the window.";
 
 type DecisionCounts = { allow: number; deny: number; defer: number };
 
@@ -500,7 +500,7 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     `<p>Window ${htmlEscape(report.from)} to ${htmlEscape(report.to)} (UTC). Ledger ${htmlEscape(report.directory)}.</p>`,
     `<p>Records in window: ${report.recordCount}. First record time: ${report.firstRecordMs === null ? "none" : String(report.firstRecordMs)}. Last record time: ${report.lastRecordMs === null ? "none" : String(report.lastRecordMs)}. Ledger head hash: ${htmlEscape(report.headHash ?? "none")}.</p>`,
     "<h2>Decisions</h2>",
-    `<p>Total — allow ${report.decisions.total.allow}, deny ${report.decisions.total.deny}, defer ${report.decisions.total.defer}.</p>`,
+    `<p>Total: allow ${report.decisions.total.allow}, deny ${report.decisions.total.deny}, defer ${report.decisions.total.defer}.</p>`,
     "<table><thead><tr><th>Tool</th><th>Allow</th><th>Deny</th><th>Defer</th></tr></thead>",
     `<tbody>${toolRows}</tbody></table>`,
     "<h2>Approvals</h2>",
