@@ -37,18 +37,37 @@ const EX_USAGE = 64;
 
 function usage(): string {
   return [
-    "usage: verax anchor <stateDir> --service <url> [--x5chain <chain.pem>] [--service-key <public.pem>] [--json]",
+    "usage: verax anchor <stateDir> --service <url> [--x5chain <chain.pem>] [--service-key <public.pem>] [--token-file <file>] [--json]",
     "",
     "  --service <url>        the Transparency Service, for example https://witness.agentactioncapsule.org.",
     "                         https only; http is accepted for a loopback address.",
     "  --x5chain <file>       register over SCRAPI (POST /entries) as a Signed Statement the witness key signs;",
     "                         the file is the PEM chain for that key, leaf first, then its CA certificates",
     "  --service-key <file>   the service's public key; each receipt must verify under it before it is kept",
+    "  --token-file <file>    bearer token the service requires; the file holds 20 to 512 printable ASCII characters",
     "  --json                 one JSON object per anchored checkpoint",
     "",
     "Sends the SHA-256 of each checkpoint not yet anchored at that service, and nothing else;",
     "with --x5chain that hash travels inside a Signed Statement that also carries the chain.",
   ].join("\n");
+}
+
+/**
+ * Reads a bearer token from a file. Trimmed content must be 20 to 512 printable
+ * ASCII characters. The token is never written to stdout or state files here.
+ */
+export function readAnchorTokenFile(path: string): { ok: true; token: string } | { ok: false; reason: string } {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch {
+    return { ok: false, reason: `cannot read token file ${path}` };
+  }
+  const token = raw.trim();
+  if (token.length < 20 || token.length > 512 || !/^[\x20-\x7e]+$/.test(token)) {
+    return { ok: false, reason: "token file must hold 20 to 512 printable ASCII characters" };
+  }
+  return { ok: true, token };
 }
 
 /** https only; http is accepted for a loopback address. No credentials, query or fragment. */
@@ -105,12 +124,18 @@ export function serviceNameOf(service: URL): string {
 
 export type Registered =
   | { ok: true; row: AnchorRow; checked: boolean }
-  | { ok: false; reason: "unreachable" | "wrong-receipt" | "receipt-unverified"; message: string };
+  | { ok: false; reason: "unreachable" | "unauthorized" | "wrong-receipt" | "receipt-unverified"; message: string };
+
+function authHeaders(base: Record<string, string>, token: string | null): Record<string, string> {
+  if (token === null) return base;
+  return { ...base, authorization: `Bearer ${token}` };
+}
 
 /**
  * Registers one checkpoint hash at `serviceName` and returns the row to keep.
  * Nothing is written here; the caller appends the row. With `serviceKey` the
  * receipt must verify under it, at the tree size and leaf the service named.
+ * With `token` every request carries `Authorization: Bearer …`.
  */
 export async function registerCheckpoint(
   serviceName: string,
@@ -118,17 +143,19 @@ export async function registerCheckpoint(
   serviceKey: string | null,
   fetchImpl: typeof fetch = fetch,
   now: () => number = Date.now,
+  token: string | null = null,
 ): Promise<Registered> {
   const entryHash = anchorEntryHash(hash, "register");
   let answer: RegisterAnswer;
   try {
     const res = await fetchImpl(`${serviceName}/register`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
+      headers: authHeaders({ "content-type": "application/json", accept: "application/json" }, token),
       body: JSON.stringify({ capsule_id: hash }),
       signal: AbortSignal.timeout(15_000),
       redirect: "error",
     });
+    if (res.status === 401) return { ok: false, reason: "unauthorized", message: "HTTP 401" };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     answer = JSON.parse(await boundedText(res)) as RegisterAnswer;
   } catch (err) {
@@ -236,6 +263,7 @@ export async function registerStatement(
   fetchImpl: typeof fetch = fetch,
   now: () => number = Date.now,
   wait: (ms: number) => Promise<void> = (ms) => new Promise((done) => setTimeout(done, ms)),
+  token: string | null = null,
 ): Promise<Registered> {
   const query = `api-version=${SCRAPI_API_VERSION}`;
   let entryId: string | null;
@@ -243,11 +271,12 @@ export async function registerStatement(
   try {
     const res = await fetchImpl(`${serviceName}/entries?${query}`, {
       method: "POST",
-      headers: { "content-type": "application/cose", accept: "application/scitt-receipt+cose" },
+      headers: authHeaders({ "content-type": "application/cose", accept: "application/scitt-receipt+cose" }, token),
       body: new Uint8Array(statement),
       signal: AbortSignal.timeout(15_000),
       redirect: "manual",
     });
+    if (res.status === 401) return { ok: false, reason: "unauthorized", message: "HTTP 401" };
     if (res.status !== 303 && res.status !== 201) throw new Error(await httpFailure(res));
     entryId = entryIdFromLocation(res.headers.get("location"), serviceName);
     if (res.status === 201) receipt = await boundedBytes(res, MAX_RECEIPT_BYTES);
@@ -255,10 +284,11 @@ export async function registerStatement(
     for (let attempt = 0; receipt === null && entryId !== null && attempt < POLL_ATTEMPTS; attempt += 1) {
       const got = await fetchImpl(`${serviceName}/entries/${encodeURIComponent(entryId)}?${query}`, {
         method: "GET",
-        headers: { accept: "application/scitt-receipt+cose" },
+        headers: authHeaders({ accept: "application/scitt-receipt+cose" }, token),
         signal: AbortSignal.timeout(15_000),
         redirect: "manual",
       });
+      if (got.status === 401) return { ok: false, reason: "unauthorized", message: "HTTP 401" };
       if (got.status === 200) {
         receipt = await boundedBytes(got, MAX_RECEIPT_BYTES);
         break;
@@ -402,6 +432,20 @@ export async function runAnchor(
     out("anchor: --x5chain needs a file path");
     return EX_USAGE;
   }
+  const tokenPath = take("--token-file");
+  if (tokenPath === null) {
+    out("anchor: --token-file needs a file path");
+    return EX_USAGE;
+  }
+  let token: string | null = null;
+  if (tokenPath) {
+    const got = readAnchorTokenFile(tokenPath);
+    if (!got.ok) {
+      out(`anchor: ${got.reason}`);
+      return EX_USAGE;
+    }
+    token = got.token;
+  }
   const dir = args.find((a) => !a.startsWith("-"));
   if (!dir) {
     out(usage());
@@ -436,17 +480,19 @@ export async function runAnchor(
   let failed = 0;
   for (const hash of pending) {
     const got = issuer
-      ? await registerStatement(serviceName, hash, checkpointStatement(hash, issuer.chain, issuer.keys), serviceKey, fetchImpl, now, wait)
-      : await registerCheckpoint(serviceName, hash, serviceKey, fetchImpl, now);
+      ? await registerStatement(serviceName, hash, checkpointStatement(hash, issuer.chain, issuer.keys), serviceKey, fetchImpl, now, wait, token)
+      : await registerCheckpoint(serviceName, hash, serviceKey, fetchImpl, now, token);
     if (!got.ok) {
       failed += 1;
       const short = hash.slice(0, 12);
       out(
         got.reason === "unreachable"
           ? `anchor: ${short} not registered: ${got.message}`
-          : got.reason === "wrong-receipt"
-            ? `anchor: ${short} ${got.message}`
-            : `anchor: ${short} receipt does not verify under --service-key; not kept`,
+          : got.reason === "unauthorized"
+            ? `anchor: ${short} not registered: unauthorized`
+            : got.reason === "wrong-receipt"
+              ? `anchor: ${short} ${got.message}`
+              : `anchor: ${short} receipt does not verify under --service-key; not kept`,
       );
       continue;
     }
