@@ -17,7 +17,6 @@ import { approvePending, approvalsLogFor, createProxy, FileLedger, loadPolicy } 
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
 import {
-  htmlEscape,
   parseReportDate,
   reportDigest,
   runReport,
@@ -30,6 +29,11 @@ const FROM_MS = Date.UTC(2026, 2, 1);
 const TO_EXCLUSIVE = Date.UTC(2026, 3, 1);
 const SECRET_ARG = "SECRET_PAYEE_NEVER_IN_REPORT";
 const ESCAPED_TOOL = `<script>x</script>."quoted"`;
+const ESCAPED_TOOL_HTML = `&lt;script&gt;x&lt;/script&gt;.&quot;quoted&quot;`;
+const IMG_TOOL = `<img src=x onerror=alert(1)`;
+const IMG_TOOL_HTML = `&lt;img src=x onerror=alert(1)`;
+const AMP_TOOL = `a'b&c`;
+const AMP_TOOL_HTML = `a&#39;b&amp;c`;
 
 const POLICY = {
   version: 1,
@@ -56,6 +60,20 @@ const POLICY = {
       requires: ["verax:memory"],
       mode: "allow",
       text: "A tool name that needs escaping.",
+    },
+    {
+      id: "img-tool-allow",
+      tool: IMG_TOOL,
+      requires: ["verax:memory"],
+      mode: "allow",
+      text: "A tool name with an img tag shape.",
+    },
+    {
+      id: "amp-tool-allow",
+      tool: AMP_TOOL,
+      requires: ["verax:memory"],
+      mode: "allow",
+      text: "A tool name with apostrophe and ampersand.",
     },
   ],
 };
@@ -102,7 +120,7 @@ async function buildLedger(): Promise<string> {
 
   let clock = FROM_MS - 1;
   const now = () => clock;
-  const refs = ["before", "at-from", "allow-1", "deny-1", "escape-tool", "after"];
+  const refs = ["before", "at-from", "allow-1", "deny-1", "escape-tool", "img-tool", "amp-tool", "after"];
   let r = 0;
   const nonce = () => {
     const n = refs[r];
@@ -166,9 +184,13 @@ async function buildLedger(): Promise<string> {
   assert.equal(approved.ok, true, "approve of held call");
   clock = Date.UTC(2026, 2, 15, 12) + 2_000;
   await proxy.call({ name: "memory.put", arguments: heldArgs }, principal);
-  // escaped tool name in window
+  // escaped tool names in window
   clock = Date.UTC(2026, 2, 20, 12);
   await proxy.call({ name: ESCAPED_TOOL, arguments: { x: 1 } }, principal);
+  clock = Date.UTC(2026, 2, 20, 13);
+  await proxy.call({ name: IMG_TOOL, arguments: { x: 1 } }, principal);
+  clock = Date.UTC(2026, 2, 20, 14);
+  await proxy.call({ name: AMP_TOOL, arguments: { x: 1 } }, principal);
 
   // after window (to+1 day)
   clock = TO_EXCLUSIVE;
@@ -229,8 +251,8 @@ describe("verax report", () => {
       recordCount: number;
     };
     // in window: at-from allow, allow-1 allow, deny-1 deny, defer-approved defer,
-    // allow-approved allow, escape-tool allow, still-held defer.
-    assert.equal(report.decisions.total.allow, 4);
+    // allow-approved allow, escape-tool allow, img-tool allow, amp-tool allow, still-held defer.
+    assert.equal(report.decisions.total.allow, 6);
     assert.equal(report.decisions.total.deny, 1);
     assert.equal(report.decisions.total.defer, 2);
     assert.equal(report.decisions.byTool["memory.get"]?.allow, 2);
@@ -238,13 +260,15 @@ describe("verax report", () => {
     assert.equal(report.decisions.byTool["memory.put"]?.defer, 2);
     assert.equal(report.decisions.byTool["memory.put"]?.allow, 1);
     assert.equal(report.decisions.byTool[ESCAPED_TOOL]?.allow, 1);
+    assert.equal(report.decisions.byTool[IMG_TOOL]?.allow, 1);
+    assert.equal(report.decisions.byTool[AMP_TOOL]?.allow, 1);
     assert.equal(report.approvals.approved, 1);
     assert.equal(report.approvals.withoutOperatorSignature, 1);
     assert.equal(report.approvals.withOperatorSignature, 0);
     assert.equal(report.approvals.stillHeld, 1);
     assert.equal(report.checkpoints.count, 1);
     assert.equal(report.checkpoints.withAnchor, 0);
-    assert.equal(report.recordCount, 7);
+    assert.equal(report.recordCount, 9);
   });
 
   it("excludes one millisecond before from and the instant at to+1 day; includes from midnight", async () => {
@@ -290,11 +314,29 @@ describe("verax report", () => {
     await runReport([dir, "--from", FROM, "--to", TO, "--json"], jsonCap.out);
     const report = JSON.parse(jsonCap.text()) as { decisions: { byTool: Record<string, unknown> } };
     assert.ok(Object.prototype.hasOwnProperty.call(report.decisions.byTool, ESCAPED_TOOL));
+    assert.ok(Object.prototype.hasOwnProperty.call(report.decisions.byTool, IMG_TOOL));
+    assert.ok(Object.prototype.hasOwnProperty.call(report.decisions.byTool, AMP_TOOL));
     const outPath = join(dir, "escape.html");
     await runReport([dir, "--from", FROM, "--to", TO, "--out", outPath], capture().out);
     const html = readFileSync(outPath, "utf8");
-    assert.equal(html.includes("<script>"), false);
-    assert.ok(html.includes(htmlEscape(ESCAPED_TOOL)));
+    assert.equal(/<script/i.test(html), false);
+    assert.equal(html.includes("<img"), false);
+    assert.ok(html.includes(ESCAPED_TOOL_HTML));
+    assert.ok(html.includes(IMG_TOOL_HTML));
+    assert.ok(html.includes(AMP_TOOL_HTML));
+  });
+
+  it("names the hold-time and checkpoint-overlap window rules", async () => {
+    const dir = await buildLedger();
+    const jsonCap = capture();
+    await runReport([dir, "--from", FROM, "--to", TO, "--json"], jsonCap.out);
+    const report = JSON.parse(jsonCap.text()) as { whatThisReportDoesNotShow: string };
+    assert.ok(report.whatThisReportDoesNotShow.includes("A held call is counted by the time it was held."));
+    assert.ok(
+      report.whatThisReportDoesNotShow.includes(
+        "A checkpoint is counted when its coverage overlaps the window.",
+      ),
+    );
   });
 
   it("an argument value in a record does not appear in JSON, HTML or text", async () => {
