@@ -672,6 +672,36 @@ with what the checkpoint counts. No other SCRAPI service has been tried.
 
 Guards: `anchor-scrapi`, `signed-statement`, `ccf-receipt`.
 
+## Period report — unreleased
+
+`verax report <stateDir> --from <YYYY-MM-DD> --to <YYYY-MM-DD>`
+reads a ledger directory the same way `verax verify` does: offline, with no
+body running and nothing on the network. The window is
+`[from 00:00:00Z, to+1 day 00:00:00Z)`. It counts decisions in that window
+(allow, deny, defer, in total and per tool name), held-call approvals whose
+hold time falls in the window (approved with or without an operator
+signature, and still held), and checkpoints whose coverage overlaps the
+window, including how many of those have an anchor row. It also carries the
+verification verdict `verax verify` would give for the whole ledger, with
+its problem lines when the ledger does not verify, the first and last
+record time in the window, the record count, and the ledger head hash at
+read time. `--json` prints one object with a fixed key order and no
+generation timestamp; `--out <file.html>` writes one self-contained HTML
+file that ends with the SHA-256 of that JSON form, and refuses to overwrite
+an existing file. Without either flag it prints a short plain-text summary
+and the digest. Exit code is 0 when the ledger verifies and the same
+non-zero code `verax verify` uses when it does not; the report is still
+written and names the verdict at the top. Usage errors (unknown option,
+malformed dates, `--from` after `--to`, overwrite) exit 64.
+
+What it does not show. It counts what is in the ledger. A call that never
+passed through the gate is not in it. A count is not a judgement that a
+decision was right. Argument values, payee names, amounts, prompts and
+operator names do not appear; tool names and counts only. Operator identity
+appears only as the hash the ledger already holds.
+
+Guards: `report`.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a
