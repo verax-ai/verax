@@ -15,7 +15,7 @@ import {
   sign1Structure,
 } from "../packages/proxy/src/transparency-receipt.ts";
 
-import { runAnchor } from "../packages/body/src/anchor-cli.ts";
+import { registerCheckpoint, runAnchor } from "../packages/body/src/anchor-cli.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ledger = join(root, "test-vectors", "v1", "valid-full", "ledger");
@@ -332,5 +332,61 @@ describe("verax anchor", () => {
   it("the receipt verifier itself fails closed on a different leaf entry", () => {
     const check = verifyReceipt(Buffer.from(row.receiptB64, "base64"), Buffer.alloc(32, 7), serviceKey);
     assert.equal(check.ok, false);
+  });
+
+  it("sends Authorization from --token-file and never writes the token into the ledger directory", async () => {
+    const dir = copyLedger(false);
+    const keyFile = join(dir, "service-key.pem");
+    const tokenFile = join(dir, "token.txt");
+    const token = "client-token-value-20chars";
+    writeFileSync(keyFile, serviceKey, "utf8");
+    writeFileSync(tokenFile, `${token}\n`, "utf8");
+    try {
+      const seen: { url: string; body: string; authorization: string | null }[] = [];
+      const out: string[] = [];
+      const fetchImpl = (async (url: string | URL | Request, init?: RequestInit) => {
+        const headers = new Headers(init?.headers);
+        seen.push({ url: String(url), body: String(init?.body ?? ""), authorization: headers.get("authorization") });
+        return new Response(JSON.stringify(answer), { status: 200, headers: { "content-type": "application/json" } });
+      }) as typeof fetch;
+      const code = await runAnchor(
+        [dir, "--service", "https://witness.example", "--service-key", keyFile, "--token-file", tokenFile],
+        (s) => out.push(s),
+        fetchImpl,
+        () => 1,
+      );
+      assert.equal(code, 0, out.join("\n"));
+      assert.equal(seen[0]!.authorization, `Bearer ${token}`);
+      assert.ok(!out.join("\n").includes(token));
+      const anchors = readFileSync(join(dir, "checkpoint-anchors.jsonl"), "utf8");
+      assert.ok(!anchors.includes(token));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a 401 from the service is unauthorized, not unreachable", async () => {
+    const fetch401 = (async () => new Response("", { status: 401 })) as typeof fetch;
+    const got = await registerCheckpoint("https://witness.example", row.checkpointHash, null, fetch401);
+    assert.equal(got.ok, false);
+    assert.equal(got.ok ? "" : got.reason, "unauthorized");
+  });
+
+  it("a short --token-file is a usage error", async () => {
+    const dir = copyLedger(false);
+    const tokenFile = join(dir, "short.txt");
+    writeFileSync(tokenFile, "too-short\n", "utf8");
+    try {
+      const out: string[] = [];
+      const code = await runAnchor(
+        [dir, "--service", "https://witness.example", "--token-file", tokenFile],
+        (s) => out.push(s),
+        fakeService(answer, []),
+      );
+      assert.equal(code, 64);
+      assert.match(out.join("\n"), /20 to 512 printable ASCII/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
