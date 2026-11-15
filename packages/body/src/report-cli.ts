@@ -99,6 +99,12 @@ export type PeriodReport = {
   decisions: {
     total: DecisionCounts | null;
     byTool: { [tool: string]: DecisionCounts } | null;
+    /**
+     * Records whose subject is empty or not a string. Null when counts are
+     * unavailable. Identity: for each kind, sum(byTool[*][kind]) +
+     * withoutSubject[kind] === total[kind].
+     */
+    withoutSubject: DecisionCounts | null;
   };
   approvals: {
     approved: number | null;
@@ -176,17 +182,13 @@ function bump(counts: DecisionCounts, decision: string): void {
 }
 
 /**
- * Per-tool bucket for a decision's subject. Empty or non-string subjects use
- * the ASCII unit separator (U+001F): it is not a printable tool name an
- * operator would choose, so it cannot collide with a real tool while still
- * letting empty and missing subjects share one key that keeps byTool totals
- * equal to the overall counts.
+ * Usable per-tool subject, or null when empty or not a string. Null subjects
+ * are counted in `withoutSubject`, not under a synthetic byTool key, so a
+ * real tool named U+001F cannot collide with the empty/missing bucket.
  */
-export const MISSING_SUBJECT_TOOL_KEY = "\u001f";
-
-export function subjectToolKey(subject: unknown): string {
+export function subjectToolKey(subject: unknown): string | null {
   if (typeof subject === "string" && subject !== "") return subject;
-  return MISSING_SUBJECT_TOOL_KEY;
+  return null;
 }
 
 function readLines(path: string): string[] {
@@ -730,7 +732,7 @@ function unverifiedReport(from: string, to: string, problem: string): PeriodRepo
     },
     countsUnavailableReason: COUNTS_UNAVAILABLE_REASON,
     unsignedApprovalsNote: null,
-    decisions: { total: null, byTool: null },
+    decisions: { total: null, byTool: null, withoutSubject: null },
     approvals: {
       approved: null,
       withOperatorSignatureFieldPresent: null,
@@ -814,6 +816,7 @@ export async function buildPeriodReport(
   });
 
   const total = emptyCounts();
+  const withoutSubject = emptyCounts();
   const byToolMap = new Map<string, DecisionCounts>();
   let firstRecordMs: number | null = null;
   let lastRecordMs: number | null = null;
@@ -825,6 +828,10 @@ export async function buildPeriodReport(
     if (typeof decision !== "string") continue;
     bump(total, decision);
     const tool = subjectToolKey(row.claims.subject);
+    if (tool === null) {
+      bump(withoutSubject, decision);
+      continue;
+    }
     let counts = byToolMap.get(tool);
     if (!counts) {
       counts = emptyCounts();
@@ -834,6 +841,8 @@ export async function buildPeriodReport(
   }
 
   // Own keys only: tool names such as __proto__ must not hit Object.prototype.
+  // byTool holds only real subjects; empty/missing are in withoutSubject.
+  // Identity: per-tool numbers plus withoutSubject equal the totals.
   const byTool: { [tool: string]: DecisionCounts } = Object.create(null);
   for (const tool of [...byToolMap.keys()].sort()) {
     byTool[tool] = byToolMap.get(tool)!;
@@ -906,7 +915,7 @@ export async function buildPeriodReport(
     verification,
     countsUnavailableReason: null,
     unsignedApprovalsNote,
-    decisions: { total, byTool },
+    decisions: { total, byTool, withoutSubject },
     approvals,
     checkpoints,
     whatThisReportDoesNotShow: WHAT_NOT_SHOWN,
@@ -935,6 +944,7 @@ export function serializePeriodReport(report: PeriodReport): string {
           .sort()
           .map((tool) => `${JSON.stringify(tool)}:${jsonCounts(report.decisions.byTool![tool]!)}`)
           .join(",")}}`;
+  const withoutSubjectJson = jsonCounts(report.decisions.withoutSubject);
   const problemsJson = `[${report.verification.problems.map((p) => JSON.stringify(p)).join(",")}]`;
   const a = report.approvals;
   const c = report.checkpoints;
@@ -950,7 +960,7 @@ export function serializePeriodReport(report: PeriodReport): string {
       `"verification":{"ok":${report.verification.ok},"verdict":${JSON.stringify(report.verification.verdict)},"problems":${problemsJson}}`,
       `"countsUnavailableReason":${JSON.stringify(report.countsUnavailableReason)}`,
       `"unsignedApprovalsNote":${JSON.stringify(report.unsignedApprovalsNote)}`,
-      `"decisions":{"total":${jsonCounts(report.decisions.total)},"byTool":${byToolJson}}`,
+      `"decisions":{"total":${jsonCounts(report.decisions.total)},"byTool":${byToolJson},"withoutSubject":${withoutSubjectJson}}`,
       `"approvals":{"approved":${jsonNum(a.approved)},"withOperatorSignatureFieldPresent":${jsonNum(a.withOperatorSignatureFieldPresent)},"withoutOperatorSignatureField":${jsonNum(a.withoutOperatorSignatureField)},"closedWithoutAllow":${jsonNum(a.closedWithoutAllow)},"stillHeld":${jsonNum(a.stillHeld)},"unmatched":${jsonNum(a.unmatched)},"terminalsWithoutBoundInputs":${jsonNum(a.terminalsWithoutBoundInputs)},"heldWithoutBoundAnswer":${jsonNum(a.heldWithoutBoundAnswer)},"heldPossiblyAnsweredByUnbound":${jsonNum(a.heldPossiblyAnsweredByUnbound)},"unavailableReason":${JSON.stringify(a.unavailableReason)}}`,
       `"checkpoints":{"count":${jsonNum(c.count)},"withAnchorVerified":${jsonNum(c.withAnchorVerified)},"anchorRowsPresentNotChecked":${jsonNum(c.anchorRowsPresentNotChecked)},"anchorUnavailableReason":${JSON.stringify(c.anchorUnavailableReason)}}`,
       `"whatThisReportDoesNotShow":${JSON.stringify(report.whatThisReportDoesNotShow)}`,
@@ -1043,6 +1053,7 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     `<p>Total: ${shownCounts(report.decisions.total)}.</p>`,
     "<table><thead><tr><th>Tool</th><th>Allow</th><th>Deny</th><th>Defer</th></tr></thead>",
     `<tbody>${toolRows}</tbody></table>`,
+    `<p>No usable subject: ${shownCounts(report.decisions.withoutSubject)}.</p>`,
     "<h2>Approvals</h2>",
     `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}${a.stillHeld === null && a.heldPossiblyAnsweredByUnbound !== null && a.heldPossiblyAnsweredByUnbound > 0 ? ` (${a.heldPossiblyAnsweredByUnbound} held record(s) could have been answered by an unbound record)` : ""}. Unmatched: ${shown(a.unmatched)}. Terminals without bound inputs: ${shown(a.terminalsWithoutBoundInputs)}.${approvalsReason}</p>`,
     "<p>Approved means the first signed bound answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed bound answer exists and no later unbound record could have answered the defer; when a held defer could have been answered by an unbound record anywhere after it, still held is not established. Unmatched means the defer has no usable reference, shares it with another defer, or its bound answers disagree on request hash or tool.</p>",
@@ -1079,6 +1090,7 @@ export function renderReportText(report: PeriodReport, digest: string): string {
       lines.push(`  ${tool}  allow ${t.allow}, deny ${t.deny}, defer ${t.defer}`);
     }
   }
+  lines.push(`no usable subject  ${shownCounts(report.decisions.withoutSubject)}`);
   lines.push(
     `approvals     approved ${shown(a.approved)} (signature field present ${shown(a.withOperatorSignatureFieldPresent)}, absent ${shown(a.withoutOperatorSignatureField)}), closed without an allow ${shown(a.closedWithoutAllow)}, still held ${shown(a.stillHeld)}, unmatched ${shown(a.unmatched)}, terminals without bound inputs ${shown(a.terminalsWithoutBoundInputs)}`,
   );

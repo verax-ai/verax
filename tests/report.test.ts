@@ -527,12 +527,10 @@ describe("verax report", () => {
   });
 
   it("j4. empty or missing subject counts under one fixed byTool key that sums to total", async () => {
-    // A non-string subject cannot appear on a verifying ledger (signature fails).
-    // subjectToolKey still maps empty and missing to the same reserved key.
-    const missingKey = "\u001f";
-    assert.equal(subjectToolKey(""), missingKey);
-    assert.equal(subjectToolKey(undefined), missingKey);
-    assert.equal(subjectToolKey(null), missingKey);
+    // Superseded by k3: empty/missing are no longer a byTool key.
+    assert.equal(subjectToolKey(""), null);
+    assert.equal(subjectToolKey(undefined), null);
+    assert.equal(subjectToolKey(null), null);
     assert.equal(subjectToolKey("memory.put"), "memory.put");
 
     const dir = mkdtempSync(join(tmpdir(), "verax-report-j4-"));
@@ -612,13 +610,121 @@ describe("verax report", () => {
     assert.equal(code, 0, text);
     const total = report.decisions.total!;
     const byTool = report.decisions.byTool!;
-    assert.equal(byTool[missingKey]?.defer, 1);
+    const withoutSubject = report.decisions.withoutSubject!;
+    assert.equal(byTool["\u001f"], undefined);
+    assert.equal(withoutSubject.defer, 1);
     assert.equal(byTool["memory.put"]?.defer, 1);
     assert.equal(byTool["memory.get"]?.deny, 1);
+    // Per-tool numbers plus withoutSubject equal the totals.
     for (const kind of ["allow", "deny", "defer"] as const) {
-      const sum = Object.values(byTool).reduce((n, c) => n + c[kind], 0);
+      const sum = Object.values(byTool).reduce((n, c) => n + c[kind], 0) + withoutSubject[kind];
       assert.equal(sum, total[kind], kind);
     }
+  });
+
+  it("k3. empty, missing and U+001F subjects land in three distinct places", async () => {
+    // Empty and missing are not usable subjects; U+001F is a real subject key.
+    assert.equal(subjectToolKey(""), null);
+    assert.equal(subjectToolKey(undefined), null);
+    assert.equal(subjectToolKey(null), null);
+    assert.equal(subjectToolKey("\u001f"), "\u001f");
+
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-k3-"));
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    try {
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "defer",
+            reasonCode: "needs-approval",
+            ref: "k3-empty",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY,
+            nonce: "k3-empty",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "\u001f",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "allow",
+            reasonCode: "ok",
+            ref: "k3-unitsep",
+            effectHash: sha("effect-k3"),
+            effectClass: "memory.put",
+            timestampMs: DAY + 1,
+            nonce: "k3-unit",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.get",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "deny",
+            reasonCode: "denied",
+            ref: "k3-named",
+            effectHash: null,
+            effectClass: "memory.get",
+            timestampMs: DAY + 2,
+            nonce: "k3-named",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+    } finally {
+      ledger.close();
+    }
+    // A non-string subject cannot appear on a verifying ledger (signature fails).
+    // Missing shares the withoutSubject field with empty; cover it via subjectToolKey.
+    const verified = await verifyLedger(dir);
+    assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+
+    const { code, report, text } = await reportJson(dir);
+    assert.equal(code, 0, text);
+    const total = report.decisions.total!;
+    const byTool = report.decisions.byTool!;
+    const withoutSubject = report.decisions.withoutSubject!;
+    assert.equal(Object.prototype.hasOwnProperty.call(byTool, "\u001f"), true);
+    assert.equal(byTool["\u001f"]?.allow, 1);
+    assert.equal(byTool["memory.get"]?.deny, 1);
+    assert.equal(withoutSubject.defer, 1);
+    assert.equal(withoutSubject.allow, 0);
+    assert.equal(withoutSubject.deny, 0);
+    // Three distinct places: withoutSubject (empty/missing), byTool U+001F, byTool named.
+    assert.equal(byTool[""], undefined);
+    for (const kind of ["allow", "deny", "defer"] as const) {
+      const sum = Object.values(byTool).reduce((n, c) => n + c[kind], 0) + withoutSubject[kind];
+      assert.equal(sum, total[kind], kind);
+    }
+    const plain = await reportText(dir);
+    assert.match(plain.text, /no usable subject|without a usable subject|no subject/i);
+    const { html } = await reportHtml(dir);
+    assert.match(html, /no usable subject|without a usable subject|no subject/i);
   });
 
   it("j3. report verifies with default options only; pinned verify differs on valid-anchored", async () => {
@@ -1113,6 +1219,11 @@ describe("verax report", () => {
     assert.equal(byTool[ESCAPED_TOOL]?.allow, 1);
     assert.equal(byTool[IMG_TOOL]?.allow, 1);
     assert.equal(byTool[AMP_TOOL]?.allow, 1);
+    const withoutSubject = report.decisions.withoutSubject!;
+    for (const kind of ["allow", "deny", "defer"] as const) {
+      const sum = Object.values(byTool).reduce((n, c) => n + c[kind], 0) + withoutSubject[kind];
+      assert.equal(sum, total[kind], kind);
+    }
     const a = report.approvals;
     assert.equal(a.approved, 1);
     assert.equal(a.withoutOperatorSignatureField, 1);
@@ -1264,6 +1375,7 @@ describe("verax report", () => {
           "z.tool": { allow: 1, deny: 0, defer: 0 },
           "a.tool": { allow: 0, deny: 1, defer: 0 },
         },
+        withoutSubject: { allow: 0, deny: 0, defer: 0 },
       },
       approvals: {
         approved: 0,
@@ -1306,6 +1418,7 @@ describe("verax report", () => {
           "a.tool": { allow: 0, deny: 1, defer: 0 },
           "z.tool": { allow: 1, deny: 0, defer: 0 },
         },
+        withoutSubject: report.decisions.withoutSubject,
       },
     };
     assert.equal(serializePeriodReport(reordered), once);
@@ -1750,6 +1863,7 @@ describe("verax report", () => {
     assert.equal(report.headHash, null);
     assert.equal(report.decisions.total, null);
     assert.equal(report.decisions.byTool, null);
+    assert.equal(report.decisions.withoutSubject, null);
     for (const key of [
       "approved",
       "withOperatorSignatureFieldPresent",

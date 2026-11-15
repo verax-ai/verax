@@ -716,7 +716,9 @@ Counts come only from the decision records and checkpoints that
 not, every count is `null` (JSON, HTML and text say so with the
 verification problem classes); unverified material is never counted. It
 counts attested decisions in the window (allow, deny, defer, in total and
-per tool name), held calls from attested defer records whose hold time
+per tool name, with records that have no usable subject counted beside
+the per-tool table so those numbers plus that field equal the totals),
+held calls from attested defer records whose hold time
 falls in the window (approved when the first terminal signed bound answer
 after the defer in chain order names it and agrees on request hash and
 tool and is an allow; closed without an allow when that first answer is a
