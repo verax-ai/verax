@@ -6,16 +6,20 @@
  * It counts decisions, held-call approvals and checkpoints inside the window,
  * and carries the verification verdict `verax verify` would give for the whole
  * ledger. It does not judge whether a decision was right.
+ *
+ * Counts come only from the records and checkpoints `verifyLedger` attested,
+ * and only when the ledger verifies. A ledger that does not verify yields
+ * `null` for every count: unverified material is never counted.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
-  copyFileSync,
-  constants as fsConstants,
+  linkSync,
   readFileSync,
+  realpathSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { checkpointHash, type SignedCheckpoint } from "@cedulon/checkpoint";
 import { canonical, decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
@@ -23,9 +27,8 @@ import {
   listPieceFiles,
   loadApprovalsFromDir,
   readAnchors,
-  readCheckpointFile,
-  terminalText,
   terminalLines,
+  terminalText,
   verifyLedger,
   type VerifyResult,
 } from "@verax-ai/proxy";
@@ -33,23 +36,40 @@ import {
 import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
 import { verifyControlSignatures, type ControlSignatureReport } from "./control-signature.ts";
 import { readStartSummary } from "./heartbeat.ts";
-import { directoryAccess, unreadableSentence } from "./install.ts";
+import { directoryAccess } from "./install.ts";
 import { EX_VERIFY_FAILED, verdictLine } from "./verify-cli.ts";
 
 export const EX_USAGE = 64;
 
 const DAY_MS = 86_400_000;
 
+const COUNTS_UNAVAILABLE_REASON =
+  "the ledger did not verify; nothing is counted from unverified records (see the verification problem classes)";
+
+const UNSIGNED_APPROVALS_NOTE =
+  "approvals.jsonl could not be parsed cleanly. It is an unsigned candidate file: it is not a source of any count and it does not change the verdict.";
+
 const WHAT_NOT_SHOWN =
-  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. A held call is a signed defer counted by the time it was held; it is approved when a signed allow answers it, closed without an allow when a signed record refuses it (expired or otherwise), and still held when no signed answer exists. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
+  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. Counts are taken only from records and checkpoints that verification attested, and only when the ledger verifies; when it does not, every count is null. A held call is a signed defer counted by the time it was held. It is approved when the first signed allow or deny that follows it in chain order, names it, and agrees on request hash and tool, is an allow; it is closed without an allow when that first answer is a deny (expired or otherwise); it is still held when no signed answer exists; it is unmatched when the defer has no usable reference, shares its reference with another defer, or its only answers disagree on request hash or tool. A signature field present on an approving record is not a verified operator signature in this report; signature verification is part of the verdict. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses and its start is before its end. Anchor receipts are counted as verified only when the anchor key was supplied and they verified; otherwise they are only counted as present and not checked. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
 
 type DecisionCounts = { allow: number; deny: number; defer: number };
+
+export type ApprovalCounts = {
+  approved: number;
+  withOperatorSignatureFieldPresent: number;
+  withoutOperatorSignatureField: number;
+  closedWithoutAllow: number;
+  stillHeld: number;
+  unmatched: number;
+};
 
 export type PeriodReport = {
   from: string;
   to: string;
+  /** Head of the whole verified ledger. Null when the ledger does not verify. */
   headHash: string | null;
-  recordCount: number;
+  /** Records in the window. Null when the ledger does not verify. */
+  recordCount: number | null;
   firstRecordMs: number | null;
   lastRecordMs: number | null;
   verification: {
@@ -57,20 +77,33 @@ export type PeriodReport = {
     verdict: string;
     problems: string[];
   };
+  /** Why every count is null, or null when counts are available. */
+  countsUnavailableReason: string | null;
+  /** Set when approvals.jsonl is malformed. Never affects verdict or counts. */
+  unsignedApprovalsNote: string | null;
   decisions: {
-    total: DecisionCounts;
-    byTool: { [tool: string]: DecisionCounts };
+    total: DecisionCounts | null;
+    byTool: { [tool: string]: DecisionCounts } | null;
   };
   approvals: {
-    approved: number;
-    withOperatorSignature: number;
-    withoutOperatorSignature: number;
-    closedWithoutAllow: number;
-    stillHeld: number;
+    approved: number | null;
+    /** Approving records whose hash-bound inputs carry an approver signature field. Not a verification. */
+    withOperatorSignatureFieldPresent: number | null;
+    withoutOperatorSignatureField: number | null;
+    closedWithoutAllow: number | null;
+    stillHeld: number | null;
+    unmatched: number | null;
+    /** Class only, when approvals could not be counted although the ledger verified. */
+    unavailableReason: string | null;
   };
   checkpoints: {
-    count: number;
-    withAnchor: number;
+    count: number | null;
+    /** Anchor receipts for window checkpoints that verified. Zero when anchors were not checked. */
+    withAnchorVerified: number | null;
+    /** Anchor rows for window checkpoints present but not checked (no anchor key). */
+    anchorRowsPresentNotChecked: number | null;
+    /** Class only, when anchors could not be read although the ledger verified. */
+    anchorUnavailableReason: string | null;
   };
   whatThisReportDoesNotShow: string;
 };
@@ -81,12 +114,16 @@ function usage(): string {
     "",
     "  <stateDir>     the directory holding decisions.jsonl and related ledger files",
     "  --from <date>  inclusive start of the window, UTC midnight (YYYY-MM-DD)",
-    "  --to <date>    inclusive calendar end; the window is [from, to+1 day) UTC",
-    "  --out <file>   write one self-contained HTML file (refuses to overwrite)",
+    "  --to <date>    the last day, included in full; the window is [from, to + 1 day) UTC",
+    "  --out <file>   write one self-contained HTML file (refuses to overwrite, and",
+    "                 refuses a path inside <stateDir>)",
     "  --json         one JSON object on stdout; no generation timestamp",
     "",
+    "Counts come only from ledger records that verified. When the ledger does not",
+    "verify, every count is null and the report says NOT VERIFIED.",
     "Exit code is 0 when the ledger verifies and the same non-zero code",
-    "`verax verify` uses when it does not. Usage errors exit 64.",
+    "`verax verify` uses when it does not (an unreadable directory included).",
+    "Usage errors exit 64.",
   ].join("\n");
 }
 
@@ -177,47 +214,59 @@ export function readDecisionRecords(dir: string): SignedDecisionRecord[] {
   return out;
 }
 
-function inputsForRecord(
-  dir: string,
-  row: SignedDecisionRecord,
-): { approver?: { signature?: unknown; resolves?: unknown } } | null {
-  const ref = row.claims.ref;
-  const inputsHash = row.claims.inputsHash;
-  if (typeof ref !== "string" || typeof inputsHash !== "string") return null;
+type ApproverInputs = { approver?: { signature?: unknown; resolves?: unknown } };
+
+/** Inputs rows by ref, each with the hash a signed record's `inputsHash` must equal. */
+type InputsIndex = Map<string, { hash: string; inputs: ApproverInputs }[]>;
+
+function buildInputsIndex(dir: string): InputsIndex {
+  const index: InputsIndex = new Map();
   for (const piece of listPieceFiles(dir)) {
     for (const line of readLines(piece.inputs)) {
       try {
-        const doc = JSON.parse(line) as {
-          ref?: unknown;
-          inputs?: { approver?: { signature?: unknown; resolves?: unknown } };
-        };
-        if (doc.ref !== ref || doc.inputs === undefined) continue;
+        const doc = JSON.parse(line) as { ref?: unknown; inputs?: unknown };
+        if (typeof doc.ref !== "string" || doc.inputs === undefined || doc.inputs === null) continue;
+        if (typeof doc.inputs !== "object") continue;
         const hash = createHash("sha256").update(canonical(doc.inputs), "utf8").digest("hex");
-        if (hash !== inputsHash) continue;
-        return doc.inputs;
+        let list = index.get(doc.ref);
+        if (!list) {
+          list = [];
+          index.set(doc.ref, list);
+        }
+        list.push({ hash, inputs: doc.inputs as ApproverInputs });
       } catch {
         // skip a torn line
       }
     }
   }
-  return null;
+  return index;
 }
 
-function allowCarriesOperatorSignature(dir: string, allow: SignedDecisionRecord): boolean {
-  const inputs = inputsForRecord(dir, allow);
-  return inputs?.approver?.signature !== undefined;
+/** The inputs row that hashes to the record's signed `inputsHash`, or null. */
+function inputsForRecord(index: InputsIndex, row: SignedDecisionRecord): ApproverInputs | null {
+  const ref = row.claims.ref;
+  const inputsHash = row.claims.inputsHash;
+  if (typeof ref !== "string" || typeof inputsHash !== "string") return null;
+  const list = index.get(ref);
+  if (!list) return null;
+  for (const entry of list) {
+    if (entry.hash === inputsHash) return entry.inputs;
+  }
+  return null;
 }
 
 /**
  * Cedulon/verify coverage is half-open `[startMs, endMs)` (see verify-ledger:
  * `r.claims.timestampMs >= startMs && r.claims.timestampMs < endMs`). Overlap
  * with the report window `[fromMs, toExclusive)` is therefore
- * `start < toExclusive && fromMs < end`.
+ * `start < toExclusive && fromMs < end`. A checkpoint with `start >= end`
+ * covers nothing and is never counted.
  */
 export function checkpointInWindow(row: SignedCheckpoint, fromMs: number, toExclusive: number): boolean {
   const start = row.claims.startMs;
   const end = row.claims.endMs;
   if (typeof start !== "number" || typeof end !== "number") return false;
+  if (!(start < end)) return false;
   return start < toExclusive && fromMs < end;
 }
 
@@ -278,6 +327,8 @@ function failedVerifyShell(dir: string, problem: string): {
     inputs: { line: "inputs: not checked", matched: 0, missing: 0, mismatched: 0 },
     anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
     problems: [problem],
+    attestedDecisions: [],
+    attestedCheckpoints: [],
   };
   return {
     result,
@@ -297,15 +348,14 @@ async function verifyLikeVerifyCli(dir: string): Promise<{
   try {
     result = await verifyLedger(dir);
   } catch (err) {
-    const problem = err instanceof Error ? err.message : "ledger could not be read";
-    return failedVerifyShell(dir, problem);
+    return failedVerifyShell(dir, classOfThrown(err, "ledger-unreadable"));
   }
 
   let approval: ApprovalSignatureReport;
   try {
     approval = await verifyApprovalSignatures(dir);
   } catch (err) {
-    const problem = err instanceof Error ? err.message : "approval signatures could not be read";
+    const problem = classOfThrown(err, "approval-signatures-unreadable");
     approval = { ...APPROVAL_NOT_CHECKED, ok: false, trustNote: problem };
     result = { ...result, ok: false, problems: [...result.problems, problem] };
   }
@@ -328,7 +378,7 @@ async function verifyLikeVerifyCli(dir: string): Promise<{
   try {
     control = await verifyControlSignatures(dir);
   } catch (err) {
-    const problem = err instanceof Error ? err.message : "control signatures could not be read";
+    const problem = classOfThrown(err, "control-signatures-unreadable");
     control = { ...CONTROL_NOT_CHECKED, ok: false, trustNote: problem };
     result = { ...result, ok: false, problems: [...result.problems, problem] };
   }
@@ -348,9 +398,14 @@ async function verifyLikeVerifyCli(dir: string): Promise<{
   }
 
   const startKeyPem = result.trust.publicKeyPem ?? null;
-  const starts = readStartSummary(dir, startKeyPem, "in-ledger", { requireSigned: false });
-  if (starts.problems.length > 0) {
-    result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
+  try {
+    const starts = readStartSummary(dir, startKeyPem, "in-ledger", { requireSigned: false });
+    if (starts.problems.length > 0) {
+      result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
+    }
+  } catch (err) {
+    const problem = classOfThrown(err, "start-summary-unreadable");
+    result = { ...result, ok: false, problems: [...result.problems, problem] };
   }
 
   return {
@@ -361,86 +416,199 @@ async function verifyLikeVerifyCli(dir: string): Promise<{
   };
 }
 
-/**
- * Map defer ref -> signed record that answers it via inputs.approver.resolves.
- * An allow wins over a refusal when both are present.
- */
-function recordsAnsweringDefers(
-  dir: string,
-  all: SignedDecisionRecord[],
-): Map<string, SignedDecisionRecord> {
-  const out = new Map<string, SignedDecisionRecord>();
-  for (const row of all) {
-    const inputs = inputsForRecord(dir, row);
-    const resolves = inputs?.approver?.resolves;
-    if (typeof resolves !== "string" || resolves === "") continue;
-    const prev = out.get(resolves);
-    if (prev && prev.claims.decision === "allow") continue;
-    out.set(resolves, row);
-  }
-  return out;
+function refOf(row: SignedDecisionRecord): string | null {
+  const ref = row.claims.ref;
+  return typeof ref === "string" && ref !== "" ? ref : null;
 }
 
-function countApprovalsFromSigned(
+function nonEmptyString(v: unknown): string | null {
+  return typeof v === "string" && v !== "" ? v : null;
+}
+
+/**
+ * Held-call counts from attested records only, in chain order.
+ *
+ * A defer is answered by the first terminal (allow or deny) record that
+ * follows it in chain order, whose hash-bound inputs name the defer's ref in
+ * `approver.resolves`, and that agrees with the defer on request hash and
+ * tool. A record whose decision is defer is never an answer. One answer
+ * answers one defer. A defer with no usable ref, a ref shared with another
+ * defer, or only disagreeing answers is unmatched.
+ */
+export function countApprovalsFromSigned(
   dir: string,
-  all: SignedDecisionRecord[],
+  all: readonly SignedDecisionRecord[],
   fromMs: number,
   toExclusive: number,
-): {
-  approved: number;
-  withOperatorSignature: number;
-  withoutOperatorSignature: number;
-  closedWithoutAllow: number;
-  stillHeld: number;
-} {
-  const answering = recordsAnsweringDefers(dir, all);
-  let approved = 0;
-  let withOperatorSignature = 0;
-  let withoutOperatorSignature = 0;
-  let closedWithoutAllow = 0;
-  let stillHeld = 0;
+): ApprovalCounts {
+  const index = buildInputsIndex(dir);
+
+  const deferRefCount = new Map<string, number>();
   for (const row of all) {
     if (row.claims.decision !== "defer") continue;
-    const ts = row.claims.timestampMs;
-    if (typeof ts !== "number" || ts < fromMs || ts >= toExclusive) continue;
-    const ref = row.claims.ref;
-    if (typeof ref !== "string") continue;
-    const answer = answering.get(ref);
-    if (!answer) {
-      stillHeld += 1;
-      continue;
-    }
-    if (answer.claims.decision === "allow") {
-      approved += 1;
-      if (allowCarriesOperatorSignature(dir, answer)) withOperatorSignature += 1;
-      else withoutOperatorSignature += 1;
-      continue;
-    }
-    closedWithoutAllow += 1;
+    const ref = refOf(row);
+    if (ref !== null) deferRefCount.set(ref, (deferRefCount.get(ref) ?? 0) + 1);
   }
-  return {
-    approved,
-    withOperatorSignature,
-    withoutOperatorSignature,
-    closedWithoutAllow,
-    stillHeld,
+
+  // resolves ref -> terminal records naming it, in chain order.
+  const answersByRef = new Map<string, { pos: number; row: SignedDecisionRecord; inputs: ApproverInputs }[]>();
+  for (let pos = 0; pos < all.length; pos += 1) {
+    const row = all[pos]!;
+    const decision = row.claims.decision;
+    if (decision !== "allow" && decision !== "deny") continue;
+    const inputs = inputsForRecord(index, row);
+    const resolves = inputs?.approver?.resolves;
+    if (typeof resolves !== "string" || resolves === "" || inputs === null) continue;
+    let list = answersByRef.get(resolves);
+    if (!list) {
+      list = [];
+      answersByRef.set(resolves, list);
+    }
+    list.push({ pos, row, inputs });
+  }
+
+  const counts: ApprovalCounts = {
+    approved: 0,
+    withOperatorSignatureFieldPresent: 0,
+    withoutOperatorSignatureField: 0,
+    closedWithoutAllow: 0,
+    stillHeld: 0,
+    unmatched: 0,
   };
+  const consumed = new Set<SignedDecisionRecord>();
+
+  for (let pos = 0; pos < all.length; pos += 1) {
+    const defer = all[pos]!;
+    if (defer.claims.decision !== "defer") continue;
+    const ts = defer.claims.timestampMs;
+    const inWindow = typeof ts === "number" && ts >= fromMs && ts < toExclusive;
+
+    const ref = refOf(defer);
+    let outcome: "approved" | "closed" | "held" | "unmatched";
+    let decided: { row: SignedDecisionRecord; inputs: ApproverInputs } | null = null;
+
+    if (ref === null || (deferRefCount.get(ref) ?? 0) !== 1) {
+      outcome = "unmatched";
+    } else {
+      const candidates = (answersByRef.get(ref) ?? []).filter((c) => c.pos > pos && !consumed.has(c.row));
+      if (candidates.length === 0) {
+        outcome = "held";
+      } else {
+        const reqHash = nonEmptyString(defer.claims.requestHash);
+        const subject = nonEmptyString(defer.claims.subject);
+        const valid = candidates.find((c) => {
+          const aReq = nonEmptyString(c.row.claims.requestHash);
+          const aSubject = nonEmptyString(c.row.claims.subject);
+          return reqHash !== null && subject !== null && aReq === reqHash && aSubject === subject;
+        });
+        if (!valid) {
+          outcome = "unmatched";
+        } else {
+          consumed.add(valid.row);
+          decided = valid;
+          outcome = valid.row.claims.decision === "allow" ? "approved" : "closed";
+        }
+      }
+    }
+
+    if (!inWindow) continue;
+    if (outcome === "approved") {
+      counts.approved += 1;
+      if (decided?.inputs.approver?.signature !== undefined) counts.withOperatorSignatureFieldPresent += 1;
+      else counts.withoutOperatorSignatureField += 1;
+    } else if (outcome === "closed") {
+      counts.closedWithoutAllow += 1;
+    } else if (outcome === "held") {
+      counts.stillHeld += 1;
+    } else {
+      counts.unmatched += 1;
+    }
+  }
+  return counts;
 }
 
+/**
+ * Temp file with a random name, exclusive create, then a hard link to the
+ * final name: the link fails with EEXIST if the target exists, so an existing
+ * file is never replaced. The temp name is removed on every path.
+ */
 function writeOutExclusive(outPath: string, content: string): void {
-  const tmp = join(dirname(outPath), `.verax-report-${process.pid}-${Date.now()}.tmp`);
+  const tmp = join(dirname(outPath), `.verax-report-${randomBytes(12).toString("hex")}.tmp`);
+  let created = false;
   try {
-    writeFileSync(tmp, content, "utf8");
-    copyFileSync(tmp, outPath, fsConstants.COPYFILE_EXCL);
-    unlinkSync(tmp);
-  } catch (err) {
-    try {
-      unlinkSync(tmp);
-    } catch {
-      // best-effort cleanup
+    writeFileSync(tmp, content, { encoding: "utf8", flag: "wx" });
+    created = true;
+    linkSync(tmp, outPath);
+  } finally {
+    if (created) {
+      try {
+        unlinkSync(tmp);
+      } catch {
+        // best-effort cleanup
+      }
     }
-    throw err;
   }
+}
+
+function realOrResolved(path: string): string {
+  const abs = resolve(path);
+  try {
+    return realpathSync(abs);
+  } catch {
+    // The file may not exist yet: resolve its parent.
+  }
+  try {
+    return join(realpathSync(dirname(abs)), basename(abs));
+  } catch {
+    return abs;
+  }
+}
+
+function pathInside(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  if (rel === "") return true;
+  if (isAbsolute(rel)) return false;
+  return rel !== ".." && !rel.startsWith(`..${sep}`);
+}
+
+function outInsideStateDir(dir: string, outPath: string): boolean {
+  return pathInside(realOrResolved(outPath), realOrResolved(dir));
+}
+
+function unverifiedReport(from: string, to: string, problem: string): PeriodReport {
+  const shell = failedVerifyShell("", problem);
+  return {
+    from,
+    to,
+    headHash: null,
+    recordCount: null,
+    firstRecordMs: null,
+    lastRecordMs: null,
+    verification: {
+      ok: false,
+      verdict: shell.verdict,
+      problems: [problem],
+    },
+    countsUnavailableReason: COUNTS_UNAVAILABLE_REASON,
+    unsignedApprovalsNote: null,
+    decisions: { total: null, byTool: null },
+    approvals: {
+      approved: null,
+      withOperatorSignatureFieldPresent: null,
+      withoutOperatorSignatureField: null,
+      closedWithoutAllow: null,
+      stillHeld: null,
+      unmatched: null,
+      unavailableReason: null,
+    },
+    checkpoints: {
+      count: null,
+      withAnchorVerified: null,
+      anchorRowsPresentNotChecked: null,
+      anchorUnavailableReason: null,
+    },
+    whatThisReportDoesNotShow: WHAT_NOT_SHOWN,
+  };
 }
 
 export async function buildPeriodReport(
@@ -450,33 +618,55 @@ export async function buildPeriodReport(
   fromMs: number,
   toExclusive: number,
 ): Promise<PeriodReport> {
-  const earlyProblems: string[] = [];
-
-  let all: SignedDecisionRecord[] = [];
-  try {
-    all = readDecisionRecords(dir);
-  } catch (err) {
-    earlyProblems.push(classOfThrown(err, "ledger-unreadable"));
+  if (directoryAccess(dir) === "unreadable") {
+    return unverifiedReport(from, to, "state-unreadable");
   }
 
-  // Candidates only: a malformed line must not abort the report, and must not
-  // be the source of a count.
+  let verified: Awaited<ReturnType<typeof verifyLikeVerifyCli>>;
+  try {
+    verified = await verifyLikeVerifyCli(dir);
+  } catch (err) {
+    return unverifiedReport(from, to, classOfThrown(err, "ledger-unreadable"));
+  }
+  const result = verified.result;
+  const problemClasses = [...new Set(result.problems.map(problemClass))];
+
+  // Candidate file only: a malformed line is noted, never counted, and never
+  // changes the verdict.
+  let unsignedApprovalsNote: string | null = null;
   try {
     loadApprovalsFromDir(dir);
   } catch {
-    earlyProblems.push("approvals-malformed");
+    unsignedApprovalsNote = UNSIGNED_APPROVALS_NOTE;
   }
 
+  const verification = {
+    ok: result.ok,
+    verdict: verified.verdict,
+    problems: problemClasses,
+  };
+
+  if (!result.ok) {
+    const report = unverifiedReport(from, to, "unused");
+    return {
+      ...report,
+      verification,
+      unsignedApprovalsNote,
+    };
+  }
+
+  const attested = result.attestedDecisions;
+
   let headHash: string | null = null;
-  if (all.length > 0) {
+  if (attested.length > 0) {
     try {
-      headHash = decisionRecordHash(all[all.length - 1]!);
+      headHash = decisionRecordHash(attested[attested.length - 1]!);
     } catch {
       headHash = null;
     }
   }
 
-  const inWindow = all.filter((r) => {
+  const inWindow = attested.filter((r) => {
     const ts = r.claims.timestampMs;
     return typeof ts === "number" && ts >= fromMs && ts < toExclusive;
   });
@@ -508,52 +698,59 @@ export async function buildPeriodReport(
     byTool[tool] = byToolMap.get(tool)!;
   }
 
-  let approvals = {
-    approved: 0,
-    withOperatorSignature: 0,
-    withoutOperatorSignature: 0,
-    closedWithoutAllow: 0,
-    stillHeld: 0,
+  let approvals: PeriodReport["approvals"] = {
+    approved: null,
+    withOperatorSignatureFieldPresent: null,
+    withoutOperatorSignatureField: null,
+    closedWithoutAllow: null,
+    stillHeld: null,
+    unmatched: null,
+    unavailableReason: null,
   };
   try {
-    approvals = countApprovalsFromSigned(dir, all, fromMs, toExclusive);
+    approvals = { ...countApprovalsFromSigned(dir, attested, fromMs, toExclusive), unavailableReason: null };
   } catch (err) {
-    earlyProblems.push(classOfThrown(err, "approvals-unreadable"));
+    approvals.unavailableReason = classOfThrown(err, "approvals-unreadable");
   }
 
-  let withAnchor = 0;
-  let checkpointCount = 0;
-  try {
-    const anchors = readAnchors(dir);
-    const anchored = new Set(anchors.rows.map((r) => r.checkpointHash));
-    const checkpoints = readCheckpointFile(dir).rows.filter((row) =>
-      checkpointInWindow(row, fromMs, toExclusive),
-    );
-    checkpointCount = checkpoints.length;
-    for (const row of checkpoints) {
-      try {
-        if (anchored.has(checkpointHash(row))) withAnchor += 1;
-      } catch {
-        // A row that cannot be hashed is not counted as anchored.
-      }
+  // Checkpoints come from verify's attested set; anchors are read on their own
+  // so that an unreadable anchor file cannot hide the checkpoint count.
+  const windowCheckpoints = result.attestedCheckpoints.filter((row) =>
+    checkpointInWindow(row, fromMs, toExclusive),
+  );
+  const windowHashes = new Set<string>();
+  for (const row of windowCheckpoints) {
+    try {
+      windowHashes.add(checkpointHash(row));
+    } catch {
+      // A row that cannot be hashed cannot be matched to an anchor row.
     }
-  } catch {
-    earlyProblems.push("anchors-unreadable");
   }
 
-  let verified = await verifyLikeVerifyCli(dir);
-  if (earlyProblems.length > 0) {
-    const problems = [...earlyProblems, ...verified.result.problems];
-    const result = { ...verified.result, ok: false, problems };
-    verified = {
-      result,
-      approval: verified.approval,
-      control: verified.control,
-      verdict: verdictLine(result, verified.approval, verified.control),
-    };
+  const checkpoints: PeriodReport["checkpoints"] = {
+    count: windowCheckpoints.length,
+    withAnchorVerified: null,
+    anchorRowsPresentNotChecked: null,
+    anchorUnavailableReason: null,
+  };
+  try {
+    const anchorRows = readAnchors(dir).rows;
+    const inWindowRows = anchorRows.filter((r) => windowHashes.has(r.checkpointHash)).length;
+    if (result.anchors.checked) {
+      // An ok ledger has no failed receipt: every row verified.
+      if (result.anchors.verified === result.anchors.receipts) {
+        checkpoints.withAnchorVerified = inWindowRows;
+        checkpoints.anchorRowsPresentNotChecked = 0;
+      } else {
+        checkpoints.anchorUnavailableReason = "anchors-not-all-verified";
+      }
+    } else {
+      checkpoints.withAnchorVerified = 0;
+      checkpoints.anchorRowsPresentNotChecked = inWindowRows;
+    }
+  } catch (err) {
+    checkpoints.anchorUnavailableReason = classOfThrown(err, "anchors-unreadable");
   }
-
-  const problemClasses = [...new Set(verified.result.problems.map(problemClass))];
 
   return {
     from,
@@ -562,51 +759,60 @@ export async function buildPeriodReport(
     recordCount: inWindow.length,
     firstRecordMs,
     lastRecordMs,
-    verification: {
-      ok: verified.result.ok,
-      verdict: verified.verdict,
-      problems: problemClasses,
-    },
+    verification,
+    countsUnavailableReason: null,
+    unsignedApprovalsNote,
     decisions: { total, byTool },
     approvals,
-    checkpoints: {
-      count: checkpointCount,
-      withAnchor,
-    },
+    checkpoints,
     whatThisReportDoesNotShow: WHAT_NOT_SHOWN,
   };
 }
 
-/** Fixed key order. The same ledger and window give the same bytes. */
+function jsonNum(n: number | null): string {
+  return n === null ? "null" : String(n);
+}
+
+function jsonCounts(c: DecisionCounts | null): string {
+  return c === null ? "null" : `{"allow":${c.allow},"deny":${c.deny},"defer":${c.defer}}`;
+}
+
+/**
+ * Fixed key order. The same ledger and window give the same bytes. These are
+ * the one canonical display-safe bytes: terminal-control and bidi characters
+ * are escaped here, before any digest, so stdout, the digest and the digest
+ * shown in HTML are all of this exact sequence.
+ */
 export function serializePeriodReport(report: PeriodReport): string {
-  const byToolEntries = Object.keys(report.decisions.byTool)
-    .sort()
-    .map((tool) => {
-      const c = report.decisions.byTool[tool]!;
-      return [
-        JSON.stringify(tool),
-        `{"allow":${c.allow},"deny":${c.deny},"defer":${c.defer}}`,
-      ].join(":");
-    });
-  const byToolJson = `{${byToolEntries.join(",")}}`;
+  const byToolJson =
+    report.decisions.byTool === null
+      ? "null"
+      : `{${Object.keys(report.decisions.byTool)
+          .sort()
+          .map((tool) => `${JSON.stringify(tool)}:${jsonCounts(report.decisions.byTool![tool]!)}`)
+          .join(",")}}`;
   const problemsJson = `[${report.verification.problems.map((p) => JSON.stringify(p)).join(",")}]`;
-  return (
+  const a = report.approvals;
+  const c = report.checkpoints;
+  const json =
     "{" +
     [
       `"from":${JSON.stringify(report.from)}`,
       `"to":${JSON.stringify(report.to)}`,
       `"headHash":${JSON.stringify(report.headHash)}`,
-      `"recordCount":${report.recordCount}`,
-      `"firstRecordMs":${report.firstRecordMs === null ? "null" : String(report.firstRecordMs)}`,
-      `"lastRecordMs":${report.lastRecordMs === null ? "null" : String(report.lastRecordMs)}`,
+      `"recordCount":${jsonNum(report.recordCount)}`,
+      `"firstRecordMs":${jsonNum(report.firstRecordMs)}`,
+      `"lastRecordMs":${jsonNum(report.lastRecordMs)}`,
       `"verification":{"ok":${report.verification.ok},"verdict":${JSON.stringify(report.verification.verdict)},"problems":${problemsJson}}`,
-      `"decisions":{"total":{"allow":${report.decisions.total.allow},"deny":${report.decisions.total.deny},"defer":${report.decisions.total.defer}},"byTool":${byToolJson}}`,
-      `"approvals":{"approved":${report.approvals.approved},"withOperatorSignature":${report.approvals.withOperatorSignature},"withoutOperatorSignature":${report.approvals.withoutOperatorSignature},"closedWithoutAllow":${report.approvals.closedWithoutAllow},"stillHeld":${report.approvals.stillHeld}}`,
-      `"checkpoints":{"count":${report.checkpoints.count},"withAnchor":${report.checkpoints.withAnchor}}`,
+      `"countsUnavailableReason":${JSON.stringify(report.countsUnavailableReason)}`,
+      `"unsignedApprovalsNote":${JSON.stringify(report.unsignedApprovalsNote)}`,
+      `"decisions":{"total":${jsonCounts(report.decisions.total)},"byTool":${byToolJson}}`,
+      `"approvals":{"approved":${jsonNum(a.approved)},"withOperatorSignatureFieldPresent":${jsonNum(a.withOperatorSignatureFieldPresent)},"withoutOperatorSignatureField":${jsonNum(a.withoutOperatorSignatureField)},"closedWithoutAllow":${jsonNum(a.closedWithoutAllow)},"stillHeld":${jsonNum(a.stillHeld)},"unmatched":${jsonNum(a.unmatched)},"unavailableReason":${JSON.stringify(a.unavailableReason)}}`,
+      `"checkpoints":{"count":${jsonNum(c.count)},"withAnchorVerified":${jsonNum(c.withAnchorVerified)},"anchorRowsPresentNotChecked":${jsonNum(c.anchorRowsPresentNotChecked)},"anchorUnavailableReason":${JSON.stringify(c.anchorUnavailableReason)}}`,
       `"whatThisReportDoesNotShow":${JSON.stringify(report.whatThisReportDoesNotShow)}`,
     ].join(",") +
-    "}"
-  );
+    "}";
+  return terminalLines(json);
 }
 
 export function reportDigest(jsonBytes: string): string {
@@ -622,21 +828,49 @@ export function htmlEscape(text: string): string {
     .replaceAll("'", "&#39;");
 }
 
+function shown(n: number | null): string {
+  return n === null ? "not available" : String(n);
+}
+
+function shownCounts(c: DecisionCounts | null): string {
+  return c === null ? "not available" : `allow ${c.allow}, deny ${c.deny}, defer ${c.defer}`;
+}
+
+function unavailableSentence(report: PeriodReport): string {
+  const classes = report.verification.problems.join(", ");
+  return `Counts not available (null): ${report.countsUnavailableReason ?? ""}${classes === "" ? "" : ` Problem classes: ${classes}.`}`;
+}
+
+const WINDOW_SENTENCE =
+  "The to day is included in full: the window is half-open, from 00:00:00 UTC on the from day up to, not including, 00:00:00 UTC on the day after the to day.";
+
 export function renderReportHtml(report: PeriodReport, digest: string): string {
-  const toolRows = Object.keys(report.decisions.byTool)
-    .sort()
-    .map((tool) => {
-      const c = report.decisions.byTool[tool]!;
-      return `<tr><td>${htmlEscape(tool)}</td><td>${c.allow}</td><td>${c.deny}</td><td>${c.defer}</td></tr>`;
-    })
-    .join("");
-  const problemItems = report.verification.problems
-    .map((p) => `<li>${htmlEscape(p)}</li>`)
-    .join("");
+  const esc = (s: string): string => htmlEscape(terminalText(s));
+  const toolRows =
+    report.decisions.byTool === null
+      ? ""
+      : Object.keys(report.decisions.byTool)
+          .sort()
+          .map((tool) => {
+            const c = report.decisions.byTool![tool]!;
+            return `<tr><td>${esc(tool)}</td><td>${c.allow}</td><td>${c.deny}</td><td>${c.defer}</td></tr>`;
+          })
+          .join("");
+  const problemItems = report.verification.problems.map((p) => `<li>${esc(p)}</li>`).join("");
   const problemsBlock =
     report.verification.problems.length === 0
       ? "<p>No verification problems named.</p>"
       : `<p>${report.verification.problems.length} problem class(es). Run <code>verax verify</code> on the machine for the detail.</p><ul>${problemItems}</ul>`;
+  const countsNotice =
+    report.countsUnavailableReason === null ? [] : [`<p class="verdict">${esc(unavailableSentence(report))}</p>`];
+  const approvalsNote =
+    report.unsignedApprovalsNote === null ? [] : [`<p>Note: ${esc(report.unsignedApprovalsNote)}</p>`];
+  const a = report.approvals;
+  const c = report.checkpoints;
+  const approvalsReason =
+    a.unavailableReason === null ? "" : ` Approvals not available: ${esc(a.unavailableReason)}.`;
+  const anchorReason =
+    c.anchorUnavailableReason === null ? "" : ` Anchor counts not available: ${esc(c.anchorUnavailableReason)}.`;
 
   return [
     "<!DOCTYPE html>",
@@ -657,23 +891,25 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     "</head>",
     "<body>",
     "<h1>Period report</h1>",
-    `<p class="verdict">${htmlEscape(report.verification.verdict)}</p>`,
-    `<p>Window ${htmlEscape(report.from)} to ${htmlEscape(report.to)} (UTC).</p>`,
-    `<p>Records in window: ${report.recordCount}. First record time: ${report.firstRecordMs === null ? "none" : String(report.firstRecordMs)}. Last record time: ${report.lastRecordMs === null ? "none" : String(report.lastRecordMs)}. Ledger head hash: ${htmlEscape(report.headHash ?? "none")}.</p>`,
+    `<p class="verdict">${esc(report.verification.verdict)}</p>`,
+    ...countsNotice,
+    `<p>Window ${esc(report.from)} to ${esc(report.to)} (UTC). ${esc(WINDOW_SENTENCE)}</p>`,
+    `<p>Records in window: ${shown(report.recordCount)}. First record time: ${report.firstRecordMs === null ? "none" : String(report.firstRecordMs)}. Last record time: ${report.lastRecordMs === null ? "none" : String(report.lastRecordMs)}. Ledger head hash: ${esc(report.headHash ?? "none")}.</p>`,
     "<h2>Decisions</h2>",
-    `<p>Total: allow ${report.decisions.total.allow}, deny ${report.decisions.total.deny}, defer ${report.decisions.total.defer}.</p>`,
+    `<p>Total: ${shownCounts(report.decisions.total)}.</p>`,
     "<table><thead><tr><th>Tool</th><th>Allow</th><th>Deny</th><th>Defer</th></tr></thead>",
     `<tbody>${toolRows}</tbody></table>`,
     "<h2>Approvals</h2>",
-    `<p>Approved held calls: ${report.approvals.approved} (${report.approvals.withOperatorSignature} with an operator signature, ${report.approvals.withoutOperatorSignature} without). Closed without an allow: ${report.approvals.closedWithoutAllow}. Still held: ${report.approvals.stillHeld}.</p>`,
-    "<p>Approved means a signed allow answered the defer. Closed without an allow means a signed record refused it (expired or otherwise). Still held means no signed answer exists.</p>",
+    `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}. Unmatched: ${shown(a.unmatched)}.${approvalsReason}</p>`,
+    "<p>Approved means the first signed answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed answer exists. Unmatched means the defer has no usable reference, shares it with another defer, or its answers disagree on request hash or tool.</p>",
+    ...approvalsNote,
     "<h2>Checkpoints</h2>",
-    `<p>Checkpoints in the window: ${report.checkpoints.count}. With an anchor row: ${report.checkpoints.withAnchor}.</p>`,
+    `<p>Checkpoints in the window: ${shown(c.count)}. Anchor receipts verified: ${shown(c.withAnchorVerified)}. Anchor rows present, not checked (no anchor key): ${shown(c.anchorRowsPresentNotChecked)}.${anchorReason}</p>`,
     "<h2>Verification</h2>",
     problemsBlock,
     "<h2>What this report does not show</h2>",
-    `<p>${htmlEscape(report.whatThisReportDoesNotShow)}</p>`,
-    `<p class="digest">Report digest (SHA-256 of the JSON form): <code>${htmlEscape(digest)}</code></p>`,
+    `<p>${esc(report.whatThisReportDoesNotShow)}</p>`,
+    `<p class="digest">Report digest (SHA-256 of the JSON form, the same bytes as --json): <code>${htmlEscape(digest)}</code></p>`,
     "</body>",
     "</html>",
     "",
@@ -682,26 +918,35 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
 
 export function renderReportText(report: PeriodReport, digest: string): string {
   const lines: string[] = [];
+  const a = report.approvals;
+  const c = report.checkpoints;
   lines.push(report.verification.verdict);
+  if (report.countsUnavailableReason !== null) lines.push(unavailableSentence(report));
   lines.push(`window        ${report.from} .. ${report.to} (UTC)`);
-  lines.push(`records       ${report.recordCount}`);
+  lines.push(`window note   ${WINDOW_SENTENCE}`);
+  lines.push(`records       ${shown(report.recordCount)}`);
   lines.push(`first         ${report.firstRecordMs === null ? "none" : String(report.firstRecordMs)}`);
   lines.push(`last          ${report.lastRecordMs === null ? "none" : String(report.lastRecordMs)}`);
   lines.push(`head          ${report.headHash ?? "none"}`);
-  lines.push(
-    `decisions     allow ${report.decisions.total.allow}, deny ${report.decisions.total.deny}, defer ${report.decisions.total.defer}`,
-  );
-  for (const tool of Object.keys(report.decisions.byTool).sort()) {
-    const c = report.decisions.byTool[tool]!;
-    lines.push(`  ${tool}  allow ${c.allow}, deny ${c.deny}, defer ${c.defer}`);
+  lines.push(`decisions     ${shownCounts(report.decisions.total)}`);
+  if (report.decisions.byTool !== null) {
+    for (const tool of Object.keys(report.decisions.byTool).sort()) {
+      const t = report.decisions.byTool[tool]!;
+      lines.push(`  ${tool}  allow ${t.allow}, deny ${t.deny}, defer ${t.defer}`);
+    }
   }
   lines.push(
-    `approvals     approved ${report.approvals.approved} (signed ${report.approvals.withOperatorSignature}, unsigned ${report.approvals.withoutOperatorSignature}), closed without an allow ${report.approvals.closedWithoutAllow}, still held ${report.approvals.stillHeld}`,
+    `approvals     approved ${shown(a.approved)} (signature field present ${shown(a.withOperatorSignatureFieldPresent)}, absent ${shown(a.withoutOperatorSignatureField)}), closed without an allow ${shown(a.closedWithoutAllow)}, still held ${shown(a.stillHeld)}, unmatched ${shown(a.unmatched)}`,
   );
+  if (a.unavailableReason !== null) lines.push(`approvals     not available: ${a.unavailableReason}`);
   lines.push(
-    "approvals mean: approved = signed allow answered the defer; closed without an allow = signed record refused it (expired or otherwise); still held = no signed answer",
+    "approvals mean: approved = first signed answer after the defer (naming it, same request hash and tool) is an allow; closed without an allow = that answer is a deny; still held = no signed answer; unmatched = no usable ref, shared ref, or disagreeing answers; signature field present is not a verified signature",
   );
-  lines.push(`checkpoints   ${report.checkpoints.count} in window, ${report.checkpoints.withAnchor} with an anchor`);
+  if (report.unsignedApprovalsNote !== null) lines.push(`note          ${report.unsignedApprovalsNote}`);
+  lines.push(
+    `checkpoints   ${shown(c.count)} in window, anchor receipts verified ${shown(c.withAnchorVerified)}, anchor rows present not checked ${shown(c.anchorRowsPresentNotChecked)}`,
+  );
+  if (c.anchorUnavailableReason !== null) lines.push(`anchors       not available: ${c.anchorUnavailableReason}`);
   if (report.verification.problems.length > 0) {
     lines.push(`problems      ${report.verification.problems.length} class(es); run verax verify on the machine for the detail`);
     for (const p of report.verification.problems.slice(0, 50)) lines.push(`  - ${p}`);
@@ -809,40 +1054,17 @@ export async function runReport(
     return argv.length === 0 || argv[0] === "--help" || argv[0] === "-h" ? (argv.length === 0 ? EX_USAGE : 0) : EX_USAGE;
   }
 
-  if (directoryAccess(parsed.dir) === "unreadable") {
-    out(terminalText(unreadableSentence(parsed.dir, "report")));
-    return 77;
+  // Before any compute or write: the report must not land inside the ledger.
+  if (parsed.outPath !== null && outInsideStateDir(parsed.dir, parsed.outPath)) {
+    out("report: --out must not be inside the state directory");
+    return EX_USAGE;
   }
 
   let report: PeriodReport;
   try {
     report = await buildPeriodReport(parsed.dir, parsed.from, parsed.to, parsed.fromMs, parsed.toExclusive);
   } catch (err) {
-    const cls = classOfThrown(err, "ledger-unreadable");
-    const shell = failedVerifyShell(parsed.dir, cls);
-    report = {
-      from: parsed.from,
-      to: parsed.to,
-      headHash: null,
-      recordCount: 0,
-      firstRecordMs: null,
-      lastRecordMs: null,
-      verification: {
-        ok: false,
-        verdict: shell.verdict,
-        problems: [cls],
-      },
-      decisions: { total: emptyCounts(), byTool: Object.create(null) },
-      approvals: {
-        approved: 0,
-        withOperatorSignature: 0,
-        withoutOperatorSignature: 0,
-        closedWithoutAllow: 0,
-        stillHeld: 0,
-      },
-      checkpoints: { count: 0, withAnchor: 0 },
-      whatThisReportDoesNotShow: WHAT_NOT_SHOWN,
-    };
+    report = unverifiedReport(parsed.from, parsed.to, classOfThrown(err, "ledger-unreadable"));
   }
 
   const json = serializePeriodReport(report);
@@ -854,7 +1076,7 @@ export async function runReport(
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "EEXIST") {
-        out(terminalText(`report: refusing to overwrite ${parsed.outPath}`));
+        out(terminalText(`report: refusing to overwrite ${basename(parsed.outPath)}`));
         return EX_USAGE;
       }
       out(terminalText(`report: could not write ${basename(parsed.outPath)}`));
@@ -863,11 +1085,11 @@ export async function runReport(
   }
 
   if (parsed.json) {
-    out(terminalLines(json));
+    out(json);
   } else if (parsed.outPath === null) {
     out(renderReportText(report, digest));
   } else {
-    out(terminalText(`wrote ${parsed.outPath}`));
+    out(terminalText(`wrote ${basename(parsed.outPath)}`));
     out(terminalText(`digest ${digest}`));
   }
 
