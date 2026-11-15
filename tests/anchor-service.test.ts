@@ -3,7 +3,6 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
-  existsSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -13,6 +12,7 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -395,6 +395,53 @@ describe("hosted anchor service", () => {
       assert.equal(res.status, 400);
       assert.deepEqual(await res.json(), { error: "body-too-large" });
       assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("after a body-too-large answer the service closes the socket", async () => {
+    const h = await startHarness();
+    try {
+      const url = new URL(h.service.url);
+      await new Promise<void>((resolve, reject) => {
+        const req = httpRequest(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: "/register",
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${h.token}`,
+              "content-length": String(4 * 1024 + 1),
+            },
+          },
+          (res) => {
+            assert.equal(res.statusCode, 400);
+            assert.equal(res.headers.connection, "close");
+            const chunks: Buffer[] = [];
+            res.on("data", (c) => chunks.push(c));
+            res.on("end", () => {
+              assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString("utf8")), {
+                error: "body-too-large",
+              });
+            });
+            const socket = res.socket;
+            assert.ok(socket);
+            const done = (): void => resolve();
+            if (socket.destroyed) {
+              done();
+              return;
+            }
+            socket.once("close", done);
+            socket.once("error", () => done());
+          },
+        );
+        req.on("error", reject);
+        req.write("x".repeat(4 * 1024 + 1));
+        req.end();
+      });
     } finally {
       await stopHarness(h);
     }

@@ -23,12 +23,20 @@ Or from the workspace: `node --experimental-strip-types packages/anchor-service/
 | --- | --- | --- |
 | `VERAX_ANCHOR_SVC_TOKENS` | yes | JSON file mapping SHA-256 hex of a token to an owner id. The service never stores a token itself. |
 | `VERAX_ANCHOR_SVC_SIGNING_KEY` | yes | Ed25519 private key PEM file used to sign receipts. |
-| `VERAX_ANCHOR_SVC_STORE` | yes | Append-only JSONL path for log leaves (`leaf_hash`, `owner_id`, `at_ms`). |
+| `VERAX_ANCHOR_SVC_STORE` | yes | Append-only JSONL path for log leaves (`leaf_hash`, `owner_id`, `at_ms`). One writer per store. |
 | `VERAX_ANCHOR_SVC_PORT` | no | Listen port (default `8798`). Use `0` for an ephemeral port. |
 | `VERAX_ANCHOR_SVC_HOST` | no | Listen host (default `127.0.0.1`). |
 | `VERAX_ANCHOR_SVC_RATE` | no | Max authenticated registrations per owner per minute (default `60`). |
 
-Missing or unreadable required values exit 64 with one sentence on stderr.
+Missing or unreadable required values exit 64 with one sentence on stderr. A
+second start on a store that is already held also exits 64, naming the store.
+
+Only one running service holds a given store (exclusive lock beside the file
+for the process life). A stale lock from a dead process is taken over. After
+a failed store write every later `POST /register` answers `503`
+`{"error":"store-unavailable"}` until the process is restarted. On start, a
+torn last line (no terminating newline) is dropped and the file truncated to
+the last full line, with one line on stderr.
 
 Token file example:
 

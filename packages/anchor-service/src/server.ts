@@ -38,6 +38,18 @@ function send(res: ServerResponse, status: number, body?: unknown): void {
   res.writeHead(status, { "content-type": "application/json" }).end(text);
 }
 
+/** Answer and close the connection so the client cannot keep streaming. */
+function sendAndClose(res: ServerResponse, status: number, body: unknown): void {
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    "content-type": "application/json",
+    connection: "close",
+  });
+  res.end(text, () => {
+    res.socket?.destroy();
+  });
+}
+
 function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -127,7 +139,7 @@ export async function startService(
       try {
         body = await readBody(req, MAX_BODY);
       } catch {
-        send(res, 400, { error: "body-too-large" });
+        sendAndClose(res, 400, { error: "body-too-large" });
         return;
       }
       let parsed: unknown;

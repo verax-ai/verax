@@ -282,6 +282,17 @@ than that time by the service's clock; it does not show that the ledger is
 complete, and the operator still chooses what to send. `verax verify` does
 not print this time yet.
 
+Only one running service may hold a given store: start takes an exclusive
+lock beside the store file for the process lifetime, and a second start on
+the same path is refused. A lock left by a process that is no longer running
+is taken over (judged by the same beat / pid / start-time / boot rule as the
+body's `ledger.lock`). After any failed store append the service stops
+registering and answers `503` `store-unavailable` until restart, so a receipt
+is never issued from memory the store may not match. On start, a final store
+line with no terminating newline is treated as a torn write: it is dropped,
+the file is truncated to the last full line, and one line is written to
+stderr.
+
 `verax anchor … --token-file <file>` and `verax witness` with
 `VERAX_ANCHOR_TOKEN_FILE` send that file's content as `Authorization: Bearer …`
 on every request to the service. The token is never accepted on the command
