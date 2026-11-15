@@ -106,6 +106,9 @@ export async function startService(
   const rate = new RateLimiter(config.ratePerMinute);
   const writeRow = options?.appendRow ?? appendStore;
   let storeUnavailable = false;
+  lock.onLost(() => {
+    storeUnavailable = true;
+  });
 
   const server = createServer((req, res) => {
     void handle(req, res);
@@ -127,7 +130,8 @@ export async function startService(
         send(res, 401, { error: "unauthorized" });
         return;
       }
-      if (storeUnavailable) {
+      if (storeUnavailable || !lock.stillHeld()) {
+        storeUnavailable = true;
         send(res, 503, { error: "store-unavailable" });
         return;
       }
@@ -166,6 +170,11 @@ export async function startService(
       const entryHash = anchorEntryHash(capsuleId, "register");
       let leafIndex = log.findLeaf(ownerId, entryHash);
       if (leafIndex < 0) {
+        if (!lock.stillHeld()) {
+          storeUnavailable = true;
+          send(res, 503, { error: "store-unavailable" });
+          return;
+        }
         const atMs = Date.now();
         try {
           writeRow(config.storePath, { leaf_hash: entryHash, owner_id: ownerId, at_ms: atMs });

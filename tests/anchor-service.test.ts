@@ -674,6 +674,159 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("deleting the lock under a live holder makes the next authenticated register 503", { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-lockdel-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeFileSync(storePath, "", "utf8");
+    const holderScript = join(root, "tests", "anchor-service-lock-holder.ts");
+    const child = spawn(process.execPath, ["--experimental-strip-types", holderScript], {
+      env: {
+        ...process.env,
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+        VERAX_ANCHOR_SVC_LOCK_BEAT_MS: String(TEST_LOCK_BEAT_MS),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    child.stderr?.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
+    let url = "";
+    try {
+      url = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`lock holder did not become ready: ${stderr}`)), 10_000);
+        let buffered = "";
+        child.stdout?.on("data", (buf: Buffer) => {
+          buffered += String(buf);
+          const m = /^ready (http:\/\/\S+)/m.exec(buffered);
+          if (m) {
+            clearTimeout(timer);
+            resolve(m[1]!);
+          }
+        });
+        child.on("exit", (code, signal) => {
+          clearTimeout(timer);
+          reject(new Error(`lock holder exited early code=${code} signal=${signal}: ${stderr}`));
+        });
+      });
+
+      const before = storeBytes(storePath);
+      rmSync(storeLockPath(storePath), { recursive: true, force: true });
+      await new Promise((r) => setTimeout(r, TEST_LOCK_BEAT_MS * 3));
+
+      const res = await fetch(`${url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "ab".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+      assert.ok(storeBytes(storePath).equals(before));
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve) => {
+          child.once("exit", () => resolve());
+          child.kill("SIGKILL");
+        });
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("replacing the lock token under a live holder makes the next authenticated register 503", { timeout: 20_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-lockswap-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeFileSync(storePath, "", "utf8");
+    const holderScript = join(root, "tests", "anchor-service-lock-holder.ts");
+    const child = spawn(process.execPath, ["--experimental-strip-types", holderScript], {
+      env: {
+        ...process.env,
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+        VERAX_ANCHOR_SVC_LOCK_BEAT_MS: String(TEST_LOCK_BEAT_MS),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stderr = "";
+    child.stderr?.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
+    let url = "";
+    try {
+      url = await new Promise<string>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`lock holder did not become ready: ${stderr}`)), 10_000);
+        let buffered = "";
+        child.stdout?.on("data", (buf: Buffer) => {
+          buffered += String(buf);
+          const m = /^ready (http:\/\/\S+)/m.exec(buffered);
+          if (m) {
+            clearTimeout(timer);
+            resolve(m[1]!);
+          }
+        });
+        child.on("exit", (code, signal) => {
+          clearTimeout(timer);
+          reject(new Error(`lock holder exited early code=${code} signal=${signal}: ${stderr}`));
+        });
+      });
+
+      const before = storeBytes(storePath);
+      const lockPath = storeLockPath(storePath);
+      writeFileSync(
+        join(lockPath, "holder"),
+        `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now(), token: "other-holder", beatMs: TEST_LOCK_BEAT_MS })}\n`,
+        "utf8",
+      );
+      await new Promise((r) => setTimeout(r, TEST_LOCK_BEAT_MS * 3));
+
+      const res = await fetch(`${url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "ac".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+      assert.ok(storeBytes(storePath).equals(before));
+      const onDisk = JSON.parse(readFileSync(join(lockPath, "holder"), "utf8")) as { token?: string };
+      assert.equal(onDisk.token, "other-holder");
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve) => {
+          child.once("exit", () => resolve());
+          child.kill("SIGKILL");
+        });
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("exactly one of many processes takes over one stale lock", { timeout: 60_000 }, async () => {
     const raceScript = join(root, "tests", "anchor-service-lock-race.ts");
     const contenders = 6;
