@@ -291,6 +291,7 @@ describe("verax report", () => {
         approved: number;
         withOperatorSignature: number;
         withoutOperatorSignature: number;
+        closedWithoutAllow: number;
         stillHeld: number;
       };
       checkpoints: { count: number; withAnchor: number };
@@ -311,7 +312,12 @@ describe("verax report", () => {
     assert.equal(report.approvals.approved, 1);
     assert.equal(report.approvals.withoutOperatorSignature, 1);
     assert.equal(report.approvals.withOperatorSignature, 0);
+    assert.equal(report.approvals.closedWithoutAllow, 0);
     assert.equal(report.approvals.stillHeld, 1);
+    assert.equal(
+      report.approvals.approved + report.approvals.closedWithoutAllow + report.approvals.stillHeld,
+      report.decisions.total.defer,
+    );
     assert.equal(report.checkpoints.count, 1);
     assert.equal(report.checkpoints.withAnchor, 0);
     assert.equal(report.recordCount, 9);
@@ -378,6 +384,8 @@ describe("verax report", () => {
     await runReport([dir, "--from", FROM, "--to", TO, "--json"], jsonCap.out);
     const report = JSON.parse(jsonCap.text()) as { whatThisReportDoesNotShow: string };
     assert.ok(report.whatThisReportDoesNotShow.includes("signed defer counted by the time it was held"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("closed without an allow"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("still held when no signed answer"));
     assert.ok(report.whatThisReportDoesNotShow.includes("approvals.jsonl is not the source of a count"));
     assert.ok(report.whatThisReportDoesNotShow.includes("[startMs, endMs)"));
     assert.ok(report.whatThisReportDoesNotShow.includes("run verax verify"));
@@ -459,6 +467,7 @@ describe("verax report", () => {
         approved: 0,
         withOperatorSignature: 0,
         withoutOperatorSignature: 0,
+        closedWithoutAllow: 0,
         stillHeld: 0,
       },
       checkpoints: { count: 0, withAnchor: 0 },
@@ -700,5 +709,116 @@ describe("verax report", () => {
     assert.equal(readFileSync(outPath, "utf8"), "already here\n");
     const leftovers = readdirSync(dir).filter((n) => n.includes(".tmp") || n.startsWith(".verax-report-"));
     assert.deepEqual(leftovers, []);
+  });
+
+  it("an expired hold is closed without an allow; the three hold counts sum to signed defers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-expired-"));
+    const signers = loadOrCreateSigners(dir);
+    const shortTtl = {
+      ...POLICY,
+      approvalTtlMs: 1_000,
+    };
+    const policy = loadPolicy(shortTtl);
+    persistPolicySnapshot(dir, policy.hash, shortTtl);
+    let clock = Date.UTC(2026, 2, 10, 12);
+    const now = () => clock;
+    let n = 0;
+    const nonce = () => `n-${n++}`;
+    const ledger = new FileLedger(dir);
+    const proxy = createProxy({
+      policy,
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+      ledger,
+      now,
+      nonce,
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    const principal = { brain: "brain-1", scopes: new Set(["verax:memory"]) };
+    const put = (id: string, ref: string) =>
+      proxy.call(
+        {
+          name: "memory.put",
+          arguments: { id, body: "y", source: { kind: "t" }, validUntilMs: 9_999, _ref: ref },
+        },
+        principal,
+      );
+
+    clock = Date.UTC(2026, 2, 10, 12);
+    await put("ok", "defer-ok");
+    clock = Date.UTC(2026, 2, 10, 12) + 500;
+    const approved = await approvePending({
+      ledger,
+      recordSigner: signers.recordSigner,
+      now,
+      nonce: () => "allow-ok",
+      ref: "defer-ok",
+      approverId: "test-operator",
+      via: "cli-script",
+      policyHash: policy.hash,
+      approvals: approvalsLogFor(ledger),
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(approved.ok, true, "approve of live hold");
+    clock = Date.UTC(2026, 2, 10, 12) + 600;
+    await put("ok", "defer-ok");
+
+    clock = Date.UTC(2026, 2, 11, 12);
+    await put("exp", "defer-expired");
+    clock = Date.UTC(2026, 2, 11, 12) + 1_001;
+    const expired = await approvePending({
+      ledger,
+      recordSigner: signers.recordSigner,
+      now,
+      nonce: () => "expire-1",
+      ref: "defer-expired",
+      approverId: "test-operator",
+      via: "cli-script",
+      policyHash: policy.hash,
+      approvals: approvalsLogFor(ledger),
+      inputsLog: proxy.inputsLog,
+    });
+    assert.equal(expired.ok, false);
+    if (expired.ok === false) assert.equal(expired.reason, "expired");
+
+    clock = Date.UTC(2026, 2, 12, 12);
+    await put("open", "defer-open");
+    ledger.close();
+
+    const jsonCap = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--json"], jsonCap.out);
+    assert.equal(code, 0, jsonCap.text());
+    const report = JSON.parse(jsonCap.text()) as {
+      decisions: { total: { defer: number } };
+      approvals: {
+        approved: number;
+        closedWithoutAllow: number;
+        stillHeld: number;
+        withOperatorSignature: number;
+        withoutOperatorSignature: number;
+      };
+      whatThisReportDoesNotShow: string;
+    };
+    assert.equal(report.approvals.approved, 1);
+    assert.equal(report.approvals.closedWithoutAllow, 1);
+    assert.equal(report.approvals.stillHeld, 1);
+    assert.equal(report.decisions.total.defer, 3);
+    assert.equal(
+      report.approvals.approved + report.approvals.closedWithoutAllow + report.approvals.stillHeld,
+      report.decisions.total.defer,
+    );
+    assert.ok(report.whatThisReportDoesNotShow.includes("closed without an allow"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("still held when no signed answer"));
+
+    const textCap = capture();
+    await runReport([dir, "--from", FROM, "--to", TO], textCap.out);
+    assert.match(textCap.text(), /closed without an allow 1/);
+    assert.match(textCap.text(), /still held 1/);
+
+    const outPath = join(dir, "expired.html");
+    await runReport([dir, "--from", FROM, "--to", TO, "--out", outPath], capture().out);
+    const html = readFileSync(outPath, "utf8");
+    assert.match(html, /Closed without an allow: 1/);
+    assert.match(html, /Still held: 1/);
   });
 });

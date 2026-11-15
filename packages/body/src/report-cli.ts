@@ -41,7 +41,7 @@ export const EX_USAGE = 64;
 const DAY_MS = 86_400_000;
 
 const WHAT_NOT_SHOWN =
-  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. A held call is a signed defer counted by the time it was held; it is approved when a signed allow answers it, and still held when none does. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
+  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. A held call is a signed defer counted by the time it was held; it is approved when a signed allow answers it, closed without an allow when a signed record refuses it (expired or otherwise), and still held when no signed answer exists. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
 
 type DecisionCounts = { allow: number; deny: number; defer: number };
 
@@ -65,6 +65,7 @@ export type PeriodReport = {
     approved: number;
     withOperatorSignature: number;
     withoutOperatorSignature: number;
+    closedWithoutAllow: number;
     stillHeld: number;
   };
   checkpoints: {
@@ -360,14 +361,22 @@ async function verifyLikeVerifyCli(dir: string): Promise<{
   };
 }
 
-/** Map defer ref -> signed allow that answers it via inputs.approver.resolves. */
-function allowsAnsweringDefers(dir: string, all: SignedDecisionRecord[]): Map<string, SignedDecisionRecord> {
+/**
+ * Map defer ref -> signed record that answers it via inputs.approver.resolves.
+ * An allow wins over a refusal when both are present.
+ */
+function recordsAnsweringDefers(
+  dir: string,
+  all: SignedDecisionRecord[],
+): Map<string, SignedDecisionRecord> {
   const out = new Map<string, SignedDecisionRecord>();
   for (const row of all) {
-    if (row.claims.decision !== "allow") continue;
     const inputs = inputsForRecord(dir, row);
     const resolves = inputs?.approver?.resolves;
-    if (typeof resolves === "string" && resolves !== "") out.set(resolves, row);
+    if (typeof resolves !== "string" || resolves === "") continue;
+    const prev = out.get(resolves);
+    if (prev && prev.claims.decision === "allow") continue;
+    out.set(resolves, row);
   }
   return out;
 }
@@ -381,12 +390,14 @@ function countApprovalsFromSigned(
   approved: number;
   withOperatorSignature: number;
   withoutOperatorSignature: number;
+  closedWithoutAllow: number;
   stillHeld: number;
 } {
-  const answering = allowsAnsweringDefers(dir, all);
+  const answering = recordsAnsweringDefers(dir, all);
   let approved = 0;
   let withOperatorSignature = 0;
   let withoutOperatorSignature = 0;
+  let closedWithoutAllow = 0;
   let stillHeld = 0;
   for (const row of all) {
     if (row.claims.decision !== "defer") continue;
@@ -394,16 +405,26 @@ function countApprovalsFromSigned(
     if (typeof ts !== "number" || ts < fromMs || ts >= toExclusive) continue;
     const ref = row.claims.ref;
     if (typeof ref !== "string") continue;
-    const allow = answering.get(ref);
-    if (!allow) {
+    const answer = answering.get(ref);
+    if (!answer) {
       stillHeld += 1;
       continue;
     }
-    approved += 1;
-    if (allowCarriesOperatorSignature(dir, allow)) withOperatorSignature += 1;
-    else withoutOperatorSignature += 1;
+    if (answer.claims.decision === "allow") {
+      approved += 1;
+      if (allowCarriesOperatorSignature(dir, answer)) withOperatorSignature += 1;
+      else withoutOperatorSignature += 1;
+      continue;
+    }
+    closedWithoutAllow += 1;
   }
-  return { approved, withOperatorSignature, withoutOperatorSignature, stillHeld };
+  return {
+    approved,
+    withOperatorSignature,
+    withoutOperatorSignature,
+    closedWithoutAllow,
+    stillHeld,
+  };
 }
 
 function writeOutExclusive(outPath: string, content: string): void {
@@ -491,6 +512,7 @@ export async function buildPeriodReport(
     approved: 0,
     withOperatorSignature: 0,
     withoutOperatorSignature: 0,
+    closedWithoutAllow: 0,
     stillHeld: 0,
   };
   try {
@@ -579,7 +601,7 @@ export function serializePeriodReport(report: PeriodReport): string {
       `"lastRecordMs":${report.lastRecordMs === null ? "null" : String(report.lastRecordMs)}`,
       `"verification":{"ok":${report.verification.ok},"verdict":${JSON.stringify(report.verification.verdict)},"problems":${problemsJson}}`,
       `"decisions":{"total":{"allow":${report.decisions.total.allow},"deny":${report.decisions.total.deny},"defer":${report.decisions.total.defer}},"byTool":${byToolJson}}`,
-      `"approvals":{"approved":${report.approvals.approved},"withOperatorSignature":${report.approvals.withOperatorSignature},"withoutOperatorSignature":${report.approvals.withoutOperatorSignature},"stillHeld":${report.approvals.stillHeld}}`,
+      `"approvals":{"approved":${report.approvals.approved},"withOperatorSignature":${report.approvals.withOperatorSignature},"withoutOperatorSignature":${report.approvals.withoutOperatorSignature},"closedWithoutAllow":${report.approvals.closedWithoutAllow},"stillHeld":${report.approvals.stillHeld}}`,
       `"checkpoints":{"count":${report.checkpoints.count},"withAnchor":${report.checkpoints.withAnchor}}`,
       `"whatThisReportDoesNotShow":${JSON.stringify(report.whatThisReportDoesNotShow)}`,
     ].join(",") +
@@ -643,7 +665,8 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     "<table><thead><tr><th>Tool</th><th>Allow</th><th>Deny</th><th>Defer</th></tr></thead>",
     `<tbody>${toolRows}</tbody></table>`,
     "<h2>Approvals</h2>",
-    `<p>Approved held calls: ${report.approvals.approved} (${report.approvals.withOperatorSignature} with an operator signature, ${report.approvals.withoutOperatorSignature} without). Still held: ${report.approvals.stillHeld}.</p>`,
+    `<p>Approved held calls: ${report.approvals.approved} (${report.approvals.withOperatorSignature} with an operator signature, ${report.approvals.withoutOperatorSignature} without). Closed without an allow: ${report.approvals.closedWithoutAllow}. Still held: ${report.approvals.stillHeld}.</p>`,
+    "<p>Approved means a signed allow answered the defer. Closed without an allow means a signed record refused it (expired or otherwise). Still held means no signed answer exists.</p>",
     "<h2>Checkpoints</h2>",
     `<p>Checkpoints in the window: ${report.checkpoints.count}. With an anchor row: ${report.checkpoints.withAnchor}.</p>`,
     "<h2>Verification</h2>",
@@ -673,7 +696,10 @@ export function renderReportText(report: PeriodReport, digest: string): string {
     lines.push(`  ${tool}  allow ${c.allow}, deny ${c.deny}, defer ${c.defer}`);
   }
   lines.push(
-    `approvals     approved ${report.approvals.approved} (signed ${report.approvals.withOperatorSignature}, unsigned ${report.approvals.withoutOperatorSignature}), still held ${report.approvals.stillHeld}`,
+    `approvals     approved ${report.approvals.approved} (signed ${report.approvals.withOperatorSignature}, unsigned ${report.approvals.withoutOperatorSignature}), closed without an allow ${report.approvals.closedWithoutAllow}, still held ${report.approvals.stillHeld}`,
+  );
+  lines.push(
+    "approvals mean: approved = signed allow answered the defer; closed without an allow = signed record refused it (expired or otherwise); still held = no signed answer",
   );
   lines.push(`checkpoints   ${report.checkpoints.count} in window, ${report.checkpoints.withAnchor} with an anchor`);
   if (report.verification.problems.length > 0) {
@@ -811,6 +837,7 @@ export async function runReport(
         approved: 0,
         withOperatorSignature: 0,
         withoutOperatorSignature: 0,
+        closedWithoutAllow: 0,
         stillHeld: 0,
       },
       checkpoints: { count: 0, withAnchor: 0 },
