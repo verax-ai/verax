@@ -172,6 +172,20 @@ function bump(counts: DecisionCounts, decision: string): void {
   else if (decision === "defer") counts.defer += 1;
 }
 
+/**
+ * Per-tool bucket for a decision's subject. Empty or non-string subjects use
+ * the ASCII unit separator (U+001F): it is not a printable tool name an
+ * operator would choose, so it cannot collide with a real tool while still
+ * letting empty and missing subjects share one key that keeps byTool totals
+ * equal to the overall counts.
+ */
+export const MISSING_SUBJECT_TOOL_KEY = "\u001f";
+
+export function subjectToolKey(subject: unknown): string {
+  if (typeof subject === "string" && subject !== "") return subject;
+  return MISSING_SUBJECT_TOOL_KEY;
+}
+
 function readLines(path: string): string[] {
   try {
     return readFileSync(path, "utf8")
@@ -809,8 +823,7 @@ export async function buildPeriodReport(
     const decision = row.claims.decision;
     if (typeof decision !== "string") continue;
     bump(total, decision);
-    const tool = typeof row.claims.subject === "string" ? row.claims.subject : "";
-    if (tool === "") continue;
+    const tool = subjectToolKey(row.claims.subject);
     let counts = byToolMap.get(tool);
     if (!counts) {
       counts = emptyCounts();

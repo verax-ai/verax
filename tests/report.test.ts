@@ -41,6 +41,7 @@ import {
   reportDigest,
   runReport,
   serializePeriodReport,
+  subjectToolKey,
   writeOutExclusive,
   type PeriodReport,
 } from "../packages/body/src/report-cli.ts";
@@ -523,6 +524,101 @@ describe("verax report", () => {
     assert.ok(json.report.verification.problems.includes("decision-without-effect"));
     assert.equal(json.report.verification.problems.includes(`decision-without-effect ${refColon}`), false);
     assert.equal(json.report.verification.problems.some((p) => p.includes(refColon)), false);
+  });
+
+  it("j4. empty or missing subject counts under one fixed byTool key that sums to total", async () => {
+    // A non-string subject cannot appear on a verifying ledger (signature fails).
+    // subjectToolKey still maps empty and missing to the same reserved key.
+    const missingKey = "\u001f";
+    assert.equal(subjectToolKey(""), missingKey);
+    assert.equal(subjectToolKey(undefined), missingKey);
+    assert.equal(subjectToolKey(null), missingKey);
+    assert.equal(subjectToolKey("memory.put"), "memory.put");
+
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-j4-"));
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    try {
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "defer",
+            reasonCode: "needs-approval",
+            ref: "empty-subj",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY,
+            nonce: "j4-empty",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.put",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "defer",
+            reasonCode: "needs-approval",
+            ref: "ordinary",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY + 2,
+            nonce: "j4-ord",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.get",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "deny",
+            reasonCode: "denied",
+            ref: "ordinary-deny",
+            effectHash: null,
+            effectClass: "memory.get",
+            timestampMs: DAY + 3,
+            nonce: "j4-deny",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+    } finally {
+      ledger.close();
+    }
+    const verified = await verifyLedger(dir);
+    assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+
+    const { code, report, text } = await reportJson(dir);
+    assert.equal(code, 0, text);
+    const total = report.decisions.total!;
+    const byTool = report.decisions.byTool!;
+    assert.equal(byTool[missingKey]?.defer, 1);
+    assert.equal(byTool["memory.put"]?.defer, 1);
+    assert.equal(byTool["memory.get"]?.deny, 1);
+    for (const kind of ["allow", "deny", "defer"] as const) {
+      const sum = Object.values(byTool).reduce((n, c) => n + c[kind], 0);
+      assert.equal(sum, total[kind], kind);
+    }
   });
 
   it("j3. report verifies with default options only; pinned verify differs on valid-anchored", async () => {
