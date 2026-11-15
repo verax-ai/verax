@@ -35,10 +35,12 @@ import {
 
 import { type ApprovalSignatureReport } from "./approval-signature.ts";
 import { type ControlSignatureReport } from "./control-signature.ts";
-import { directoryAccess } from "./install.ts";
+import { directoryAccess, EX_ELEVATION } from "./install.ts";
 import { completeVerify, EX_VERIFY_FAILED, verdictLine } from "./verify-cli.ts";
 
 export const EX_USAGE = 64;
+/** Same code `verax verify` uses for an unreadable state directory. */
+export const EX_STATE_UNREADABLE = EX_ELEVATION;
 
 const DAY_MS = 86_400_000;
 
@@ -1243,5 +1245,8 @@ export async function runReport(
     out(terminalText(`digest ${digest}`));
   }
 
-  return report.verification.ok ? 0 : EX_VERIFY_FAILED;
+  if (report.verification.ok) return 0;
+  // Match verax verify: an unreadable directory is 77, not the generic verify-failed 1.
+  if (report.verification.problems.includes("state-unreadable")) return EX_STATE_UNREADABLE;
+  return EX_VERIFY_FAILED;
 }

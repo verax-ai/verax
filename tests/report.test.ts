@@ -1662,7 +1662,7 @@ describe("verax report", () => {
   });
 
   it(
-    "8. an unreadable state directory: state-unreadable, exit verify-failed, no path in output",
+    "8. an unreadable state directory: state-unreadable, same exit as verify, no path in output",
     {
       skip:
         process.platform === "win32"
@@ -1675,14 +1675,19 @@ describe("verax report", () => {
       const dir = await buildLedger();
       chmodSync(dir, 0o000);
       try {
+        const verifyCode = await runCli(["verify", dir], {
+          elevated: () => false,
+          stdout: { write: () => {} },
+          stderr: { write: () => {} },
+        });
         const json = await reportJson(dir);
-        assert.equal(json.code, EX_VERIFY_FAILED, json.text);
+        assert.equal(json.code, verifyCode, json.text);
         assert.deepEqual(json.report.verification.problems, ["state-unreadable"]);
         assert.equal(json.report.recordCount, null);
         assert.equal(json.report.checkpoints.count, null);
         assert.equal(json.text.includes(dir), false);
         const text = await reportText(dir);
-        assert.equal(text.code, EX_VERIFY_FAILED);
+        assert.equal(text.code, verifyCode);
         assert.equal(text.text.includes(dir), false);
       } finally {
         chmodSync(dir, 0o700);
@@ -2143,8 +2148,17 @@ describe("verax report", () => {
       restore = () => chmodSync(dir, 0o700);
     }
     try {
+      let verifyCode = -1;
+      {
+        const code = await runCli(["verify", dir], {
+          elevated: () => false,
+          stdout: { write: () => {} },
+          stderr: { write: () => {} },
+        });
+        verifyCode = code;
+      }
       const json = await reportJson(dir);
-      assert.equal(json.code, EX_VERIFY_FAILED, json.text);
+      assert.equal(json.code, verifyCode, `report ${json.code} vs verify ${verifyCode}`);
       assert.deepEqual(json.report.verification.problems, ["state-unreadable"]);
       assert.equal(json.report.verification.ok, false);
       assert.equal(json.report.recordCount, null);
@@ -2154,12 +2168,12 @@ describe("verax report", () => {
       assert.equal(json.text.includes("System32"), false);
 
       const text = await reportText(dir);
-      assert.equal(text.code, EX_VERIFY_FAILED);
+      assert.equal(text.code, verifyCode);
       assert.equal(text.text.includes(dir), false);
       assert.match(text.text.split("\n")[0]!, /NOT VERIFIED/);
 
       const via = await throughDispatcher([dir, "--from", FROM, "--to", TO, "--json"]);
-      assert.equal(via.code, EX_VERIFY_FAILED);
+      assert.equal(via.code, verifyCode);
       assert.equal(via.stderr, "");
       assert.equal(via.stdout.includes(dir), false);
       assert.deepEqual(JSON.parse(via.stdout).verification.problems, ["state-unreadable"]);
