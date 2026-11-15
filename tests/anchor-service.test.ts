@@ -133,6 +133,38 @@ async function stopHarness(h: Harness): Promise<void> {
   rmSync(h.dir, { recursive: true, force: true });
 }
 
+/**
+ * startService must refuse. If a protection is mutated away and start succeeds,
+ * close the service before failing — otherwise the lock beat keeps the process alive.
+ */
+async function assertStartRefused(
+  start: () => Promise<RunningService>,
+  expect: RegExp | ((err: Error) => boolean),
+): Promise<void> {
+  let service: RunningService | null = null;
+  try {
+    service = await start();
+  } catch (err) {
+    const e = err instanceof Error ? err : new Error(String(err));
+    if (expect instanceof RegExp) {
+      assert.match(e.message, expect);
+    } else {
+      assert.equal(expect(e), true);
+    }
+    return;
+  }
+  try {
+    await service.close();
+  } catch {
+    /* */
+  }
+  assert.fail(
+    expect instanceof RegExp
+      ? `expected startService to refuse matching ${expect}`
+      : "expected startService to refuse",
+  );
+}
+
 function storeBytes(path: string): Buffer {
   try {
     return readFileSync(path);
@@ -347,7 +379,7 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config), /store line 1/);
+      await assertStartRefused(() => startService(config), /store line 1/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -687,10 +719,9 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(
+      await assertStartRefused(
         () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
-        (err: unknown) => {
-          assert.ok(err instanceof Error);
+        (err) => {
           assert.equal(err.message, `store already locked: ${h.storePath}`);
           return true;
         },
@@ -1099,7 +1130,7 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store already locked/);
+      await assertStartRefused(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store already locked/);
       const first = await registerCheckpoint(h.service.url, "aa".repeat(32), h.publicKeyPem, fetch, Date.now, h.token);
       assert.equal(first.ok, true);
       if (!first.ok || first.row.v !== 1) return;
@@ -1419,7 +1450,7 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store line 2/);
+      await assertStartRefused(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store line 2/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1446,13 +1477,13 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /blank/);
+      await assertStartRefused(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /blank/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("a repeated owner_id and leaf_hash refuses to start", async () => {
+  it("a repeated owner_id and leaf_hash refuses to start", { timeout: 5_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-dup-"));
     try {
       const { privateKey } = generateKeyPairSync("ed25519");
@@ -1474,7 +1505,10 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /repeats an \(owner_id, leaf_hash\)/);
+      await assertStartRefused(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        /repeats an \(owner_id, leaf_hash\)/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1502,7 +1536,7 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(
+      await assertStartRefused(
         () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
         /old format without line index and prev hash/,
       );
@@ -1523,7 +1557,7 @@ describe("hosted anchor service", () => {
 
       const asDir = join(dir, "store-dir");
       mkdirSync(asDir);
-      await assert.rejects(
+      await assertStartRefused(
         () =>
           startService(
             loadConfig({
@@ -1563,7 +1597,7 @@ describe("hosted anchor service", () => {
         }
         throw err;
       }
-      await assert.rejects(
+      await assertStartRefused(
         () =>
           startService(
             loadConfig({
@@ -1764,7 +1798,7 @@ describe("hosted anchor service", () => {
     );
   });
 
-  it("a store with a wrong index but a matching prev chain refuses to start", async () => {
+  it("a store with a wrong index but a matching prev chain refuses to start", { timeout: 5_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-badindex-"));
     try {
       const { privateKey } = generateKeyPairSync("ed25519");
@@ -1785,13 +1819,16 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /index 99, expected 1/);
+      await assertStartRefused(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        /index 99, expected 1/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("a store with a broken prev after an altered earlier line refuses to start", async () => {
+  it("a store with a broken prev after an altered earlier line refuses to start", { timeout: 5_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-badprev-"));
     try {
       const { privateKey } = generateKeyPairSync("ed25519");
@@ -1813,13 +1850,16 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /breaks the prev-hash chain/);
+      await assertStartRefused(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        /breaks the prev-hash chain/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("a store with a removed middle line and renumbered indexes refuses on prev", async () => {
+  it("a store with a removed middle line and renumbered indexes refuses on prev", { timeout: 5_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-gap-"));
     try {
       const { privateKey } = generateKeyPairSync("ed25519");
@@ -1843,7 +1883,10 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /breaks the prev-hash chain/);
+      await assertStartRefused(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        /breaks the prev-hash chain/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2166,10 +2209,9 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      await assert.rejects(
+      await assertStartRefused(
         () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
-        (err: unknown) => {
-          assert.ok(err instanceof Error);
+        (err) => {
           assert.match(err.message, /store lock takeover gate is present/);
           assert.ok(err.message.includes(gate));
           assert.ok(!err.message.startsWith("store already locked:"));
