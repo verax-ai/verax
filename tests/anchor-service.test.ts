@@ -2012,7 +2012,7 @@ describe("hosted anchor service", () => {
       chmodSync(keyFile, 0o640);
       const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
       writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
-      await assert.rejects(
+      assert.throws(
         () =>
           loadConfig({
             VERAX_ANCHOR_SVC_TOKENS: tokensFile,
