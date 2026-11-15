@@ -1,8 +1,16 @@
 import { strict as assert } from "node:assert";
 import { createHash, generateKeyPairSync } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { describe, it } from "node:test";
 
 import {
@@ -22,6 +30,7 @@ import {
   runReport,
   serializePeriodReport,
 } from "../packages/body/src/report-cli.ts";
+import { EX_VERIFY_FAILED } from "../packages/body/src/verify-cli.ts";
 
 const FROM = "2026-03-01";
 const TO = "2026-03-31";
@@ -74,6 +83,27 @@ const POLICY = {
       requires: ["verax:memory"],
       mode: "allow",
       text: "A tool name with apostrophe and ampersand.",
+    },
+    {
+      id: "proto-tool-allow",
+      tool: "__proto__",
+      requires: ["verax:memory"],
+      mode: "allow",
+      text: "A tool name that collides with Object.prototype.",
+    },
+    {
+      id: "constructor-tool-allow",
+      tool: "constructor",
+      requires: ["verax:memory"],
+      mode: "allow",
+      text: "A tool name equal to constructor.",
+    },
+    {
+      id: "tostring-tool-allow",
+      tool: "toString",
+      requires: ["verax:memory"],
+      mode: "allow",
+      text: "A tool name equal to toString.",
     },
   ],
 };
@@ -331,12 +361,11 @@ describe("verax report", () => {
     const jsonCap = capture();
     await runReport([dir, "--from", FROM, "--to", TO, "--json"], jsonCap.out);
     const report = JSON.parse(jsonCap.text()) as { whatThisReportDoesNotShow: string };
-    assert.ok(report.whatThisReportDoesNotShow.includes("A held call is counted by the time it was held."));
-    assert.ok(
-      report.whatThisReportDoesNotShow.includes(
-        "A checkpoint is counted when its coverage overlaps the window.",
-      ),
-    );
+    assert.ok(report.whatThisReportDoesNotShow.includes("signed defer counted by the time it was held"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("approvals.jsonl is not the source of a count"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("[startMs, endMs)"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("run verax verify"));
+    assert.ok(report.whatThisReportDoesNotShow.includes("does not name the ledger directory"));
   });
 
   it("an argument value in a record does not appear in JSON, HTML or text", async () => {
@@ -398,7 +427,6 @@ describe("verax report", () => {
     const report = {
       from: FROM,
       to: TO,
-      directory: "/tmp/x",
       headHash: "ab",
       recordCount: 0,
       firstRecordMs: null,
@@ -425,5 +453,236 @@ describe("verax report", () => {
     const again = serializePeriodReport(report);
     assert.equal(once, again);
     assert.ok(once.indexOf('"a.tool"') < once.indexOf('"z.tool"'));
+    assert.equal(once.includes('"directory"'), false);
+  });
+
+  it("a fabricated approvals.jsonl row is not counted; signed allow answers a held defer", async () => {
+    const dir = await buildLedger();
+    const before = capture();
+    await runReport([dir, "--from", FROM, "--to", TO, "--json"], before.out);
+    const base = JSON.parse(before.text()) as {
+      approvals: { approved: number; stillHeld: number; withoutOperatorSignature: number };
+    };
+    const approvalsPath = join(dir, "approvals.jsonl");
+    const fabricated = {
+      ref: "fabricated-hold",
+      subject: "memory.put",
+      brain: "brain-1",
+      requestHash: "ab".repeat(32),
+      args: { id: "x" },
+      expiresAtMs: Date.UTC(2026, 2, 28),
+      createdAtMs: Date.UTC(2026, 2, 16, 12),
+      status: "approved",
+      allowRef: "no-such-allow",
+    };
+    writeFileSync(approvalsPath, `${readFileSync(approvalsPath, "utf8")}${JSON.stringify(fabricated)}\n`, "utf8");
+    const after = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--json"], after.out);
+    assert.equal(code, 0, after.text());
+    const report = JSON.parse(after.text()) as {
+      approvals: { approved: number; stillHeld: number; withoutOperatorSignature: number };
+    };
+    assert.equal(report.approvals.approved, base.approvals.approved);
+    assert.equal(report.approvals.stillHeld, base.approvals.stillHeld);
+    assert.equal(report.approvals.approved, 1);
+    assert.equal(report.approvals.stillHeld, 1);
+  });
+
+  it("a signed allow with approvals.jsonl still pending counts as approved", async () => {
+    const dir = await buildLedger();
+    const approvalsPath = join(dir, "approvals.jsonl");
+    const lines = readFileSync(approvalsPath, "utf8")
+      .split("\n")
+      .filter((line) => line !== "");
+    const rewritten = lines.map((line) => {
+      const row = JSON.parse(line) as { ref?: string; status?: string; allowRef?: string };
+      if (row.ref === "defer-approved") {
+        return JSON.stringify({ ...row, status: "pending", allowRef: undefined });
+      }
+      return line;
+    });
+    writeFileSync(approvalsPath, `${rewritten.join("\n")}\n`, "utf8");
+    const c = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--json"], c.out);
+    assert.equal(code, 0, c.text());
+    const report = JSON.parse(c.text()) as {
+      approvals: { approved: number; stillHeld: number; withoutOperatorSignature: number };
+    };
+    assert.equal(report.approvals.approved, 1);
+    assert.equal(report.approvals.withoutOperatorSignature, 1);
+    assert.equal(report.approvals.stillHeld, 1);
+  });
+
+  it("JSON digest matches for relative path, absolute path, and a copy of the ledger", async () => {
+    const dir = await buildLedger();
+    const abs = resolve(dir);
+    const copyDir = mkdtempSync(join(tmpdir(), "verax-report-copy-"));
+    for (const name of readdirSync(dir)) {
+      const src = join(dir, name);
+      const dest = join(copyDir, name);
+      try {
+        copyFileSync(src, dest);
+      } catch {
+        // skip non-files (lock dirs)
+      }
+    }
+    const a = capture();
+    const b = capture();
+    const c = capture();
+    assert.equal(await runReport([dir, "--from", FROM, "--to", TO, "--json"], a.out), 0, a.text());
+    assert.equal(await runReport([abs, "--from", FROM, "--to", TO, "--json"], b.out), 0, b.text());
+    assert.equal(await runReport([copyDir, "--from", FROM, "--to", TO, "--json"], c.out), 0, c.text());
+    assert.equal(a.text(), b.text());
+    assert.equal(a.text(), c.text());
+    assert.equal(a.text().includes('"directory"'), false);
+    assert.equal(a.text().includes(dir.replaceAll("\\", "\\\\")), false);
+    const textCap = capture();
+    await runReport([dir, "--from", FROM, "--to", TO], textCap.out);
+    assert.equal(textCap.text().includes(dir), false);
+    const outPath = join(dir, "no-path.html");
+    await runReport([dir, "--from", FROM, "--to", TO, "--out", outPath], capture().out);
+    assert.equal(readFileSync(outPath, "utf8").includes(dir), false);
+  });
+
+  it("verification problems are reported by class only, and the text points to verax verify", async () => {
+    const dir = await buildLedger();
+    const path = join(dir, "decisions.jsonl");
+    const lines = readFileSync(path, "utf8").trim().split("\n");
+    const rec = JSON.parse(lines[2]!) as { claims: Record<string, unknown> };
+    rec.claims.subject = "tampered-tool";
+    lines[2] = JSON.stringify(rec);
+    writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+    const jsonCap = capture();
+    await runReport([dir, "--from", FROM, "--to", TO, "--json"], jsonCap.out);
+    const report = JSON.parse(jsonCap.text()) as { verification: { problems: string[]; ok: boolean } };
+    assert.equal(report.verification.ok, false);
+    assert.ok(report.verification.problems.length > 0);
+    for (const p of report.verification.problems) {
+      assert.equal(p.includes(dir), false, p);
+      assert.equal(/ref\s/.test(p), false, p);
+      assert.equal(p.includes("_ref"), false, p);
+    }
+    const textCap = capture();
+    await runReport([dir, "--from", FROM, "--to", TO], textCap.out);
+    assert.match(textCap.text(), /verax verify/);
+    for (const p of report.verification.problems) {
+      assert.ok(textCap.text().includes(p), p);
+    }
+  });
+
+  it("a checkpoint whose exclusive end equals from is outside; touching cases match [startMs, endMs)", async () => {
+    const dir = await buildLedger();
+    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+    const priv = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const pub = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const signWindow = (startMs: number, endMs: number, epoch: number): SignedCheckpoint =>
+      signCheckpoint(
+        buildCheckpointClaims(epoch, [], startMs, endMs, null, () => ({ allow: "0", deny: "0", defer: "0" }), () => ""),
+        priv,
+        pub,
+      );
+    // Coverage ends exactly at from: [from-10, from) does not overlap [from, to+1day).
+    // Coverage starts exactly at from: overlaps.
+    // Coverage ends exactly at to+1day: overlaps.
+    // Coverage starts exactly at to+1day: does not overlap.
+    const rows = [
+      signWindow(FROM_MS - 10, FROM_MS, 0),
+      signWindow(FROM_MS, FROM_MS + 10, 1),
+      signWindow(TO_EXCLUSIVE - 10, TO_EXCLUSIVE, 2),
+      signWindow(TO_EXCLUSIVE, TO_EXCLUSIVE + 10, 3),
+    ];
+    writeFileSync(join(dir, "checkpoints.jsonl"), `${rows.map((r) => JSON.stringify(r)).join("\n")}\n`, "utf8");
+    const c = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--json"], c.out);
+    assert.equal(code === 0 || code === EX_VERIFY_FAILED, true, c.text());
+    const report = JSON.parse(c.text()) as { checkpoints: { count: number } };
+    assert.equal(report.checkpoints.count, 2);
+  });
+
+  it("tool names __proto__, constructor and toString appear in the per-tool table", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-proto-"));
+    const signers = loadOrCreateSigners(dir);
+    const policy = loadPolicy(POLICY);
+    persistPolicySnapshot(dir, policy.hash, POLICY);
+    let clock = Date.UTC(2026, 2, 10, 12);
+    const names = ["__proto__", "constructor", "toString"] as const;
+    let i = 0;
+    const ledger = new FileLedger(dir);
+    const proxy = createProxy({
+      policy,
+      recordSigner: signers.recordSigner,
+      effectSigner: signers.effectSigner,
+      ledger,
+      now: () => clock,
+      nonce: () => `proto-${i++}`,
+      inner: async () => ({ content: [{ type: "text", text: "ok" }], isError: false }),
+    });
+    const principal = { brain: "brain-1", scopes: new Set(["verax:memory"]) };
+    for (const name of names) {
+      clock += 1;
+      await proxy.call({ name, arguments: { x: 1 } }, principal);
+    }
+    ledger.close();
+    const c = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--json"], c.out);
+    assert.equal(code, 0, c.text());
+    const report = JSON.parse(c.text()) as {
+      decisions: { total: { allow: number }; byTool: Record<string, { allow: number }> };
+    };
+    assert.equal(report.decisions.total.allow, 3);
+    assert.equal(report.decisions.byTool["__proto__"]?.allow, 1);
+    assert.equal(report.decisions.byTool["constructor"]?.allow, 1);
+    assert.equal(report.decisions.byTool["toString"]?.allow, 1);
+    assert.ok(Object.prototype.hasOwnProperty.call(report.decisions.byTool, "__proto__"));
+    assert.ok(Object.prototype.hasOwnProperty.call(report.decisions.byTool, "constructor"));
+    assert.ok(Object.prototype.hasOwnProperty.call(report.decisions.byTool, "toString"));
+  });
+
+  it("corrupt manifest, malformed approvals, or unreadable anchors still yield NOT VERIFIED and exit verify-failed", async () => {
+    async function assertFailedReport(dir: string, expectedClass: string): Promise<void> {
+      const c = capture();
+      const errParts: string[] = [];
+      const prior = process.listeners("uncaughtException");
+      const onUncaught = (err: Error): void => {
+        errParts.push(err.stack ?? err.message);
+      };
+      process.on("uncaughtException", onUncaught);
+      let code: number;
+      try {
+        code = await runReport([dir, "--from", FROM, "--to", TO], c.out);
+      } finally {
+        process.off("uncaughtException", onUncaught);
+      }
+      assert.equal(errParts.length, 0, errParts.join("\n"));
+      assert.equal(code, EX_VERIFY_FAILED, c.text());
+      assert.match(c.text().split("\n")[0]!, /NOT VERIFIED/);
+      assert.match(c.text(), new RegExp(expectedClass));
+      assert.equal(/\bat [\w.]+\s*\(/.test(c.text()), false, c.text());
+    }
+
+    const corrupt = await buildLedger();
+    writeFileSync(join(corrupt, "ledger-manifest.json"), "{not-json\n", "utf8");
+    await assertFailedReport(corrupt, "ledger-manifest-corrupt");
+
+    const badApprovals = await buildLedger();
+    writeFileSync(join(badApprovals, "approvals.jsonl"), "{not-json\n", "utf8");
+    await assertFailedReport(badApprovals, "approvals-malformed");
+
+    const badAnchors = await buildLedger();
+    mkdirSync(join(badAnchors, "checkpoint-anchors.jsonl"));
+    await assertFailedReport(badAnchors, "anchors-unreadable");
+  });
+
+  it("exclusive --out create refuses a racing existing file and leaves no partial on failure", async () => {
+    const dir = await buildLedger();
+    const outPath = join(dir, "race.html");
+    writeFileSync(outPath, "already here\n", "utf8");
+    const c = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--out", outPath], c.out);
+    assert.equal(code, 64);
+    assert.match(c.text(), /refusing to overwrite/);
+    assert.equal(readFileSync(outPath, "utf8"), "already here\n");
+    const leftovers = readdirSync(dir).filter((n) => n.includes(".tmp") || n.startsWith(".verax-report-"));
+    assert.deepEqual(leftovers, []);
   });
 });
