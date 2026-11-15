@@ -746,8 +746,9 @@ describe("verax report", () => {
     assert.match(plain.text, /could have been answered by an unbound record/);
     assert.match(plain.text, /still held not available|still held: not available|Still held: not available/i);
 
-    // Identity over six ledgers (comment in countApprovalsFromSigned):
+    // Identity over ledgers (comment in countApprovalsFromSigned):
     // approved + closedWithoutAllow + unmatched + heldWithoutBoundAnswer = window defer count.
+    // stillHeld is null whenever a held defer could be answered by an unbound record after it.
     const ledgers: { dir: string; records: SignedDecisionRecord[] }[] = [
       await handLedger([defer("d1", DAY)]),
       await handLedger([defer("d1", DAY), answer("allow", "a1", "d1", DAY + 100)]),
@@ -768,10 +769,227 @@ describe("verax report", () => {
         windowDefers,
         `identity for ${d}`,
       );
-      assert.equal(c.stillHeld, c.terminalsWithoutBoundInputs === 0 ? c.heldWithoutBoundAnswer : null);
-      if (c.terminalsWithoutBoundInputs === 0) assert.equal(c.heldPossiblyAnsweredByUnbound, 0);
+      assert.equal(
+        c.stillHeld,
+        c.heldPossiblyAnsweredByUnbound === 0 ? c.heldWithoutBoundAnswer : null,
+      );
       assert.ok(c.heldPossiblyAnsweredByUnbound <= c.heldWithoutBoundAnswer);
     }
+  });
+
+  it("k1. an unbound answer outside the window makes stillHeld unestablished", async () => {
+    // March defer, April 1 unbound deny that names it: same request hash and tool.
+    const april = Date.UTC(2026, 3, 1);
+    async function ledgerWithUnboundAt(unboundTs: number): Promise<string> {
+      const dir = mkdtempSync(join(tmpdir(), "verax-report-k1-"));
+      const signers = loadOrCreateSigners(dir);
+      const ledger = new FileLedger(dir);
+      try {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "defer",
+              reasonCode: "needs-approval",
+              ref: "d",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY,
+              nonce: "k1-defer",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-operator",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "deny",
+              reasonCode: "expired",
+              ref: "u",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: unboundTs,
+              nonce: "k1-deny",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+      } finally {
+        ledger.close();
+      }
+      writeFileSync(
+        join(dir, "inputs.jsonl"),
+        `${JSON.stringify({ ref: "u", inputs: { approver: { resolves: "d" } } })}\n`,
+        "utf8",
+      );
+      const verified = await verifyLedger(dir);
+      assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+      return dir;
+    }
+
+    const outside = await ledgerWithUnboundAt(april);
+    const outReport = await reportJson(outside);
+    assert.equal(outReport.code, 0, outReport.text);
+    assert.equal(outReport.report.approvals.terminalsWithoutBoundInputs, 0);
+    assert.equal(outReport.report.approvals.heldWithoutBoundAnswer, 1);
+    assert.equal(outReport.report.approvals.heldPossiblyAnsweredByUnbound, 1);
+    assert.equal(outReport.report.approvals.stillHeld, null);
+
+    const inside = await ledgerWithUnboundAt(DAY + 100);
+    const inReport = await reportJson(inside);
+    assert.equal(inReport.code, 0, inReport.text);
+    assert.equal(inReport.report.approvals.terminalsWithoutBoundInputs, 1);
+    assert.equal(inReport.report.approvals.heldPossiblyAnsweredByUnbound, 1);
+    assert.equal(inReport.report.approvals.stillHeld, null);
+
+    // Identity: out-of-window unbound after defer, and unbound before defer (must not count).
+    const afterOutside = await (async () => {
+      const dir = mkdtempSync(join(tmpdir(), "verax-report-k1-id-"));
+      const signers = loadOrCreateSigners(dir);
+      const ledger = new FileLedger(dir);
+      try {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "defer",
+              reasonCode: "needs-approval",
+              ref: "d-id",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY,
+              nonce: "k1-id-d",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-operator",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "deny",
+              reasonCode: "expired",
+              ref: "u-after",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: april,
+              nonce: "k1-id-u",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+      } finally {
+        ledger.close();
+      }
+      writeFileSync(
+        join(dir, "inputs.jsonl"),
+        `${JSON.stringify({ ref: "u-after", inputs: { approver: { resolves: "d-id" } } })}\n`,
+        "utf8",
+      );
+      return { dir, records: readDecisionRecords(dir) };
+    })();
+    const beforeUnbound = await (async () => {
+      const dir = mkdtempSync(join(tmpdir(), "verax-report-k1-before-"));
+      const signers = loadOrCreateSigners(dir);
+      const ledger = new FileLedger(dir);
+      try {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-operator",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "deny",
+              reasonCode: "expired",
+              ref: "u-before",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY - 50,
+              nonce: "k1-before-u",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "defer",
+              reasonCode: "needs-approval",
+              ref: "d-before",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY,
+              nonce: "k1-before-d",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+      } finally {
+        ledger.close();
+      }
+      writeFileSync(
+        join(dir, "inputs.jsonl"),
+        `${JSON.stringify({ ref: "u-before", inputs: { approver: { resolves: "d-before" } } })}\n`,
+        "utf8",
+      );
+      return { dir, records: readDecisionRecords(dir) };
+    })();
+
+    for (const { dir: d, records } of [afterOutside, beforeUnbound]) {
+      const c = approvalCounts(d, records);
+      assert.equal(
+        c.approved + c.closedWithoutAllow + c.unmatched + c.heldWithoutBoundAnswer,
+        deferCount(records),
+        `identity for ${d}`,
+      );
+      assert.equal(
+        c.stillHeld,
+        c.heldPossiblyAnsweredByUnbound === 0 ? c.heldWithoutBoundAnswer : null,
+      );
+      assert.ok(c.heldPossiblyAnsweredByUnbound <= c.heldWithoutBoundAnswer);
+    }
+    const beforeCounts = approvalCounts(beforeUnbound.dir, beforeUnbound.records);
+    assert.equal(beforeCounts.heldPossiblyAnsweredByUnbound, 0);
+    assert.equal(beforeCounts.stillHeld, 1);
+    const afterCounts = approvalCounts(afterOutside.dir, afterOutside.records);
+    assert.equal(afterCounts.heldPossiblyAnsweredByUnbound, 1);
+    assert.equal(afterCounts.stillHeld, null);
   });
 
   // -------------------------------------------------------------------------

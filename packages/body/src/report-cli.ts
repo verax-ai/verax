@@ -51,7 +51,7 @@ const UNSIGNED_APPROVALS_NOTE =
   "approvals.jsonl could not be parsed cleanly. It is an unsigned candidate file: it is not a source of any count and it does not change the verdict.";
 
 const WHAT_NOT_SHOWN =
-  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. Counts are taken only from records and checkpoints that verification attested, and only when the ledger verifies; when it does not, every count is null. A held call is a signed defer counted by the time it was held. It is approved when the first signed allow or deny that follows it in chain order, names it, and agrees on request hash and tool, is an allow; it is closed without an allow when that first answer is a deny (expired or otherwise); it is still held when no signed bound answer exists and every terminal in the window has hash-bound inputs; when a terminal in the window has no bound inputs, stillHeld is not established and the report says how many held records an unbound inputs row could have answered; it is unmatched when the defer has no usable reference, shares its reference with another defer, or its only bound answers disagree on request hash or tool. A signature field present on an approving record is not a verified operator signature in this report; signature verification is part of the verdict. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses and its start is before its end. The report verifies with default options only (no key pins, operator credentials, anchor requirements or signed-start requirement), so anchor rows are only counted as present and not checked. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
+  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. Counts are taken only from records and checkpoints that verification attested, and only when the ledger verifies; when it does not, every count is null. A held call is a signed defer counted by the time it was held. It is approved when the first signed allow or deny that follows it in chain order, names it, and agrees on request hash and tool, is an allow; it is closed without an allow when that first answer is a deny (expired or otherwise); it is still held when no signed bound answer exists and no later unbound record could have answered it; when a held defer could have been answered by an unbound record anywhere after it in chain order, stillHeld is not established and the report says how many held records an unbound inputs row could have answered; it is unmatched when the defer has no usable reference, shares its reference with another defer, or its only bound answers disagree on request hash or tool. A signature field present on an approving record is not a verified operator signature in this report; signature verification is part of the verdict. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses and its start is before its end. The report verifies with default options only (no key pins, operator credentials, anchor requirements or signed-start requirement), so anchor rows are only counted as present and not checked. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
 
 type DecisionCounts = { allow: number; deny: number; defer: number };
 
@@ -61,8 +61,9 @@ export type ApprovalCounts = {
   withoutOperatorSignatureField: number;
   closedWithoutAllow: number;
   /**
-   * Defers with no hash-bound answer. Established as a fact only when
-   * `terminalsWithoutBoundInputs === 0`; otherwise null (see heldWithoutBoundAnswer).
+   * Defers with no hash-bound answer. Established as a fact only when no held
+   * defer could be answered by an unbound record after it; otherwise null
+   * (see heldWithoutBoundAnswer / heldPossiblyAnsweredByUnbound).
    */
   stillHeld: number | null;
   unmatched: number;
@@ -520,11 +521,12 @@ function nonEmptyString(v: unknown): string | null {
  * Identity (when counts are available):
  *   approved + closedWithoutAllow + unmatched + heldWithoutBoundAnswer
  *     === windowDeferCount
- * stillHeld is heldWithoutBoundAnswer when terminalsWithoutBoundInputs === 0,
- * otherwise null (not established). heldPossiblyAnsweredByUnbound counts
- * how many of those held an unbound terminal's inputs row could answer; it
- * is 0 when terminalsWithoutBoundInputs === 0, and never exceeds
- * heldWithoutBoundAnswer.
+ * Bound answers and unbound possibility both scan every later terminal in
+ * chain order, inside the window or not. stillHeld is heldWithoutBoundAnswer
+ * when no held defer could be answered by an unbound record after it
+ * (heldPossiblyAnsweredByUnbound === 0); otherwise null. terminalsWithoutBoundInputs
+ * still counts only unbound terminals whose time falls in the window.
+ * heldPossiblyAnsweredByUnbound never exceeds heldWithoutBoundAnswer.
  */
 export function countApprovalsFromSigned(
   dir: string,
@@ -659,8 +661,7 @@ export function countApprovalsFromSigned(
   }
 
   counts.stillHeld =
-    counts.terminalsWithoutBoundInputs === 0 ? counts.heldWithoutBoundAnswer : null;
-  if (counts.terminalsWithoutBoundInputs === 0) counts.heldPossiblyAnsweredByUnbound = 0;
+    counts.heldPossiblyAnsweredByUnbound === 0 ? counts.heldWithoutBoundAnswer : null;
 
   return counts;
 }
@@ -1046,7 +1047,7 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     `<tbody>${toolRows}</tbody></table>`,
     "<h2>Approvals</h2>",
     `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}${a.stillHeld === null && a.heldPossiblyAnsweredByUnbound !== null && a.heldPossiblyAnsweredByUnbound > 0 ? ` (${a.heldPossiblyAnsweredByUnbound} held record(s) could have been answered by an unbound record)` : ""}. Unmatched: ${shown(a.unmatched)}. Terminals without bound inputs: ${shown(a.terminalsWithoutBoundInputs)}.${approvalsReason}</p>`,
-    "<p>Approved means the first signed bound answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed bound answer exists and every terminal in the window has hash-bound inputs; when a terminal has no bound inputs, still held is not established. Unmatched means the defer has no usable reference, shares it with another defer, or its bound answers disagree on request hash or tool.</p>",
+    "<p>Approved means the first signed bound answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed bound answer exists and no later unbound record could have answered the defer; when a held defer could have been answered by an unbound record anywhere after it, still held is not established. Unmatched means the defer has no usable reference, shares it with another defer, or its bound answers disagree on request hash or tool.</p>",
     ...approvalsNote,
     "<h2>Checkpoints</h2>",
     `<p>Checkpoints in the window: ${shown(c.count)}. Anchor receipts verified: ${shown(c.withAnchorVerified)}. Anchor rows present, not checked (no anchor key): ${shown(c.anchorRowsPresentNotChecked)}.${anchorReason}</p>`,
@@ -1090,7 +1091,7 @@ export function renderReportText(report: PeriodReport, digest: string): string {
   }
   if (a.unavailableReason !== null) lines.push(`approvals     not available: ${a.unavailableReason}`);
   lines.push(
-    "approvals mean: approved = first signed bound answer after the defer (naming it, same request hash and tool) is an allow; closed without an allow = that answer is a deny; still held = no signed bound answer and every terminal has bound inputs (otherwise not available); unmatched = no usable ref, shared ref, or disagreeing bound answers; signature field present is not a verified signature",
+    "approvals mean: approved = first signed bound answer after the defer (naming it, same request hash and tool) is an allow; closed without an allow = that answer is a deny; still held = no signed bound answer and no later unbound record could have answered it (otherwise not available); unmatched = no usable ref, shared ref, or disagreeing bound answers; signature field present is not a verified signature",
   );
   if (report.unsignedApprovalsNote !== null) lines.push(`note          ${report.unsignedApprovalsNote}`);
   lines.push(
