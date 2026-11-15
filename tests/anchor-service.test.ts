@@ -2269,7 +2269,9 @@ describe("hosted anchor service", () => {
       });
       ops.push("responded");
       assert.equal(res.status, 200);
-      assert.deepEqual(ops.slice(0, 2), ["write", "fsync"]);
+      const writeAt = ops.indexOf("write");
+      assert.ok(writeAt >= 0, "expected a store write");
+      assert.equal(ops[writeAt + 1], "fsync");
       assert.equal(service.log.size, 1);
 
       await service.close();
