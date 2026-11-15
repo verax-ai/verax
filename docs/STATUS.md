@@ -728,14 +728,15 @@ answered; unmatched when the defer has no usable reference, shares its
 reference with another defer, or its only bound answers disagree on
 request hash or tool), and attested checkpoints whose coverage overlaps
 the window under the same `[startMs, endMs)` rule with `start < end`.
-Anchor receipts are counted as verified only when an anchor key was
-supplied and they verified; without a key they are only counted as present
-and not checked. A signature field
-present on an approving record is reported as a field present, not as a
-verified operator signature. `approvals.jsonl` may be noted when malformed
-but never changes the verdict or any count. The verdict is only what
-`verax verify` would give for the whole ledger, naming each problem by its
-stable class only (a known class prefix from the verifier's problem
+The report verifies with default options only: it does not accept key
+pins, `--operator-credentials`, `--require-anchored`, `--anchor-key` or
+`--require-signed-starts`, so anchor rows are only counted as present and
+not checked. A signature field present on an approving record is reported
+as a field present, not as a verified operator signature.
+`approvals.jsonl` may be noted when malformed but never changes the
+verdict or any count. The verdict is only what `verax verify` would give
+for the whole ledger under those default options, naming each problem by
+its stable class only (a known class prefix from the verifier's problem
 strings, matched before a space, a colon or the end, or else
 `unclassified`; ledger refs and other detail are not the class; run
 `verax verify` on the machine for the detail), the first and last record

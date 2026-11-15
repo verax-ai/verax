@@ -525,6 +525,60 @@ describe("verax report", () => {
     assert.equal(json.report.verification.problems.some((p) => p.includes(refColon)), false);
   });
 
+  it("j3. report verifies with default options only; pinned verify differs on valid-anchored", async () => {
+    const root = join("test-vectors", "v1", "valid-anchored");
+    const ledger = join(root, "ledger");
+    const pins = join(root, "pins");
+    let verifyOut = "";
+    const verifyCode = await runCli(
+      [
+        "verify",
+        ledger,
+        "--key",
+        join(pins, "record-key.pem"),
+        "--witness-key",
+        join(pins, "witness-key.pem"),
+        "--checkpoint-key",
+        join(pins, "witness-key.pem"),
+        "--operator-credentials",
+        join(pins, "operator-credentials.json"),
+        "--anchor-key",
+        join(pins, "anchor-key.pem"),
+      ],
+      {
+        elevated: () => false,
+        stdout: { write: (s: string) => (verifyOut += s) },
+        stderr: { write: () => {} },
+      },
+    );
+    assert.equal(verifyCode, 0, verifyOut);
+    assert.match(verifyOut, /VERIFIED/);
+
+    const report = await throughDispatcher([ledger, "--from", "2026-10-01", "--to", "2026-10-02"]);
+    assert.equal(report.code, EX_VERIFY_FAILED, report.stdout);
+    assert.match(report.stdout, /NOT VERIFIED/);
+
+    const refused = await throughDispatcher([
+      ledger,
+      "--from",
+      "2026-10-01",
+      "--to",
+      "2026-10-02",
+      "--anchor-key",
+      join(pins, "anchor-key.pem"),
+    ]);
+    assert.equal(refused.code, EX_USAGE);
+    assert.match(refused.stdout, /unknown option --anchor-key/);
+
+    const help = capture();
+    assert.equal(await runReport(["--help"], help.out), 0);
+    assert.match(help.text(), /default options only/);
+    assert.match(help.text(), /does not (accept|take|check).*key|key pins|anchor-key|operator-credentials|require-signed-starts/i);
+    const { report: body } = await reportJson(await buildLedger());
+    assert.equal(body.whatThisReportDoesNotShow.includes("when the anchor key was supplied"), false);
+    assert.ok(body.whatThisReportDoesNotShow.includes("default options only"));
+  });
+
   it("j2. unbound terminals do not present stillHeld as established", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-report-j2-"));
     const signers = loadOrCreateSigners(dir);
@@ -752,6 +806,8 @@ describe("verax report", () => {
     assert.ok(w.includes("approvals.jsonl is not the source of a count"));
     assert.ok(w.includes("[startMs, endMs)"));
     assert.ok(w.includes("present and not checked"));
+    assert.ok(w.includes("default options only"));
+    assert.equal(w.includes("when the anchor key was supplied"), false);
     assert.ok(w.includes("run verax verify"));
     assert.ok(w.includes("does not name the ledger directory"));
   });
