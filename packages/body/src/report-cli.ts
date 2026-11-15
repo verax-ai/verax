@@ -545,9 +545,10 @@ export function countApprovalsFromSigned(
 
   // resolves ref -> terminal records naming it, in chain order (bound only).
   const answersByRef = new Map<string, { pos: number; row: SignedDecisionRecord; inputs: ApproverInputs }[]>();
-  // Unbound terminals: no string inputsHash or no row hashing to it. Their
-  // inputs rows (if any) are consulted only for heldPossiblyAnsweredByUnbound.
-  const unboundTerminals: { pos: number; row: SignedDecisionRecord; resolves: string | null }[] = [];
+  // Unbound terminals: no string inputsHash or no row hashing to it. Every
+  // inputs row for the terminal (not only the first with resolves) is
+  // consulted for heldPossiblyAnsweredByUnbound.
+  const unboundTerminals: { pos: number; row: SignedDecisionRecord; resolves: Set<string> }[] = [];
   let terminalsWithoutBoundInputs = 0;
   for (let pos = 0; pos < all.length; pos += 1) {
     const row = all[pos]!;
@@ -559,16 +560,13 @@ export function countApprovalsFromSigned(
     if (inputs === null) {
       if (inWindow) terminalsWithoutBoundInputs += 1;
       const ref = typeof row.claims.ref === "string" ? row.claims.ref : null;
-      let resolves: string | null = null;
+      const resolves = new Set<string>();
       if (ref !== null) {
         const rows = index.get(ref);
         if (rows) {
           for (const entry of rows) {
             const r = entry.inputs.approver?.resolves;
-            if (typeof r === "string" && r !== "") {
-              resolves = r;
-              break;
-            }
+            if (typeof r === "string" && r !== "") resolves.add(r);
           }
         }
       }
@@ -652,7 +650,7 @@ export function countApprovalsFromSigned(
     const subject = nonEmptyString(held.defer.claims.subject);
     const maybe = unboundTerminals.some((u) => {
       if (u.pos <= held.pos) return false;
-      if (u.resolves !== held.ref) return false;
+      if (!u.resolves.has(held.ref)) return false;
       const aReq = nonEmptyString(u.row.claims.requestHash);
       const aSubject = nonEmptyString(u.row.claims.subject);
       return reqHash !== null && subject !== null && aReq === reqHash && aSubject === subject;

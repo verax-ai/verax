@@ -992,6 +992,102 @@ describe("verax report", () => {
     assert.equal(afterCounts.stillHeld, null);
   });
 
+  it("k2. heldPossiblyAnsweredByUnbound is the same for every inputs-row order", async () => {
+    async function unboundWithInputOrder(
+      resolvesOrder: readonly string[],
+    ): Promise<{ dir: string; records: SignedDecisionRecord[] }> {
+      const dir = mkdtempSync(join(tmpdir(), "verax-report-k2-"));
+      const signers = loadOrCreateSigners(dir);
+      const ledger = new FileLedger(dir);
+      try {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "defer",
+              reasonCode: "needs-approval",
+              ref: "d1",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY,
+              nonce: "k2-d1",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "defer",
+              reasonCode: "needs-approval",
+              ref: "d2",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY + 50,
+              nonce: "k2-d2",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-operator",
+              subject: "memory.put",
+              requestHash: REQ_A,
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "deny",
+              reasonCode: "expired",
+              ref: "u-multi",
+              effectHash: null,
+              effectClass: "memory.put",
+              timestampMs: DAY + 100,
+              nonce: "k2-u",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+      } finally {
+        ledger.close();
+      }
+      const lines = resolvesOrder.map((resolves) =>
+        JSON.stringify({ ref: "u-multi", inputs: { approver: { resolves } } }),
+      );
+      writeFileSync(join(dir, "inputs.jsonl"), `${lines.join("\n")}\n`, "utf8");
+      const verified = await verifyLedger(dir);
+      assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+      return { dir, records: readDecisionRecords(dir) };
+    }
+
+    const orderD1First = await unboundWithInputOrder(["d1", "unrelated", "d2"]);
+    const orderUnrelatedFirst = await unboundWithInputOrder(["unrelated", "d1", "d2"]);
+    const a = approvalCounts(orderD1First.dir, orderD1First.records);
+    const b = approvalCounts(orderUnrelatedFirst.dir, orderUnrelatedFirst.records);
+    assert.equal(a.heldWithoutBoundAnswer, 2);
+    assert.equal(a.heldPossiblyAnsweredByUnbound, 2);
+    assert.equal(a.stillHeld, null);
+    assert.equal(b.heldWithoutBoundAnswer, a.heldWithoutBoundAnswer);
+    assert.equal(b.heldPossiblyAnsweredByUnbound, a.heldPossiblyAnsweredByUnbound);
+    assert.equal(b.stillHeld, a.stillHeld);
+    assert.equal(b.terminalsWithoutBoundInputs, a.terminalsWithoutBoundInputs);
+  });
+
   // -------------------------------------------------------------------------
   // Happy path counts
   // -------------------------------------------------------------------------
