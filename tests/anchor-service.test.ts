@@ -1681,8 +1681,10 @@ describe("hosted anchor service", () => {
         const after = readFileSync(storePath, "utf8");
         assert.ok(after.includes(complete), `failAt=${failAt}: complete row missing`);
         assert.notEqual(after, "", `failAt=${failAt}: store must not be empty`);
-        // Before rename the torn original remains; after rename the kept prefix is
-        // already durable. Either way a clean start keeps the acknowledged row.
+        // Before rename the torn original remains. After rename (including when
+        // the directory flush then failed) the store path holds the kept prefix
+        // bytes; a later clean start can load that row. This does not show that
+        // the directory entry itself was made durable when failAt was fsync-dir.
         const opened = openStore(storePath);
         try {
           assert.equal(opened.log.size, 1);
@@ -2404,6 +2406,46 @@ describe("hosted anchor service", () => {
         },
       });
       ignored.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a failed directory flush on the first open and on the second both refuse", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-dirfsync-again-"));
+    try {
+      const storePath = join(dir, "store.jsonl");
+      const failDir: Partial<{
+        openSync: (path: string, flags: number) => number;
+        fsyncSync: (fd: number) => void;
+        closeSync: (fd: number) => void;
+      }> = {
+        openSync: () => {
+          const err = new Error("injected directory open EIO") as NodeJS.ErrnoException;
+          err.code = "EIO";
+          throw err;
+        },
+      };
+      assert.throws(() => openStore(storePath, { parentDirOps: failDir }), /EIO|injected directory open/);
+      assert.equal(existsSync(storePath), true);
+      assert.throws(() => openStore(storePath, { parentDirOps: failDir }), /EIO|injected directory open/);
+
+      const tornPath = join(dir, "torn.jsonl");
+      const full = v1StoreLine({
+        leaf_hash: "11".repeat(32),
+        owner_id: "owner-a",
+        at_ms: 1,
+      });
+      writeFileSync(tornPath, `${full.trimEnd()}\n{"leaf`, "utf8");
+      assert.throws(
+        () =>
+          openStore(tornPath, {
+            recoveryOps: { failAt: "fsync-dir" },
+            parentDirOps: failDir,
+          }),
+        /torn-tail recovery failed/,
+      );
+      assert.throws(() => openStore(tornPath, { parentDirOps: failDir }), /EIO|injected directory open/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

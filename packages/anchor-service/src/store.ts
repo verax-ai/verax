@@ -430,10 +430,13 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
     }
   }
 
-  // Flush whatever the OS may still hold from a prior crash between write and
-  // fsync before this process accepts requests. Refuse to start if that fails.
+  // Flush the file and (where supported) its parent directory before this
+  // process accepts requests — including when the path already existed, so a
+  // prior create or recovery that left the file after a failed directory flush
+  // cannot be accepted on the next start.
   try {
     io.fsyncSync(fd);
+    flushParentDir(path, parentDirOps);
   } catch (err) {
     try {
       closeSync(fd);
