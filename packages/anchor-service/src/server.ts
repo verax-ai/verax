@@ -66,6 +66,9 @@ function refuseEarly(
   sendAndClose(res, status, body, after);
 }
 
+// Body-timeout rejects only; the handler always answers through sendAndClose,
+// which destroys the socket. Destroying here would duplicate that close and is
+// not held by any test (a half-body client is gone via getConnections either way).
 function readBody(req: IncomingMessage, max: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -74,7 +77,6 @@ function readBody(req: IncomingMessage, max: number, timeoutMs: number): Promise
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      req.destroy();
       reject(new Error("body-timeout"));
     }, timeoutMs);
     const ok = (buf: Buffer): void => {
