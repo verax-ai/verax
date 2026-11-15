@@ -367,19 +367,10 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   }
 
   if (created) {
-    try {
-      io.fsyncSync(fd);
-      flushParentDir(path, parentDirOps, platform);
-      closeSync(fd);
-      fd = openSync(path, "a+");
-    } catch (err) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* */
-      }
-      throw err;
-    }
+    // Reopen for append; the single open-time fsync and directory flush below
+    // are the path to "ready" (a create-time flush here was redundant with that).
+    closeSync(fd);
+    fd = openSync(path, "a+");
   }
 
   // Re-check identity after open: refuse if the path is no longer a regular file
@@ -419,7 +410,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
       fd = -1;
       recoverTornTail(path, kept, recoveryOps, parentDirOps, platform);
       fd = openSync(path, "a+");
-      io.fsyncSync(fd);
+      // Open-time fsync below is the flush to "ready"; no second fsync here.
     } catch (err) {
       if (fd >= 0) {
         try {

@@ -275,11 +275,6 @@ export async function startService(
       const entryHash = anchorEntryHash(capsuleId, "register");
       let leafIndex = log.findLeaf(ownerId, entryHash);
       if (leafIndex < 0) {
-        if (storeUnavailable || !lock.stillHeld()) {
-          storeUnavailable = true;
-          send(res, 503, { error: "store-unavailable" });
-          return;
-        }
         const atMs = Date.now();
         try {
           writeRow(config.storePath, { leaf_hash: entryHash, owner_id: ownerId, at_ms: atMs });
@@ -300,17 +295,16 @@ export async function startService(
       }
       // Before any signature: path must still name the open store, for new and
       // existing leaves (existing leaves never call append, so its check alone
-      // would miss a removed or replaced path).
+      // would miss a removed or replaced path). Identity may latch; the check
+      // below is the second moment after the body.
       try {
         store.assertPathIdentity();
       } catch (err) {
         storeUnavailable = true;
-        if (err instanceof StoreUnavailableError) {
-          send(res, 503, { error: "store-unavailable" });
-        } else {
+        if (!(err instanceof StoreUnavailableError)) {
           send(res, 500, { error: "internal" });
+          return;
         }
-        return;
       }
       if (storeUnavailable || !lock.stillHeld()) {
         storeUnavailable = true;
