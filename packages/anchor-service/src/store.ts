@@ -202,10 +202,13 @@ export function assertStorePath(path: string, lstat: (path: string) => StoreStat
  * On POSIX and on Windows volumes that report stable ids, compare `dev` and
  * `ino` from `fstatSync(fd)` with `statSync(path)`. A symlink at the path, a
  * missing path, or a different (dev, ino) means the open file is no longer the
- * configured store. Some Windows volumes report `ino` as 0 for every file; when
- * both sides are 0 the check cannot prove identity and still refuses if the
- * path is gone or is not a regular file (symlink/dir), but cannot detect a
- * same-volume replace that also reports ino 0.
+ * configured store. Some volumes report `ino` as 0 for every file; when both
+ * sides are 0 the check cannot prove identity and still refuses if the path is
+ * gone or is not a regular file, but cannot detect a same-volume replace that
+ * also reports ino 0. A rename in the store's directory between this comparison
+ * and a following write can also swap the path. Both limits are the same as for
+ * the prev chain: whoever can write the store's directory can defeat the check
+ * (see docs/STATUS.md, hosted anchoring). No further code closes that.
  */
 function assertPathMatchesFd(path: string, fd: number): void {
   let pathStat: ReturnType<typeof statSync>;
