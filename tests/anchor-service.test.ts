@@ -1727,7 +1727,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a leftover store-recovering temp is removed on start and the store is unchanged", () => {
+  it("a recovery-pattern file beside the store stays byte-for-byte after start and after torn-tail recovery", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-recover-leftover-"));
     try {
       const storePath = join(dir, "store.jsonl");
@@ -1736,17 +1736,28 @@ describe("hosted anchor service", () => {
         owner_id: "owner-a",
         at_ms: 1,
       });
-      writeFileSync(storePath, full, "utf8");
       const leftover = join(dir, ".deadbeefdeadbeef.store-recovering");
-      writeFileSync(leftover, "should-not-remain\n", "utf8");
+      const leftoverBytes = "should-remain-byte-for-byte\n";
+      writeFileSync(storePath, full, "utf8");
+      writeFileSync(leftover, leftoverBytes, "utf8");
       const before = readFileSync(storePath, "utf8");
       const opened = openStore(storePath);
       try {
         assert.equal(opened.log.size, 1);
         assert.equal(readFileSync(storePath, "utf8"), before);
-        assert.equal(existsSync(leftover), false);
+        assert.equal(readFileSync(leftover, "utf8"), leftoverBytes);
       } finally {
         opened.close();
+      }
+
+      writeFileSync(storePath, `${full.trimEnd()}\n{"leaf`, "utf8");
+      const openedAfterTorn = openStore(storePath);
+      try {
+        assert.equal(openedAfterTorn.log.size, 1);
+        assert.equal(readFileSync(storePath, "utf8"), full);
+        assert.equal(readFileSync(leftover, "utf8"), leftoverBytes);
+      } finally {
+        openedAfterTorn.close();
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });

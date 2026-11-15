@@ -21,7 +21,6 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
-  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -29,14 +28,12 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
 const HASH = /^[0-9a-f]{64}$/;
 const ZERO_PREV = "0".repeat(64);
-/** Side-copy name used only during torn-tail recovery; never the configured store. */
-const STORE_RECOVERING = /^\.[0-9a-f]{16}\.store-recovering$/;
 
 /** Thrown when the configured path no longer names the open store descriptor. */
 export class StoreUnavailableError extends Error {
@@ -339,21 +336,6 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   const parentDirOps = opts?.parentDirOps;
   const platform = opts?.platform ?? process.platform;
   assertStorePath(path, lstat);
-
-  // Drop leftover recovery side-copies from an interrupted prior start. Safe
-  // because names matching STORE_RECOVERING are never the configured store
-  // path (they are only the temporary file recoverTornTail writes beside it).
-  const storeDir = dirname(path);
-  const storeBase = basename(path);
-  for (const name of readdirSync(storeDir)) {
-    if (name === storeBase) continue;
-    if (!STORE_RECOVERING.test(name)) continue;
-    try {
-      unlinkSync(join(storeDir, name));
-    } catch {
-      /* best-effort; open continues */
-    }
-  }
 
   let created = false;
   let fd: number;
