@@ -11,12 +11,17 @@ import { isoBase64URL } from "@simplewebauthn/server/helpers";
 
 import { FileLedger } from "@verax-ai/proxy";
 
+import { runCli } from "../packages/body/src/cli.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
-import { controlChallenge, verifyControlSignatures } from "../packages/body/src/control-signature.ts";
-import { historyTail } from "../packages/body/src/halt.ts";
-import { saveCredential } from "../packages/body/src/operator-credentials.ts";
-import { runVerify } from "../packages/body/src/verify-cli.ts";
+import {
+  controlChallenge,
+  nextControlChallenge,
+  verifyControlSignatures,
+} from "../packages/body/src/control-signature.ts";
+import { haltBody, historyTail } from "../packages/body/src/halt.ts";
+import { removeCredential, saveCredential } from "../packages/body/src/operator-credentials.ts";
+import { EX_VERIFY_FAILED, runVerify } from "../packages/body/src/verify-cli.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 import { assertWithSoftwarePasskey, mintSoftwarePasskey, type SoftwarePasskey } from "./software-passkey.ts";
 
@@ -415,6 +420,75 @@ describe("signed halt and resume over HTTP", () => {
       const out = await verifyText(door.stateDir);
       assert.equal(out.code, 0, out.text);
       assert.match(out.text, /signed-verified 0 \| signed-failed 0 \| unsigned-http 2/);
+    });
+  });
+
+  it("C11 a signed halt after its passkey was removed fails verify and report", async () => {
+    await withRp(async () => {
+      const phone = mintSoftwarePasskey();
+      const spare = mintSoftwarePasskey();
+      const door = await openDoor(phone);
+      saveCredential(door.stateDir, {
+        id: spare.id,
+        publicKey: isoBase64URL.fromBuffer(spare.publicKeyCose.slice()),
+        counter: 0,
+        sub: "operator-1",
+      });
+      const stateDir = door.stateDir;
+      try {
+        assert.equal(removeCredential(stateDir, phone.id), "removed");
+      } finally {
+        await door.close();
+      }
+      // Open again so the removal mark reaches the ledger before any halt line.
+      const syncRemoval = await openDoor(null, stateDir);
+      await syncRemoval.close();
+      assert.ok(readFileSync(join(stateDir, "decisions.jsonl"), "utf8").includes("passkey-removed"));
+
+      const { challenge, prev } = nextControlChallenge(stateDir, "halt");
+      const halt = assertWithSoftwarePasskey(phone, { challenge, rpID: RP_ID, origin: ORIGIN, counter: 7 });
+      haltBody(stateDir, "operator-1", "http", Date.now(), {
+        credentialId: phone.id,
+        sub: "operator-1",
+        authenticatorData: halt.response.authenticatorData,
+        clientDataJSON: halt.response.clientDataJSON,
+        signature: halt.response.signature,
+        rpId: RP_ID,
+        prev,
+      });
+      const syncHalt = await openDoor(null, stateDir);
+      await syncHalt.close();
+
+      const controls = await verifyControlSignatures(stateDir);
+      assert.equal(controls.signedAfterRemoval, 1, controls.line);
+      assert.equal(controls.signedVerified, 0, controls.line);
+      assert.equal(controls.ok, false, controls.line);
+
+      const day = new Date().toISOString().slice(0, 10);
+      let verifyOut = "";
+      let reportOut = "";
+      const verifyCode = await runCli(["verify", stateDir], {
+        elevated: () => false,
+        stdout: { write: (s: string) => (verifyOut += s) },
+        stderr: { write: () => {} },
+      });
+      const reportCode = await runCli(["report", stateDir, "--from", day, "--to", day, "--json"], {
+        elevated: () => false,
+        stdout: { write: (s: string) => (reportOut += s) },
+        stderr: { write: () => {} },
+      });
+      const verifyLines = verifyOut.split("\n").filter((line) => line !== "");
+      const verifyVerdict = verifyLines[verifyLines.length - 1] ?? "";
+      assert.equal(verifyCode, EX_VERIFY_FAILED, verifyOut);
+      assert.equal(verifyVerdict, "NOT VERIFIED");
+      assert.match(verifyOut, /control signatures: 1 signed after removal/);
+      const body = JSON.parse(reportOut) as {
+        verification: { ok: boolean; verdict: string; problems: string[] };
+      };
+      assert.equal(reportCode, EX_VERIFY_FAILED, reportOut);
+      assert.equal(body.verification.ok, false);
+      assert.equal(body.verification.verdict, verifyVerdict);
+      assert.ok(body.verification.problems.includes("control signatures"));
     });
   });
 

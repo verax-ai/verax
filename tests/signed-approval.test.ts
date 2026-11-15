@@ -8,15 +8,16 @@ import { fileURLToPath } from "node:url";
 import { decisionRecordHash, type SignedDecisionRecord } from "@cedulon/core";
 import { verifyAuthenticationResponse, type AuthenticationResponseJSON } from "@simplewebauthn/server";
 import { isoBase64URL, isoCBOR } from "@simplewebauthn/server/helpers";
-import { createProxy, FileLedger, loadPolicy } from "@verax-ai/proxy";
+import { approvalsLogFor, approvePending, createProxy, FileLedger, loadPolicy } from "@verax-ai/proxy";
 
+import { runCli } from "../packages/body/src/cli.ts";
 import { listen } from "../packages/body/src/server.ts";
 import { approvalChallenge, verifyApprovalSignatures } from "../packages/body/src/approval-signature.ts";
 import { coseKeyToPublicKey, verifyAssertion } from "../packages/body/src/webauthn-verify.ts";
 import { runApprove } from "../packages/body/src/approve-cli.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
-import { saveCredential } from "../packages/body/src/operator-credentials.ts";
-import { runVerify } from "../packages/body/src/verify-cli.ts";
+import { removeCredential, saveCredential } from "../packages/body/src/operator-credentials.ts";
+import { EX_VERIFY_FAILED, runVerify } from "../packages/body/src/verify-cli.ts";
 import { sha256Canonical } from "../packages/proxy/src/hash.ts";
 import { startDevIssuer } from "./issuer-helper.ts";
 import { assertWithSoftwarePasskey, mintSoftwarePasskey, type SoftwarePasskey } from "./software-passkey.ts";
@@ -583,6 +584,97 @@ describe("signed approval", () => {
     const report = await verifyApprovalSignatures(stateDir);
     assert.equal(report.signedVerified, 1);
     assert.equal(report.signedFailed, 0);
+  });
+
+  it("A14 a signed approval after its passkey was removed fails verify and report", async () => {
+    const phone = mintSoftwarePasskey();
+    const spare = mintSoftwarePasskey();
+    await withRp(async () => {
+      const door = await openDoor(phone);
+      saveCredential(door.stateDir, {
+        id: spare.id,
+        publicKey: isoBase64URL.fromBuffer(spare.publicKeyCose.slice()),
+        counter: 0,
+        sub: "operator-1",
+      });
+      let assertion: AuthenticationResponseJSON | null = null;
+      let deferRef = "";
+      try {
+        await hold(door, "after-removal");
+        const row = (await waiting(door))[0]!;
+        deferRef = row.ref;
+        assertion = signApproval(phone, door.stateDir, row.ref, row.requestHash);
+        assert.equal(removeCredential(door.stateDir, phone.id), "removed");
+        await hold(door, "after-removal-sync");
+        assert.ok(
+          readFileSync(join(door.stateDir, "decisions.jsonl"), "utf8").includes("passkey-removed"),
+        );
+      } finally {
+        await door.close();
+      }
+      assert.ok(assertion);
+      const deferRow = readJsonl<SignedDecisionRecord>(join(door.stateDir, "decisions.jsonl")).find(
+        (row) => row.claims.ref === deferRef && row.claims.decision === "defer",
+      );
+      assert.ok(deferRow);
+      const ledger = new FileLedger(door.stateDir);
+      try {
+        const outcome = await approvePending({
+          ledger,
+          recordSigner: loadOrCreateSigners(door.stateDir).recordSigner,
+          now: () => Date.now(),
+          nonce: () => crypto.randomUUID(),
+          ref: deferRef,
+          approverId: "operator-1",
+          via: "http",
+          policyHash: deferRow.claims.policyHash,
+          approvals: approvalsLogFor(ledger),
+          signature: {
+            credentialId: phone.id,
+            sub: "operator-1",
+            authenticatorData: assertion.response.authenticatorData,
+            clientDataJSON: assertion.response.clientDataJSON,
+            signature: assertion.response.signature,
+            deferRecordHash: decisionRecordHash(deferRow),
+            rpId: RP_ID,
+          },
+        });
+        assert.equal(outcome.ok, true, JSON.stringify(outcome));
+      } finally {
+        ledger.close();
+      }
+
+      const approvals = await verifyApprovalSignatures(door.stateDir);
+      assert.equal(approvals.signedAfterRemoval, 1, approvals.line);
+      assert.equal(approvals.signedVerified, 0, approvals.line);
+      assert.equal(approvals.ok, false, approvals.line);
+
+      const day = new Date().toISOString().slice(0, 10);
+      let verifyOut = "";
+      let reportOut = "";
+      const verifyCode = await runCli(["verify", door.stateDir], {
+        elevated: () => false,
+        stdout: { write: (s: string) => (verifyOut += s) },
+        stderr: { write: () => {} },
+      });
+      const reportCode = await runCli(["report", door.stateDir, "--from", day, "--to", day, "--json"], {
+        elevated: () => false,
+        stdout: { write: (s: string) => (reportOut += s) },
+        stderr: { write: () => {} },
+      });
+      const verifyLines = verifyOut.split("\n").filter((line) => line !== "");
+      const verifyVerdict = verifyLines[verifyLines.length - 1] ?? "";
+      assert.equal(verifyCode, EX_VERIFY_FAILED, verifyOut);
+      assert.equal(verifyVerdict, "NOT VERIFIED");
+      assert.match(verifyOut, /approval signatures: 1 signed after removal/);
+      const body = JSON.parse(reportOut) as {
+        verification: { ok: boolean; verdict: string; problems: string[] };
+      };
+      assert.equal(reportCode, EX_VERIFY_FAILED, reportOut);
+      assert.equal(body.verification.ok, false);
+      assert.equal(body.verification.verdict, verifyVerdict);
+      assert.ok(body.verification.problems.includes("approval signatures"));
+    });
   });
 
   it("A9 counts a CLI approval as cli and does not expect a signature", async () => {
