@@ -2275,14 +2275,19 @@ describe("hosted anchor service", () => {
       assert.equal(service.log.size, 1);
 
       await service.close();
-      let throwFsync = true;
+      let throwAppendFsync = true;
+      let acceptOpen = true;
       const again = await startService(config, {
         lockBeatMs: TEST_LOCK_BEAT_MS,
         openStore: {
           fileOps: {
             writeSync,
             fsyncSync: () => {
-              if (throwFsync) throw new Error("fsync failed");
+              if (acceptOpen) {
+                acceptOpen = false;
+                return;
+              }
+              if (throwAppendFsync) throw new Error("fsync failed");
             },
           },
         },
