@@ -123,7 +123,8 @@ const CONTROL_NOT_CHECKED: ControlSignatureReport = {
  * files. Anything less names what is missing. The exit code and `--json` are
  * unchanged.
  */
-function verdictLine(
+/** The line `verax verify` ends on. Shared with `verax report`. */
+export function verdictLine(
   r: VerifyResult,
   approval: ApprovalSignatureReport,
   control: ControlSignatureReport,
