@@ -6,6 +6,7 @@ import {
   closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -2139,6 +2140,85 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("open fsyncs the store; a failed open fsync after an unflushed append refuses to start", { timeout: 10_000 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-open-fsync-"));
+    try {
+      const storePath = join(dir, "store.jsonl");
+      const row = { leaf_hash: "ab".repeat(32), owner_id: "owner-a", at_ms: 1 };
+      let appendFsync = false;
+      const first = openStore(storePath, {
+        fileOps: {
+          writeSync,
+          fsyncSync: (fd) => {
+            if (appendFsync) throw new Error("injected append fsync failure");
+            fsyncSync(fd);
+          },
+        },
+      });
+      try {
+        appendFsync = true;
+        assert.throws(() => first.append(row), /injected append fsync failure/);
+      } finally {
+        first.close();
+      }
+      assert.ok(readFileSync(storePath, "utf8").includes(row.leaf_hash));
+      assert.throws(
+        () =>
+          openStore(storePath, {
+            fileOps: {
+              writeSync,
+              fsyncSync: () => {
+                throw new Error("injected open fsync failure");
+              },
+            },
+          }),
+        /injected open fsync failure/,
+      );
+      assert.ok(readFileSync(storePath, "utf8").includes(row.leaf_hash));
+      const again = openStore(storePath);
+      try {
+        assert.equal(again.log.size, 1);
+      } finally {
+        again.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a real I/O error flushing the parent directory refuses to create a store", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-dirfsync-"));
+    try {
+      const storePath = join(dir, "store.jsonl");
+      assert.throws(
+        () =>
+          openStore(storePath, {
+            parentDirOps: {
+              openSync: () => {
+                const err = new Error("injected directory open EIO") as NodeJS.ErrnoException;
+                err.code = "EIO";
+                throw err;
+              },
+            },
+          }),
+        /EIO|injected directory open/,
+      );
+      assert.equal(existsSync(storePath), true);
+      const ignored = openStore(join(dir, "other.jsonl"), {
+        parentDirOps: {
+          openSync: () => {
+            const err = new Error("injected directory open EINVAL") as NodeJS.ErrnoException;
+            err.code = "EINVAL";
+            throw err;
+          },
+        },
+      });
+      ignored.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("append does not advance memory before fsync returns, and a throwing fsync latches 503", { timeout: 10_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-fsync-"));
     const { privateKey } = generateKeyPairSync("ed25519");
@@ -2168,8 +2248,9 @@ describe("hosted anchor service", () => {
           },
           fsyncSync: (fd) => {
             ops.push("fsync");
+            // Open also fsyncs before accept; append assertions apply only once the service exists.
+            if (serviceRef === null) return;
             // In-memory log is only advanced after writeRow returns.
-            assert.ok(serviceRef);
             assert.equal(serviceRef.log.size, 0);
             assert.ok(!ops.includes("responded"));
           },

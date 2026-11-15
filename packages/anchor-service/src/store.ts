@@ -81,13 +81,21 @@ export type StoreRecoveryOps = {
   unlinkSync?: typeof unlinkSync;
 };
 
+export type ParentDirOps = {
+  openSync: (path: string, flags: number) => number;
+  fsyncSync: (fd: number) => void;
+  closeSync: (fd: number) => void;
+};
+
 export type OpenStoreOpts = {
   /** Test-only: substitute for lstatSync. Not exposed through the CLI. */
   lstat?: (path: string) => StoreStat;
-  /** Test-only: substitute write/fsync used by append. Not exposed through the CLI. */
+  /** Test-only: substitute write/fsync used by append and open flush. Not exposed through the CLI. */
   fileOps?: StoreFileOps;
   /** Test-only: substitute torn-tail recovery I/O. Not exposed through the CLI. */
   recoveryOps?: StoreRecoveryOps;
+  /** Test-only: substitute parent-directory flush I/O. Not exposed through the CLI. */
+  parentDirOps?: Partial<ParentDirOps>;
 };
 
 function lineDigest(lineWithNewline: string): string {
@@ -167,16 +175,27 @@ export function assertStorePath(path: string, lstat: (path: string) => StoreStat
   }
 }
 
-function flushParentDir(filePath: string): void {
+/** Errnos that mean this platform cannot flush a directory fd. */
+const DIR_FLUSH_UNSUPPORTED = new Set(["EINVAL", "ENOTSUP", "ENOSYS", "EISDIR", "EPERM"]);
+
+function flushParentDir(filePath: string, ops?: Partial<ParentDirOps>): void {
+  const open = ops?.openSync ?? openSync;
+  const fsync = ops?.fsyncSync ?? fsyncSync;
+  const close = ops?.closeSync ?? closeSync;
   try {
-    const dirFd = openSync(dirname(filePath), fsConstants.O_RDONLY);
+    const dirFd = open(dirname(filePath), fsConstants.O_RDONLY);
     try {
-      fsyncSync(dirFd);
+      fsync(dirFd);
     } finally {
-      closeSync(dirFd);
+      close(dirFd);
     }
-  } catch {
-    // Some platforms refuse to fsync a directory; the file fsync still ran.
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== undefined && DIR_FLUSH_UNSUPPORTED.has(code)) {
+      // Directory flush is not supported here; the file fsync still ran.
+      return;
+    }
+    throw err;
   }
 }
 
@@ -185,7 +204,12 @@ function flushParentDir(filePath: string): void {
  * Write → fsync → rename → directory fsync. A failure before rename leaves
  * the original bytes (including any complete rows) untouched.
  */
-function recoverTornTail(path: string, kept: string, ops?: StoreRecoveryOps): void {
+function recoverTornTail(
+  path: string,
+  kept: string,
+  ops?: StoreRecoveryOps,
+  parentDirOps?: Partial<ParentDirOps>,
+): void {
   const writeFile = ops?.writeFileSync ?? writeFileSync;
   const open = ops?.openSync ?? openSync;
   const fsync = ops?.fsyncSync ?? fsyncSync;
@@ -207,7 +231,7 @@ function recoverTornTail(path: string, kept: string, ops?: StoreRecoveryOps): vo
     if (failAt === "rename") throw new Error("injected torn-tail recovery failure at rename");
     rename(tmp, path);
     if (failAt === "fsync-dir") throw new Error("injected torn-tail recovery failure at fsync-dir");
-    flushParentDir(path);
+    flushParentDir(path, parentDirOps);
   } catch (err) {
     try {
       unlink(tmp);
@@ -227,6 +251,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   const lstat = opts?.lstat ?? lstatSync;
   const io: StoreFileOps = opts?.fileOps ?? { writeSync, fsyncSync };
   const recoveryOps = opts?.recoveryOps;
+  const parentDirOps = opts?.parentDirOps;
   assertStorePath(path, lstat);
 
   let created = false;
@@ -242,8 +267,8 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
 
   if (created) {
     try {
-      fsyncSync(fd);
-      flushParentDir(path);
+      io.fsyncSync(fd);
+      flushParentDir(path, parentDirOps);
       closeSync(fd);
       fd = openSync(path, "a+");
     } catch (err) {
@@ -291,9 +316,9 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
       // fsync, rename over it, fsync the directory, then reopen.
       closeSync(fd);
       fd = -1;
-      recoverTornTail(path, kept, recoveryOps);
+      recoverTornTail(path, kept, recoveryOps, parentDirOps);
       fd = openSync(path, "a+");
-      fsyncSync(fd);
+      io.fsyncSync(fd);
     } catch (err) {
       if (fd >= 0) {
         try {
@@ -355,6 +380,19 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
       prevDigest = lineDigest(`${raw}\n`);
       nextIndex += 1;
     }
+  }
+
+  // Flush whatever the OS may still hold from a prior crash between write and
+  // fsync before this process accepts requests. Refuse to start if that fails.
+  try {
+    io.fsyncSync(fd);
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+      /* */
+    }
+    throw err;
   }
 
   let closed = false;

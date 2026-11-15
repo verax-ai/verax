@@ -10,6 +10,7 @@ export {
   type OpenStoreOpts,
   type StoreFileOps,
   type StoreRecoveryOps,
+  type ParentDirOps,
   type TornTailRecoveryStep,
   type StoreStat,
   type StoredLine,
