@@ -9,6 +9,15 @@ the operator still chooses what to send.
 
 Private workspace package. Not published.
 
+## Deployment
+
+Listen on loopback only, behind a TLS-terminating reverse proxy. The service
+speaks plain HTTP and does not terminate TLS itself. The proxy must enforce
+TLS to clients, limit request size and rate at the edge, and must not log the
+`Authorization` header (or any bearer token). Run exactly one instance per
+store on one host with one pid namespace and a local file system: the lock
+file only distinguishes holders inside that deployment shape.
+
 ## Run
 
 ```sh
@@ -27,16 +36,23 @@ Or from the workspace: `node --experimental-strip-types packages/anchor-service/
 | `VERAX_ANCHOR_SVC_PORT` | no | Listen port (default `8798`). Use `0` for an ephemeral port. |
 | `VERAX_ANCHOR_SVC_HOST` | no | Listen host (default `127.0.0.1`). |
 | `VERAX_ANCHOR_SVC_RATE` | no | Max authenticated registrations per owner per minute (default `60`). |
+| `VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS` | no | Max time to receive request headers (default `10000`). |
+| `VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS` | no | Max time for the whole request including body (default `30000`). |
+| `VERAX_ANCHOR_SVC_KEEP_ALIVE_TIMEOUT_MS` | no | Idle keep-alive timeout (default `5000`). |
+| `VERAX_ANCHOR_SVC_MAX_CONNECTIONS` | no | Max concurrent TCP connections (default `64`). |
 
 Missing or unreadable required values exit 64 with one sentence on stderr. A
 second start on a store that is already held also exits 64, naming the store.
 
-Only one running service holds a given store (exclusive lock beside the file
-for the process life). A stale lock from a dead process is taken over. After
-a failed store write every later `POST /register` answers `503`
-`{"error":"store-unavailable"}` until the process is restarted. On start, a
-torn last line (no terminating newline) is dropped and the file truncated to
-the last full line, with one line on stderr.
+Only one running service holds a given store (exclusive lock directory beside
+the file for the process life). Under the one-host / one-pid-namespace /
+local-filesystem deployment above, a quiet lock whose named process cannot
+still be the writer is taken over by at most one waiter. After a failed store
+write, or after the process loses its lock, every later authenticated
+`POST /register` answers `503` `{"error":"store-unavailable"}` until the
+process is restarted (unknown tokens still get `401`, unknown routes `404`).
+On start, a torn last line (no terminating newline) is dropped and the file
+truncated to the last full line, with one line on stderr.
 
 Token file example:
 

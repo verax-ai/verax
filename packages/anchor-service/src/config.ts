@@ -18,7 +18,35 @@ export type ServiceConfig = {
   host: string;
   port: number;
   ratePerMinute: number;
+  /** Milliseconds to wait for request headers (Node `headersTimeout`). */
+  headersTimeoutMs: number;
+  /** Milliseconds for the whole request including the body (Node `requestTimeout`). */
+  requestTimeoutMs: number;
+  /** Idle keep-alive timeout (Node `keepAliveTimeout`). */
+  keepAliveTimeoutMs: number;
+  /** Max concurrent TCP connections (Node `maxConnections`). */
+  maxConnections: number;
 };
+
+const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_KEEP_ALIVE_TIMEOUT_MS = 5_000;
+const DEFAULT_MAX_CONNECTIONS = 64;
+
+function boundedInt(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+  name: string,
+): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw.trim());
+  if (!Number.isInteger(n) || n < min || n > max) {
+    throw new Error(`${name} must be an integer ${min}..${max}`);
+  }
+  return n;
+}
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
   const tokensPath = env.VERAX_ANCHOR_SVC_TOKENS?.trim() ?? "";
@@ -58,5 +86,49 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
     throw new Error("VERAX_ANCHOR_SVC_RATE must be a positive integer");
   }
 
-  return { tokens, privateKeyPem, publicKeyPem, storePath, host, port, ratePerMinute };
+  const headersTimeoutMs = boundedInt(
+    env.VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS,
+    DEFAULT_HEADERS_TIMEOUT_MS,
+    100,
+    120_000,
+    "VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS",
+  );
+  const requestTimeoutMs = boundedInt(
+    env.VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS,
+    DEFAULT_REQUEST_TIMEOUT_MS,
+    100,
+    300_000,
+    "VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS",
+  );
+  const keepAliveTimeoutMs = boundedInt(
+    env.VERAX_ANCHOR_SVC_KEEP_ALIVE_TIMEOUT_MS,
+    DEFAULT_KEEP_ALIVE_TIMEOUT_MS,
+    100,
+    120_000,
+    "VERAX_ANCHOR_SVC_KEEP_ALIVE_TIMEOUT_MS",
+  );
+  const maxConnections = boundedInt(
+    env.VERAX_ANCHOR_SVC_MAX_CONNECTIONS,
+    DEFAULT_MAX_CONNECTIONS,
+    1,
+    10_000,
+    "VERAX_ANCHOR_SVC_MAX_CONNECTIONS",
+  );
+  if (requestTimeoutMs < headersTimeoutMs) {
+    throw new Error("VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS must be >= VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS");
+  }
+
+  return {
+    tokens,
+    privateKeyPem,
+    publicKeyPem,
+    storePath,
+    host,
+    port,
+    ratePerMinute,
+    headersTimeoutMs,
+    requestTimeoutMs,
+    keepAliveTimeoutMs,
+    maxConnections,
+  };
 }

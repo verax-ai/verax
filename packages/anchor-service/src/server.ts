@@ -50,32 +50,48 @@ function sendAndClose(res: ServerResponse, status: number, body: unknown): void 
   });
 }
 
-function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
+/** Early refusal before a body is consumed: always ends the TCP connection. */
+function refuseEarly(res: ServerResponse, status: number, body: unknown): void {
+  sendAndClose(res, status, body);
+}
+
+function readBody(req: IncomingMessage, max: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      req.destroy();
+      reject(new Error("body-timeout"));
+    }, timeoutMs);
+    const ok = (buf: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(buf);
+    };
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    };
     req.on("data", (chunk: Buffer) => {
       if (settled) return;
       size += chunk.length;
       if (size > max) {
-        settled = true;
-        reject(new Error("body-too-large"));
+        fail(new Error("body-too-large"));
         return;
       }
       chunks.push(chunk);
     });
     req.on("end", () => {
-      if (!settled) {
-        settled = true;
-        resolve(Buffer.concat(chunks));
-      }
+      ok(Buffer.concat(chunks));
     });
     req.on("error", (err) => {
-      if (!settled) {
-        settled = true;
-        reject(err);
-      }
+      fail(err);
     });
   });
 }
@@ -113,37 +129,59 @@ export async function startService(
   const server = createServer((req, res) => {
     void handle(req, res);
   });
+  server.headersTimeout = config.headersTimeoutMs;
+  server.requestTimeout = config.requestTimeoutMs;
+  server.keepAliveTimeout = config.keepAliveTimeoutMs;
+  server.maxConnections = config.maxConnections;
+  server.connectionsCheckingInterval = Math.max(50, Math.min(1_000, Math.floor(config.headersTimeoutMs / 2)));
+  // Node's headersTimeout is not reliable on every platform; arm a socket
+  // timer on connect and clear it once headers have produced a request.
+  server.on("connection", (socket) => {
+    socket.setTimeout(config.headersTimeoutMs);
+    socket.once("timeout", () => {
+      socket.destroy();
+    });
+  });
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
+      req.socket.setTimeout(config.requestTimeoutMs);
       if (req.method !== "POST" || req.url !== "/register") {
-        send(res, 404, { error: "not-found" });
+        refuseEarly(res, 404, { error: "not-found" });
         return;
       }
       const token = bearerToken(req.headers.authorization);
       if (token === null) {
-        send(res, 401, { error: "unauthorized" });
+        refuseEarly(res, 401, { error: "unauthorized" });
         return;
       }
       const ownerId = ownerForToken(token, config.tokens);
       if (ownerId === null) {
-        send(res, 401, { error: "unauthorized" });
+        refuseEarly(res, 401, { error: "unauthorized" });
         return;
       }
       if (storeUnavailable || !lock.stillHeld()) {
         storeUnavailable = true;
-        send(res, 503, { error: "store-unavailable" });
+        refuseEarly(res, 503, { error: "store-unavailable" });
         return;
       }
       if (!contentTypeOk(req.headers["content-type"])) {
-        send(res, 400, { error: "bad-content-type" });
+        // 415 would be more precise; keep 400 for the existing client contract.
+        refuseEarly(res, 400, { error: "bad-content-type" });
         return;
       }
       let body: Buffer;
       try {
-        body = await readBody(req, MAX_BODY);
-      } catch {
-        sendAndClose(res, 400, { error: "body-too-large" });
+        body = await readBody(req, MAX_BODY, config.requestTimeoutMs);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg === "body-too-large") {
+          sendAndClose(res, 413, { error: "body-too-large" });
+        } else if (msg === "body-timeout") {
+          sendAndClose(res, 408, { error: "request-timeout" });
+        } else {
+          sendAndClose(res, 400, { error: "bad-body" });
+        }
         return;
       }
       let parsed: unknown;

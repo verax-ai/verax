@@ -15,6 +15,7 @@ import {
   writeSync,
 } from "node:fs";
 import { request as httpRequest } from "node:http";
+import { connect as netConnect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
@@ -388,7 +389,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a body over the size limit is 400 and leaves the store unchanged", async () => {
+  it("a body over the size limit is 413 and leaves the store unchanged", async () => {
     const h = await startHarness();
     try {
       writeFileSync(h.storePath, "", "utf8");
@@ -401,7 +402,7 @@ describe("hosted anchor service", () => {
         },
         body: "x".repeat(4 * 1024 + 1),
       });
-      assert.equal(res.status, 400);
+      assert.equal(res.status, 413);
       assert.deepEqual(await res.json(), { error: "body-too-large" });
       assert.ok(storeBytes(h.storePath).equals(before));
     } finally {
@@ -439,7 +440,7 @@ describe("hosted anchor service", () => {
             },
           },
           (res) => {
-            assert.equal(res.statusCode, 400);
+            assert.equal(res.statusCode, 413);
             assert.equal(res.headers.connection, "close");
             const chunks: Buffer[] = [];
             res.on("data", (c) => chunks.push(c));
@@ -450,12 +451,19 @@ describe("hosted anchor service", () => {
             });
             const socket = res.socket;
             assert.ok(socket);
-            if (socket.destroyed) {
+            // Connection: close alone is not enough; the service must destroy the socket.
+            let sawForcedClose = socket.destroyed;
+            const onClose = (): void => {
+              sawForcedClose = sawForcedClose || socket.destroyed;
+              assert.equal(sawForcedClose, true, "expected the service to destroy the socket");
               done();
+            };
+            if (socket.destroyed) {
+              onClose();
               return;
             }
-            socket.once("close", done);
-            socket.once("error", () => done());
+            socket.once("close", onClose);
+            socket.once("error", () => onClose());
           },
         );
         req.on("error", fail);
@@ -463,6 +471,134 @@ describe("hosted anchor service", () => {
         req.end();
       });
     } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("a slow header is cut by headersTimeout", { timeout: 10_000 }, async () => {
+    const h = await startHarness({
+      VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "200",
+      VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "2000",
+    });
+    try {
+      const url = new URL(h.service.url);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("slow header was not cut")), 3_000);
+        const socket = netConnect({ host: url.hostname, port: Number(url.port) }, () => {
+          socket.write("POST /register HTTP/1.1\r\nHost: 127.0.0.1\r\n");
+          // Deliberately never finish the headers.
+        });
+        socket.on("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+        socket.on("error", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("a slow body is cut by requestTimeout", { timeout: 10_000 }, async () => {
+    const h = await startHarness({
+      VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "200",
+      VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "300",
+    });
+    try {
+      const url = new URL(h.service.url);
+      const before = storeBytes(h.storePath);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("slow body was not cut")), 3_000);
+        const done = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const req = httpRequest(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: "/register",
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${h.token}`,
+              "content-length": "50",
+            },
+          },
+          (res) => {
+            // Node may answer 408 Request Timeout when requestTimeout fires.
+            if (res.statusCode === 408) {
+              res.resume();
+              done();
+              return;
+            }
+            clearTimeout(timer);
+            reject(new Error(`slow body got status ${res.statusCode}`));
+          },
+        );
+        req.on("error", () => done());
+        req.write('{"capsule_id":"');
+        // Never send the rest; requestTimeout must cut the socket.
+      });
+      assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("maxConnections refuses an extra TCP connection", { timeout: 10_000 }, async () => {
+    const h = await startHarness({
+      VERAX_ANCHOR_SVC_MAX_CONNECTIONS: "2",
+      VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "5000",
+      VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "5000",
+    });
+    const sockets: Socket[] = [];
+    try {
+      const url = new URL(h.service.url);
+      const openOne = (): Promise<Socket> =>
+        new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("connect timed out")), 2_000);
+          const s = netConnect({ host: url.hostname, port: Number(url.port) }, () => {
+            clearTimeout(timer);
+            resolve(s);
+          });
+          s.on("error", (err) => {
+            clearTimeout(timer);
+            reject(err);
+          });
+        });
+      sockets.push(await openOne());
+      sockets.push(await openOne());
+      const thirdRefused = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 1_000);
+        const s = netConnect({ host: url.hostname, port: Number(url.port) });
+        sockets.push(s);
+        s.on("error", () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+        s.on("close", () => {
+          clearTimeout(timer);
+          resolve(true);
+        });
+        // If the OS accepts the socket, Node should still drop it when over max.
+        s.on("data", () => {
+          clearTimeout(timer);
+          resolve(false);
+        });
+      });
+      assert.equal(thirdRefused, true, "expected the third connection to be refused or closed");
+    } finally {
+      for (const s of sockets) {
+        try {
+          s.destroy();
+        } catch {
+          /* */
+        }
+      }
       await stopHarness(h);
     }
   });
