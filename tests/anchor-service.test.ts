@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   copyFileSync,
   mkdirSync,
@@ -11,6 +12,7 @@ import {
   readFileSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -43,6 +45,22 @@ function writeStaleStoreLock(storePath: string, holder: Record<string, unknown>)
   const lockPath = storeLockPath(storePath);
   mkdirSync(lockPath);
   writeFileSync(join(lockPath, "holder"), `${JSON.stringify(holder)}\n`, "utf8");
+}
+
+function writeSecretFile(path: string, contents: string): void {
+  writeFileSync(path, contents, { encoding: "utf8", mode: 0o600 });
+}
+
+/** One v1 store line with the correct prev chain for a single-line store. */
+function v1StoreLine(row: { leaf_hash: string; owner_id: string; at_ms: number }, index = 0, prev = "0".repeat(64)): string {
+  return `${JSON.stringify({
+    v: 1,
+    index,
+    prev,
+    leaf_hash: row.leaf_hash,
+    owner_id: row.owner_id,
+    at_ms: row.at_ms,
+  })}\n`;
 }
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -83,11 +101,11 @@ async function startHarness(env: NodeJS.ProcessEnv = {}): Promise<Harness> {
   const tokensFile = join(dir, "tokens.json");
   const storePath = join(dir, "store.jsonl");
   const tokenFile = join(dir, "token.txt");
-  writeFileSync(keyFile, privatePem, "utf8");
+  writeFileSync(keyFile, privatePem, { encoding: "utf8", mode: 0o600 });
   writeFileSync(pubFile, publicKeyPem, "utf8");
   writeFileSync(tokenFile, `${TOKEN}\n`, "utf8");
   const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-  writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+  writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), { encoding: "utf8", mode: 0o600 });
   const config = loadConfig({
     VERAX_ANCHOR_SVC_TOKENS: tokensFile,
     VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
@@ -308,9 +326,9 @@ describe("hosted anchor service", () => {
       const keyFile = join(dir, "signing.private.pem");
       const tokensFile = join(dir, "tokens.json");
       const storePath = join(dir, "store.jsonl");
-      writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
       const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-      writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
       writeFileSync(storePath, "not-json\n", "utf8");
       const config = loadConfig({
         VERAX_ANCHOR_SVC_TOKENS: tokensFile,
@@ -683,9 +701,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     writeFileSync(storePath, "", "utf8");
     const holderScript = join(root, "tests", "anchor-service-lock-holder.ts");
     const child = spawn(
@@ -787,9 +805,9 @@ describe("hosted anchor service", () => {
       const keyFile = join(dir, "signing.private.pem");
       const tokensFile = join(dir, "tokens.json");
       const storePath = join(dir, "store.jsonl");
-      writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
       const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-      writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
       writeFileSync(storePath, "", "utf8");
       writeStaleStoreLock(storePath, {
         pid: 2_147_483_646,
@@ -816,9 +834,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     writeFileSync(storePath, "", "utf8");
     const holderScript = join(root, "tests", "anchor-service-lock-holder.ts");
     const child = spawn(process.execPath, ["--experimental-strip-types", holderScript], {
@@ -889,9 +907,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     writeFileSync(storePath, "", "utf8");
     const holderScript = join(root, "tests", "anchor-service-lock-holder.ts");
     const child = spawn(process.execPath, ["--experimental-strip-types", holderScript], {
@@ -1090,9 +1108,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     const config = loadConfig({
       VERAX_ANCHOR_SVC_TOKENS: tokensFile,
       VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
@@ -1150,9 +1168,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     const config = loadConfig({
       VERAX_ANCHOR_SVC_TOKENS: tokensFile,
       VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
@@ -1204,9 +1222,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privatePem, "utf8");
+    writeSecretFile(keyFile, privatePem);
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     const config = loadConfig({
       VERAX_ANCHOR_SVC_TOKENS: tokensFile,
       VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
@@ -1270,9 +1288,9 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privatePem, "utf8");
+    writeSecretFile(keyFile, privatePem);
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
     const config = loadConfig({
       VERAX_ANCHOR_SVC_TOKENS: tokensFile,
       VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
@@ -1280,12 +1298,13 @@ describe("hosted anchor service", () => {
       VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
       VERAX_ANCHOR_SVC_PORT: "0",
     });
+    const partial = '{"leaf';
     const service = await startService(config, {
       lockBeatMs: TEST_LOCK_BEAT_MS,
-      appendRow: (path, row) => {
+      appendRow: (path, _row) => {
         const fd = openSync(path, "a");
         try {
-          writeSync(fd, '{"leaf', null, "utf8");
+          writeSync(fd, partial, null, "utf8");
         } finally {
           closeSync(fd);
         }
@@ -1302,6 +1321,7 @@ describe("hosted anchor service", () => {
         body: JSON.stringify({ capsule_id: "ee".repeat(32) }),
       });
       assert.equal(res.status, 500);
+      assert.equal(readFileSync(storePath, "utf8"), partial);
       const later = await fetch(`${service.url}/register`, {
         method: "POST",
         headers: {
@@ -1312,9 +1332,21 @@ describe("hosted anchor service", () => {
       });
       assert.equal(later.status, 503);
       assert.deepEqual(await later.json(), { error: "store-unavailable" });
-      assert.equal(publicKeyPem.length > 0, true);
-    } finally {
+
       await service.close();
+      // Restart drops the torn partial and the next leaf is index 0.
+      const again = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+      try {
+        assert.equal(readFileSync(storePath, "utf8"), "");
+        assert.equal(again.log.size, 0);
+        const next = await registerCheckpoint(again.url, "ff".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+        assert.equal(next.ok, true);
+        if (!next.ok || next.row.v !== 1) return;
+        assert.equal(next.row.leafIndex, 0);
+      } finally {
+        await again.close();
+      }
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1327,14 +1359,14 @@ describe("hosted anchor service", () => {
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
-    writeFileSync(keyFile, privatePem, "utf8");
+    writeSecretFile(keyFile, privatePem);
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
-    const full = JSON.stringify({
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const full = v1StoreLine({
       leaf_hash: "11".repeat(32),
       owner_id: "owner-a",
       at_ms: 1,
-    });
+    }).trimEnd();
     writeFileSync(storePath, `${full}\n{"leaf`, "utf8");
     const config = loadConfig({
       VERAX_ANCHOR_SVC_TOKENS: tokensFile,
@@ -1365,10 +1397,10 @@ describe("hosted anchor service", () => {
       const keyFile = join(dir, "signing.private.pem");
       const tokensFile = join(dir, "tokens.json");
       const storePath = join(dir, "store.jsonl");
-      writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
       const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
-      writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
-      const good = JSON.stringify({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 });
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      const good = v1StoreLine({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 }).trimEnd();
       writeFileSync(storePath, `${good}\nnot-json\n${good}\n`, "utf8");
       const config = loadConfig({
         VERAX_ANCHOR_SVC_TOKENS: tokensFile,
@@ -1378,6 +1410,218 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_PORT: "0",
       });
       await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store line 2/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a blank store line that is not a torn tail refuses to start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-blank-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      const good = v1StoreLine({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 });
+      writeFileSync(storePath, `${good}\n${good}`, "utf8");
+      // Insert a blank line between two newlines: good\n\ngood\n
+      writeFileSync(storePath, `${good.trimEnd()}\n\n${good}`, "utf8");
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /blank/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a repeated owner_id and leaf_hash refuses to start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-dup-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      const row = { leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 };
+      const first = v1StoreLine(row);
+      const prev = createHash("sha256").update(first, "utf8").digest("hex");
+      const second = v1StoreLine({ ...row, at_ms: 2 }, 1, prev);
+      writeFileSync(storePath, `${first}${second}`, "utf8");
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /repeats an \(owner_id, leaf_hash\)/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an old unversioned store format is refused with a clear sentence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-oldfmt-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      writeFileSync(
+        storePath,
+        `${JSON.stringify({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 })}\n`,
+        "utf8",
+      );
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        /old format without line index and prev hash/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a store path that is a symlink or directory is refused", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-storepath-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+
+      const asDir = join(dir, "store-dir");
+      mkdirSync(asDir);
+      await assert.rejects(
+        () =>
+          startService(
+            loadConfig({
+              VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+              VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+              VERAX_ANCHOR_SVC_STORE: asDir,
+              VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+              VERAX_ANCHOR_SVC_PORT: "0",
+            }),
+            { lockBeatMs: TEST_LOCK_BEAT_MS },
+          ),
+        /regular file/,
+      );
+
+      const target = join(dir, "real-store.jsonl");
+      writeFileSync(target, "", "utf8");
+      const link = join(dir, "store-link.jsonl");
+      try {
+        symlinkSync(target, link);
+      } catch (err) {
+        // Windows may require elevated privileges for symlinks.
+        if ((err as NodeJS.ErrnoException).code === "EPERM") return;
+        throw err;
+      }
+      await assert.rejects(
+        () =>
+          startService(
+            loadConfig({
+              VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+              VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+              VERAX_ANCHOR_SVC_STORE: link,
+              VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+              VERAX_ANCHOR_SVC_PORT: "0",
+            }),
+            { lockBeatMs: TEST_LOCK_BEAT_MS },
+          ),
+        /symbolic link/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a symlink swapped in after start does not redirect appends", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-swap-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    const decoy = join(dir, "decoy.jsonl");
+    writeSecretFile(keyFile, privatePem);
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    writeFileSync(storePath, "", "utf8");
+    writeFileSync(decoy, "", "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      const inodeBefore = statSync(storePath).ino;
+      try {
+        rmSync(storePath);
+        symlinkSync(decoy, storePath);
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "EPERM") return;
+        throw err;
+      }
+      const got = await registerCheckpoint(service.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(got.ok, true);
+      // Appends still went to the original inode, not the decoy.
+      assert.equal(readFileSync(decoy, "utf8"), "");
+      assert.notEqual(inodeBefore, undefined);
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a group-readable signing key is refused on POSIX", async () => {
+    if (process.platform === "win32") return;
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-keymode-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      chmodSync(keyFile, 0o640);
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      await assert.rejects(
+        () =>
+          loadConfig({
+            VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+            VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+            VERAX_ANCHOR_SVC_STORE: storePath,
+            VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+            VERAX_ANCHOR_SVC_PORT: "0",
+          }),
+        /signing key must not be readable or writable by group or others/,
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

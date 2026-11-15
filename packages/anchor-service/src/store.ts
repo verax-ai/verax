@@ -1,24 +1,32 @@
 /**
  * Append-only JSONL store of log leaves. Each line is
- * `{"leaf_hash":"<64 hex>","owner_id":"<id>","at_ms":<number>}`. On start the
- * file is read back in order; a line that does not parse or breaks the
- * expected shape refuses to load. A final line with no terminating newline is
- * a torn write: it is dropped and the file is truncated before the service
- * starts.
+ * `{"v":1,"index":N,"prev":"<64 hex>","leaf_hash":"<64 hex>","owner_id":"<id>","at_ms":<number>}`
+ * where `prev` is SHA-256 of the previous line (including its newline), or
+ * 64 zero hex digits for the first line. On start the file is read back in
+ * order; a blank line that is not a torn tail, a repeated (owner_id, leaf_hash),
+ * a broken chain, or an old unversioned line refuses to load. A final line with
+ * no terminating newline is a torn write: it is dropped and the file is
+ * truncated before the service starts. The store path is opened once and that
+ * descriptor is kept for the process life so a later symlink cannot redirect
+ * appends.
  */
+import { createHash } from "node:crypto";
 import {
   closeSync,
-  existsSync,
+  constants as fsConstants,
   fsyncSync,
+  lstatSync,
   openSync,
   readFileSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
+import { dirname } from "node:path";
 
 import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
 const HASH = /^[0-9a-f]{64}$/;
+const ZERO_PREV = "0".repeat(64);
 
 export type StoreRow = {
   leaf_hash: string;
@@ -26,7 +34,35 @@ export type StoreRow = {
   at_ms: number;
 };
 
-export function parseStoreLine(line: string, lineNo: number): StoreRow {
+export type StoredLine = StoreRow & {
+  v: 1;
+  index: number;
+  prev: string;
+};
+
+export type OpenStore = {
+  path: string;
+  log: MerkleLog;
+  append: (row: StoreRow) => void;
+  close: () => void;
+};
+
+function lineDigest(lineWithNewline: string): string {
+  return createHash("sha256").update(lineWithNewline, "utf8").digest("hex");
+}
+
+function encodeLine(row: StoredLine): string {
+  return `${JSON.stringify({
+    v: row.v,
+    index: row.index,
+    prev: row.prev,
+    leaf_hash: row.leaf_hash,
+    owner_id: row.owner_id,
+    at_ms: row.at_ms,
+  })}\n`;
+}
+
+export function parseStoreLine(line: string, lineNo: number): StoredLine {
   let parsed: unknown;
   try {
     parsed = JSON.parse(line);
@@ -37,6 +73,20 @@ export function parseStoreLine(line: string, lineNo: number): StoreRow {
     throw new Error(`store line ${lineNo} is not a store row`);
   }
   const row = parsed as Record<string, unknown>;
+  if (row.v === undefined && row.index === undefined && row.prev === undefined) {
+    throw new Error(
+      "store is in an old format without line index and prev hash; start a new store file",
+    );
+  }
+  if (row.v !== 1) {
+    throw new Error(`store line ${lineNo} has an unsupported version`);
+  }
+  if (typeof row.index !== "number" || !Number.isSafeInteger(row.index) || row.index < 0) {
+    throw new Error(`store line ${lineNo} has a bad index`);
+  }
+  if (typeof row.prev !== "string" || !HASH.test(row.prev)) {
+    throw new Error(`store line ${lineNo} has a bad prev`);
+  }
   if (typeof row.leaf_hash !== "string" || !HASH.test(row.leaf_hash)) {
     throw new Error(`store line ${lineNo} has a bad leaf_hash`);
   }
@@ -47,55 +97,228 @@ export function parseStoreLine(line: string, lineNo: number): StoreRow {
     throw new Error(`store line ${lineNo} has a bad at_ms`);
   }
   const keys = Object.keys(row);
-  if (keys.length !== 3) throw new Error(`store line ${lineNo} has unexpected fields`);
-  return { leaf_hash: row.leaf_hash, owner_id: row.owner_id, at_ms: row.at_ms };
+  if (keys.length !== 6) throw new Error(`store line ${lineNo} has unexpected fields`);
+  return {
+    v: 1,
+    index: row.index,
+    prev: row.prev,
+    leaf_hash: row.leaf_hash,
+    owner_id: row.owner_id,
+    at_ms: row.at_ms,
+  };
 }
 
-export function loadStore(path: string): MerkleLog {
-  const log = new MerkleLog();
-  if (!existsSync(path)) {
-    // Touch the file so later appends do not create it under a race the
-    // operator did not intend; open for append creates an empty file.
-    closeSync(openSync(path, "a"));
-    return log;
+function assertStorePath(path: string): void {
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink()) {
+      throw new Error(`store path must not be a symbolic link`);
+    }
+    if (!st.isFile()) {
+      throw new Error(`store path must be a regular file`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw err;
   }
-  let text = readFileSync(path, "utf8");
+}
+
+function flushParentDir(filePath: string): void {
+  try {
+    const dirFd = openSync(dirname(filePath), fsConstants.O_RDONLY);
+    try {
+      fsyncSync(dirFd);
+    } finally {
+      closeSync(dirFd);
+    }
+  } catch {
+    // Some platforms refuse to fsync a directory; the file fsync still ran.
+  }
+}
+
+/**
+ * Open the store for the life of the process. Creates an empty regular file
+ * when missing, fsyncs it and (where the platform allows) its parent directory.
+ */
+export function openStore(path: string): OpenStore {
+  assertStorePath(path);
+
+  let created = false;
+  let fd: number;
+  try {
+    // Exclusive create so a raced symlink cannot become the store.
+    fd = openSync(path, "wx");
+    created = true;
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    fd = openSync(path, "a+");
+  }
+
+  if (created) {
+    try {
+      fsyncSync(fd);
+      flushParentDir(path);
+      closeSync(fd);
+      fd = openSync(path, "a+");
+    } catch (err) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* */
+      }
+      throw err;
+    }
+  }
+
+  // Re-check identity after open: refuse if the path is no longer a regular file
+  // we would have accepted (symlink swapped in between lstat and open).
+  try {
+    const st = lstatSync(path);
+    if (st.isSymbolicLink() || !st.isFile()) {
+      closeSync(fd);
+      throw new Error(`store path must be a regular file`);
+    }
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+      /* */
+    }
+    throw err;
+  }
+
+  let text = "";
+  try {
+    // Read via path is fine for startup; appends use the kept fd.
+    text = readFileSync(path, "utf8");
+  } catch (err) {
+    closeSync(fd);
+    throw err;
+  }
+
   if (text !== "" && !text.endsWith("\n")) {
     const cut = text.lastIndexOf("\n");
     const kept = cut < 0 ? "" : text.slice(0, cut + 1);
-    writeFileSync(path, kept, "utf8");
+    try {
+      // Re-write through the path then reopen: Windows refuses ftruncate on an
+      // append-mode descriptor.
+      closeSync(fd);
+      writeFileSync(path, kept, "utf8");
+      fd = openSync(path, "a+");
+      fsyncSync(fd);
+    } catch (err) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* */
+      }
+      throw err;
+    }
     process.stderr.write(`verax-anchor-service: dropped a torn last line from ${path}\n`);
     text = kept;
   }
-  if (text === "") return log;
-  const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
-  for (let i = 0; i < lines.length; i += 1) {
-    const line = lines[i]!.trim();
-    if (line === "") continue;
-    const row = parseStoreLine(line, i + 1);
-    const leaf: LogLeaf = {
-      entry: Buffer.from(row.leaf_hash, "hex"),
-      ownerId: row.owner_id,
-      atMs: row.at_ms,
-    };
-    log.append(leaf);
+
+  const log = new MerkleLog();
+  const seenPairs = new Set<string>();
+  let prevDigest = ZERO_PREV;
+  let nextIndex = 0;
+
+  if (text !== "") {
+    if (!text.endsWith("\n")) {
+      closeSync(fd);
+      throw new Error("store text must end with a newline after torn-tail recovery");
+    }
+    const lines = text.slice(0, -1).split("\n");
+    for (let i = 0; i < lines.length; i += 1) {
+      const raw = lines[i]!;
+      if (raw.trim() === "") {
+        closeSync(fd);
+        throw new Error(`store line ${i + 1} is blank`);
+      }
+      let row: StoredLine;
+      try {
+        row = parseStoreLine(raw, i + 1);
+      } catch (err) {
+        closeSync(fd);
+        throw err;
+      }
+      if (row.index !== nextIndex) {
+        closeSync(fd);
+        throw new Error(`store line ${i + 1} has index ${row.index}, expected ${nextIndex}`);
+      }
+      if (row.prev !== prevDigest) {
+        closeSync(fd);
+        throw new Error(`store line ${i + 1} breaks the prev-hash chain`);
+      }
+      const pair = `${row.owner_id}\0${row.leaf_hash}`;
+      if (seenPairs.has(pair)) {
+        closeSync(fd);
+        throw new Error(`store line ${i + 1} repeats an (owner_id, leaf_hash) pair`);
+      }
+      seenPairs.add(pair);
+      const leaf: LogLeaf = {
+        entry: Buffer.from(row.leaf_hash, "hex"),
+        ownerId: row.owner_id,
+        atMs: row.at_ms,
+      };
+      log.append(leaf);
+      prevDigest = lineDigest(`${raw}\n`);
+      nextIndex += 1;
+    }
   }
+
+  let closed = false;
+  return {
+    path,
+    log,
+    append: (row: StoreRow) => {
+      if (closed) throw new Error("store is closed");
+      const pair = `${row.owner_id}\0${row.leaf_hash}`;
+      if (seenPairs.has(pair)) {
+        throw new Error("store refuses a repeated (owner_id, leaf_hash) pair");
+      }
+      const stored: StoredLine = {
+        v: 1,
+        index: nextIndex,
+        prev: prevDigest,
+        leaf_hash: row.leaf_hash,
+        owner_id: row.owner_id,
+        at_ms: row.at_ms,
+      };
+      const payload = Buffer.from(encodeLine(stored), "utf8");
+      let offset = 0;
+      while (offset < payload.length) {
+        const n = writeSync(fd, payload, offset, payload.length - offset);
+        if (n <= 0) throw new Error("store write made no progress");
+        offset += n;
+      }
+      fsyncSync(fd);
+      seenPairs.add(pair);
+      prevDigest = lineDigest(payload.toString("utf8"));
+      nextIndex += 1;
+    },
+    close: () => {
+      if (closed) return;
+      closed = true;
+      closeSync(fd);
+    },
+  };
+}
+
+/** @deprecated Prefer openStore; kept for tests that inject a one-shot append. */
+export function loadStore(path: string): MerkleLog {
+  const opened = openStore(path);
+  const log = opened.log;
+  opened.close();
   return log;
 }
 
-/** Write the whole row or throw. Partial writes are not left as success. */
+/** Write one row through a fresh open of the path (tests only). */
 export function appendStore(path: string, row: StoreRow): void {
-  const payload = Buffer.from(`${JSON.stringify(row)}\n`, "utf8");
-  const fd = openSync(path, "a");
+  const opened = openStore(path);
   try {
-    let offset = 0;
-    while (offset < payload.length) {
-      const n = writeSync(fd, payload, offset, payload.length - offset);
-      if (n <= 0) throw new Error("store write made no progress");
-      offset += n;
-    }
-    fsyncSync(fd);
+    opened.append(row);
   } finally {
-    closeSync(fd);
+    opened.close();
   }
 }

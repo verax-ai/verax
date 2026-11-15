@@ -30,9 +30,9 @@ Or from the workspace: `node --experimental-strip-types packages/anchor-service/
 
 | Variable | Required | Meaning |
 | --- | --- | --- |
-| `VERAX_ANCHOR_SVC_TOKENS` | yes | JSON file mapping SHA-256 hex of a token to an owner id. The service never stores a token itself. |
-| `VERAX_ANCHOR_SVC_SIGNING_KEY` | yes | Ed25519 private key PEM file used to sign receipts. |
-| `VERAX_ANCHOR_SVC_STORE` | yes | Append-only JSONL path for log leaves (`leaf_hash`, `owner_id`, `at_ms`). One writer per store. |
+| `VERAX_ANCHOR_SVC_TOKENS` | yes | JSON file mapping SHA-256 hex of a token to an owner id. The service never stores a token itself. Regular file only; not a symlink. On POSIX, mode must not grant group/other read or write. On Windows, the operator must restrict the ACL to the service account before start; the service refuses symlinks and non-files. |
+| `VERAX_ANCHOR_SVC_SIGNING_KEY` | yes | Ed25519 private key PEM file used to sign receipts. Same path rules as the token map. |
+| `VERAX_ANCHOR_SVC_STORE` | yes | Append-only JSONL path for log leaves. Each line is versioned with `index` and `prev` (SHA-256 of the previous line). Regular file only; not a symlink. One writer per store. |
 | `VERAX_ANCHOR_SVC_PORT` | no | Listen port (default `8798`). Use `0` for an ephemeral port. |
 | `VERAX_ANCHOR_SVC_HOST` | no | Listen host (default `127.0.0.1`). |
 | `VERAX_ANCHOR_SVC_RATE` | no | Max authenticated registrations per owner per minute (default `60`). |
@@ -47,12 +47,24 @@ second start on a store that is already held also exits 64, naming the store.
 Only one running service holds a given store (exclusive lock directory beside
 the file for the process life). Under the one-host / one-pid-namespace /
 local-filesystem deployment above, a quiet lock whose named process cannot
-still be the writer is taken over by at most one waiter. After a failed store
-write, or after the process loses its lock, every later authenticated
-`POST /register` answers `503` `{"error":"store-unavailable"}` until the
-process is restarted (unknown tokens still get `401`, unknown routes `404`).
-On start, a torn last line (no terminating newline) is dropped and the file
-truncated to the last full line, with one line on stderr.
+still be the writer is taken over by at most one waiter. The lock records pid,
+start time, token and (on Linux) boot id; that is enough only inside that
+deployment shape — a dead holder whose pid was reused in another pid namespace,
+or a store on a volume shared across namespaces, is outside what the lock can
+decide. After a failed store write, or after the process loses its lock, every
+later authenticated `POST /register` answers `503`
+`{"error":"store-unavailable"}` until the process is restarted (unknown tokens
+still get `401`, unknown routes `404`). On start, a torn last line (no
+terminating newline) is dropped and the file truncated to the last full line,
+with one line on stderr. A blank line that is not that torn tail, a repeated
+`(owner_id, leaf_hash)`, a broken prev-hash chain, or an old unversioned store
+refuses to start.
+
+Durability: after each append the service `fsync`s the store file. After
+creating a new store it also `fsync`s the file and, where the platform allows,
+the parent directory. The service assumes a local file system that honors
+`fsync` for durability of those writes; it does not claim durability on
+network file systems or volumes that ignore flush.
 
 Token file example:
 

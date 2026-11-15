@@ -11,7 +11,7 @@ import { bearerToken, ownerForToken } from "./auth.ts";
 import type { ServiceConfig } from "./config.ts";
 import { RateLimiter } from "./rate.ts";
 import { issueReceipt } from "./receipt.ts";
-import { appendStore, loadStore, type StoreRow } from "./store.ts";
+import { openStore, type OpenStore, type StoreRow } from "./store.ts";
 import { acquireStoreLock, type StoreLock } from "./store-lock.ts";
 import type { MerkleLog } from "./merkle.ts";
 
@@ -112,15 +112,16 @@ export async function startService(
   } catch (err) {
     throw new Error(err instanceof Error ? err.message : String(err));
   }
-  let log: MerkleLog;
+  let store: OpenStore;
   try {
-    log = loadStore(config.storePath);
+    store = openStore(config.storePath);
   } catch (err) {
     lock.release();
     throw new Error(err instanceof Error ? err.message : String(err));
   }
+  const log: MerkleLog = store.log;
   const rate = new RateLimiter(config.ratePerMinute);
-  const writeRow = options?.appendRow ?? appendStore;
+  const writeRow = options?.appendRow ?? ((_path: string, row: StoreRow) => store.append(row));
   let storeUnavailable = false;
   lock.onLost(() => {
     storeUnavailable = true;
@@ -265,6 +266,11 @@ export async function startService(
     close: () =>
       new Promise((resolve, reject) => {
         server.close((err) => {
+          try {
+            store.close();
+          } catch {
+            // Still release the lock.
+          }
           lock.release();
           if (err) reject(err);
           else resolve();
