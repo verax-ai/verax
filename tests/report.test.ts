@@ -622,6 +622,101 @@ describe("verax report", () => {
     }
   });
 
+  it("k4. text and HTML show the held counts that reconcile when stillHeld is null", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-k4-"));
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    try {
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.put",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "defer",
+            reasonCode: "needs-approval",
+            ref: "d-k4",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY,
+            nonce: "k4-defer",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-operator",
+            subject: "memory.put",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "deny",
+            reasonCode: "expired",
+            ref: "u-k4",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY + 100,
+            nonce: "k4-deny",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+    } finally {
+      ledger.close();
+    }
+    writeFileSync(
+      join(dir, "inputs.jsonl"),
+      `${JSON.stringify({ ref: "u-k4", inputs: { approver: { resolves: "d-k4" } } })}\n`,
+      "utf8",
+    );
+    const verified = await verifyLedger(dir);
+    assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+
+    const { code, report, text: jsonText } = await reportJson(dir);
+    assert.equal(code, 0, jsonText);
+    assert.equal(report.approvals.stillHeld, null);
+    const held = report.approvals.heldWithoutBoundAnswer!;
+    const unboundTerminals = report.approvals.terminalsWithoutBoundInputs!;
+    const possibly = report.approvals.heldPossiblyAnsweredByUnbound!;
+    assert.ok(held >= 1);
+    assert.ok(unboundTerminals >= 1);
+    assert.ok(possibly >= 1);
+
+    const plain = await reportText(dir);
+    assert.match(plain.text, /held, and no bound answer found|held without a bound answer/i);
+    assert.match(plain.text, new RegExp(String(held)));
+    assert.match(plain.text, /terminals without bound inputs/i);
+    assert.match(plain.text, new RegExp(String(unboundTerminals)));
+    assert.match(plain.text, /could have been answered by an unbound record|held possibly answered/i);
+    assert.match(plain.text, new RegExp(String(possibly)));
+
+    const { html } = await reportHtml(dir);
+    assert.match(html, /held, and no bound answer found|held without a bound answer/i);
+    assert.match(html, new RegExp(String(held)));
+    assert.match(html, /terminals without bound inputs/i);
+    assert.match(html, new RegExp(String(unboundTerminals)));
+    assert.match(html, /could have been answered by an unbound record|held possibly answered/i);
+    assert.match(html, new RegExp(String(possibly)));
+
+    // JSON and the two human formats agree on the three numbers.
+    for (const surface of [plain.text, html]) {
+      assert.ok(surface.includes(String(held)), "heldWithoutBoundAnswer");
+      assert.ok(surface.includes(String(unboundTerminals)), "terminalsWithoutBoundInputs");
+      assert.ok(surface.includes(String(possibly)), "heldPossiblyAnsweredByUnbound");
+    }
+    assert.equal(JSON.parse(jsonText).approvals.heldWithoutBoundAnswer, held);
+    assert.equal(JSON.parse(jsonText).approvals.terminalsWithoutBoundInputs, unboundTerminals);
+    assert.equal(JSON.parse(jsonText).approvals.heldPossiblyAnsweredByUnbound, possibly);
+  });
+
   it("k3. empty, missing and U+001F subjects land in three distinct places", async () => {
     // Empty and missing are not usable subjects; U+001F is a real subject key.
     assert.equal(subjectToolKey(""), null);

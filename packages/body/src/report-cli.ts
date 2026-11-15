@@ -1055,7 +1055,7 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     `<tbody>${toolRows}</tbody></table>`,
     `<p>No usable subject: ${shownCounts(report.decisions.withoutSubject)}.</p>`,
     "<h2>Approvals</h2>",
-    `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}${a.stillHeld === null && a.heldPossiblyAnsweredByUnbound !== null && a.heldPossiblyAnsweredByUnbound > 0 ? ` (${a.heldPossiblyAnsweredByUnbound} held record(s) could have been answered by an unbound record)` : ""}. Unmatched: ${shown(a.unmatched)}. Terminals without bound inputs: ${shown(a.terminalsWithoutBoundInputs)}.${approvalsReason}</p>`,
+    `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}. Unmatched: ${shown(a.unmatched)}. Held, and no bound answer found: ${shown(a.heldWithoutBoundAnswer)}. Terminals without bound inputs: ${shown(a.terminalsWithoutBoundInputs)}. Held record(s) that could have been answered by an unbound record: ${shown(a.heldPossiblyAnsweredByUnbound)}.${approvalsReason}</p>`,
     "<p>Approved means the first signed bound answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed bound answer exists and no later unbound record could have answered the defer; when a held defer could have been answered by an unbound record anywhere after it, still held is not established. Unmatched means the defer has no usable reference, shares it with another defer, or its bound answers disagree on request hash or tool.</p>",
     ...approvalsNote,
     "<h2>Checkpoints</h2>",
@@ -1092,13 +1092,11 @@ export function renderReportText(report: PeriodReport, digest: string): string {
   }
   lines.push(`no usable subject  ${shownCounts(report.decisions.withoutSubject)}`);
   lines.push(
-    `approvals     approved ${shown(a.approved)} (signature field present ${shown(a.withOperatorSignatureFieldPresent)}, absent ${shown(a.withoutOperatorSignatureField)}), closed without an allow ${shown(a.closedWithoutAllow)}, still held ${shown(a.stillHeld)}, unmatched ${shown(a.unmatched)}, terminals without bound inputs ${shown(a.terminalsWithoutBoundInputs)}`,
+    `approvals     approved ${shown(a.approved)} (signature field present ${shown(a.withOperatorSignatureFieldPresent)}, absent ${shown(a.withoutOperatorSignatureField)}), closed without an allow ${shown(a.closedWithoutAllow)}, still held ${shown(a.stillHeld)}, unmatched ${shown(a.unmatched)}`,
   );
-  if (a.stillHeld === null && a.heldPossiblyAnsweredByUnbound !== null && a.heldPossiblyAnsweredByUnbound > 0) {
-    lines.push(
-      `approvals     ${a.heldPossiblyAnsweredByUnbound} held record(s) could have been answered by an unbound record`,
-    );
-  }
+  lines.push(
+    `approvals     held, and no bound answer found ${shown(a.heldWithoutBoundAnswer)}, terminals without bound inputs ${shown(a.terminalsWithoutBoundInputs)}, held record(s) that could have been answered by an unbound record ${shown(a.heldPossiblyAnsweredByUnbound)}`,
+  );
   if (a.unavailableReason !== null) lines.push(`approvals     not available: ${a.unavailableReason}`);
   lines.push(
     "approvals mean: approved = first signed bound answer after the defer (naming it, same request hash and tool) is an allow; closed without an allow = that answer is a deny; still held = no signed bound answer and no later unbound record could have answered it (otherwise not available); unmatched = no usable ref, shared ref, or disagreeing bound answers; signature field present is not a verified signature",
