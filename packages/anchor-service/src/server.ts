@@ -66,9 +66,12 @@ function refuseEarly(
   sendAndClose(res, status, body, after);
 }
 
-// Body-timeout rejects only; the handler always answers through sendAndClose,
-// which destroys the socket. Destroying here would duplicate that close and is
-// not held by any test (a half-body client is gone via getConnections either way).
+// Body bound: this timer. On expiry the handler answers 408
+// {"error":"request-timeout"} through sendAndClose and closes the socket.
+// Node's requestTimeout and the connection idle timer only tear the socket
+// down (the client sees a hang-up), so they are not a substitute for a stalled
+// body after auth. Destroying the request here would duplicate that close and
+// is not held by any test.
 function readBody(req: IncomingMessage, max: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
@@ -153,9 +156,12 @@ export async function startService(
   const server = createServer((req, res) => {
     void handle(req, res);
   });
-  // server.headersTimeout alone was not held by a test (the connection socket
-  // timer below is). Keep requestTimeout as a whole-request bound; the
-  // slow-body path is held by readBody's timer, not req.socket.setTimeout.
+  // headersTimeout must be set for requestTimeout to take effect under Node's
+  // connections checker (default headersTimeout is 60s and then a short
+  // requestTimeout does not cut). Partial-header clients are still cut by the
+  // connection socket timer below — headersTimeout alone does not hold that
+  // path under these intervals. Slow bodies after auth are held by readBody.
+  server.headersTimeout = config.headersTimeoutMs;
   server.requestTimeout = config.requestTimeoutMs;
   server.keepAliveTimeout = config.keepAliveTimeoutMs;
   server.maxConnections = config.maxConnections;
