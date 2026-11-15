@@ -1698,6 +1698,61 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("torn-tail recovery preserves the store mode on POSIX", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX file mode bits are not preserved the same way on win32");
+      return;
+    }
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-recover-mode-"));
+    try {
+      const storePath = join(dir, "store.jsonl");
+      const full = v1StoreLine({
+        leaf_hash: "11".repeat(32),
+        owner_id: "owner-a",
+        at_ms: 1,
+      });
+      writeFileSync(storePath, `${full.trimEnd()}\n{"leaf`, { encoding: "utf8", mode: 0o600 });
+      chmodSync(storePath, 0o600);
+      const beforeMode = statSync(storePath).mode & 0o777;
+      assert.equal(beforeMode, 0o600);
+      const opened = openStore(storePath);
+      try {
+        assert.equal(opened.log.size, 1);
+        assert.equal(statSync(storePath).mode & 0o777, 0o600);
+      } finally {
+        opened.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a leftover store-recovering temp is removed on start and the store is unchanged", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-recover-leftover-"));
+    try {
+      const storePath = join(dir, "store.jsonl");
+      const full = v1StoreLine({
+        leaf_hash: "11".repeat(32),
+        owner_id: "owner-a",
+        at_ms: 1,
+      });
+      writeFileSync(storePath, full, "utf8");
+      const leftover = join(dir, ".deadbeefdeadbeef.store-recovering");
+      writeFileSync(leftover, "should-not-remain\n", "utf8");
+      const before = readFileSync(storePath, "utf8");
+      const opened = openStore(storePath);
+      try {
+        assert.equal(opened.log.size, 1);
+        assert.equal(readFileSync(storePath, "utf8"), before);
+        assert.equal(existsSync(leftover), false);
+      } finally {
+        opened.close();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a store with a bad line in the middle still refuses to start", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-mid-"));
     try {

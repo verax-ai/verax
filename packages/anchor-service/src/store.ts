@@ -21,6 +21,7 @@ import {
   fsyncSync,
   lstatSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -28,12 +29,14 @@ import {
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
 const HASH = /^[0-9a-f]{64}$/;
 const ZERO_PREV = "0".repeat(64);
+/** Side-copy name used only during torn-tail recovery; never the configured store. */
+const STORE_RECOVERING = /^\.[0-9a-f]{16}\.store-recovering$/;
 
 /** Thrown when the configured path no longer names the open store descriptor. */
 export class StoreUnavailableError extends Error {
@@ -293,10 +296,13 @@ function recoverTornTail(
   const rename = ops?.renameSync ?? renameSync;
   const unlink = ops?.unlinkSync ?? unlinkSync;
   const failAt = ops?.failAt;
+  // Owner bits only: a 0600 store must not become group-writable under a
+  // permissive umask, and the temporary copy must not be exposed wider either.
+  const ownerMode = (statSync(path).mode & 0o700) || 0o600;
   const tmp = join(dirname(path), `.${randomBytes(8).toString("hex")}.store-recovering`);
   try {
     if (failAt === "write-tmp") throw new Error("injected torn-tail recovery failure at write-tmp");
-    writeFile(tmp, kept, "utf8");
+    writeFile(tmp, kept, { encoding: "utf8", mode: ownerMode, flag: "wx" });
     if (failAt === "fsync-tmp") throw new Error("injected torn-tail recovery failure at fsync-tmp");
     const tmpFd = open(tmp, "r+");
     try {
@@ -330,6 +336,21 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   const parentDirOps = opts?.parentDirOps;
   const platform = opts?.platform ?? process.platform;
   assertStorePath(path, lstat);
+
+  // Drop leftover recovery side-copies from an interrupted prior start. Safe
+  // because names matching STORE_RECOVERING are never the configured store
+  // path (they are only the temporary file recoverTornTail writes beside it).
+  const storeDir = dirname(path);
+  const storeBase = basename(path);
+  for (const name of readdirSync(storeDir)) {
+    if (name === storeBase) continue;
+    if (!STORE_RECOVERING.test(name)) continue;
+    try {
+      unlinkSync(join(storeDir, name));
+    } catch {
+      /* best-effort; open continues */
+    }
+  }
 
   let created = false;
   let fd: number;
