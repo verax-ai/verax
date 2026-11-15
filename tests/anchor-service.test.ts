@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
   closeSync,
@@ -400,11 +401,23 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("after a body-too-large answer the service closes the socket", async () => {
+  it("after a body-too-large answer the service closes the socket", { timeout: 5_000 }, async () => {
     const h = await startHarness();
     try {
       const url = new URL(h.service.url);
       await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error("service did not close the socket after body-too-large")),
+          3_000,
+        );
+        const done = (): void => {
+          clearTimeout(timer);
+          resolve();
+        };
+        const fail = (err: Error): void => {
+          clearTimeout(timer);
+          reject(err);
+        };
         const req = httpRequest(
           {
             hostname: url.hostname,
@@ -429,7 +442,6 @@ describe("hosted anchor service", () => {
             });
             const socket = res.socket;
             assert.ok(socket);
-            const done = (): void => resolve();
             if (socket.destroyed) {
               done();
               return;
@@ -438,7 +450,7 @@ describe("hosted anchor service", () => {
             socket.once("error", () => done());
           },
         );
-        req.on("error", reject);
+        req.on("error", fail);
         req.write("x".repeat(4 * 1024 + 1));
         req.end();
       });
@@ -521,6 +533,109 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("a second process is refused while another holds the store lock, and takes over after a hard kill", { timeout: 15_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-xproc-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    writeFileSync(storePath, "", "utf8");
+    const holderScript = join(root, "tests", "anchor-service-lock-holder.ts");
+    const child = spawn(
+      process.execPath,
+      ["--experimental-strip-types", holderScript],
+      {
+        env: {
+          ...process.env,
+          VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+          VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+          VERAX_ANCHOR_SVC_STORE: storePath,
+          VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+          VERAX_ANCHOR_SVC_PORT: "0",
+          VERAX_ANCHOR_SVC_LOCK_BEAT_MS: String(TEST_LOCK_BEAT_MS),
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    let stderr = "";
+    child.stderr?.on("data", (buf: Buffer) => {
+      stderr += String(buf);
+    });
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`lock holder did not become ready: ${stderr}`)), 10_000);
+        let buffered = "";
+        const onData = (buf: Buffer): void => {
+          buffered += String(buf);
+          if (buffered.includes("\n") && buffered.startsWith("ready ")) {
+            cleanup();
+            resolve();
+          }
+        };
+        const onError = (err: Error): void => {
+          cleanup();
+          reject(err);
+        };
+        const onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
+          cleanup();
+          reject(new Error(`lock holder exited early code=${code} signal=${signal}: ${stderr}`));
+        };
+        const cleanup = (): void => {
+          clearTimeout(timer);
+          child.stdout?.off("data", onData);
+          child.off("error", onError);
+          child.off("exit", onExit);
+        };
+        child.stdout?.on("data", onData);
+        child.once("error", onError);
+        child.once("exit", onExit);
+      });
+
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      let stolen: RunningService | null = null;
+      try {
+        stolen = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+        assert.fail(`expected store already locked: ${storePath}`);
+      } catch (err) {
+        if (stolen !== null) throw err;
+        assert.ok(err instanceof Error);
+        assert.equal(err.message, `store already locked: ${storePath}`);
+      } finally {
+        if (stolen !== null) await stolen.close();
+      }
+
+      await new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          resolve();
+          return;
+        }
+        child.once("exit", () => resolve());
+        child.kill("SIGKILL");
+      });
+
+      const again = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+      await again.close();
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        await new Promise<void>((resolve) => {
+          child.once("exit", () => resolve());
+          child.kill("SIGKILL");
+        });
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a stale lock from a dead process is taken over", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-stale-"));
     try {
@@ -571,6 +686,118 @@ describe("hosted anchor service", () => {
       assert.equal(lines.length, 1);
     } finally {
       await stopHarness(h);
+    }
+  });
+
+  it("without a known token, register is 401 even when the store is unavailable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-auth-first-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    let failNext = false;
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      appendRow: (path, row) => {
+        if (failNext) throw new Error("store-write-failed");
+        appendStore(path, row);
+      },
+    });
+    try {
+      failNext = true;
+      const trip = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(trip.status, 500);
+
+      const none = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(none.status, 401);
+      assert.deepEqual(await none.json(), { error: "unauthorized" });
+
+      const wrong = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: "Bearer wrong-token-also-20chars!!",
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(wrong.status, 401);
+      assert.deepEqual(await wrong.json(), { error: "unauthorized" });
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a known token still gets 503 when the store is unavailable", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-503-after-auth-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    let failNext = false;
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      appendRow: (path, row) => {
+        if (failNext) throw new Error("store-write-failed");
+        appendStore(path, row);
+      },
+    });
+    try {
+      failNext = true;
+      const trip = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(trip.status, 500);
+
+      const later = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(later.status, 503);
+      assert.deepEqual(await later.json(), { error: "store-unavailable" });
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

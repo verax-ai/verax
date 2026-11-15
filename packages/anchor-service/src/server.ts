@@ -117,10 +117,6 @@ export async function startService(
         send(res, 404, { error: "not-found" });
         return;
       }
-      if (storeUnavailable) {
-        send(res, 503, { error: "store-unavailable" });
-        return;
-      }
       const token = bearerToken(req.headers.authorization);
       if (token === null) {
         send(res, 401, { error: "unauthorized" });
@@ -129,6 +125,10 @@ export async function startService(
       const ownerId = ownerForToken(token, config.tokens);
       if (ownerId === null) {
         send(res, 401, { error: "unauthorized" });
+        return;
+      }
+      if (storeUnavailable) {
+        send(res, 503, { error: "store-unavailable" });
         return;
       }
       if (!contentTypeOk(req.headers["content-type"])) {
