@@ -4,6 +4,7 @@ import { createHash, generateKeyPairSync } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
+  mkdirSync,
   mkdtempSync,
   openSync,
   readdirSync,
@@ -35,6 +36,13 @@ import { runVerify } from "../packages/body/src/verify-cli.ts";
 
 /** Short beat so lock refusal tests do not wait on the default 2s interval. */
 const TEST_LOCK_BEAT_MS = 40;
+
+/** Write a stale lock directory the service will judge and may take over. */
+function writeStaleStoreLock(storePath: string, holder: Record<string, unknown>): void {
+  const lockPath = storeLockPath(storePath);
+  mkdirSync(lockPath);
+  writeFileSync(join(lockPath, "holder"), `${JSON.stringify(holder)}\n`, "utf8");
+}
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ledger = join(root, "test-vectors", "v1", "valid-full", "ledger");
@@ -647,11 +655,11 @@ describe("hosted anchor service", () => {
       const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
       writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
       writeFileSync(storePath, "", "utf8");
-      writeFileSync(
-        storeLockPath(storePath),
-        `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now() - 60_000, token: "dead-holder" })}\n`,
-        "utf8",
-      );
+      writeStaleStoreLock(storePath, {
+        pid: 2_147_483_646,
+        startedAt: Date.now() - 60_000,
+        token: "dead-holder",
+      });
       const config = loadConfig({
         VERAX_ANCHOR_SVC_TOKENS: tokensFile,
         VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
@@ -663,6 +671,104 @@ describe("hosted anchor service", () => {
       await service.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("exactly one of many processes takes over one stale lock", { timeout: 60_000 }, async () => {
+    const raceScript = join(root, "tests", "anchor-service-lock-race.ts");
+    const contenders = 6;
+    const rounds = 20;
+    for (let round = 0; round < rounds; round += 1) {
+      const dir = mkdtempSync(join(tmpdir(), "verax-asvc-race-"));
+      const storePath = join(dir, "store.jsonl");
+      writeFileSync(storePath, "", "utf8");
+      writeStaleStoreLock(storePath, {
+        pid: 2_147_483_646,
+        startedAt: Date.now() - 60_000,
+        token: "stale-race-token",
+      });
+      const children: ReturnType<typeof spawn>[] = [];
+      try {
+        const results = await Promise.all(
+          Array.from({ length: contenders }, () => {
+            const child = spawn(process.execPath, ["--experimental-strip-types", raceScript], {
+              env: {
+                ...process.env,
+                VERAX_ANCHOR_SVC_STORE: storePath,
+                VERAX_ANCHOR_SVC_LOCK_BEAT_MS: String(TEST_LOCK_BEAT_MS),
+              },
+              stdio: ["ignore", "pipe", "pipe"],
+              windowsHide: true,
+            });
+            children.push(child);
+            return new Promise<string>((resolve, reject) => {
+              const timer = setTimeout(() => {
+                reject(new Error(`lock race contender timed out round=${round} stderr=${err} stdout=${out}`));
+              }, 10_000);
+              let out = "";
+              let err = "";
+              let settled = false;
+              const finish = (line: string): void => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                resolve(line);
+              };
+              child.stdout?.on("data", (buf: Buffer) => {
+                out += String(buf);
+                if (/(^|\n)held\r?\n/.test(out) || out === "held\r\n" || out.startsWith("held\n") || out.startsWith("held\r\n")) {
+                  finish("held");
+                } else if (/(^|\n)refused\r?\n/.test(out) || out.startsWith("refused\n") || out.startsWith("refused\r\n")) {
+                  finish("refused");
+                }
+              });
+              child.stderr?.on("data", (buf: Buffer) => {
+                err += String(buf);
+              });
+              child.on("error", (e) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                reject(e);
+              });
+              child.on("exit", (code) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timer);
+                reject(new Error(`lock race contender exit=${code} stderr=${err} stdout=${out}`));
+              });
+            });
+          }),
+        );
+        const held = results.filter((r) => r === "held").length;
+        const refused = results.filter((r) => r === "refused").length;
+        assert.equal(
+          held,
+          1,
+          `round ${round}: expected exactly one holder, got held=${held} refused=${refused} results=${results.join(",")}`,
+        );
+        assert.equal(refused, contenders - 1);
+      } finally {
+        for (const child of children) {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+          }
+        }
+        await Promise.all(
+          children.map(
+            (child) =>
+              new Promise<void>((resolve) => {
+                if (child.exitCode !== null || child.signalCode !== null) {
+                  resolve();
+                  return;
+                }
+                child.once("exit", () => resolve());
+                child.kill("SIGKILL");
+              }),
+          ),
+        );
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
   });
 
