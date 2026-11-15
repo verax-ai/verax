@@ -2331,6 +2331,202 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("a new leaf after another request's failed append during the body is 503 with no line", { timeout: 15_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-body-latch-new-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    let failNext = false;
+    let stalled: (() => void) | null = null;
+    let phase = 0;
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      appendRow: (path, row) => {
+        if (failNext) throw new Error("store-write-failed");
+        appendStore(path, row);
+      },
+      afterAuthBeforeBody: async () => {
+        if (phase++ !== 0) return;
+        await new Promise<void>((resolve) => {
+          stalled = resolve;
+        });
+      },
+    });
+    try {
+      const before = storeBytes(storePath);
+      const aPromise = fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "a1".repeat(32) }),
+      });
+      const deadline = Date.now() + 5_000;
+      while (stalled === null && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(stalled, "expected request A to stall after auth");
+      failNext = true;
+      const b = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "b1".repeat(32) }),
+      });
+      assert.equal(b.status, 500);
+      failNext = false;
+      stalled();
+      const a = await aPromise;
+      assert.equal(a.status, 503);
+      assert.deepEqual(await a.json(), { error: "store-unavailable" });
+      assert.ok(storeBytes(storePath).equals(before));
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an existing leaf after a failed append during the body is 503 with no receipt", { timeout: 15_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-body-latch-dup-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const seeded = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      const prior = await registerCheckpoint(seeded.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(prior.ok, true);
+    } finally {
+      await seeded.close();
+    }
+    let failNext = false;
+    let stalled: (() => void) | null = null;
+    let phase = 0;
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      appendRow: (path, row) => {
+        if (failNext) throw new Error("store-write-failed");
+        appendStore(path, row);
+      },
+      afterAuthBeforeBody: async () => {
+        if (phase++ !== 0) return;
+        await new Promise<void>((resolve) => {
+          stalled = resolve;
+        });
+      },
+    });
+    try {
+      const aPromise = fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      const deadline = Date.now() + 5_000;
+      while (stalled === null && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.ok(stalled, "expected duplicate request to stall after auth");
+      failNext = true;
+      const b = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(b.status, 500);
+      failNext = false;
+      stalled();
+      const a = await aPromise;
+      assert.equal(a.status, 503);
+      assert.deepEqual(await a.json(), { error: "store-unavailable" });
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an existing leaf after the lock was lost during the body is 503 with no receipt", { timeout: 15_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-body-lock-dup-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const seeded = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      const prior = await registerCheckpoint(seeded.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(prior.ok, true);
+    } finally {
+      await seeded.close();
+    }
+    const again = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      afterAuthBeforeBody: () => {
+        const lockPath = storeLockPath(storePath);
+        writeFileSync(
+          join(lockPath, "holder"),
+          `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now(), token: "other-holder", beatMs: TEST_LOCK_BEAT_MS })}\n`,
+          "utf8",
+        );
+      },
+    });
+    try {
+      const res = await fetch(`${again.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+    } finally {
+      await again.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("losing the lock after the first check and before append answers 503 with no new line", { timeout: 15_000 }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-before-append-"));
     const { privateKey } = generateKeyPairSync("ed25519");

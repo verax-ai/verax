@@ -258,10 +258,18 @@ export async function startService(
         return;
       }
 
+      // Re-check after the body: another request may have latched the store, or
+      // the lock may have been lost while this request was reading.
+      if (storeUnavailable || !lock.stillHeld()) {
+        storeUnavailable = true;
+        send(res, 503, { error: "store-unavailable" });
+        return;
+      }
+
       const entryHash = anchorEntryHash(capsuleId, "register");
       let leafIndex = log.findLeaf(ownerId, entryHash);
       if (leafIndex < 0) {
-        if (!lock.stillHeld()) {
+        if (storeUnavailable || !lock.stillHeld()) {
           storeUnavailable = true;
           send(res, 503, { error: "store-unavailable" });
           return;
@@ -279,6 +287,11 @@ export async function startService(
           ownerId,
           atMs,
         });
+      }
+      if (storeUnavailable || !lock.stillHeld()) {
+        storeUnavailable = true;
+        send(res, 503, { error: "store-unavailable" });
+        return;
       }
       rate.record(ownerId);
       const issued = issueReceipt(log, leafIndex, config.privateKeyPem);
