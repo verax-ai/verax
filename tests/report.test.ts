@@ -440,6 +440,17 @@ describe("verax report", () => {
     assert.equal(problemClass(`${"a".repeat(200)}: detail after a long label`), "unclassified");
   });
 
+  it("k5. a known class followed by other letters without space or colon is unclassified", () => {
+    // "ref" is a known class; glued letters must not take that class.
+    assert.equal(problemClass("refutation"), "unclassified");
+    assert.equal(problemClass("decision-without-effectively"), "unclassified");
+    assert.equal(problemClass("signature does not verifyextra"), "unclassified");
+    // Boundaries that do classify stay classified.
+    assert.equal(problemClass("ref"), "ref");
+    assert.equal(problemClass("ref: detail"), "ref");
+    assert.equal(problemClass("ref more"), "ref");
+  });
+
   it("j1. problemClass takes only a known class; ledger refs never appear in the report", async () => {
     const refColon = "private-payee:123";
     const refKnownClass = "signature does not verify";
