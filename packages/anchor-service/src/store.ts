@@ -110,6 +110,11 @@ export type OpenStoreOpts = {
   recoveryOps?: StoreRecoveryOps;
   /** Test-only: substitute parent-directory flush I/O. Not exposed through the CLI. */
   parentDirOps?: Partial<ParentDirOps>;
+  /**
+   * Test-only: platform string for directory-flush unsupported errno rules.
+   * Defaults to `process.platform`. Not a global patch.
+   */
+  platform?: NodeJS.Platform;
 };
 
 function lineDigest(lineWithNewline: string): string {
@@ -223,23 +228,45 @@ function assertPathMatchesFd(path: string, fd: number): void {
   }
 }
 
-/** Errnos that mean this platform cannot flush a directory fd. */
-const DIR_FLUSH_UNSUPPORTED = new Set(["EINVAL", "ENOTSUP", "ENOSYS", "EISDIR", "EPERM"]);
+/** Errnos that mean this platform cannot flush a directory fd on every OS. */
+const DIR_FLUSH_UNSUPPORTED = new Set(["EINVAL", "ENOTSUP", "ENOSYS", "EISDIR"]);
 
-function flushParentDir(filePath: string, ops?: Partial<ParentDirOps>): void {
+function dirFlushUnsupported(code: string | undefined, platform: NodeJS.Platform): boolean {
+  if (code === undefined) return false;
+  if (DIR_FLUSH_UNSUPPORTED.has(code)) return true;
+  // On win32, opening a directory for flush is refused with EPERM; that is a
+  // missing primitive there. On Linux and macOS EPERM is a denial, not a
+  // missing flush, so it must refuse the open.
+  if (code === "EPERM" && platform === "win32") return true;
+  return false;
+}
+
+function flushParentDir(
+  filePath: string,
+  ops?: Partial<ParentDirOps>,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const open = ops?.openSync ?? openSync;
   const fsync = ops?.fsyncSync ?? fsyncSync;
   const close = ops?.closeSync ?? closeSync;
   try {
     const dirFd = open(dirname(filePath), fsConstants.O_RDONLY);
+    let fsyncErr: unknown;
     try {
       fsync(dirFd);
-    } finally {
-      close(dirFd);
+    } catch (err) {
+      fsyncErr = err;
     }
+    try {
+      close(dirFd);
+    } catch (closeErr) {
+      // A close error must not mask an earlier fsync failure.
+      if (fsyncErr === undefined) fsyncErr = closeErr;
+    }
+    if (fsyncErr !== undefined) throw fsyncErr;
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
-    if (code !== undefined && DIR_FLUSH_UNSUPPORTED.has(code)) {
+    if (dirFlushUnsupported(code, platform)) {
       // Directory flush is not supported here; the file fsync still ran.
       return;
     }
@@ -257,6 +284,7 @@ function recoverTornTail(
   kept: string,
   ops?: StoreRecoveryOps,
   parentDirOps?: Partial<ParentDirOps>,
+  platform: NodeJS.Platform = process.platform,
 ): void {
   const writeFile = ops?.writeFileSync ?? writeFileSync;
   const open = ops?.openSync ?? openSync;
@@ -279,7 +307,7 @@ function recoverTornTail(
     if (failAt === "rename") throw new Error("injected torn-tail recovery failure at rename");
     rename(tmp, path);
     if (failAt === "fsync-dir") throw new Error("injected torn-tail recovery failure at fsync-dir");
-    flushParentDir(path, parentDirOps);
+    flushParentDir(path, parentDirOps, platform);
   } catch (err) {
     try {
       unlink(tmp);
@@ -300,6 +328,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   const io: StoreFileOps = opts?.fileOps ?? { writeSync, fsyncSync };
   const recoveryOps = opts?.recoveryOps;
   const parentDirOps = opts?.parentDirOps;
+  const platform = opts?.platform ?? process.platform;
   assertStorePath(path, lstat);
 
   let created = false;
@@ -316,7 +345,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   if (created) {
     try {
       io.fsyncSync(fd);
-      flushParentDir(path, parentDirOps);
+      flushParentDir(path, parentDirOps, platform);
       closeSync(fd);
       fd = openSync(path, "a+");
     } catch (err) {
@@ -364,7 +393,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
       // fsync, rename over it, fsync the directory, then reopen.
       closeSync(fd);
       fd = -1;
-      recoverTornTail(path, kept, recoveryOps, parentDirOps);
+      recoverTornTail(path, kept, recoveryOps, parentDirOps, platform);
       fd = openSync(path, "a+");
       io.fsyncSync(fd);
     } catch (err) {
@@ -436,7 +465,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   // cannot be accepted on the next start.
   try {
     io.fsyncSync(fd);
-    flushParentDir(path, parentDirOps);
+    flushParentDir(path, parentDirOps, platform);
   } catch (err) {
     try {
       closeSync(fd);

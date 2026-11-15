@@ -2411,6 +2411,64 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("directory flush EPERM is unsupported only on win32; a close error does not mask fsync", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-dir-eperm-"));
+    try {
+      const epermOpen = (): number => {
+        const err = new Error("injected directory open EPERM") as NodeJS.ErrnoException;
+        err.code = "EPERM";
+        throw err;
+      };
+      assert.throws(
+        () =>
+          openStore(join(dir, "linux.jsonl"), {
+            platform: "linux",
+            parentDirOps: { openSync: epermOpen },
+          }),
+        /EPERM|injected directory open/,
+      );
+      assert.throws(
+        () =>
+          openStore(join(dir, "darwin.jsonl"), {
+            platform: "darwin",
+            parentDirOps: { openSync: epermOpen },
+          }),
+        /EPERM|injected directory open/,
+      );
+      const win = openStore(join(dir, "win.jsonl"), {
+        platform: "win32",
+        parentDirOps: { openSync: epermOpen },
+      });
+      win.close();
+
+      let closed = false;
+      assert.throws(
+        () =>
+          openStore(join(dir, "mask.jsonl"), {
+            platform: "linux",
+            parentDirOps: {
+              openSync: () => 99,
+              fsyncSync: () => {
+                const err = new Error("injected directory fsync EIO") as NodeJS.ErrnoException;
+                err.code = "EIO";
+                throw err;
+              },
+              closeSync: () => {
+                closed = true;
+                const err = new Error("injected directory close EBADF") as NodeJS.ErrnoException;
+                err.code = "EBADF";
+                throw err;
+              },
+            },
+          }),
+        /EIO|injected directory fsync/,
+      );
+      assert.equal(closed, true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a failed directory flush on the first open and on the second both refuse", () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-dirfsync-again-"));
     try {
