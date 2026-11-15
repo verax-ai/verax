@@ -404,8 +404,13 @@ function approvalCounts(dir: string, records: readonly SignedDecisionRecord[]): 
   return countApprovalsFromSigned(dir, records, FROM_MS, TO_EXCLUSIVE);
 }
 
-function sumOf(a: { approved: number; closedWithoutAllow: number; stillHeld: number; unmatched: number }): number {
-  return a.approved + a.closedWithoutAllow + a.stillHeld + a.unmatched;
+function sumOf(a: {
+  approved: number;
+  closedWithoutAllow: number;
+  heldWithoutBoundAnswer: number;
+  unmatched: number;
+}): number {
+  return a.approved + a.closedWithoutAllow + a.heldWithoutBoundAnswer + a.unmatched;
 }
 
 function deferCount(records: readonly SignedDecisionRecord[]): number {
@@ -520,6 +525,105 @@ describe("verax report", () => {
     assert.equal(json.report.verification.problems.some((p) => p.includes(refColon)), false);
   });
 
+  it("j2. unbound terminals do not present stillHeld as established", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-j2-"));
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    try {
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.put",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "defer",
+            reasonCode: "needs-approval",
+            ref: "d-unbound",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY,
+            nonce: "j2-defer",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-operator",
+            subject: "memory.put",
+            requestHash: REQ_A,
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "deny",
+            reasonCode: "expired",
+            ref: "a-unbound",
+            effectHash: null,
+            effectClass: "memory.put",
+            timestampMs: DAY + 100,
+            nonce: "j2-deny",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+    } finally {
+      ledger.close();
+    }
+    writeFileSync(
+      join(dir, "inputs.jsonl"),
+      `${JSON.stringify({ ref: "a-unbound", inputs: { approver: { resolves: "d-unbound" } } })}\n`,
+      "utf8",
+    );
+    const verified = await verifyLedger(dir);
+    assert.equal(verified.ok, true, JSON.stringify(verified.problems));
+
+    const { code, report, text } = await reportJson(dir);
+    assert.equal(code, 0, text);
+    assert.equal(report.approvals.terminalsWithoutBoundInputs, 1);
+    assert.equal(report.approvals.stillHeld, null, "unbound answer makes stillHeld unestablished");
+    assert.equal(report.approvals.heldWithoutBoundAnswer, 1);
+    assert.equal(report.approvals.heldPossiblyAnsweredByUnbound, 1);
+    assert.equal(report.approvals.unmatched, 0);
+    assert.equal(report.approvals.unavailableReason, null);
+
+    const plain = await reportText(dir);
+    assert.match(plain.text, /could have been answered by an unbound record/);
+    assert.match(plain.text, /still held not available|still held: not available|Still held: not available/i);
+
+    // Identity over six ledgers (comment in countApprovalsFromSigned):
+    // approved + closedWithoutAllow + unmatched + heldWithoutBoundAnswer = window defer count.
+    const ledgers: { dir: string; records: SignedDecisionRecord[] }[] = [
+      await handLedger([defer("d1", DAY)]),
+      await handLedger([defer("d1", DAY), answer("allow", "a1", "d1", DAY + 100)]),
+      await handLedger([defer("d1", DAY), answer("deny", "a1", "d1", DAY + 100)]),
+      await handLedger([defer("d1", DAY), defer("d2", DAY + 50)]),
+      await handLedger([defer(null, DAY), answer("allow", "a1", "nope", DAY + 100)]),
+      await handLedger([
+        defer("dup", DAY),
+        defer("dup", DAY + 50),
+        answer("allow", "a1", "dup", DAY + 100),
+      ]),
+    ];
+    for (const { dir: d, records } of ledgers) {
+      const c = approvalCounts(d, records);
+      const windowDefers = deferCount(records);
+      assert.equal(
+        c.approved + c.closedWithoutAllow + c.unmatched + c.heldWithoutBoundAnswer,
+        windowDefers,
+        `identity for ${d}`,
+      );
+      assert.equal(c.stillHeld, c.terminalsWithoutBoundInputs === 0 ? c.heldWithoutBoundAnswer : null);
+      if (c.terminalsWithoutBoundInputs === 0) assert.equal(c.heldPossiblyAnsweredByUnbound, 0);
+      assert.ok(c.heldPossiblyAnsweredByUnbound <= c.heldWithoutBoundAnswer);
+    }
+  });
+
   // -------------------------------------------------------------------------
   // Happy path counts
   // -------------------------------------------------------------------------
@@ -552,7 +656,10 @@ describe("verax report", () => {
     assert.equal(a.closedWithoutAllow, 0);
     assert.equal(a.stillHeld, 1);
     assert.equal(a.unmatched, 0);
-    assert.equal(a.approved! + a.closedWithoutAllow! + a.stillHeld! + a.unmatched!, total.defer);
+    assert.equal(
+      a.approved! + a.closedWithoutAllow! + a.heldWithoutBoundAnswer! + a.unmatched!,
+      total.defer,
+    );
     assert.equal(report.checkpoints.count, 1);
     assert.equal(report.checkpoints.withAnchorVerified, 0);
     assert.equal(report.checkpoints.anchorRowsPresentNotChecked, 0);
@@ -639,7 +746,7 @@ describe("verax report", () => {
     assert.ok(w.includes("signed defer counted by the time it was held"));
     assert.ok(w.includes("first signed allow or deny that follows it in chain order"));
     assert.ok(w.includes("closed without an allow"));
-    assert.ok(w.includes("still held when no signed answer"));
+    assert.ok(w.includes("still held when no signed bound answer"));
     assert.ok(w.includes("unmatched when the defer has no usable reference"));
     assert.ok(w.includes("is not a verified operator signature in this report"));
     assert.ok(w.includes("approvals.jsonl is not the source of a count"));
@@ -699,6 +806,9 @@ describe("verax report", () => {
         closedWithoutAllow: 0,
         stillHeld: 0,
         unmatched: 0,
+        terminalsWithoutBoundInputs: 0,
+        heldWithoutBoundAnswer: 0,
+        heldPossiblyAnsweredByUnbound: 0,
         unavailableReason: null,
       },
       checkpoints: { count: 0, withAnchorVerified: 0, anchorRowsPresentNotChecked: 0, anchorUnavailableReason: null },
@@ -918,8 +1028,14 @@ describe("verax report", () => {
     const { dir, records } = await handLedger(specs);
     const c = approvalCounts(dir, records);
     assert.deepEqual(
-      { approved: c.approved, closed: c.closedWithoutAllow, held: c.stillHeld, unmatched: c.unmatched },
-      { approved: 1, closed: 1, held: 1, unmatched: 4 },
+      {
+        approved: c.approved,
+        closed: c.closedWithoutAllow,
+        held: c.heldWithoutBoundAnswer,
+        stillHeld: c.stillHeld,
+        unmatched: c.unmatched,
+      },
+      { approved: 1, closed: 1, held: 1, stillHeld: 1, unmatched: 4 },
     );
     assert.equal(sumOf(c), deferCount(records));
     assert.equal(deferCount(records), 7);
@@ -939,10 +1055,13 @@ describe("verax report", () => {
     assert.equal(code, 0, text);
     const a = report.approvals;
     assert.deepEqual(
-      [a.approved, a.closedWithoutAllow, a.stillHeld, a.unmatched],
-      [1, 1, 1, 1],
+      [a.approved, a.closedWithoutAllow, a.stillHeld, a.heldWithoutBoundAnswer, a.unmatched],
+      [1, 1, 1, 1, 1],
     );
-    assert.equal(a.approved! + a.closedWithoutAllow! + a.stillHeld! + a.unmatched!, report.decisions.total!.defer);
+    assert.equal(
+      a.approved! + a.closedWithoutAllow! + a.heldWithoutBoundAnswer! + a.unmatched!,
+      report.decisions.total!.defer,
+    );
     assert.equal(report.decisions.total!.defer, 4);
   });
 
@@ -1082,7 +1201,10 @@ describe("verax report", () => {
     assert.equal(a.stillHeld, 1);
     assert.equal(a.unmatched, 0);
     assert.equal(report.decisions.total!.defer, 3);
-    assert.equal(a.approved! + a.closedWithoutAllow! + a.stillHeld! + a.unmatched!, report.decisions.total!.defer);
+    assert.equal(
+      a.approved! + a.closedWithoutAllow! + a.heldWithoutBoundAnswer! + a.unmatched!,
+      report.decisions.total!.defer,
+    );
 
     const textOut = await reportText(dir);
     assert.match(textOut.text, /closed without an allow 1/);

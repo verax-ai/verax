@@ -49,7 +49,7 @@ const UNSIGNED_APPROVALS_NOTE =
   "approvals.jsonl could not be parsed cleanly. It is an unsigned candidate file: it is not a source of any count and it does not change the verdict.";
 
 const WHAT_NOT_SHOWN =
-  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. Counts are taken only from records and checkpoints that verification attested, and only when the ledger verifies; when it does not, every count is null. A held call is a signed defer counted by the time it was held. It is approved when the first signed allow or deny that follows it in chain order, names it, and agrees on request hash and tool, is an allow; it is closed without an allow when that first answer is a deny (expired or otherwise); it is still held when no signed answer exists; it is unmatched when the defer has no usable reference, shares its reference with another defer, or its only answers disagree on request hash or tool. A signature field present on an approving record is not a verified operator signature in this report; signature verification is part of the verdict. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses and its start is before its end. Anchor receipts are counted as verified only when the anchor key was supplied and they verified; otherwise they are only counted as present and not checked. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
+  "It counts what is in the ledger. A call that never passed through the gate is not in it. A count is not a judgement that a decision was right. Counts are taken only from records and checkpoints that verification attested, and only when the ledger verifies; when it does not, every count is null. A held call is a signed defer counted by the time it was held. It is approved when the first signed allow or deny that follows it in chain order, names it, and agrees on request hash and tool, is an allow; it is closed without an allow when that first answer is a deny (expired or otherwise); it is still held when no signed bound answer exists and every terminal in the window has hash-bound inputs; when a terminal in the window has no bound inputs, stillHeld is not established and the report says how many held records an unbound inputs row could have answered; it is unmatched when the defer has no usable reference, shares its reference with another defer, or its only bound answers disagree on request hash or tool. A signature field present on an approving record is not a verified operator signature in this report; signature verification is part of the verdict. approvals.jsonl is not the source of a count. A checkpoint is counted when its coverage overlaps the window under the same [startMs, endMs) rule the ledger uses and its start is before its end. Anchor receipts are counted as verified only when the anchor key was supplied and they verified; otherwise they are only counted as present and not checked. The report does not name the ledger directory. Verification problems are named by class only; run verax verify on the machine for the detail. A ledger that cannot be read still yields a report that says it does not verify.";
 
 type DecisionCounts = { allow: number; deny: number; defer: number };
 
@@ -58,8 +58,21 @@ export type ApprovalCounts = {
   withOperatorSignatureFieldPresent: number;
   withoutOperatorSignatureField: number;
   closedWithoutAllow: number;
-  stillHeld: number;
+  /**
+   * Defers with no hash-bound answer. Established as a fact only when
+   * `terminalsWithoutBoundInputs === 0`; otherwise null (see heldWithoutBoundAnswer).
+   */
+  stillHeld: number | null;
   unmatched: number;
+  /** Allow/deny records in the window whose inputs are not hash-bound. */
+  terminalsWithoutBoundInputs: number;
+  /** Defers with no hash-bound answer (raw open count; always computed). */
+  heldWithoutBoundAnswer: number;
+  /**
+   * Of those held without a bound answer, how many an unbound terminal's
+   * inputs row names with matching request hash and tool.
+   */
+  heldPossiblyAnsweredByUnbound: number;
 };
 
 export type PeriodReport = {
@@ -92,6 +105,12 @@ export type PeriodReport = {
     closedWithoutAllow: number | null;
     stillHeld: number | null;
     unmatched: number | null;
+    /** Allow/deny in the window with no hash-bound inputs. Null when counts unavailable. */
+    terminalsWithoutBoundInputs: number | null;
+    /** Defers with no hash-bound answer. Null when counts unavailable. */
+    heldWithoutBoundAnswer: number | null;
+    /** Held defers an unbound terminal's inputs row could answer. Null when counts unavailable. */
+    heldPossiblyAnsweredByUnbound: number | null;
     /** Class only, when approvals could not be counted although the ledger verified. */
     unavailableReason: string | null;
   };
@@ -478,6 +497,15 @@ function nonEmptyString(v: unknown): string | null {
  * shared by two defers is unmatched, so no shared-consumption set is needed.
  * A defer with no usable ref, a ref shared with another defer, or only
  * disagreeing answers is unmatched.
+ *
+ * Identity (when counts are available):
+ *   approved + closedWithoutAllow + unmatched + heldWithoutBoundAnswer
+ *     === windowDeferCount
+ * stillHeld is heldWithoutBoundAnswer when terminalsWithoutBoundInputs === 0,
+ * otherwise null (not established). heldPossiblyAnsweredByUnbound counts
+ * how many of those held an unbound terminal's inputs row could answer; it
+ * is 0 when terminalsWithoutBoundInputs === 0, and never exceeds
+ * heldWithoutBoundAnswer.
  */
 export function countApprovalsFromSigned(
   dir: string,
@@ -494,15 +522,40 @@ export function countApprovalsFromSigned(
     if (ref !== null) deferRefCount.set(ref, (deferRefCount.get(ref) ?? 0) + 1);
   }
 
-  // resolves ref -> terminal records naming it, in chain order.
+  // resolves ref -> terminal records naming it, in chain order (bound only).
   const answersByRef = new Map<string, { pos: number; row: SignedDecisionRecord; inputs: ApproverInputs }[]>();
+  // Unbound terminals: no string inputsHash or no row hashing to it. Their
+  // inputs rows (if any) are consulted only for heldPossiblyAnsweredByUnbound.
+  const unboundTerminals: { pos: number; row: SignedDecisionRecord; resolves: string | null }[] = [];
+  let terminalsWithoutBoundInputs = 0;
   for (let pos = 0; pos < all.length; pos += 1) {
     const row = all[pos]!;
     const decision = row.claims.decision;
     if (decision !== "allow" && decision !== "deny") continue;
+    const ts = row.claims.timestampMs;
+    const inWindow = typeof ts === "number" && ts >= fromMs && ts < toExclusive;
     const inputs = inputsForRecord(index, row);
-    const resolves = inputs?.approver?.resolves;
-    if (typeof resolves !== "string" || resolves === "" || inputs === null) continue;
+    if (inputs === null) {
+      if (inWindow) terminalsWithoutBoundInputs += 1;
+      const ref = typeof row.claims.ref === "string" ? row.claims.ref : null;
+      let resolves: string | null = null;
+      if (ref !== null) {
+        const rows = index.get(ref);
+        if (rows) {
+          for (const entry of rows) {
+            const r = entry.inputs.approver?.resolves;
+            if (typeof r === "string" && r !== "") {
+              resolves = r;
+              break;
+            }
+          }
+        }
+      }
+      unboundTerminals.push({ pos, row, resolves });
+      continue;
+    }
+    const resolves = inputs.approver?.resolves;
+    if (typeof resolves !== "string" || resolves === "") continue;
     let list = answersByRef.get(resolves);
     if (!list) {
       list = [];
@@ -518,7 +571,12 @@ export function countApprovalsFromSigned(
     closedWithoutAllow: 0,
     stillHeld: 0,
     unmatched: 0,
+    terminalsWithoutBoundInputs,
+    heldWithoutBoundAnswer: 0,
+    heldPossiblyAnsweredByUnbound: 0,
   };
+
+  const heldPositions: { pos: number; defer: SignedDecisionRecord; ref: string }[] = [];
 
   for (let pos = 0; pos < all.length; pos += 1) {
     const defer = all[pos]!;
@@ -561,11 +619,30 @@ export function countApprovalsFromSigned(
     } else if (outcome === "closed") {
       counts.closedWithoutAllow += 1;
     } else if (outcome === "held") {
-      counts.stillHeld += 1;
+      counts.heldWithoutBoundAnswer += 1;
+      heldPositions.push({ pos, defer, ref: ref! });
     } else {
       counts.unmatched += 1;
     }
   }
+
+  for (const held of heldPositions) {
+    const reqHash = nonEmptyString(held.defer.claims.requestHash);
+    const subject = nonEmptyString(held.defer.claims.subject);
+    const maybe = unboundTerminals.some((u) => {
+      if (u.pos <= held.pos) return false;
+      if (u.resolves !== held.ref) return false;
+      const aReq = nonEmptyString(u.row.claims.requestHash);
+      const aSubject = nonEmptyString(u.row.claims.subject);
+      return reqHash !== null && subject !== null && aReq === reqHash && aSubject === subject;
+    });
+    if (maybe) counts.heldPossiblyAnsweredByUnbound += 1;
+  }
+
+  counts.stillHeld =
+    counts.terminalsWithoutBoundInputs === 0 ? counts.heldWithoutBoundAnswer : null;
+  if (counts.terminalsWithoutBoundInputs === 0) counts.heldPossiblyAnsweredByUnbound = 0;
+
   return counts;
 }
 
@@ -643,6 +720,9 @@ function unverifiedReport(from: string, to: string, problem: string): PeriodRepo
       closedWithoutAllow: null,
       stillHeld: null,
       unmatched: null,
+      terminalsWithoutBoundInputs: null,
+      heldWithoutBoundAnswer: null,
+      heldPossiblyAnsweredByUnbound: null,
       unavailableReason: null,
     },
     checkpoints: {
@@ -749,6 +829,9 @@ export async function buildPeriodReport(
     closedWithoutAllow: null,
     stillHeld: null,
     unmatched: null,
+    terminalsWithoutBoundInputs: null,
+    heldWithoutBoundAnswer: null,
+    heldPossiblyAnsweredByUnbound: null,
     unavailableReason: null,
   };
   try {
@@ -851,7 +934,7 @@ export function serializePeriodReport(report: PeriodReport): string {
       `"countsUnavailableReason":${JSON.stringify(report.countsUnavailableReason)}`,
       `"unsignedApprovalsNote":${JSON.stringify(report.unsignedApprovalsNote)}`,
       `"decisions":{"total":${jsonCounts(report.decisions.total)},"byTool":${byToolJson}}`,
-      `"approvals":{"approved":${jsonNum(a.approved)},"withOperatorSignatureFieldPresent":${jsonNum(a.withOperatorSignatureFieldPresent)},"withoutOperatorSignatureField":${jsonNum(a.withoutOperatorSignatureField)},"closedWithoutAllow":${jsonNum(a.closedWithoutAllow)},"stillHeld":${jsonNum(a.stillHeld)},"unmatched":${jsonNum(a.unmatched)},"unavailableReason":${JSON.stringify(a.unavailableReason)}}`,
+      `"approvals":{"approved":${jsonNum(a.approved)},"withOperatorSignatureFieldPresent":${jsonNum(a.withOperatorSignatureFieldPresent)},"withoutOperatorSignatureField":${jsonNum(a.withoutOperatorSignatureField)},"closedWithoutAllow":${jsonNum(a.closedWithoutAllow)},"stillHeld":${jsonNum(a.stillHeld)},"unmatched":${jsonNum(a.unmatched)},"terminalsWithoutBoundInputs":${jsonNum(a.terminalsWithoutBoundInputs)},"heldWithoutBoundAnswer":${jsonNum(a.heldWithoutBoundAnswer)},"heldPossiblyAnsweredByUnbound":${jsonNum(a.heldPossiblyAnsweredByUnbound)},"unavailableReason":${JSON.stringify(a.unavailableReason)}}`,
       `"checkpoints":{"count":${jsonNum(c.count)},"withAnchorVerified":${jsonNum(c.withAnchorVerified)},"anchorRowsPresentNotChecked":${jsonNum(c.anchorRowsPresentNotChecked)},"anchorUnavailableReason":${JSON.stringify(c.anchorUnavailableReason)}}`,
       `"whatThisReportDoesNotShow":${JSON.stringify(report.whatThisReportDoesNotShow)}`,
     ].join(",") +
@@ -944,8 +1027,8 @@ export function renderReportHtml(report: PeriodReport, digest: string): string {
     "<table><thead><tr><th>Tool</th><th>Allow</th><th>Deny</th><th>Defer</th></tr></thead>",
     `<tbody>${toolRows}</tbody></table>`,
     "<h2>Approvals</h2>",
-    `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}. Unmatched: ${shown(a.unmatched)}.${approvalsReason}</p>`,
-    "<p>Approved means the first signed answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed answer exists. Unmatched means the defer has no usable reference, shares it with another defer, or its answers disagree on request hash or tool.</p>",
+    `<p>Approved held calls: ${shown(a.approved)} (${shown(a.withOperatorSignatureFieldPresent)} with an operator signature field present, ${shown(a.withoutOperatorSignatureField)} without; signature field present is not a verified signature here). Closed without an allow: ${shown(a.closedWithoutAllow)}. Still held: ${shown(a.stillHeld)}${a.stillHeld === null && a.heldPossiblyAnsweredByUnbound !== null && a.heldPossiblyAnsweredByUnbound > 0 ? ` (${a.heldPossiblyAnsweredByUnbound} held record(s) could have been answered by an unbound record)` : ""}. Unmatched: ${shown(a.unmatched)}. Terminals without bound inputs: ${shown(a.terminalsWithoutBoundInputs)}.${approvalsReason}</p>`,
+    "<p>Approved means the first signed bound answer after the defer, naming it and agreeing on request hash and tool, is an allow. Closed without an allow means that first answer is a deny (expired or otherwise). Still held means no signed bound answer exists and every terminal in the window has hash-bound inputs; when a terminal has no bound inputs, still held is not established. Unmatched means the defer has no usable reference, shares it with another defer, or its bound answers disagree on request hash or tool.</p>",
     ...approvalsNote,
     "<h2>Checkpoints</h2>",
     `<p>Checkpoints in the window: ${shown(c.count)}. Anchor receipts verified: ${shown(c.withAnchorVerified)}. Anchor rows present, not checked (no anchor key): ${shown(c.anchorRowsPresentNotChecked)}.${anchorReason}</p>`,
@@ -980,11 +1063,16 @@ export function renderReportText(report: PeriodReport, digest: string): string {
     }
   }
   lines.push(
-    `approvals     approved ${shown(a.approved)} (signature field present ${shown(a.withOperatorSignatureFieldPresent)}, absent ${shown(a.withoutOperatorSignatureField)}), closed without an allow ${shown(a.closedWithoutAllow)}, still held ${shown(a.stillHeld)}, unmatched ${shown(a.unmatched)}`,
+    `approvals     approved ${shown(a.approved)} (signature field present ${shown(a.withOperatorSignatureFieldPresent)}, absent ${shown(a.withoutOperatorSignatureField)}), closed without an allow ${shown(a.closedWithoutAllow)}, still held ${shown(a.stillHeld)}, unmatched ${shown(a.unmatched)}, terminals without bound inputs ${shown(a.terminalsWithoutBoundInputs)}`,
   );
+  if (a.stillHeld === null && a.heldPossiblyAnsweredByUnbound !== null && a.heldPossiblyAnsweredByUnbound > 0) {
+    lines.push(
+      `approvals     ${a.heldPossiblyAnsweredByUnbound} held record(s) could have been answered by an unbound record`,
+    );
+  }
   if (a.unavailableReason !== null) lines.push(`approvals     not available: ${a.unavailableReason}`);
   lines.push(
-    "approvals mean: approved = first signed answer after the defer (naming it, same request hash and tool) is an allow; closed without an allow = that answer is a deny; still held = no signed answer; unmatched = no usable ref, shared ref, or disagreeing answers; signature field present is not a verified signature",
+    "approvals mean: approved = first signed bound answer after the defer (naming it, same request hash and tool) is an allow; closed without an allow = that answer is a deny; still held = no signed bound answer and every terminal has bound inputs (otherwise not available); unmatched = no usable ref, shared ref, or disagreeing bound answers; signature field present is not a verified signature",
   );
   if (report.unsignedApprovalsNote !== null) lines.push(`note          ${report.unsignedApprovalsNote}`);
   lines.push(

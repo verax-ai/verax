@@ -717,16 +717,20 @@ not, every count is `null` (JSON, HTML and text say so with the
 verification problem classes); unverified material is never counted. It
 counts attested decisions in the window (allow, deny, defer, in total and
 per tool name), held calls from attested defer records whose hold time
-falls in the window (approved when the first terminal signed answer after
-the defer in chain order names it and agrees on request hash and tool and
-is an allow; closed without an allow when that first answer is a deny,
-expired or otherwise; still held when no signed answer exists; unmatched
-when the defer has no usable reference, shares its reference with another
-defer, or its only answers disagree on request hash or tool), and
-attested checkpoints whose coverage overlaps the window under the same
-`[startMs, endMs)` rule with `start < end`. Anchor receipts are counted as
-verified only when an anchor key was supplied and they verified; without
-a key they are only counted as present and not checked. A signature field
+falls in the window (approved when the first terminal signed bound answer
+after the defer in chain order names it and agrees on request hash and
+tool and is an allow; closed without an allow when that first answer is a
+deny, expired or otherwise; still held when no signed bound answer exists
+and every terminal in the window has hash-bound inputs; when a terminal in
+the window has no bound inputs, `stillHeld` is not established and the
+report says how many held records an unbound inputs row could have
+answered; unmatched when the defer has no usable reference, shares its
+reference with another defer, or its only bound answers disagree on
+request hash or tool), and attested checkpoints whose coverage overlaps
+the window under the same `[startMs, endMs)` rule with `start < end`.
+Anchor receipts are counted as verified only when an anchor key was
+supplied and they verified; without a key they are only counted as present
+and not checked. A signature field
 present on an approving record is reported as a field present, not as a
 verified operator signature. `approvals.jsonl` may be noted when malformed
 but never changes the verdict or any count. The verdict is only what
@@ -761,16 +765,18 @@ passed through the gate is not in it. A count is not a judgement that a
 decision was right. Counts are taken only from records and checkpoints
 that verification attested, and only when the ledger verifies; when it
 does not, every count is null. A held call is a signed defer counted by
-the time it was held, matched only by a later terminal answer that agrees
-on request hash and tool. `approvals.jsonl` is not the source of a count
-and does not change the verdict. A checkpoint is counted when its
-coverage overlaps the window under the same `[startMs, endMs)` rule with
-`start < end`. The report does not name the ledger directory.
-Verification problems are named by class only; run `verax verify` on the
-machine for the detail. A ledger that cannot be read still yields a
-report that says it does not verify. Argument values, payee names,
-amounts, prompts and operator names do not appear; tool names and counts
-only. Operator identity appears only as the hash the ledger already holds.
+the time it was held, matched only by a later terminal bound answer that
+agrees on request hash and tool; when a terminal in the window has no
+bound inputs, still held is not established. `approvals.jsonl` is not the
+source of a count and does not change the verdict. A checkpoint is
+counted when its coverage overlaps the window under the same
+`[startMs, endMs)` rule with `start < end`. The report does not name the
+ledger directory. Verification problems are named by class only; run
+`verax verify` on the machine for the detail. A ledger that cannot be
+read still yields a report that says it does not verify. Argument values,
+payee names, amounts, prompts and operator names do not appear; tool
+names and counts only. Operator identity appears only as the hash the
+ledger already holds.
 
 Guards: `report`.
 
