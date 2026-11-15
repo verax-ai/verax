@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 
 import { loadTokenMap, type TokenMap } from "./auth.ts";
 import { publicKeyPemFromPrivate } from "./receipt.ts";
+import { assertSecretFile } from "./secret-file.ts";
 
 export const EX_USAGE = 64;
 
@@ -55,18 +56,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig 
 
   const keyPath = env.VERAX_ANCHOR_SVC_SIGNING_KEY?.trim() ?? "";
   if (keyPath === "") throw new Error("VERAX_ANCHOR_SVC_SIGNING_KEY is required (private key PEM file)");
+  assertSecretFile(keyPath, "signing key");
   let privateKeyPem: string;
   try {
     privateKeyPem = readFileSync(keyPath, "utf8");
   } catch {
-    throw new Error(`cannot read VERAX_ANCHOR_SVC_SIGNING_KEY file ${keyPath}`);
+    throw new Error(`cannot read signing key`);
   }
   try {
     const key = createPrivateKey(privateKeyPem);
     if (key.asymmetricKeyType !== "ed25519") throw new Error("not ed25519");
     createPublicKey(key);
   } catch {
-    throw new Error(`VERAX_ANCHOR_SVC_SIGNING_KEY file ${keyPath} is not an Ed25519 private key`);
+    throw new Error(`signing key is not an Ed25519 private key`);
   }
   const publicKeyPem = publicKeyPemFromPrivate(privateKeyPem);
 
