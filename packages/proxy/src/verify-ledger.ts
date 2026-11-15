@@ -184,6 +184,17 @@ export type VerifyResult = {
   /** Transparency Service receipts for checkpoints, when the ledger holds any. */
   anchors: VerifyAnchors;
   problems: string[];
+  /**
+   * Decision records whose signatures verified under the key used for this run.
+   * Empty when none verified. Added for readers that must count only accepted
+   * rows; does not change ok, problems, or any existing field.
+   */
+  attestedDecisions: SignedDecisionRecord[];
+  /**
+   * Checkpoint rows whose signatures verified under the key used for this run.
+   * Empty when none verified. Same additive contract as attestedDecisions.
+   */
+  attestedCheckpoints: SignedCheckpoint[];
 };
 
 export type VerifyAnchors = {
@@ -869,7 +880,13 @@ function tailStatement(
   records: readonly SignedDecisionRecord[],
   checkpointPublicKeyPem: string,
   attested: readonly SignedDecisionRecord[] = records,
-): { tail: VerifyTail; checkpointTrust: VerifyTrust; problems: string[]; verified: VerifiedCheckpoint[] } {
+): {
+  tail: VerifyTail;
+  checkpointTrust: VerifyTrust;
+  problems: string[];
+  verified: VerifiedCheckpoint[];
+  attestedRows: SignedCheckpoint[];
+} {
   const checkpointFile = checkpointsPath(dir);
   const checkpointLink = symbolicLinkProblem(checkpointFile);
   if (checkpointLink !== null) {
@@ -879,6 +896,7 @@ function tailStatement(
       checkpointTrust: checkpointTrustOf(pinned, null, 0),
       problems: [checkpointLink],
       verified: [],
+      attestedRows: [],
     };
   }
   const loaded = readCheckpointFile(dir);
@@ -889,12 +907,14 @@ function tailStatement(
   const checkpointTrust = checkpointTrustOf(pinned, taken, rows.length);
   const problems: string[] = [...loaded.problems];
   const verified: VerifiedCheckpoint[] = [];
+  const attestedRows: SignedCheckpoint[] = [];
   noteEd25519(key, problems);
   for (let i = 0; i < rows.length; i += 1) {
     if (!checkpointRowVerifies(rows[i]!, key)) {
       problems.push(`checkpoint signature does not verify: checkpoint ${i}`);
       continue;
     }
+    attestedRows.push(rows[i]!);
     try {
       const count = rows[i]!.claims.receiptCount;
       const endMs = rows[i]!.claims.endMs;
@@ -927,7 +947,7 @@ function tailStatement(
   const covered = brk ? rows.slice(0, brk.index) : rows;
   const newest = covered.length > 0 ? covered[covered.length - 1]! : null;
   if (!newest) {
-    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems, verified };
+    return { tail: { line: TAIL_NONE, checkpoint: null }, checkpointTrust, problems, verified, attestedRows };
   }
   const claims = newest.claims;
   const receiptCount = typeof claims.receiptCount === "number" ? claims.receiptCount : null;
@@ -960,6 +980,7 @@ function tailStatement(
     checkpointTrust,
     problems,
     verified,
+    attestedRows,
   };
 }
 
@@ -1283,6 +1304,8 @@ function unreadableResult(dir: string, problem: string): VerifyResult {
     inputs: INPUTS_UNCHECKED,
     anchors: ANCHORS_NONE,
     problems: [problem],
+    attestedDecisions: [],
+    attestedCheckpoints: [],
   };
 }
 
@@ -1370,6 +1393,8 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
       inputs: INPUTS_UNCHECKED,
       anchors: ANCHORS_NONE,
       problems,
+      attestedDecisions: [],
+      attestedCheckpoints: [],
     };
   }
 
@@ -1703,5 +1728,7 @@ async function verifyLedgerUnchecked(dir: string, opts: VerifyOptions = {}): Pro
     inputs,
     anchors,
     problems,
+    attestedDecisions: attested,
+    attestedCheckpoints: tailed.attestedRows,
   };
 }

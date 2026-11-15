@@ -411,6 +411,8 @@ export async function runVerify(
       inputs: { line: "inputs: not checked", matched: 0, missing: 0, mismatched: 0 },
       anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
+      attestedDecisions: [],
+      attestedCheckpoints: [],
     };
     const starts = readStartSummary(dir, publicKeyPem ?? null, publicKeyPem ? "pinned" : "none", {
       requireSigned: requireSignedStarts,
