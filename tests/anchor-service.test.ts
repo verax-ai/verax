@@ -2014,6 +2014,90 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("an existing leaf after the store path was removed answers 503 with no receipt", { timeout: 10_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-exist-removed-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    writeFileSync(storePath, "", "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      const prior = await registerCheckpoint(service.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(prior.ok, true);
+      rmSync(storePath);
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      const body = await res.json();
+      assert.deepEqual(body, { error: "store-unavailable" });
+      assert.equal("receipt_b64" in (body as object), false);
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("an existing leaf after the store path was replaced answers 503 with no receipt", { timeout: 10_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-exist-replaced-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    writeFileSync(storePath, "", "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      const prior = await registerCheckpoint(service.url, "bb".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(prior.ok, true);
+      rmSync(storePath);
+      writeFileSync(storePath, '{"other":true}\n', "utf8");
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      const body = await res.json();
+      assert.deepEqual(body, { error: "store-unavailable" });
+      assert.equal("receipt_b64" in (body as object), false);
+      assert.equal(readFileSync(storePath, "utf8"), '{"other":true}\n');
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a group-readable signing key is refused on POSIX", async (t) => {
     if (process.platform === "win32") {
       t.skip("POSIX chmod mode bits are not enforced on win32");

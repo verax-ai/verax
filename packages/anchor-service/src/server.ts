@@ -298,6 +298,20 @@ export async function startService(
           atMs,
         });
       }
+      // Before any signature: path must still name the open store, for new and
+      // existing leaves (existing leaves never call append, so its check alone
+      // would miss a removed or replaced path).
+      try {
+        store.assertPathIdentity();
+      } catch (err) {
+        storeUnavailable = true;
+        if (err instanceof StoreUnavailableError) {
+          send(res, 503, { error: "store-unavailable" });
+        } else {
+          send(res, 500, { error: "internal" });
+        }
+        return;
+      }
       if (storeUnavailable || !lock.stillHeld()) {
         storeUnavailable = true;
         send(res, 503, { error: "store-unavailable" });

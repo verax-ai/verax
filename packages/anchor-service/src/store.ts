@@ -60,6 +60,8 @@ export type OpenStore = {
   path: string;
   log: MerkleLog;
   append: (row: StoreRow) => void;
+  /** Same path-identity check `append` runs; call before signing a receipt. */
+  assertPathIdentity: () => void;
   close: () => void;
 };
 
@@ -442,12 +444,16 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   }
 
   let closed = false;
+  const assertPathIdentity = (): void => {
+    if (closed) throw new Error("store is closed");
+    assertPathMatchesFd(path, fd);
+  };
   return {
     path,
     log,
     append: (row: StoreRow) => {
       if (closed) throw new Error("store is closed");
-      assertPathMatchesFd(path, fd);
+      assertPathIdentity();
       const pair = `${row.owner_id}\0${row.leaf_hash}`;
       if (seenPairs.has(pair)) {
         throw new Error("store refuses a repeated (owner_id, leaf_hash) pair");
@@ -472,6 +478,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
       prevDigest = lineDigest(payload.toString("utf8"));
       nextIndex += 1;
     },
+    assertPathIdentity,
     close: () => {
       if (closed) return;
       closed = true;
