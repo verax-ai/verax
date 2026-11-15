@@ -162,29 +162,116 @@ function readLines(path: string): string[] {
 }
 
 /**
- * Stable leading code or kind from a verify problem line: the text before the
- * first colon, or the leading kebab-case token when there is no colon. A class
- * is only ever a short fixed phrase (lower-case letters, digits, spaces and
- * hyphens, at most 60 characters, starting with a letter); anything else is
- * `unclassified`.
+ * Known verify / report problem-class prefixes, taken from the strings the
+ * verifier and `completeVerify` push into `problems` (and the report's own
+ * shell classes). Matched as a prefix of the problem line followed by a
+ * space, a colon, or the end of the string; longest match wins. Anything
+ * else is `unclassified`, so a ledger ref after a class cannot become the
+ * class label.
+ */
+const KNOWN_PROBLEM_CLASSES: readonly string[] = [
+  "allow-while-halted",
+  "anchor entry hash is not the checkpoint's",
+  "anchor line",
+  "anchor names a checkpoint the ledger does not hold",
+  "anchor receipt does not verify",
+  "anchor route is not one this verifier reads",
+  "anchor row disagrees with its receipt",
+  "anchor statement is not this checkpoint's",
+  "approval signatures could not be read",
+  "approval signatures",
+  "approval-signatures-unreadable",
+  "approvals-malformed",
+  "approvals-unreadable",
+  "anchors-not-all-verified",
+  "anchors-unreadable",
+  "chain breaks at record",
+  "checkpoint chain breaks at checkpoint",
+  "checkpoint chain could not be checked",
+  "checkpoint covers",
+  "checkpoint file could not be read",
+  "checkpoint has no window",
+  "checkpoint line",
+  "checkpoint names a head the ledger does not hold",
+  "checkpoint signature does not verify",
+  "checkpoint totals do not match the records in its window",
+  "checkpoint-not-anchored",
+  "checkpoint-window-in-future",
+  "control signatures could not be read",
+  "control signatures",
+  "control-signatures-unreadable",
+  "decision-without-effect",
+  "downstream-manifest-invalid",
+  "downstream-manifest-mismatch",
+  "downstream-manifest-missing",
+  "duplicate-effect hash is not the fixed refusal",
+  "duplicate-effect row repeated",
+  "duplicate-effect with no decision",
+  "effect attestation does not cover the row",
+  "effect class is not the signed class",
+  "effect hash does not match its decision",
+  "effect is not an effect row",
+  "effect with no decision",
+  "halted effect does not match an allowed decision",
+  "index could not be read",
+  "index line",
+  "index names",
+  "index says ref",
+  "inputs row does not match",
+  "inputs row missing",
+  "ledger could not be read",
+  "ledger-manifest-corrupt",
+  "ledger-manifest-invalid",
+  "ledger-manifest-unreadable",
+  "ledger-unreadable",
+  "manifest piece path leaves the ledger directory",
+  "missing piece",
+  "newest checkpoint names a record the ledger no longer holds",
+  "no decisions found",
+  "public key is not ed25519",
+  "record is not a decision",
+  "record shape is not a decision",
+  "ref",
+  "require-anchored needs the service key",
+  "result-record-mismatch",
+  "same-org rows need --witness-key when --effect-key is pinned",
+  "self rows need --effect-key when --witness-key is pinned",
+  "signature does not verify",
+  "signed start row is malformed",
+  "signed start row is not written as the body writes it",
+  "start chain breaks at starts.jsonl line",
+  "start row at starts.jsonl line",
+  "start signature does not verify",
+  "start signature is not canonical base64",
+  "start-row-unreadable",
+  "start-row-unsigned",
+  "start-rows-missing",
+  "start-rows-not-checked",
+  "start-summary-unreadable",
+  "starts.jsonl could not be read",
+  "starts.jsonl line",
+  "state-unreadable",
+  "symbolic link",
+  "third-party key equals",
+  "third-party key rejected",
+  "third-party row",
+  "thrown effect does not match an allowed decision",
+  "unreadable file",
+  "unreadable row",
+  "unsigned start row after a signed one",
+].slice().sort((a, b) => b.length - a.length || a.localeCompare(b));
+
+/**
+ * Stable class for a verify problem line: the longest known class prefix
+ * followed by a space, a colon, or the end. Ledger detail after that prefix
+ * is dropped. Anything that is not a known class is `unclassified`.
  */
 export function problemClass(problem: string): string {
-  let candidate: string | null = null;
-  const colon = problem.indexOf(":");
-  if (colon > 0) {
-    // A URL scheme (https://, http://) is not a class label.
-    if (problem[colon + 1] === "/") return "unclassified";
-    candidate = problem.slice(0, colon).trim();
-  } else {
-    const m = /^([a-z][a-z0-9-]*)\b/.exec(problem);
-    if (m) candidate = m[1]!;
-  }
-  if (
-    candidate !== null &&
-    candidate.length <= 60 &&
-    /^[a-z][a-z0-9 -]*$/.test(candidate)
-  ) {
-    return candidate;
+  for (const known of KNOWN_PROBLEM_CLASSES) {
+    if (problem === known) return known;
+    if (!problem.startsWith(known)) continue;
+    const next = problem[known.length];
+    if (next === " " || next === ":") return known;
   }
   return "unclassified";
 }

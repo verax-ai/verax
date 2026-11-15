@@ -731,8 +731,9 @@ present on an approving record is reported as a field present, not as a
 verified operator signature. `approvals.jsonl` may be noted when malformed
 but never changes the verdict or any count. The verdict is only what
 `verax verify` would give for the whole ledger, naming each problem by its
-stable class only (a short fixed phrase of lower-case letters, digits,
-spaces and hyphens, at most 60 characters, or else `unclassified`; run
+stable class only (a known class prefix from the verifier's problem
+strings, matched before a space, a colon or the end, or else
+`unclassified`; ledger refs and other detail are not the class; run
 `verax verify` on the machine for the detail), the first and last record
 time in the window, the record count, and the ledger head hash when the
 ledger verifies. The ledger directory path does not appear in the JSON,

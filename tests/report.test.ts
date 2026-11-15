@@ -434,6 +434,92 @@ describe("verax report", () => {
     assert.equal(problemClass(`${"a".repeat(200)}: detail after a long label`), "unclassified");
   });
 
+  it("j1. problemClass takes only a known class; ledger refs never appear in the report", async () => {
+    const refColon = "private-payee:123";
+    const refKnownClass = "signature does not verify";
+    const refSixty = "a".repeat(60);
+    assert.equal(problemClass(`decision-without-effect ${refColon}`), "decision-without-effect");
+    assert.equal(problemClass(`decision-without-effect ${refKnownClass}`), "decision-without-effect");
+    assert.equal(problemClass(`decision-without-effect ${refSixty}`), "decision-without-effect");
+    // A phrase that looks like a class but is not on the verifier's list.
+    assert.equal(problemClass("invented-class-with-space detail: more"), "unclassified");
+
+    const dir = mkdtempSync(join(tmpdir(), "verax-report-j1-"));
+    const signers = loadOrCreateSigners(dir);
+    const ledger = new FileLedger(dir);
+    const refs = [refColon, refKnownClass, refSixty];
+    try {
+      for (const [i, ref] of refs.entries()) {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-proxy",
+              subject: "memory.get",
+              requestHash: sha(`req-j1-${i}`),
+              policyHash: sha("policy"),
+              inputsHash: null,
+              decision: "allow",
+              reasonCode: "ok",
+              ref,
+              effectHash: sha(`effect-j1-${i}`),
+              effectClass: "memory.get",
+              // Older than the default boundary allowance of the trailing deny.
+              timestampMs: DAY + i,
+              nonce: `j1-${i}`,
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+      }
+      // Newest record: pulls the three allows outside the in-flight allowance
+      // so default verifyLedger names decision-without-effect for each.
+      await ledger.appendDecisionChained((prev) =>
+        signDecisionRecord(
+          {
+            decider: "verax-proxy",
+            subject: "memory.get",
+            requestHash: sha("req-j1-tail"),
+            policyHash: sha("policy"),
+            inputsHash: null,
+            decision: "deny",
+            reasonCode: "denied",
+            ref: "j1-tail",
+            effectHash: null,
+            effectClass: "memory.get",
+            timestampMs: DAY + 600_000,
+            nonce: "j1-tail",
+            prevRecordHash: prev,
+          } as never,
+          signers.recordSigner.privateKeyPem,
+          signers.recordSigner.publicKeyPem,
+        ),
+      );
+    } finally {
+      ledger.close();
+    }
+    const verified = await verifyLedger(dir);
+    assert.equal(verified.ok, false);
+    for (const ref of refs) {
+      assert.ok(verified.problems.includes(`decision-without-effect ${ref}`), ref);
+    }
+
+    const json = await reportJson(dir);
+    const text = await reportText(dir);
+    const html = await reportHtml(dir);
+    const via = await throughDispatcher([dir, "--from", FROM, "--to", TO, "--json"]);
+    const surfaces = [json.text, text.text, html.html, via.stdout, via.stderr];
+    for (const ref of refs) {
+      for (const surface of surfaces) {
+        assert.equal(surface.includes(ref), false, `ref leaked: ${ref}`);
+      }
+    }
+    assert.ok(json.report.verification.problems.includes("decision-without-effect"));
+    assert.equal(json.report.verification.problems.includes(`decision-without-effect ${refColon}`), false);
+    assert.equal(json.report.verification.problems.some((p) => p.includes(refColon)), false);
+  });
+
   // -------------------------------------------------------------------------
   // Happy path counts
   // -------------------------------------------------------------------------
