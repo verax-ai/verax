@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 
 import { loadTokenMap, type TokenMap } from "./auth.ts";
 import { publicKeyPemFromPrivate } from "./receipt.ts";
-import { assertSecretFile } from "./secret-file.ts";
+import { assertSecretFile, type AssertSecretFileOpts } from "./secret-file.ts";
 
 export const EX_USAGE = 64;
 
@@ -27,6 +27,11 @@ export type ServiceConfig = {
   keepAliveTimeoutMs: number;
   /** Max concurrent TCP connections (Node `maxConnections`). */
   maxConnections: number;
+};
+
+export type LoadConfigOpts = {
+  /** Test-only secret-file checks; not read from the environment or CLI. */
+  secretFile?: AssertSecretFileOpts;
 };
 
 const DEFAULT_HEADERS_TIMEOUT_MS = 10_000;
@@ -49,14 +54,14 @@ function boundedInt(
   return n;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServiceConfig {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, opts?: LoadConfigOpts): ServiceConfig {
   const tokensPath = env.VERAX_ANCHOR_SVC_TOKENS?.trim() ?? "";
   if (tokensPath === "") throw new Error("VERAX_ANCHOR_SVC_TOKENS is required (JSON file of token digests to owner ids)");
-  const tokens = loadTokenMap(tokensPath);
+  const tokens = loadTokenMap(tokensPath, opts?.secretFile);
 
   const keyPath = env.VERAX_ANCHOR_SVC_SIGNING_KEY?.trim() ?? "";
   if (keyPath === "") throw new Error("VERAX_ANCHOR_SVC_SIGNING_KEY is required (private key PEM file)");
-  assertSecretFile(keyPath, "signing key");
+  assertSecretFile(keyPath, "signing key", opts?.secretFile);
   let privateKeyPem: string;
   try {
     privateKeyPem = readFileSync(keyPath, "utf8");

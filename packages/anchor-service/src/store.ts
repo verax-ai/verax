@@ -47,6 +47,29 @@ export type OpenStore = {
   close: () => void;
 };
 
+export type StoreStat = {
+  isSymbolicLink: () => boolean;
+  isFile: () => boolean;
+};
+
+export type StoreFileOps = {
+  writeSync: (
+    fd: number,
+    buffer: NodeJS.ArrayBufferView,
+    offset?: number,
+    length?: number,
+    position?: number | null,
+  ) => number;
+  fsyncSync: (fd: number) => void;
+};
+
+export type OpenStoreOpts = {
+  /** Test-only: substitute for lstatSync. Not exposed through the CLI. */
+  lstat?: (path: string) => StoreStat;
+  /** Test-only: substitute write/fsync used by append. Not exposed through the CLI. */
+  fileOps?: StoreFileOps;
+};
+
 function lineDigest(lineWithNewline: string): string {
   return createHash("sha256").update(lineWithNewline, "utf8").digest("hex");
 }
@@ -108,9 +131,10 @@ export function parseStoreLine(line: string, lineNo: number): StoredLine {
   };
 }
 
-function assertStorePath(path: string): void {
+/** Path identity checks used before open; tests may call with a fake lstat. */
+export function assertStorePath(path: string, lstat: (path: string) => StoreStat = lstatSync): void {
   try {
-    const st = lstatSync(path);
+    const st = lstat(path);
     if (st.isSymbolicLink()) {
       throw new Error(`store path must not be a symbolic link`);
     }
@@ -140,8 +164,10 @@ function flushParentDir(filePath: string): void {
  * Open the store for the life of the process. Creates an empty regular file
  * when missing, fsyncs it and (where the platform allows) its parent directory.
  */
-export function openStore(path: string): OpenStore {
-  assertStorePath(path);
+export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
+  const lstat = opts?.lstat ?? lstatSync;
+  const io: StoreFileOps = opts?.fileOps ?? { writeSync, fsyncSync };
+  assertStorePath(path, lstat);
 
   let created = false;
   let fd: number;
@@ -173,7 +199,7 @@ export function openStore(path: string): OpenStore {
   // Re-check identity after open: refuse if the path is no longer a regular file
   // we would have accepted (symlink swapped in between lstat and open).
   try {
-    const st = lstatSync(path);
+    const st = lstat(path);
     if (st.isSymbolicLink() || !st.isFile()) {
       closeSync(fd);
       throw new Error(`store path must be a regular file`);
@@ -288,11 +314,11 @@ export function openStore(path: string): OpenStore {
       const payload = Buffer.from(encodeLine(stored), "utf8");
       let offset = 0;
       while (offset < payload.length) {
-        const n = writeSync(fd, payload, offset, payload.length - offset);
+        const n = io.writeSync(fd, payload, offset, payload.length - offset);
         if (n <= 0) throw new Error("store write made no progress");
         offset += n;
       }
-      fsyncSync(fd);
+      io.fsyncSync(fd);
       seenPairs.add(pair);
       prevDigest = lineDigest(payload.toString("utf8"));
       nextIndex += 1;

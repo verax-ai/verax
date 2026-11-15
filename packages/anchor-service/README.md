@@ -51,12 +51,16 @@ still be the writer is taken over by at most one waiter. The lock records pid,
 start time, token and (on Linux) boot id; that is enough only inside that
 deployment shape — a dead holder whose pid was reused in another pid namespace,
 or a store on a volume shared across namespaces, is outside what the lock can
-decide. After a failed store write, or after the process loses its lock, every
-later authenticated `POST /register` answers `503`
-`{"error":"store-unavailable"}` until the process is restarted (unknown tokens
-still get `401`, unknown routes `404`). On start, a torn last line (no
-terminating newline) is dropped and the file truncated to the last full line,
-with one line on stderr. A blank line that is not that torn tail, a repeated
+decide. A stale takeover uses a gate directory named
+`<store>.lock.takeover`. If a process dies while holding that gate, later
+starts refuse with a sentence that names the gate path. Before removing the
+gate by hand, confirm no takeover is in progress (no other `verax-anchor-service`
+on that store, and the gate's age is past any in-flight start). After a failed
+store write, or after the process loses its lock, every later authenticated
+`POST /register` answers `503` `{"error":"store-unavailable"}` until the
+process is restarted (unknown tokens still get `401`, unknown routes `404`).
+On start, a torn last line (no terminating newline) is dropped and the file
+truncated to the last full line, with one line on stderr. A blank line that is not that torn tail, a repeated
 `(owner_id, leaf_hash)`, a broken prev-hash chain, or an old unversioned store
 refuses to start.
 

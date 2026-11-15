@@ -5,6 +5,7 @@ import {
   chmodSync,
   closeSync,
   copyFileSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -13,6 +14,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -30,10 +32,18 @@ import { CborTag, encodeCbor } from "../packages/anchor-service/src/cbor.ts";
 import {
   appendStore,
   loadConfig,
+  openStore,
   startService,
   type RunningService,
 } from "../packages/anchor-service/src/index.ts";
-import { storeLockPath } from "../packages/anchor-service/src/store-lock.ts";
+import { loadTokenMap } from "../packages/anchor-service/src/auth.ts";
+import { assertSecretFile } from "../packages/anchor-service/src/secret-file.ts";
+import { assertStorePath } from "../packages/anchor-service/src/store.ts";
+import {
+  acquireStoreLock,
+  storeLockPath,
+  storeTakeoverGatePath,
+} from "../packages/anchor-service/src/store-lock.ts";
 import { pendingAnchors, registerCheckpoint, runAnchor } from "../packages/body/src/anchor-cli.ts";
 import { runVerify } from "../packages/body/src/verify-cli.ts";
 
@@ -493,7 +503,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a slow header is cut by headersTimeout", { timeout: 10_000 }, async () => {
+  it("a slow header is cut by the connection socket timer", { timeout: 10_000 }, async () => {
     const h = await startHarness({
       VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "200",
       VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "2000",
@@ -520,7 +530,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a slow body is cut by requestTimeout", { timeout: 10_000 }, async () => {
+  it("a slow body is cut by the body read timer", { timeout: 10_000 }, async () => {
     const h = await startHarness({
       VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "200",
       VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "300",
@@ -1501,7 +1511,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a store path that is a symlink or directory is refused", async () => {
+  it("a store path that is a directory is refused", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-storepath-"));
     try {
       const { privateKey } = generateKeyPairSync("ed25519");
@@ -1527,15 +1537,30 @@ describe("hosted anchor service", () => {
           ),
         /regular file/,
       );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
+  it("a real store symlink is refused when the platform can create one", async (t) => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-storesym-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
       const target = join(dir, "real-store.jsonl");
       writeFileSync(target, "", "utf8");
       const link = join(dir, "store-link.jsonl");
       try {
         symlinkSync(target, link);
       } catch (err) {
-        // Windows may require elevated privileges for symlinks.
-        if ((err as NodeJS.ErrnoException).code === "EPERM") return;
+        if ((err as NodeJS.ErrnoException).code === "EPERM") {
+          t.skip("platform cannot create a symlink without elevation (EPERM)");
+          return;
+        }
         throw err;
       }
       await assert.rejects(
@@ -1557,7 +1582,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a symlink swapped in after start does not redirect appends", async () => {
+  it("a symlink swapped in after start does not redirect appends", async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-swap-"));
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -1585,12 +1610,14 @@ describe("hosted anchor service", () => {
         rmSync(storePath);
         symlinkSync(decoy, storePath);
       } catch (err) {
-        if ((err as NodeJS.ErrnoException).code === "EPERM") return;
+        if ((err as NodeJS.ErrnoException).code === "EPERM") {
+          t.skip("platform cannot create a symlink without elevation (EPERM)");
+          return;
+        }
         throw err;
       }
       const got = await registerCheckpoint(service.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
       assert.equal(got.ok, true);
-      // Appends still went to the original inode, not the decoy.
       assert.equal(readFileSync(decoy, "utf8"), "");
       assert.notEqual(inodeBefore, undefined);
     } finally {
@@ -1599,8 +1626,11 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a group-readable signing key is refused on POSIX", async () => {
-    if (process.platform === "win32") return;
+  it("a group-readable signing key is refused on POSIX", async (t) => {
+    if (process.platform === "win32") {
+      t.skip("POSIX chmod mode bits are not enforced on win32");
+      return;
+    }
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-keymode-"));
     try {
       const { privateKey } = generateKeyPairSync("ed25519");
@@ -1624,6 +1654,699 @@ describe("hosted anchor service", () => {
       );
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("assertSecretFile refuses symlink, directory, and weak modes with fakes on every platform", () => {
+    const fake = (kind: "symlink" | "dir" | "fifo" | "file", mode: number) => ({
+      mode,
+      isSymbolicLink: () => kind === "symlink",
+      isFile: () => kind === "file",
+    });
+    assert.throws(
+      () => assertSecretFile("/x", "signing key", { lstat: () => fake("symlink", 0o600), platform: "linux" }),
+      /signing key must not be a symbolic link/,
+    );
+    assert.throws(
+      () => assertSecretFile("/x", "signing key", { lstat: () => fake("dir", 0o600), platform: "linux" }),
+      /signing key must be a regular file/,
+    );
+    assert.throws(
+      () => assertSecretFile("/x", "token map", { lstat: () => fake("fifo", 0o600), platform: "linux" }),
+      /token map must be a regular file/,
+    );
+    for (const mode of [0o640, 0o604, 0o660]) {
+      assert.throws(
+        () => assertSecretFile("/x", "signing key", { lstat: () => fake("file", mode), platform: "linux" }),
+        /signing key must not be readable or writable by group or others/,
+      );
+    }
+    assert.doesNotThrow(() =>
+      assertSecretFile("/x", "signing key", { lstat: () => fake("file", 0o600), platform: "linux" }),
+    );
+    assert.doesNotThrow(() =>
+      assertSecretFile("/x", "signing key", { lstat: () => fake("file", 0o640), platform: "win32" }),
+    );
+  });
+
+  it("loadConfig refuses a signing key that assertSecretFile would reject", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-cfg-secret-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      assert.throws(
+        () =>
+          loadConfig(
+            {
+              VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+              VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+              VERAX_ANCHOR_SVC_STORE: join(dir, "store.jsonl"),
+              VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+              VERAX_ANCHOR_SVC_PORT: "0",
+            },
+            {
+              secretFile: {
+                platform: "linux",
+                lstat: (p) => {
+                  if (p === keyFile) {
+                    return {
+                      mode: 0o600,
+                      isSymbolicLink: () => true,
+                      isFile: () => false,
+                    };
+                  }
+                  return {
+                    mode: 0o600,
+                    isSymbolicLink: () => false,
+                    isFile: () => true,
+                  };
+                },
+              },
+            },
+          ),
+        /signing key must not be a symbolic link/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("loadTokenMap refuses a token map that assertSecretFile would reject", () => {
+    assert.throws(
+      () =>
+        loadTokenMap("/token-map.json", {
+          platform: "linux",
+          lstat: () => ({
+            mode: 0o600,
+            isSymbolicLink: () => false,
+            isFile: () => false,
+          }),
+        }),
+      /token map must be a regular file/,
+    );
+  });
+
+  it("assertStorePath refuses symlink, directory, and fifo via an injected lstat", () => {
+    assert.throws(
+      () => assertStorePath("/store", () => ({ isSymbolicLink: () => true, isFile: () => false })),
+      /symbolic link/,
+    );
+    assert.throws(
+      () => assertStorePath("/store", () => ({ isSymbolicLink: () => false, isFile: () => false })),
+      /regular file/,
+    );
+    assert.doesNotThrow(() =>
+      assertStorePath("/store", () => ({ isSymbolicLink: () => false, isFile: () => true })),
+    );
+  });
+
+  it("a store with a wrong index but a matching prev chain refuses to start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-badindex-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      const first = v1StoreLine({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 }, 0);
+      const prev = createHash("sha256").update(first, "utf8").digest("hex");
+      const second = v1StoreLine({ leaf_hash: "22".repeat(32), owner_id: "owner-a", at_ms: 2 }, 99, prev);
+      writeFileSync(storePath, `${first}${second}`, "utf8");
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /index 99, expected 1/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a store with a broken prev after an altered earlier line refuses to start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-badprev-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      const first = v1StoreLine({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 }, 0);
+      const prev = createHash("sha256").update(first, "utf8").digest("hex");
+      const second = v1StoreLine({ leaf_hash: "22".repeat(32), owner_id: "owner-a", at_ms: 2 }, 1, prev);
+      const alteredFirst = v1StoreLine({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 9 }, 0);
+      writeFileSync(storePath, `${alteredFirst}${second}`, "utf8");
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /breaks the prev-hash chain/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a store with a removed middle line and renumbered indexes refuses on prev", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-gap-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      const first = v1StoreLine({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 }, 0);
+      const prevFirst = createHash("sha256").update(first, "utf8").digest("hex");
+      const middle = v1StoreLine({ leaf_hash: "22".repeat(32), owner_id: "owner-a", at_ms: 2 }, 1, prevFirst);
+      const prevMiddle = createHash("sha256").update(middle, "utf8").digest("hex");
+      // Drop middle; keep third's prev pointing at middle, but renumber index to 1.
+      const third = v1StoreLine({ leaf_hash: "33".repeat(32), owner_id: "owner-a", at_ms: 3 }, 1, prevMiddle);
+      writeFileSync(storePath, `${first}${third}`, "utf8");
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /breaks the prev-hash chain/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("append does not advance memory before fsync returns, and a throwing fsync latches 503", { timeout: 10_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-fsync-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+
+    const ops: string[] = [];
+    let serviceRef: RunningService | null = null;
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      openStore: {
+        fileOps: {
+          writeSync: (fd, buffer, offset, length, position) => {
+            ops.push("write");
+            return writeSync(fd, buffer, offset, length, position);
+          },
+          fsyncSync: (fd) => {
+            ops.push("fsync");
+            // In-memory log is only advanced after writeRow returns.
+            assert.ok(serviceRef);
+            assert.equal(serviceRef.log.size, 0);
+            assert.ok(!ops.includes("responded"));
+          },
+        },
+      },
+    });
+    serviceRef = service;
+    try {
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "ab".repeat(32) }),
+      });
+      ops.push("responded");
+      assert.equal(res.status, 200);
+      assert.deepEqual(ops.slice(0, 2), ["write", "fsync"]);
+      assert.equal(service.log.size, 1);
+
+      await service.close();
+      let throwFsync = true;
+      const again = await startService(config, {
+        lockBeatMs: TEST_LOCK_BEAT_MS,
+        openStore: {
+          fileOps: {
+            writeSync,
+            fsyncSync: () => {
+              if (throwFsync) throw new Error("fsync failed");
+            },
+          },
+        },
+      });
+      try {
+        const fail = await fetch(`${again.url}/register`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${TOKEN}`,
+          },
+          body: JSON.stringify({ capsule_id: "cd".repeat(32) }),
+        });
+        assert.equal(fail.status, 500);
+        const later = await fetch(`${again.url}/register`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${TOKEN}`,
+          },
+          body: JSON.stringify({ capsule_id: "ef".repeat(32) }),
+        });
+        assert.equal(later.status, 503);
+        assert.deepEqual(await later.json(), { error: "store-unavailable" });
+      } finally {
+        await again.close();
+      }
+    } finally {
+      try {
+        await service.close();
+      } catch {
+        /* already closed */
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("sendAndClose destroys the socket, not only Connection: close", { timeout: 5_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-destroy-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    let destroyed: boolean | null = null;
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      afterSendAndClose: (socketDestroyed) => {
+        destroyed = socketDestroyed;
+      },
+    });
+    try {
+      const url = new URL(service.url);
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("body-too-large answer did not finish")), 3_000);
+        const req = httpRequest(
+          {
+            hostname: url.hostname,
+            port: url.port,
+            path: "/register",
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${TOKEN}`,
+              "content-length": String(4 * 1024 + 1),
+            },
+          },
+          (res) => {
+            assert.equal(res.statusCode, 413);
+            res.resume();
+            res.on("end", () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          },
+        );
+        req.on("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        req.write("x".repeat(4 * 1024 + 1));
+        req.end();
+      });
+      const deadline = Date.now() + 2_000;
+      while (destroyed === null && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      assert.equal(destroyed, true, "expected sendAndClose to destroy the socket");
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("after the lock is lost, a duplicate registration is 503 with no receipt", { timeout: 15_000 }, async () => {
+    const h = await startHarness();
+    try {
+      const first = await registerCheckpoint(h.service.url, "aa".repeat(32), h.publicKeyPem, fetch, Date.now, h.token);
+      assert.equal(first.ok, true);
+      const before = storeBytes(h.storePath);
+      const lockPath = storeLockPath(h.storePath);
+      writeFileSync(
+        join(lockPath, "holder"),
+        `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now(), token: "other-holder", beatMs: TEST_LOCK_BEAT_MS })}\n`,
+        "utf8",
+      );
+      await new Promise((r) => setTimeout(r, TEST_LOCK_BEAT_MS * 3));
+      const res = await fetch(`${h.service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${h.token}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+      assert.ok(storeBytes(h.storePath).equals(before));
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
+  it("losing the lock after the first check and before append answers 503 with no new line", { timeout: 15_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-before-append-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      afterAuthBeforeBody: () => {
+        const lockPath = storeLockPath(storePath);
+        writeFileSync(
+          join(lockPath, "holder"),
+          `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now(), token: "other-holder", beatMs: TEST_LOCK_BEAT_MS })}\n`,
+          "utf8",
+        );
+      },
+    });
+    try {
+      const before = storeBytes(storePath);
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+      assert.ok(storeBytes(storePath).equals(before));
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a holder that lost its lock stops beating the new holder's file and reports lost", { timeout: 10_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-beat-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    const lock = acquireStoreLock(storePath, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      let lost = false;
+      lock.onLost(() => {
+        lost = true;
+      });
+      const lockPath = storeLockPath(storePath);
+      const holder = join(lockPath, "holder");
+      writeFileSync(
+        holder,
+        `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now(), token: "other-holder", beatMs: TEST_LOCK_BEAT_MS })}\n`,
+        "utf8",
+      );
+      const past = Date.now() / 1000 - 120;
+      utimesSync(holder, past, past);
+      const mtimeBefore = statSync(holder).mtimeMs;
+      await new Promise((r) => setTimeout(r, TEST_LOCK_BEAT_MS * 5));
+      assert.equal(lock.stillHeld(), false);
+      assert.equal(lost, true);
+      assert.equal(statSync(holder).mtimeMs, mtimeBefore);
+      const onDisk = JSON.parse(readFileSync(holder, "utf8")) as { token?: string };
+      assert.equal(onDisk.token, "other-holder");
+    } finally {
+      lock.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a holder that lost its lock does not remove the other holder's lock on release", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-release-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    const lock = acquireStoreLock(storePath, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      const lockPath = storeLockPath(storePath);
+      const holder = join(lockPath, "holder");
+      writeFileSync(
+        holder,
+        `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now(), token: "other-holder", beatMs: TEST_LOCK_BEAT_MS })}\n`,
+        "utf8",
+      );
+      lock.release();
+      assert.equal(existsSync(lockPath), true);
+      const onDisk = JSON.parse(readFileSync(holder, "utf8")) as { token?: string };
+      assert.equal(onDisk.token, "other-holder");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a leftover takeover gate is refused with a sentence that names the gate", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-gateleft-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+      writeFileSync(storePath, "", "utf8");
+      writeStaleStoreLock(storePath, {
+        pid: 2_147_483_646,
+        startedAt: Date.now() - 60_000,
+        token: "dead-holder",
+      });
+      const gate = storeTakeoverGatePath(storePath);
+      mkdirSync(gate);
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.match(err.message, /store lock takeover gate is present/);
+          assert.ok(err.message.includes(gate));
+          assert.ok(!err.message.startsWith("store already locked:"));
+          return true;
+        },
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a deterministic takeover: A holds, B is refused, and a changed holder under the gate is left alone", { timeout: 30_000 }, async () => {
+    const takeoverScript = join(root, "tests", "anchor-service-lock-takeover.ts");
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-det-"));
+    const syncDir = mkdtempSync(join(tmpdir(), "verax-asvc-sync-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    writeStaleStoreLock(storePath, {
+      pid: 2_147_483_646,
+      startedAt: Date.now() - 60_000,
+      token: "stale-det-token",
+    });
+    const children: ReturnType<typeof spawn>[] = [];
+    const buffers = new Map<ReturnType<typeof spawn>, { out: string; err: string }>();
+    const spawnOne = (id: string, pause: string) => {
+      const child = spawn(
+        process.execPath,
+        ["--experimental-strip-types", takeoverScript, storePath, String(TEST_LOCK_BEAT_MS), pause, syncDir, id],
+        { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+      );
+      children.push(child);
+      const buf = { out: "", err: "" };
+      buffers.set(child, buf);
+      child.stdout?.on("data", (b: Buffer) => {
+        buf.out += String(b);
+      });
+      child.stderr?.on("data", (b: Buffer) => {
+        buf.err += String(b);
+      });
+      return child;
+    };
+    const waitPaused = async (id: string, point: string): Promise<void> => {
+      const marker = join(syncDir, `paused-${id}-${point}`);
+      const deadline = Date.now() + 10_000;
+      while (!existsSync(marker)) {
+        if (Date.now() > deadline) throw new Error(`missing pause marker ${marker}`);
+        await new Promise((r) => setTimeout(r, 20));
+      }
+    };
+    const go = (id: string, point: string): void => {
+      writeFileSync(join(syncDir, `go-${id}-${point}`), "1", "utf8");
+    };
+    const readOutcome = (child: ReturnType<typeof spawn>): Promise<string> =>
+      new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          const buf = buffers.get(child)!;
+          reject(new Error(`takeover child timed out stdout=${buf.out} stderr=${buf.err}`));
+        }, 15_000);
+        const check = (): void => {
+          const buf = buffers.get(child)!;
+          if (/(^|\n)held /.test(buf.out) || /(^|\n)refused /.test(buf.out)) {
+            clearTimeout(timer);
+            resolve(buf.out);
+          }
+        };
+        check();
+        child.stdout?.on("data", check);
+        child.on("exit", (code) => {
+          const buf = buffers.get(child)!;
+          if (/(^|\n)held /.test(buf.out) || /(^|\n)refused /.test(buf.out)) {
+            clearTimeout(timer);
+            resolve(buf.out);
+            return;
+          }
+          clearTimeout(timer);
+          reject(new Error(`exit ${code} stderr=${buf.err} stdout=${buf.out}`));
+        });
+      });
+    try {
+      // Both try to enter the gate and pause before removal. With the gate,
+      // only one pauses and the other is refused; without it, both pause and
+      // both can hold after release.
+      const a = spawnOne("A", "inside-gate-before-removal");
+      const b = spawnOne("B", "inside-gate-before-removal");
+      const point = "inside-gate-before-removal";
+      const deadline = Date.now() + 10_000;
+      let aPaused = false;
+      let bPaused = false;
+      while (Date.now() < deadline) {
+        aPaused = existsSync(join(syncDir, `paused-A-${point}`));
+        bPaused = existsSync(join(syncDir, `paused-B-${point}`));
+        const aBuf = buffers.get(a)!.out;
+        const bBuf = buffers.get(b)!.out;
+        if (aPaused && bPaused) break;
+        if (aPaused && /refused B/.test(bBuf)) break;
+        if (bPaused && /refused A/.test(aBuf)) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      aPaused = existsSync(join(syncDir, `paused-A-${point}`));
+      bPaused = existsSync(join(syncDir, `paused-B-${point}`));
+      // If both reached the critical section, release one then the other so the
+      // second removes the first's lock (only possible when the gate is absent).
+      if (aPaused && bPaused) {
+        go("A", point);
+        const first = await readOutcome(a);
+        go("B", point);
+        const second = await readOutcome(b);
+        const held = [first, second].filter((o) => /held /.test(o));
+        assert.equal(held.length, 1, `expected one holder, got:\n${first}\n${second}`);
+      } else {
+        if (aPaused) go("A", point);
+        if (bPaused) go("B", point);
+        const outA = await readOutcome(a);
+        const outB = await readOutcome(b);
+        const held = [outA, outB].filter((o) => /held /.test(o));
+        const refused = [outA, outB].filter((o) => /refused /.test(o));
+        assert.equal(held.length, 1, `expected one holder, got:\n${outA}\n${outB}`);
+        assert.equal(refused.length, 1, `expected one refusal, got:\n${outA}\n${outB}`);
+      }
+      assert.equal(existsSync(storeTakeoverGatePath(storePath)), false);
+
+      // Recheck: pause inside the gate, change holder bytes (same token), refuse.
+      a.kill("SIGKILL");
+      b.kill("SIGKILL");
+      await Promise.all(
+        children.map(
+          (c) =>
+            new Promise<void>((resolve) => {
+              if (c.exitCode !== null || c.signalCode !== null) resolve();
+              else c.once("exit", () => resolve());
+            }),
+        ),
+      );
+      children.length = 0;
+      rmSync(storeLockPath(storePath), { recursive: true, force: true });
+      writeStaleStoreLock(storePath, {
+        pid: 2_147_483_646,
+        startedAt: Date.now() - 60_000,
+        token: "stale-recheck-token",
+      });
+      const judged = readFileSync(join(storeLockPath(storePath), "holder"), "utf8");
+      const c = spawnOne("C", "inside-gate-before-recheck");
+      await waitPaused("C", "inside-gate-before-recheck");
+      writeFileSync(
+        join(storeLockPath(storePath), "holder"),
+        `${JSON.stringify({
+          pid: 1,
+          startedAt: Date.now() - 60_000,
+          token: "stale-recheck-token",
+        })}\n`,
+        "utf8",
+      );
+      const changed = readFileSync(join(storeLockPath(storePath), "holder"), "utf8");
+      assert.notEqual(changed, judged);
+      go("C", "inside-gate-before-recheck");
+      const outC = await readOutcome(c);
+      assert.match(outC, /refused C/);
+      assert.equal(readFileSync(join(storeLockPath(storePath), "holder"), "utf8"), changed);
+      assert.equal(existsSync(storeTakeoverGatePath(storePath)), false);
+    } finally {
+      for (const child of children) {
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      }
+      await Promise.all(
+        children.map(
+          (c) =>
+            new Promise<void>((resolve) => {
+              if (c.exitCode !== null || c.signalCode !== null) resolve();
+              else {
+                c.once("exit", () => resolve());
+                c.kill("SIGKILL");
+              }
+            }),
+        ),
+      );
+      rmSync(dir, { recursive: true, force: true });
+      rmSync(syncDir, { recursive: true, force: true });
     }
   });
 });

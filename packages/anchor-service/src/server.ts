@@ -11,7 +11,7 @@ import { bearerToken, ownerForToken } from "./auth.ts";
 import type { ServiceConfig } from "./config.ts";
 import { RateLimiter } from "./rate.ts";
 import { issueReceipt } from "./receipt.ts";
-import { openStore, type OpenStore, type StoreRow } from "./store.ts";
+import { openStore, type OpenStore, type OpenStoreOpts, type StoreRow } from "./store.ts";
 import { acquireStoreLock, type StoreLock } from "./store-lock.ts";
 import type { MerkleLog } from "./merkle.ts";
 
@@ -39,7 +39,12 @@ function send(res: ServerResponse, status: number, body?: unknown): void {
 }
 
 /** Answer and close the connection so the client cannot keep streaming. */
-function sendAndClose(res: ServerResponse, status: number, body: unknown): void {
+function sendAndClose(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  after?: (socketDestroyed: boolean) => void,
+): void {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json",
@@ -47,12 +52,18 @@ function sendAndClose(res: ServerResponse, status: number, body: unknown): void 
   });
   res.end(text, () => {
     res.socket?.destroy();
+    after?.(res.socket?.destroyed === true);
   });
 }
 
 /** Early refusal before a body is consumed: always ends the TCP connection. */
-function refuseEarly(res: ServerResponse, status: number, body: unknown): void {
-  sendAndClose(res, status, body);
+function refuseEarly(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  after?: (socketDestroyed: boolean) => void,
+): void {
+  sendAndClose(res, status, body, after);
 }
 
 function readBody(req: IncomingMessage, max: number, timeoutMs: number): Promise<Buffer> {
@@ -104,7 +115,15 @@ function contentTypeOk(header: string | undefined): boolean {
 
 export async function startService(
   config: ServiceConfig,
-  options?: { appendRow?: AppendRow; lockBeatMs?: number },
+  options?: {
+    appendRow?: AppendRow;
+    lockBeatMs?: number;
+    openStore?: OpenStoreOpts;
+    /** Test-only: after auth and the first lock check, before the body is read. */
+    afterAuthBeforeBody?: () => void | Promise<void>;
+    /** Test-only: called after sendAndClose finishes its end callback. */
+    afterSendAndClose?: (socketDestroyed: boolean) => void;
+  },
 ): Promise<RunningService> {
   let lock: StoreLock;
   try {
@@ -114,7 +133,7 @@ export async function startService(
   }
   let store: OpenStore;
   try {
-    store = openStore(config.storePath);
+    store = openStore(config.storePath, options?.openStore);
   } catch (err) {
     lock.release();
     throw new Error(err instanceof Error ? err.message : String(err));
@@ -122,15 +141,19 @@ export async function startService(
   const log: MerkleLog = store.log;
   const rate = new RateLimiter(config.ratePerMinute);
   const writeRow = options?.appendRow ?? ((_path: string, row: StoreRow) => store.append(row));
+  // stillHeld() already latches lost on the lock; every authenticated path
+  // checks it (and sets storeUnavailable). A separate onLost → storeUnavailable
+  // latch cannot fail alone, so it is not registered.
   let storeUnavailable = false;
-  lock.onLost(() => {
-    storeUnavailable = true;
-  });
+  const afterAuthBeforeBody = options?.afterAuthBeforeBody;
+  const afterSendAndClose = options?.afterSendAndClose;
 
   const server = createServer((req, res) => {
     void handle(req, res);
   });
-  server.headersTimeout = config.headersTimeoutMs;
+  // server.headersTimeout alone was not held by a test (the connection socket
+  // timer below is). Keep requestTimeout as a whole-request bound; the
+  // slow-body path is held by readBody's timer, not req.socket.setTimeout.
   server.requestTimeout = config.requestTimeoutMs;
   server.keepAliveTimeout = config.keepAliveTimeoutMs;
   server.maxConnections = config.maxConnections;
@@ -139,8 +162,7 @@ export async function startService(
     50,
     Math.min(1_000, Math.floor(config.headersTimeoutMs / 2)),
   );
-  // Node's headersTimeout is not reliable on every platform; arm a socket
-  // timer on connect and clear it once headers have produced a request.
+  // Connection-level timer: cuts sockets that never finish headers.
   server.on("connection", (socket) => {
     socket.setTimeout(config.headersTimeoutMs);
     socket.once("timeout", () => {
@@ -150,7 +172,6 @@ export async function startService(
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
-      req.socket.setTimeout(config.requestTimeoutMs);
       if (req.method !== "POST" || req.url !== "/register") {
         refuseEarly(res, 404, { error: "not-found" });
         return;
@@ -175,17 +196,18 @@ export async function startService(
         refuseEarly(res, 400, { error: "bad-content-type" });
         return;
       }
+      if (afterAuthBeforeBody) await afterAuthBeforeBody();
       let body: Buffer;
       try {
         body = await readBody(req, MAX_BODY, config.requestTimeoutMs);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "";
         if (msg === "body-too-large") {
-          sendAndClose(res, 413, { error: "body-too-large" });
+          sendAndClose(res, 413, { error: "body-too-large" }, afterSendAndClose);
         } else if (msg === "body-timeout") {
-          sendAndClose(res, 408, { error: "request-timeout" });
+          sendAndClose(res, 408, { error: "request-timeout" }, afterSendAndClose);
         } else {
-          sendAndClose(res, 400, { error: "bad-body" });
+          sendAndClose(res, 400, { error: "bad-body" }, afterSendAndClose);
         }
         return;
       }

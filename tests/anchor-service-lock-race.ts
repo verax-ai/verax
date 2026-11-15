@@ -29,7 +29,7 @@ try {
   setInterval(() => {}, 60_000);
 } catch (err) {
   const msg = err instanceof Error ? err.message : String(err);
-  if (msg.startsWith("store already locked:")) {
+  if (msg.startsWith("store already locked:") || msg.startsWith("store lock takeover gate is present")) {
     process.stdout.write("refused\n");
     process.exit(0);
   }

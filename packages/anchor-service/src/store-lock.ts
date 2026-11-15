@@ -28,6 +28,10 @@ export function storeLockPath(storePath: string): string {
   return `${storePath}.lock`;
 }
 
+export function storeTakeoverGatePath(storePath: string): string {
+  return `${storeLockPath(storePath)}.takeover`;
+}
+
 function holderPath(lockPath: string): string {
   return join(lockPath, "holder");
 }
@@ -96,19 +100,38 @@ export type StoreLock = {
   stillHeld: () => boolean;
   /**
    * Called once when a beat finds the lock missing or carrying another token.
-   * The service latches store-unavailable; the lock is not removed.
+   * The lock is not removed.
    */
   onLost: (cb: () => void) => void;
   release: () => void;
 };
 
+/** Named points where a test may pause a stale takeover. Never from the environment. */
+export type TakeoverPausePoint =
+  | "after-stale-before-gate"
+  | "inside-gate-before-recheck"
+  | "inside-gate-before-removal";
+
 export type AcquireStoreLockOpts = {
   /** How often the held lock is touched; tests shorten it. */
   lockBeatMs?: number;
+  /**
+   * Test-only hook: called at named points during stale takeover. Production
+   * callers omit this; it is never read from the environment.
+   */
+  pauseAt?: (point: TakeoverPausePoint) => void;
 };
 
 function lockedError(storePath: string): Error {
   return new Error(`store already locked: ${storePath}`);
+}
+
+/** Fixed sentence when a previous takeover left the gate directory behind. */
+export function takeoverGatePresentError(storePath: string): Error {
+  const gate = storeTakeoverGatePath(storePath);
+  return new Error(
+    `store lock takeover gate is present at ${gate}; confirm no takeover is in progress, then remove that gate directory before starting again`,
+  );
 }
 
 function lockExists(lockPath: string): boolean {
@@ -168,19 +191,29 @@ function parseHolder(judgedBytes: string): LockHolder | null {
  * Under an exclusive takeover gate, remove the lock only when its holder
  * bytes are still exactly the ones judged stale, then create ours.
  */
-function takeOverStale(lockPath: string, judgedBytes: string, judgedToken: string, body: string): boolean {
+function takeOverStale(
+  lockPath: string,
+  storePath: string,
+  judgedBytes: string,
+  body: string,
+  pauseAt?: (point: TakeoverPausePoint) => void,
+): boolean {
   const gate = takeoverGatePath(lockPath);
+  pauseAt?.("after-stale-before-gate");
   try {
     mkdirSync(gate);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    return false;
+    throw takeoverGatePresentError(storePath);
   }
   try {
+    pauseAt?.("inside-gate-before-recheck");
     const current = readHolderBytes(lockPath);
+    // Byte identity already refuses a changed token (token is part of the
+    // holder JSON). A separate token recheck cannot fail on its own.
     if (current !== judgedBytes) return false;
-    const again = parseHolder(current);
-    if (again?.token !== judgedToken) return false;
+    // After the recheck and before removal: a second waiter must not be here.
+    pauseAt?.("inside-gate-before-removal");
     rmSync(lockPath, { recursive: true, force: true });
     return tryCreate(lockPath, body);
   } finally {
@@ -224,7 +257,7 @@ export function acquireStoreLock(storePath: string, opts?: AcquireStoreLockOpts)
       const state = lock ? judge(lockPath, lock) : null;
       if (state === "stale") {
         if (typeof lock?.token !== "string") throw lockedError(storePath);
-        if (!takeOverStale(lockPath, judgedBytes, lock.token, body)) {
+        if (!takeOverStale(lockPath, storePath, judgedBytes, body, opts?.pauseAt)) {
           throw lockedError(storePath);
         }
       } else if (state === "gone" && !lockExists(lockPath)) {
