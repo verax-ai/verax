@@ -336,6 +336,7 @@ describe("hosted anchor service", () => {
 
   it("restart on the same store keeps an old receipt valid and continues the leaf index", async () => {
     const h = await startHarness();
+    let firstClosed = false;
     try {
       const a = "33".repeat(32);
       const first = await registerCheckpoint(h.service.url, a, h.publicKeyPem, fetch, Date.now, h.token);
@@ -344,6 +345,7 @@ describe("hosted anchor service", () => {
       const receiptB64 = first.row.receiptB64;
       const entryHash = first.row.entryHash;
       await h.service.close();
+      firstClosed = true;
       const config = loadConfig({
         VERAX_ANCHOR_SVC_TOKENS: join(h.dir, "tokens.json"),
         VERAX_ANCHOR_SVC_SIGNING_KEY: join(h.dir, "signing.private.pem"),
@@ -365,6 +367,13 @@ describe("hosted anchor service", () => {
         await again.close();
       }
     } finally {
+      if (!firstClosed) {
+        try {
+          await h.service.close();
+        } catch {
+          /* */
+        }
+      }
       rmSync(h.dir, { recursive: true, force: true });
     }
   });
@@ -1070,7 +1079,11 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_PORT: "0",
       });
       const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
-      await service.close();
+      try {
+        assert.equal(service.log.size, 0);
+      } finally {
+        await service.close();
+      }
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1580,21 +1593,20 @@ describe("hosted anchor service", () => {
       });
       assert.equal(later.status, 503);
       assert.deepEqual(await later.json(), { error: "store-unavailable" });
-
-      await service.close();
-      // Restart drops the torn partial and the next leaf is index 0.
-      const again = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
-      try {
-        assert.equal(readFileSync(storePath, "utf8"), "");
-        assert.equal(again.log.size, 0);
-        const next = await registerCheckpoint(again.url, "ff".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
-        assert.equal(next.ok, true);
-        if (!next.ok || next.row.v !== 1) return;
-        assert.equal(next.row.leafIndex, 0);
-      } finally {
-        await again.close();
-      }
     } finally {
+      await service.close();
+    }
+    // Restart drops the torn partial and the next leaf is index 0.
+    const again = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      assert.equal(readFileSync(storePath, "utf8"), "");
+      assert.equal(again.log.size, 0);
+      const next = await registerCheckpoint(again.url, "ff".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(next.ok, true);
+      if (!next.ok || next.row.v !== 1) return;
+      assert.equal(next.row.leafIndex, 0);
+    } finally {
+      await again.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
