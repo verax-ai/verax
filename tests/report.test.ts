@@ -26,6 +26,7 @@ import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
 import {
   parseReportDate,
+  problemClass,
   reportDigest,
   runReport,
   serializePeriodReport,
@@ -259,6 +260,21 @@ describe("verax report", () => {
     assert.equal(parseReportDate("2026-02-30"), null);
     assert.equal(parseReportDate("2026-3-1"), null);
     assert.equal(parseReportDate("not-a-date"), null);
+  });
+
+  it("problemClass keeps known classes and refuses free text, paths and URLs", () => {
+    assert.equal(problemClass("ledger-manifest-corrupt: Expected property name"), "ledger-manifest-corrupt");
+    assert.equal(problemClass("approvals-malformed"), "approvals-malformed");
+    assert.equal(problemClass("signature does not verify: record 2 (ref allow-1)"), "signature does not verify");
+    assert.equal(problemClass("symbolic link: C:\\Users\\x\\ledger"), "symbolic link");
+    assert.equal(problemClass("missing piece: decisions.jsonl"), "missing piece");
+    assert.equal(
+      problemClass("C:\\Users\\x\\ledger: torn line in decisions.jsonl"),
+      "unclassified",
+    );
+    assert.equal(problemClass("https://evil.example/x: planted detail"), "unclassified");
+    assert.equal(problemClass("SOME UPPER CASE ERROR WITHOUT A COLON"), "unclassified");
+    assert.equal(problemClass(`${"a".repeat(200)}: detail after a long label`), "unclassified");
   });
 
   it("counts match the records in the window, per tool and in total", async () => {

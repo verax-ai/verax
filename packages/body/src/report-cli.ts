@@ -126,20 +126,36 @@ function readLines(path: string): string[] {
 
 /**
  * Stable leading code or kind from a verify problem line: the text before the
- * first colon, or the leading kebab-case token when there is no colon.
+ * first colon, or the leading kebab-case token when there is no colon. A class
+ * is only ever a short fixed phrase (lower-case letters, digits, spaces and
+ * hyphens, at most 60 characters, starting with a letter); anything else is
+ * `unclassified`.
  */
 export function problemClass(problem: string): string {
+  let candidate: string | null = null;
   const colon = problem.indexOf(":");
-  if (colon > 0) return problem.slice(0, colon).trim();
-  const m = /^([a-z][a-z0-9-]*)\b/.exec(problem);
-  if (m) return m[1]!;
-  return problem;
+  if (colon > 0) {
+    // A URL scheme (https://, http://) is not a class label.
+    if (problem[colon + 1] === "/") return "unclassified";
+    candidate = problem.slice(0, colon).trim();
+  } else {
+    const m = /^([a-z][a-z0-9-]*)\b/.exec(problem);
+    if (m) candidate = m[1]!;
+  }
+  if (
+    candidate !== null &&
+    candidate.length <= 60 &&
+    /^[a-z][a-z0-9 -]*$/.test(candidate)
+  ) {
+    return candidate;
+  }
+  return "unclassified";
 }
 
 function classOfThrown(err: unknown, fallback: string): string {
   if (err instanceof Error && err.message) {
     const cls = problemClass(err.message);
-    if (cls !== err.message || /^[a-z][a-z0-9-]*$/.test(cls)) return cls;
+    if (cls !== "unclassified") return cls;
   }
   return fallback;
 }
