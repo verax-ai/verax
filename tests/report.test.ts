@@ -2018,11 +2018,85 @@ describe("verax report", () => {
     const missing = join(mkdtempSync(join(tmpdir(), "verax-report-parity-miss-")), "gone");
     await assertReportMatchesVerify(missing);
 
-    // Approval / control signature failures share completeVerify; a forged
-    // halt-history signature line is enough to flip both commands together.
+    // A signed control record whose bound inputs carry a signature that does
+    // not verify: both commands read decisions + bound inputs, not halt-history.
     const badControl = await buildLedger();
+    {
+      const signers = loadOrCreateSigners(badControl);
+      const controlInputs = {
+        control: {
+          action: "halt",
+          via: "http",
+          by: "operator-1",
+          line: 0,
+          lineHash: "ab".repeat(32),
+          signature: {
+            credentialId: "forged-cred",
+            sub: "operator-1",
+            authenticatorData: "aa",
+            clientDataJSON: "bb",
+            signature: "cc",
+            rpId: "localhost",
+            prev: null,
+          },
+        },
+      };
+      const inputsHash = sha(canonical(controlInputs));
+      appendFileSync(
+        join(badControl, "inputs.jsonl"),
+        `${JSON.stringify({ ref: "halt-forged", inputs: controlInputs })}\n`,
+        "utf8",
+      );
+      const ledger = new FileLedger(badControl);
+      try {
+        await ledger.appendDecisionChained((prev) =>
+          signDecisionRecord(
+            {
+              decider: "verax-operator",
+              subject: "verax.halt",
+              requestHash: sha("halt-req"),
+              policyHash: sha("policy"),
+              inputsHash,
+              decision: "allow",
+              reasonCode: "halted",
+              ref: "halt-forged",
+              effectHash: sha("halt-effect"),
+              effectClass: "verax.control",
+              // Newest enough to sit inside the in-flight effect allowance so
+              // verifyLedger stays ok; completeVerify still fails the signature.
+              timestampMs: Date.now(),
+              nonce: "halt-forged",
+              prevRecordHash: prev,
+            } as never,
+            signers.recordSigner.privateKeyPem,
+            signers.recordSigner.publicKeyPem,
+          ),
+        );
+      } finally {
+        ledger.close();
+      }
+    }
+    {
+      const verify = await verifyThroughDispatcher(badControl);
+      const report = await throughDispatcher([badControl, "--from", FROM, "--to", TO, "--json"]);
+      const body = JSON.parse(report.stdout) as PeriodReport;
+      const verifyLines = verify.stdout.split("\n").filter((l) => l !== "");
+      const verifyVerdict = verifyLines[verifyLines.length - 1] ?? "";
+      assert.notEqual(verify.code, 0);
+      assert.equal(report.code === 0, false);
+      assert.equal(body.verification.verdict, verifyVerdict);
+      assert.match(verifyVerdict, /NOT VERIFIED/);
+      assert.ok(
+        body.verification.problems.includes("control signatures"),
+        JSON.stringify(body.verification.problems),
+      );
+    }
+
+    // Forged halt-history.jsonl alone is not read by offline control-signature
+    // verification: both commands stay VERIFIED.
+    const historyNoiseOnly = await buildLedger();
     writeFileSync(
-      join(badControl, "halt-history.jsonl"),
+      join(historyNoiseOnly, "halt-history.jsonl"),
       `${JSON.stringify({
         action: "halt",
         atMs: Date.UTC(2026, 2, 10),
@@ -2032,7 +2106,11 @@ describe("verax report", () => {
       })}\n`,
       "utf8",
     );
-    await assertReportMatchesVerify(badControl);
+    await assertReportMatchesVerify(historyNoiseOnly);
+    {
+      const verify = await verifyThroughDispatcher(historyNoiseOnly);
+      assert.equal(verify.code, 0, "forged halt-history alone must not fail verify");
+    }
   });
 
   // -------------------------------------------------------------------------
