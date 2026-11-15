@@ -25,11 +25,12 @@ import {
   type SignedCheckpoint,
 } from "@cedulon/checkpoint";
 import { canonical, decisionRecordHash, signDecisionRecord, type SignedDecisionRecord } from "@cedulon/core";
-import { approvePending, approvalsLogFor, createProxy, FileLedger, loadPolicy } from "@verax-ai/proxy";
+import { approvePending, approvalsLogFor, createProxy, FileLedger, loadPolicy, verifyLedger } from "@verax-ai/proxy";
 
 import { runCli } from "../packages/body/src/cli.ts";
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
+import { directoryAccess } from "../packages/body/src/install.ts";
 import {
   checkpointInWindow,
   countApprovalsFromSigned,
@@ -40,6 +41,7 @@ import {
   reportDigest,
   runReport,
   serializePeriodReport,
+  writeOutExclusive,
   type PeriodReport,
 } from "../packages/body/src/report-cli.ts";
 import { EX_VERIFY_FAILED } from "../packages/body/src/verify-cli.ts";
@@ -1562,5 +1564,296 @@ describe("verax report", () => {
     assert.equal(ok.code, 0, ok.stdout + ok.stderr);
     assert.equal(ok.stderr, "");
     assert.equal(JSON.parse(ok.stdout).verification.ok, true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Round f: verdict parity with verax verify (shared completeVerify)
+  // -------------------------------------------------------------------------
+
+  async function verifyThroughDispatcher(dir: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    let stdout = "";
+    let stderr = "";
+    const code = await runCli(["verify", dir], {
+      elevated: () => false,
+      stdout: { write: (s: string) => (stdout += s) },
+      stderr: { write: (s: string) => (stderr += s) },
+    });
+    return { code, stdout, stderr };
+  }
+
+  async function assertReportMatchesVerify(dir: string): Promise<void> {
+    const verify = await verifyThroughDispatcher(dir);
+    const report = await throughDispatcher([dir, "--from", FROM, "--to", TO, "--json"]);
+    const body = JSON.parse(report.stdout) as PeriodReport;
+    const verifyLines = verify.stdout.split("\n").filter((l) => l !== "");
+    const verifyVerdict = verifyLines[verifyLines.length - 1] ?? "";
+    assert.equal(body.verification.ok, verify.code === 0, `ok vs exit for ${dir}`);
+    assert.equal(body.verification.verdict, verifyVerdict, `verdict for ${dir}`);
+    assert.equal(report.code === 0, verify.code === 0, `exit codes for ${dir}`);
+  }
+
+  it("f1. report verification.ok and verdict match verax verify through the dispatcher", async () => {
+    const clean = await buildLedger();
+    await assertReportMatchesVerify(clean);
+
+    const brokenSig = await buildLedger();
+    {
+      const path = join(brokenSig, "decisions.jsonl");
+      const lines = readFileSync(path, "utf8").trim().split("\n");
+      const rec = JSON.parse(lines[2]!) as { claims: Record<string, unknown> };
+      rec.claims.subject = "tampered-tool";
+      lines[2] = JSON.stringify(rec);
+      writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+    }
+    await assertReportMatchesVerify(brokenSig);
+
+    const brokenChain = await buildLedger();
+    {
+      const path = join(brokenChain, "decisions.jsonl");
+      const lines = readFileSync(path, "utf8").trim().split("\n");
+      const rec = JSON.parse(lines[1]!) as { claims: Record<string, unknown> };
+      rec.claims.prevRecordHash = "ab".repeat(32);
+      lines[1] = JSON.stringify(rec);
+      writeFileSync(path, `${lines.join("\n")}\n`, "utf8");
+    }
+    await assertReportMatchesVerify(brokenChain);
+
+    const removedWithIndex = await buildLedger();
+    {
+      const path = join(removedWithIndex, "decisions.jsonl");
+      const lines = readFileSync(path, "utf8").trim().split("\n");
+      const kept = lines.slice(0, -1);
+      const dropped = JSON.parse(lines[lines.length - 1]!) as { claims: { ref?: string } };
+      writeFileSync(path, `${kept.join("\n")}\n`, "utf8");
+      const refs = kept
+        .map((line) => (JSON.parse(line) as { claims: { ref?: string } }).claims.ref)
+        .filter((r): r is string => typeof r === "string");
+      if (typeof dropped.claims.ref === "string") refs.push(dropped.claims.ref);
+      writeFileSync(
+        join(removedWithIndex, "index.jsonl"),
+        refs.map((ref) => JSON.stringify({ ref })).join("\n") + "\n",
+        "utf8",
+      );
+    }
+    await assertReportMatchesVerify(removedWithIndex);
+
+    const badCheckpoint = await buildLedger();
+    {
+      const path = join(badCheckpoint, "checkpoints.jsonl");
+      const row = JSON.parse(readFileSync(path, "utf8").trim()) as { signature: string };
+      row.signature = "00".repeat(64);
+      writeFileSync(path, `${JSON.stringify(row)}\n`, "utf8");
+    }
+    await assertReportMatchesVerify(badCheckpoint);
+
+    const startProblem = await buildLedger();
+    writeFileSync(join(startProblem, "starts.jsonl"), "not-json\n", "utf8");
+    await assertReportMatchesVerify(startProblem);
+
+    const missing = join(mkdtempSync(join(tmpdir(), "verax-report-parity-miss-")), "gone");
+    await assertReportMatchesVerify(missing);
+
+    // Approval / control signature failures share completeVerify; a forged
+    // halt-history signature line is enough to flip both commands together.
+    const badControl = await buildLedger();
+    writeFileSync(
+      join(badControl, "halt-history.jsonl"),
+      `${JSON.stringify({
+        action: "halt",
+        atMs: Date.UTC(2026, 2, 10),
+        by: "test",
+        reason: "test",
+        signature: { alg: "ed25519", publicKey: "aa", sig: "bb" },
+      })}\n`,
+      "utf8",
+    );
+    await assertReportMatchesVerify(badControl);
+  });
+
+  // -------------------------------------------------------------------------
+  // Round f: inputsHash binds approver.resolves to the signed record
+  // -------------------------------------------------------------------------
+
+  it("f2. a mismatched inputs row that names a defer does not approve it", async () => {
+    const { dir, records } = await handLedger([
+      defer("d1", DAY),
+      // Matching inputs for the allow have no resolves.
+      { decision: "allow", ref: "a1", ts: DAY + 100 },
+    ]);
+    const deferRec = records.find((r) => r.claims.decision === "defer")!;
+    const allow = records.find((r) => r.claims.decision === "allow")!;
+    const allowRef = allow.claims.ref as string;
+    const deferInputs = {
+      principal: { brain: "brain-1", scopes: [] as string[] },
+      inputs: [] as unknown[],
+      n: 0,
+    };
+    const matchingInputs = {
+      principal: { brain: "brain-1", scopes: [] as string[] },
+      inputs: [] as unknown[],
+      n: 1,
+    };
+    assert.equal(sha(canonical(deferInputs)), deferRec.claims.inputsHash);
+    assert.equal(sha(canonical(matchingInputs)), allow.claims.inputsHash);
+
+    const wrongInputs = {
+      principal: { brain: "brain-1", scopes: [] as string[] },
+      inputs: [] as unknown[],
+      n: 1,
+      planted: true,
+      approver: { id: "test-operator", via: "cli-script", resolves: "d1" },
+    };
+    assert.notEqual(sha(canonical(wrongInputs)), allow.claims.inputsHash);
+
+    const inputsPath = join(dir, "inputs.jsonl");
+    const writeAllowOrder = (first: unknown, second: unknown): void => {
+      writeFileSync(
+        inputsPath,
+        [
+          JSON.stringify({ ref: deferRec.claims.ref, inputs: deferInputs }),
+          JSON.stringify({ ref: allowRef, inputs: first }),
+          JSON.stringify({ ref: allowRef, inputs: second }),
+        ].join("\n") + "\n",
+        "utf8",
+      );
+    };
+
+    // Wrong row first: without the hash check the defer would be approved.
+    writeAllowOrder(wrongInputs, matchingInputs);
+    const wrongFirst = approvalCounts(dir, records);
+    assert.equal(wrongFirst.approved, 0, "wrong-hash resolves must not approve");
+    assert.equal(wrongFirst.stillHeld, 1);
+
+    writeAllowOrder(matchingInputs, wrongInputs);
+    const matchFirst = approvalCounts(dir, records);
+    assert.equal(matchFirst.approved, 0);
+    assert.equal(matchFirst.stillHeld, 1);
+
+    const full = await reportJson(dir);
+    assert.equal(full.code, 0, full.text);
+    assert.equal(full.report.approvals.stillHeld, 1);
+    assert.equal(full.report.approvals.approved, 0);
+
+    // Missing or mismatched inputs alone: verifyLedger fails and ok is false,
+    // so the report never presents stillHeld as a fact about those records.
+    const onlyWrong = await handLedger([
+      defer("d2", DAY),
+      { decision: "allow", ref: "a2", ts: DAY + 100 },
+    ]);
+    const onlyAllow = onlyWrong.records.find((r) => r.claims.decision === "allow")!;
+    writeFileSync(
+      join(onlyWrong.dir, "inputs.jsonl"),
+      `${JSON.stringify({
+        ref: onlyAllow.claims.ref,
+        inputs: { planted: true, approver: { resolves: "d2" } },
+      })}\n`,
+      "utf8",
+    );
+    const mismatched = await verifyLedger(onlyWrong.dir);
+    assert.equal(mismatched.ok, false);
+    assert.ok(mismatched.problems.some((p) => /inputs row/.test(p)));
+
+    const noInputs = await handLedger([defer("d3", DAY), { decision: "allow", ref: "a3", ts: DAY + 100 }]);
+    unlinkSync(join(noInputs.dir, "inputs.jsonl"));
+    const missingInputs = await verifyLedger(noInputs.dir);
+    assert.equal(missingInputs.ok, false);
+    assert.ok(missingInputs.problems.some((p) => /inputs row missing/.test(p)));
+  });
+
+  // -------------------------------------------------------------------------
+  // Round f: unreadable state directory on every platform
+  // -------------------------------------------------------------------------
+
+  it("f3. an unreadable state directory: state-unreadable, null counts, no path", async (t) => {
+    let dir: string;
+    let restore: (() => void) | null = null;
+    if (process.platform === "win32") {
+      // Parent-as-file is "missing" (ENOTDIR) here. SAM is EPERM → unreadable.
+      dir = "C:\\Windows\\System32\\config\\SAM";
+      if (directoryAccess(dir) !== "unreadable") {
+        t.skip(`expected ${dir} to be unreadable, got ${directoryAccess(dir)}`);
+        return;
+      }
+    } else if (typeof process.getuid === "function" && process.getuid() === 0) {
+      t.skip("root reads a mode-000 directory");
+      return;
+    } else {
+      dir = await buildLedger();
+      chmodSync(dir, 0o000);
+      restore = () => chmodSync(dir, 0o700);
+    }
+    try {
+      const json = await reportJson(dir);
+      assert.equal(json.code, EX_VERIFY_FAILED, json.text);
+      assert.deepEqual(json.report.verification.problems, ["state-unreadable"]);
+      assert.equal(json.report.verification.ok, false);
+      assert.equal(json.report.recordCount, null);
+      assert.equal(json.report.decisions.total, null);
+      assert.equal(json.report.checkpoints.count, null);
+      assert.equal(json.text.includes(dir), false);
+      assert.equal(json.text.includes("System32"), false);
+
+      const text = await reportText(dir);
+      assert.equal(text.code, EX_VERIFY_FAILED);
+      assert.equal(text.text.includes(dir), false);
+      assert.match(text.text.split("\n")[0]!, /NOT VERIFIED/);
+
+      const via = await throughDispatcher([dir, "--from", FROM, "--to", TO, "--json"]);
+      assert.equal(via.code, EX_VERIFY_FAILED);
+      assert.equal(via.stderr, "");
+      assert.equal(via.stdout.includes(dir), false);
+      assert.deepEqual(JSON.parse(via.stdout).verification.problems, ["state-unreadable"]);
+    } finally {
+      restore?.();
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // Round f: exclusive temp create (wx)
+  // -------------------------------------------------------------------------
+
+  it("f4. a file already at the injectable temp name is not truncated and the write refuses", async () => {
+    const dir = await buildLedger();
+    const out = outDir();
+    const target = join(out, "period.html");
+    const tempPath = join(out, ".verax-report-planted.tmp");
+    writeFileSync(tempPath, "planted-temp-content\n", "utf8");
+    const c = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--out", target], c.out, {
+      writeTempPath: tempPath,
+    });
+    assert.equal(code, EX_USAGE, c.text());
+    assert.match(c.text(), /refusing to overwrite period\.html/);
+    assert.equal(readFileSync(tempPath, "utf8"), "planted-temp-content\n");
+    assert.equal(existsSync(target), false);
+
+    // Direct call: wx must throw EEXIST without changing the planted bytes.
+    assert.throws(
+      () => writeOutExclusive(join(out, "other.html"), "<html></html>\n", tempPath),
+      (err: NodeJS.ErrnoException) => err.code === "EEXIST",
+    );
+    assert.equal(readFileSync(tempPath, "utf8"), "planted-temp-content\n");
+  });
+
+  it("f4. a symlink at the injectable temp name is not followed or truncated", async (t) => {
+    const dir = await buildLedger();
+    const out = outDir();
+    const target = join(out, "period.html");
+    const real = join(out, "real-target.txt");
+    const tempPath = join(out, ".verax-report-link.tmp");
+    writeFileSync(real, "symlink-target-bytes\n", "utf8");
+    try {
+      symlinkSync(real, tempPath, "file");
+    } catch (err) {
+      t.skip(`symlink not permitted on this platform: ${(err as NodeJS.ErrnoException).code}`);
+      return;
+    }
+    const c = capture();
+    const code = await runReport([dir, "--from", FROM, "--to", TO, "--out", target], c.out, {
+      writeTempPath: tempPath,
+    });
+    assert.equal(code, EX_USAGE, c.text());
+    assert.match(c.text(), /refusing to overwrite/);
+    assert.equal(readFileSync(real, "utf8"), "symlink-target-bytes\n");
   });
 });
