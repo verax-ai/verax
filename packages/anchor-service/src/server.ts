@@ -134,7 +134,11 @@ export async function startService(
   server.requestTimeout = config.requestTimeoutMs;
   server.keepAliveTimeout = config.keepAliveTimeoutMs;
   server.maxConnections = config.maxConnections;
-  server.connectionsCheckingInterval = Math.max(50, Math.min(1_000, Math.floor(config.headersTimeoutMs / 2)));
+  // Present on Node's HTTP server; not yet in the published type definitions.
+  (server as Server & { connectionsCheckingInterval: number }).connectionsCheckingInterval = Math.max(
+    50,
+    Math.min(1_000, Math.floor(config.headersTimeoutMs / 2)),
+  );
   // Node's headersTimeout is not reliable on every platform; arm a socket
   // timer on connect and clear it once headers have produced a request.
   server.on("connection", (socket) => {
