@@ -93,6 +93,7 @@ export async function startService(
   }
   const rate = new RateLimiter(config.ratePerMinute);
   const writeRow = options?.appendRow ?? appendStore;
+  let storeUnavailable = false;
 
   const server = createServer((req, res) => {
     void handle(req, res);
@@ -102,6 +103,10 @@ export async function startService(
     try {
       if (req.method !== "POST" || req.url !== "/register") {
         send(res, 404, { error: "not-found" });
+        return;
+      }
+      if (storeUnavailable) {
+        send(res, 503, { error: "store-unavailable" });
         return;
       }
       const token = bearerToken(req.headers.authorization);
@@ -150,7 +155,13 @@ export async function startService(
       let leafIndex = log.findLeaf(ownerId, entryHash);
       if (leafIndex < 0) {
         const atMs = Date.now();
-        writeRow(config.storePath, { leaf_hash: entryHash, owner_id: ownerId, at_ms: atMs });
+        try {
+          writeRow(config.storePath, { leaf_hash: entryHash, owner_id: ownerId, at_ms: atMs });
+        } catch {
+          storeUnavailable = true;
+          send(res, 500, { error: "internal" });
+          return;
+        }
         leafIndex = log.append({
           entry: Buffer.from(entryHash, "hex"),
           ownerId,

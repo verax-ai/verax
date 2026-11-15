@@ -2,9 +2,19 @@
  * Append-only JSONL store of log leaves. Each line is
  * `{"leaf_hash":"<64 hex>","owner_id":"<id>","at_ms":<number>}`. On start the
  * file is read back in order; a line that does not parse or breaks the
- * expected shape refuses to load.
+ * expected shape refuses to load. A final line with no terminating newline is
+ * a torn write: it is dropped and the file is truncated before the service
+ * starts.
  */
-import { closeSync, existsSync, fsyncSync, openSync, readFileSync, writeSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 
 import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
@@ -49,8 +59,16 @@ export function loadStore(path: string): MerkleLog {
     closeSync(openSync(path, "a"));
     return log;
   }
-  const text = readFileSync(path, "utf8");
-  const lines = text.split("\n");
+  let text = readFileSync(path, "utf8");
+  if (text !== "" && !text.endsWith("\n")) {
+    const cut = text.lastIndexOf("\n");
+    const kept = cut < 0 ? "" : text.slice(0, cut + 1);
+    writeFileSync(path, kept, "utf8");
+    process.stderr.write(`verax-anchor-service: dropped a torn last line from ${path}\n`);
+    text = kept;
+  }
+  if (text === "") return log;
+  const lines = text.endsWith("\n") ? text.slice(0, -1).split("\n") : text.split("\n");
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i]!.trim();
     if (line === "") continue;
@@ -65,10 +83,17 @@ export function loadStore(path: string): MerkleLog {
   return log;
 }
 
+/** Write the whole row or throw. Partial writes are not left as success. */
 export function appendStore(path: string, row: StoreRow): void {
+  const payload = Buffer.from(`${JSON.stringify(row)}\n`, "utf8");
   const fd = openSync(path, "a");
   try {
-    writeSync(fd, `${JSON.stringify(row)}\n`, null, "utf8");
+    let offset = 0;
+    while (offset < payload.length) {
+      const n = writeSync(fd, payload, offset, payload.length - offset);
+      if (n <= 0) throw new Error("store write made no progress");
+      offset += n;
+    }
     fsyncSync(fd);
   } finally {
     closeSync(fd);

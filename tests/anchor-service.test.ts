@@ -1,14 +1,17 @@
 import { strict as assert } from "node:assert";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   rmSync,
   statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -524,7 +527,7 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a failed store write answers 500, leaves the leaf index, and keeps prior receipts valid", async () => {
+  it("a failed store write answers 500 then 503, and keeps prior receipts valid", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-fail-"));
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
     const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -570,16 +573,143 @@ describe("hosted anchor service", () => {
       assert.deepEqual(await res.json(), { error: "internal" });
 
       failNext = false;
-      const next = await registerCheckpoint(service.url, "bb".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
-      assert.equal(next.ok, true);
-      if (!next.ok || next.row.v !== 1) return;
-      assert.equal(next.row.leafIndex, 1);
-      assert.equal(next.row.treeSize, 2);
+      const later = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(later.status, 503);
+      assert.deepEqual(await later.json(), { error: "store-unavailable" });
+      assert.equal(service.log.size, 1);
 
       const check = verifyReceipt(Buffer.from(priorReceipt, "base64"), Buffer.from(priorEntry, "hex"), publicKeyPem);
       assert.equal(check.ok, true, check.ok ? "" : check.reason);
     } finally {
       await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a partial store append that throws leaves the service answering 503 afterwards", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-partial-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privatePem, "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      appendRow: (path, row) => {
+        const fd = openSync(path, "a");
+        try {
+          writeSync(fd, '{"leaf', null, "utf8");
+        } finally {
+          closeSync(fd);
+        }
+        throw new Error("store-write-partial");
+      },
+    });
+    try {
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "ee".repeat(32) }),
+      });
+      assert.equal(res.status, 500);
+      const later = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "ff".repeat(32) }),
+      });
+      assert.equal(later.status, 503);
+      assert.deepEqual(await later.json(), { error: "store-unavailable" });
+      assert.equal(publicKeyPem.length > 0, true);
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a store ending in a partial line starts, drops it, and the next leaf index is the full-line count", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-torn-"));
+    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(keyFile, privatePem, "utf8");
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+    const full = JSON.stringify({
+      leaf_hash: "11".repeat(32),
+      owner_id: "owner-a",
+      at_ms: 1,
+    });
+    writeFileSync(storePath, `${full}\n{"leaf`, "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      assert.equal(service.log.size, 1);
+      assert.equal(readFileSync(storePath, "utf8"), `${full}\n`);
+      const next = await registerCheckpoint(service.url, "22".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
+      assert.equal(next.ok, true);
+      if (!next.ok || next.row.v !== 1) return;
+      assert.equal(next.row.leafIndex, 1);
+      assert.equal(next.row.treeSize, 2);
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a store with a bad line in the middle still refuses to start", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-mid-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+      const good = JSON.stringify({ leaf_hash: "11".repeat(32), owner_id: "owner-a", at_ms: 1 });
+      writeFileSync(storePath, `${good}\nnot-json\n${good}\n`, "utf8");
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store line 2/);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });
