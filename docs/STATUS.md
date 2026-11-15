@@ -678,28 +678,46 @@ Guards: `anchor-scrapi`, `signed-statement`, `ccf-receipt`.
 reads a ledger directory the same way `verax verify` does: offline, with no
 body running and nothing on the network. The window is
 `[from 00:00:00Z, to+1 day 00:00:00Z)`. It counts decisions in that window
-(allow, deny, defer, in total and per tool name), held-call approvals whose
-hold time falls in the window (approved with or without an operator
-signature, and still held), and checkpoints whose coverage overlaps the
-window, including how many of those have an anchor row. It also carries the
-verification verdict `verax verify` would give for the whole ledger, with
-its problem lines when the ledger does not verify, the first and last
-record time in the window, the record count, and the ledger head hash at
-read time. `--json` prints one object with a fixed key order and no
+(allow, deny, defer, in total and per tool name), held calls from signed
+defer records whose hold time falls in the window (approved when a signed
+allow answers the defer, with or without an operator signature as the
+signed inputs show, and still held when no signed allow answers it), and
+checkpoints whose coverage overlaps the window under the same
+`[startMs, endMs)` rule the ledger uses, including how many of those have
+an anchor row. `approvals.jsonl` may be read for candidates but is never
+the source of a count. It also carries the verification verdict
+`verax verify` would give for the whole ledger, naming each problem by its
+stable class only (run `verax verify` on the machine for the detail), the
+first and last record time in the window, the record count, and the ledger
+head hash at read time. The ledger directory path does not appear in the
+JSON, HTML or text form; the same ledger reached by a relative path, an
+absolute path or a copy in another directory yields the same JSON and
+digest. `--json` prints one object with a fixed key order and no
 generation timestamp; `--out <file.html>` writes one self-contained HTML
-file that ends with the SHA-256 of that JSON form, and refuses to overwrite
-an existing file. Without either flag it prints a short plain-text summary
-and the digest. Exit code is 0 when the ledger verifies and the same
-non-zero code `verax verify` uses when it does not; the report is still
-written and names the verdict at the top. Usage errors (unknown option,
-malformed dates, `--from` after `--to`, overwrite) exit 64.
+file through an exclusive create (refusing to overwrite) via a temporary
+file in the same directory, and ends with the SHA-256 of that JSON form.
+Without either flag it prints a short plain-text summary and the digest.
+Exit code is 0 when the ledger verifies and the same non-zero code
+`verax verify` uses when it does not; the report is still written and
+names the verdict at the top. A corrupt ledger manifest, a malformed
+`approvals.jsonl` line, or an unreadable anchors file still produces the
+report, marks the ledger as not verifying, names the failure class, and
+exits with that verify-failed code (no stack trace on stderr). Usage
+errors (unknown option, malformed dates, `--from` after `--to`,
+overwrite) exit 64.
 
 What it does not show. It counts what is in the ledger. A call that never
 passed through the gate is not in it. A count is not a judgement that a
-decision was right. A held call is counted by the time it was held. A
-checkpoint is counted when its coverage overlaps the window. Argument
-values, payee names, amounts, prompts and operator names do not appear;
-tool names and counts only. Operator identity appears only as the hash the
+decision was right. A held call is a signed defer counted by the time it
+was held; it is approved when a signed allow answers it, and still held
+when none does. `approvals.jsonl` is not the source of a count. A
+checkpoint is counted when its coverage overlaps the window under the same
+`[startMs, endMs)` rule the ledger uses. The report does not name the
+ledger directory. Verification problems are named by class only; run
+`verax verify` on the machine for the detail. A ledger that cannot be
+read still yields a report that says it does not verify. Argument values,
+payee names, amounts, prompts and operator names do not appear; tool
+names and counts only. Operator identity appears only as the hash the
 ledger already holds.
 
 Guards: `report`.
