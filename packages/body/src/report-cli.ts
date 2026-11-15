@@ -33,11 +33,10 @@ import {
   type VerifyResult,
 } from "@verax-ai/proxy";
 
-import { verifyApprovalSignatures, type ApprovalSignatureReport } from "./approval-signature.ts";
-import { verifyControlSignatures, type ControlSignatureReport } from "./control-signature.ts";
-import { readStartSummary } from "./heartbeat.ts";
+import { type ApprovalSignatureReport } from "./approval-signature.ts";
+import { type ControlSignatureReport } from "./control-signature.ts";
 import { directoryAccess } from "./install.ts";
-import { EX_VERIFY_FAILED, verdictLine } from "./verify-cli.ts";
+import { completeVerify, EX_VERIFY_FAILED, verdictLine } from "./verify-cli.ts";
 
 export const EX_USAGE = 64;
 
@@ -351,68 +350,24 @@ async function verifyLikeVerifyCli(dir: string): Promise<{
     return failedVerifyShell(dir, classOfThrown(err, "ledger-unreadable"));
   }
 
-  let approval: ApprovalSignatureReport;
-  try {
-    approval = await verifyApprovalSignatures(dir);
-  } catch (err) {
-    const problem = classOfThrown(err, "approval-signatures-unreadable");
-    approval = { ...APPROVAL_NOT_CHECKED, ok: false, trustNote: problem };
-    result = { ...result, ok: false, problems: [...result.problems, problem] };
-  }
-  if (approval.signedFailed > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `approval signatures: ${approval.signedFailed} did not verify`],
-    };
-  }
-  if (approval.signedAfterRemoval > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `approval signatures: ${approval.signedAfterRemoval} signed after removal`],
-    };
-  }
-
-  let control: ControlSignatureReport;
-  try {
-    control = await verifyControlSignatures(dir);
-  } catch (err) {
-    const problem = classOfThrown(err, "control-signatures-unreadable");
-    control = { ...CONTROL_NOT_CHECKED, ok: false, trustNote: problem };
-    result = { ...result, ok: false, problems: [...result.problems, problem] };
-  }
-  if (control.signedFailed > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `control signatures: ${control.signedFailed} did not verify`],
-    };
-  }
-  if (control.signedAfterRemoval > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `control signatures: ${control.signedAfterRemoval} signed after removal`],
-    };
-  }
-
-  const startKeyPem = result.trust.publicKeyPem ?? null;
-  try {
-    const starts = readStartSummary(dir, startKeyPem, "in-ledger", { requireSigned: false });
-    if (starts.problems.length > 0) {
-      result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
-    }
-  } catch (err) {
-    const problem = classOfThrown(err, "start-summary-unreadable");
-    result = { ...result, ok: false, problems: [...result.problems, problem] };
-  }
-
+  const completed = await completeVerify(dir, result, {
+    requireSignedStarts: false,
+    catchStartErrors: true,
+    problemFromThrown: (err, fallback) => {
+      const reportFallback =
+        fallback === "approval signatures could not be read"
+          ? "approval-signatures-unreadable"
+          : fallback === "control signatures could not be read"
+            ? "control-signatures-unreadable"
+            : fallback;
+      return classOfThrown(err, reportFallback);
+    },
+  });
   return {
-    result,
-    approval,
-    control,
-    verdict: verdictLine(result, approval, control),
+    result: completed.result,
+    approval: completed.approval,
+    control: completed.control,
+    verdict: completed.verdict,
   };
 }
 
@@ -432,8 +387,10 @@ function nonEmptyString(v: unknown): string | null {
  * follows it in chain order, whose hash-bound inputs name the defer's ref in
  * `approver.resolves`, and that agrees with the defer on request hash and
  * tool. A record whose decision is defer is never an answer. One answer
- * answers one defer. A defer with no usable ref, a ref shared with another
- * defer, or only disagreeing answers is unmatched.
+ * answers one defer: each answer names at most one resolves ref, and a ref
+ * shared by two defers is unmatched, so no shared-consumption set is needed.
+ * A defer with no usable ref, a ref shared with another defer, or only
+ * disagreeing answers is unmatched.
  */
 export function countApprovalsFromSigned(
   dir: string,
@@ -475,7 +432,6 @@ export function countApprovalsFromSigned(
     stillHeld: 0,
     unmatched: 0,
   };
-  const consumed = new Set<SignedDecisionRecord>();
 
   for (let pos = 0; pos < all.length; pos += 1) {
     const defer = all[pos]!;
@@ -490,7 +446,7 @@ export function countApprovalsFromSigned(
     if (ref === null || (deferRefCount.get(ref) ?? 0) !== 1) {
       outcome = "unmatched";
     } else {
-      const candidates = (answersByRef.get(ref) ?? []).filter((c) => c.pos > pos && !consumed.has(c.row));
+      const candidates = (answersByRef.get(ref) ?? []).filter((c) => c.pos > pos);
       if (candidates.length === 0) {
         outcome = "held";
       } else {
@@ -504,7 +460,6 @@ export function countApprovalsFromSigned(
         if (!valid) {
           outcome = "unmatched";
         } else {
-          consumed.add(valid.row);
           decided = valid;
           outcome = valid.row.claims.decision === "allow" ? "approved" : "closed";
         }
@@ -531,9 +486,11 @@ export function countApprovalsFromSigned(
  * Temp file with a random name, exclusive create, then a hard link to the
  * final name: the link fails with EEXIST if the target exists, so an existing
  * file is never replaced. The temp name is removed on every path.
+ * `tempPath` is for tests that plant a collision at a known name; the CLI
+ * never passes it.
  */
-function writeOutExclusive(outPath: string, content: string): void {
-  const tmp = join(dirname(outPath), `.verax-report-${randomBytes(12).toString("hex")}.tmp`);
+export function writeOutExclusive(outPath: string, content: string, tempPath?: string): void {
+  const tmp = tempPath ?? join(dirname(outPath), `.verax-report-${randomBytes(12).toString("hex")}.tmp`);
   let created = false;
   try {
     writeFileSync(tmp, content, { encoding: "utf8", flag: "wx" });
@@ -1047,6 +1004,8 @@ function parseArgs(argv: readonly string[]): ParsedArgs {
 export async function runReport(
   argv: readonly string[],
   out: (s: string) => void = (s) => process.stdout.write(`${s}\n`),
+  /** Test-only: force the exclusive-create temp path. Not a CLI flag. */
+  opts?: { writeTempPath?: string },
 ): Promise<number> {
   const parsed = parseArgs(argv);
   if (!parsed.ok) {
@@ -1072,7 +1031,7 @@ export async function runReport(
 
   if (parsed.outPath !== null) {
     try {
-      writeOutExclusive(parsed.outPath, renderReportHtml(report, digest));
+      writeOutExclusive(parsed.outPath, renderReportHtml(report, digest), opts?.writeTempPath);
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === "EEXIST") {
