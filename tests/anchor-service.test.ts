@@ -1864,11 +1864,10 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a symlink swapped in after start does not redirect appends", async (t) => {
+  it("a symlink swapped in after start answers 503 and does not append", async (t) => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-swap-"));
-    const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+    const { privateKey } = generateKeyPairSync("ed25519");
     const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const publicKeyPem = publicKey.export({ type: "spki", format: "pem" }).toString();
     const keyFile = join(dir, "signing.private.pem");
     const tokensFile = join(dir, "tokens.json");
     const storePath = join(dir, "store.jsonl");
@@ -1887,7 +1886,6 @@ describe("hosted anchor service", () => {
     });
     const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
     try {
-      const inodeBefore = statSync(storePath).ino;
       try {
         rmSync(storePath);
         symlinkSync(decoy, storePath);
@@ -1898,10 +1896,101 @@ describe("hosted anchor service", () => {
         }
         throw err;
       }
-      const got = await registerCheckpoint(service.url, "aa".repeat(32), publicKeyPem, fetch, Date.now, TOKEN);
-      assert.equal(got.ok, true);
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
       assert.equal(readFileSync(decoy, "utf8"), "");
-      assert.notEqual(inodeBefore, undefined);
+      const later = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "bb".repeat(32) }),
+      });
+      assert.equal(later.status, 503);
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a store path replaced by another regular file answers 503 with no receipt", { timeout: 10_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-replaced-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    writeFileSync(storePath, "", "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      rmSync(storePath);
+      writeFileSync(storePath, '{"other":true}\n', "utf8");
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+      assert.equal(readFileSync(storePath, "utf8"), '{"other":true}\n');
+    } finally {
+      await service.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a removed store path answers 503 with no receipt", { timeout: 10_000 }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-removed-"));
+    const { privateKey } = generateKeyPairSync("ed25519");
+    const keyFile = join(dir, "signing.private.pem");
+    const tokensFile = join(dir, "tokens.json");
+    const storePath = join(dir, "store.jsonl");
+    writeSecretFile(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString());
+    const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+    writeSecretFile(tokensFile, JSON.stringify({ [digest]: "owner-a" }));
+    writeFileSync(storePath, "", "utf8");
+    const config = loadConfig({
+      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+      VERAX_ANCHOR_SVC_STORE: storePath,
+      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+      VERAX_ANCHOR_SVC_PORT: "0",
+    });
+    const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    try {
+      rmSync(storePath);
+      const res = await fetch(`${service.url}/register`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${TOKEN}`,
+        },
+        body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
+      });
+      assert.equal(res.status, 503);
+      assert.deepEqual(await res.json(), { error: "store-unavailable" });
+      assert.equal(existsSync(storePath), false);
     } finally {
       await service.close();
       rmSync(dir, { recursive: true, force: true });

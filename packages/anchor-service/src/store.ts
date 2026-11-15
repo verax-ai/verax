@@ -9,18 +9,21 @@
  * prefix to a new file in the same directory, fsyncing it, renaming it over
  * the store, and fsyncing the directory (so a crash cannot leave an empty
  * store in place of acknowledged rows). The store path is opened once and that
- * descriptor is kept for the process life so a later symlink cannot redirect
- * appends.
+ * descriptor is kept for the process life; before each append the path is
+ * checked against the open file (dev/ino) so a swap or removal latches
+ * store-unavailable instead of writing into an unlinked inode.
  */
 import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
+  fstatSync,
   fsyncSync,
   lstatSync,
   openSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -31,6 +34,15 @@ import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
 const HASH = /^[0-9a-f]{64}$/;
 const ZERO_PREV = "0".repeat(64);
+
+/** Thrown when the configured path no longer names the open store descriptor. */
+export class StoreUnavailableError extends Error {
+  readonly code = "STORE_UNAVAILABLE" as const;
+  constructor(message = "store-unavailable") {
+    super(message);
+    this.name = "StoreUnavailableError";
+  }
+}
 
 export type StoreRow = {
   leaf_hash: string;
@@ -172,6 +184,40 @@ export function assertStorePath(path: string, lstat: (path: string) => StoreStat
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return;
     throw err;
+  }
+}
+
+/**
+ * Ensure the path still names the same file as the kept descriptor.
+ * On POSIX and on Windows volumes that report stable ids, compare `dev` and
+ * `ino` from `fstatSync(fd)` with `statSync(path)`. A symlink at the path, a
+ * missing path, or a different (dev, ino) means the open file is no longer the
+ * configured store. Some Windows volumes report `ino` as 0 for every file; when
+ * both sides are 0 the check cannot prove identity and still refuses if the
+ * path is gone or is not a regular file (symlink/dir), but cannot detect a
+ * same-volume replace that also reports ino 0.
+ */
+function assertPathMatchesFd(path: string, fd: number): void {
+  let pathStat: ReturnType<typeof statSync>;
+  try {
+    const link = lstatSync(path);
+    if (link.isSymbolicLink()) {
+      throw new StoreUnavailableError("store path is a symbolic link");
+    }
+    pathStat = statSync(path);
+  } catch (err) {
+    if (err instanceof StoreUnavailableError) throw err;
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new StoreUnavailableError("store path is missing");
+    }
+    throw err;
+  }
+  if (!pathStat.isFile()) {
+    throw new StoreUnavailableError("store path is not a regular file");
+  }
+  const fdStat = fstatSync(fd);
+  if (fdStat.dev !== pathStat.dev || fdStat.ino !== pathStat.ino) {
+    throw new StoreUnavailableError("store path no longer matches the open file");
   }
 }
 
@@ -401,6 +447,7 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
     log,
     append: (row: StoreRow) => {
       if (closed) throw new Error("store is closed");
+      assertPathMatchesFd(path, fd);
       const pair = `${row.owner_id}\0${row.leaf_hash}`;
       if (seenPairs.has(pair)) {
         throw new Error("store refuses a repeated (owner_id, leaf_hash) pair");

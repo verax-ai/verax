@@ -5,6 +5,7 @@ export {
   appendStore,
   openStore,
   parseStoreLine,
+  StoreUnavailableError,
   type StoreRow,
   type OpenStore,
   type OpenStoreOpts,

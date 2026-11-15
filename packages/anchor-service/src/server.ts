@@ -11,7 +11,13 @@ import { bearerToken, ownerForToken } from "./auth.ts";
 import type { ServiceConfig } from "./config.ts";
 import { RateLimiter } from "./rate.ts";
 import { issueReceipt } from "./receipt.ts";
-import { openStore, type OpenStore, type OpenStoreOpts, type StoreRow } from "./store.ts";
+import {
+  openStore,
+  StoreUnavailableError,
+  type OpenStore,
+  type OpenStoreOpts,
+  type StoreRow,
+} from "./store.ts";
 import { acquireStoreLock, type StoreLock } from "./store-lock.ts";
 import type { MerkleLog } from "./merkle.ts";
 
@@ -277,9 +283,13 @@ export async function startService(
         const atMs = Date.now();
         try {
           writeRow(config.storePath, { leaf_hash: entryHash, owner_id: ownerId, at_ms: atMs });
-        } catch {
+        } catch (err) {
           storeUnavailable = true;
-          send(res, 500, { error: "internal" });
+          if (err instanceof StoreUnavailableError) {
+            send(res, 503, { error: "store-unavailable" });
+          } else {
+            send(res, 500, { error: "internal" });
+          }
           return;
         }
         leafIndex = log.append({
