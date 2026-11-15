@@ -301,7 +301,11 @@ the process loses its lock, every later authenticated register answers `503`
 `404`), so that process will not sign from memory after a write it could not
 finish. On start, a final store line with no terminating newline is treated as
 a torn write: it is dropped, the kept prefix replaces the file, and one line
-is written to stderr.
+is written to stderr. Configured HTTP bounds (`headersTimeout`,
+`requestTimeout`, `keepAliveTimeout`, and the connection idle timer) are lower
+bounds on when a connection is cut, not exact limits: Node adds a keep-alive
+buffer of about one second to `keepAliveTimeout`, and header and request expiry
+are checked on an interval.
 
 `verax anchor … --token-file <file>` and `verax witness` with
 `VERAX_ANCHOR_TOKEN_FILE` send that file's content as `Authorization: Bearer …`

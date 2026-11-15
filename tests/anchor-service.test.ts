@@ -666,10 +666,14 @@ describe("hosted anchor service", () => {
     // CUT_MS. headersTimeout must stay set for requestTimeout to take effect under
     // Node's connections checker (pair: headersTimeout + requestTimeout).
     const CUT_MS = 1_200;
+    // headersTimeout stays short so Node's connections checker can honour a short
+    // requestTimeout; connection idle is widened separately so a scheduling pause
+    // cannot fire the socket timer before the mechanism under test.
     const HEADERS_MS = 400;
     const SHORT_REQUEST_MS = 400;
     const LARGE_REQUEST_MS = 5_000;
     const BODY_TIMEOUT_MS = 5_000;
+    const CONNECTION_IDLE_MS = 5_000;
     const TRICKLE_EVERY_MS = 40;
     const TRICKLE_COUNT = 80;
 
@@ -696,6 +700,7 @@ describe("hosted anchor service", () => {
       return startService(config, {
         lockBeatMs: TEST_LOCK_BEAT_MS,
         bodyTimeoutMs: BODY_TIMEOUT_MS,
+        connectionIdleTimeoutMs: CONNECTION_IDLE_MS,
       });
     };
 
