@@ -2,6 +2,7 @@ import { strict as assert } from "node:assert";
 import { createHash, generateKeyPairSync } from "node:crypto";
 import {
   copyFileSync,
+  existsSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -24,8 +25,12 @@ import {
   startService,
   type RunningService,
 } from "../packages/anchor-service/src/index.ts";
+import { storeLockPath } from "../packages/anchor-service/src/store-lock.ts";
 import { pendingAnchors, registerCheckpoint, runAnchor } from "../packages/body/src/anchor-cli.ts";
 import { runVerify } from "../packages/body/src/verify-cli.ts";
+
+/** Short beat so lock refusal tests do not wait on the default 2s interval. */
+const TEST_LOCK_BEAT_MS = 40;
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ledger = join(root, "test-vectors", "v1", "valid-full", "ledger");
@@ -78,7 +83,7 @@ async function startHarness(env: NodeJS.ProcessEnv = {}): Promise<Harness> {
     VERAX_ANCHOR_SVC_PORT: "0",
     ...env,
   });
-  const service = await startService(config);
+  const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
   return { dir, service, tokenFile, keyFile: pubFile, storePath, publicKeyPem, token: TOKEN };
 }
 
@@ -265,7 +270,7 @@ describe("hosted anchor service", () => {
         VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
         VERAX_ANCHOR_SVC_PORT: "0",
       });
-      const again = await startService(config);
+      const again = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
       try {
         const check = verifyReceipt(Buffer.from(receiptB64, "base64"), Buffer.from(entryHash, "hex"), h.publicKeyPem);
         assert.equal(check.ok, true, check.ok ? "" : check.reason);
@@ -437,6 +442,88 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("a second start on the same store is refused while the first runs, and works after close", async () => {
+    const h = await startHarness();
+    let closed = false;
+    try {
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: join(h.dir, "tokens.json"),
+        VERAX_ANCHOR_SVC_SIGNING_KEY: join(h.dir, "signing.private.pem"),
+        VERAX_ANCHOR_SVC_STORE: h.storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(
+        () => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal(err.message, `store already locked: ${h.storePath}`);
+          return true;
+        },
+      );
+      await h.service.close();
+      closed = true;
+      const again = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+      await again.close();
+    } finally {
+      if (!closed) await h.service.close();
+      rmSync(h.dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a stale lock from a dead process is taken over", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-stale-"));
+    try {
+      const { privateKey } = generateKeyPairSync("ed25519");
+      const keyFile = join(dir, "signing.private.pem");
+      const tokensFile = join(dir, "tokens.json");
+      const storePath = join(dir, "store.jsonl");
+      writeFileSync(keyFile, privateKey.export({ type: "pkcs8", format: "pem" }).toString(), "utf8");
+      const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
+      writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), "utf8");
+      writeFileSync(storePath, "", "utf8");
+      writeFileSync(
+        storeLockPath(storePath),
+        `${JSON.stringify({ pid: 2_147_483_646, startedAt: Date.now() - 60_000, token: "dead-holder" })}\n`,
+        "utf8",
+      );
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+      await service.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("two instances cannot fork the same store into separate trees", async () => {
+    const h = await startHarness();
+    try {
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: join(h.dir, "tokens.json"),
+        VERAX_ANCHOR_SVC_SIGNING_KEY: join(h.dir, "signing.private.pem"),
+        VERAX_ANCHOR_SVC_STORE: h.storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+      });
+      await assert.rejects(() => startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS }), /store already locked/);
+      const first = await registerCheckpoint(h.service.url, "aa".repeat(32), h.publicKeyPem, fetch, Date.now, h.token);
+      assert.equal(first.ok, true);
+      if (!first.ok || first.row.v !== 1) return;
+      assert.equal(first.row.leafIndex, 0);
+      assert.equal(first.row.treeSize, 1);
+      const lines = readFileSync(h.storePath, "utf8").split("\n").filter((l) => l.trim() !== "");
+      assert.equal(lines.length, 1);
+    } finally {
+      await stopHarness(h);
+    }
+  });
+
   it("a failed store write answers 500, leaves the leaf index, and keeps prior receipts valid", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-fail-"));
     const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -457,6 +544,7 @@ describe("hosted anchor service", () => {
     });
     let failNext = false;
     const service = await startService(config, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
       appendRow: (path, row) => {
         if (failNext) throw new Error("store-write-failed");
         appendStore(path, row);

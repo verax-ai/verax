@@ -12,6 +12,7 @@ import type { ServiceConfig } from "./config.ts";
 import { RateLimiter } from "./rate.ts";
 import { issueReceipt } from "./receipt.ts";
 import { appendStore, loadStore, type StoreRow } from "./store.ts";
+import { acquireStoreLock, type StoreLock } from "./store-lock.ts";
 import type { MerkleLog } from "./merkle.ts";
 
 const MAX_BODY = 4 * 1024;
@@ -75,12 +76,19 @@ function contentTypeOk(header: string | undefined): boolean {
 
 export async function startService(
   config: ServiceConfig,
-  options?: { appendRow?: AppendRow },
+  options?: { appendRow?: AppendRow; lockBeatMs?: number },
 ): Promise<RunningService> {
+  let lock: StoreLock;
+  try {
+    lock = acquireStoreLock(config.storePath, { lockBeatMs: options?.lockBeatMs });
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : String(err));
+  }
   let log: MerkleLog;
   try {
     log = loadStore(config.storePath);
   } catch (err) {
+    lock.release();
     throw new Error(err instanceof Error ? err.message : String(err));
   }
   const rate = new RateLimiter(config.ratePerMinute);
@@ -162,12 +170,20 @@ export async function startService(
     }
   }
 
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(config.port, config.host, () => resolve());
-  });
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(config.port, config.host, () => resolve());
+    });
+  } catch (err) {
+    lock.release();
+    throw err;
+  }
   const addr = server.address();
-  if (!addr || typeof addr === "string") throw new Error("bind failed");
+  if (!addr || typeof addr === "string") {
+    lock.release();
+    throw new Error("bind failed");
+  }
   const url = `http://${config.host}:${addr.port}`;
 
   return {
@@ -178,7 +194,11 @@ export async function startService(
     publicKeyPem: config.publicKeyPem,
     close: () =>
       new Promise((resolve, reject) => {
-        server.close((err) => (err ? reject(err) : resolve()));
+        server.close((err) => {
+          lock.release();
+          if (err) reject(err);
+          else resolve();
+        });
       }),
   };
 }
