@@ -1637,6 +1637,47 @@ describe("hosted anchor service", () => {
     }
   });
 
+  it("a failed torn-tail recovery leaves the complete rows on disk and refuses to start", { timeout: 10_000 }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-torn-fail-"));
+    try {
+      const storePath = join(dir, "store.jsonl");
+      const full = v1StoreLine({
+        leaf_hash: "11".repeat(32),
+        owner_id: "owner-a",
+        at_ms: 1,
+      });
+      const complete = full.trimEnd();
+      const original = `${complete}\n{"leaf`;
+      const steps = ["write-tmp", "fsync-tmp", "rename", "fsync-dir"] as const;
+      for (const failAt of steps) {
+        writeFileSync(storePath, original, "utf8");
+        assert.throws(
+          () =>
+            openStore(storePath, {
+              recoveryOps: {
+                failAt,
+              },
+            }),
+          /torn-tail recovery failed/,
+        );
+        const after = readFileSync(storePath, "utf8");
+        assert.ok(after.includes(complete), `failAt=${failAt}: complete row missing`);
+        assert.notEqual(after, "", `failAt=${failAt}: store must not be empty`);
+        // Before rename the torn original remains; after rename the kept prefix is
+        // already durable. Either way a clean start keeps the acknowledged row.
+        const opened = openStore(storePath);
+        try {
+          assert.equal(opened.log.size, 1);
+          assert.equal(readFileSync(storePath, "utf8"), full);
+        } finally {
+          opened.close();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("a store with a bad line in the middle still refuses to start", async () => {
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-mid-"));
     try {

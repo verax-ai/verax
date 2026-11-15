@@ -9,6 +9,8 @@ export {
   type OpenStore,
   type OpenStoreOpts,
   type StoreFileOps,
+  type StoreRecoveryOps,
+  type TornTailRecoveryStep,
   type StoreStat,
   type StoredLine,
 } from "./store.ts";

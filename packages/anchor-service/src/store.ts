@@ -5,12 +5,14 @@
  * 64 zero hex digits for the first line. On start the file is read back in
  * order; a blank line that is not a torn tail, a repeated (owner_id, leaf_hash),
  * a broken chain, or an old unversioned line refuses to load. A final line with
- * no terminating newline is a torn write: it is dropped and the file is
- * truncated before the service starts. The store path is opened once and that
+ * no terminating newline is a torn write: it is dropped by writing the kept
+ * prefix to a new file in the same directory, fsyncing it, renaming it over
+ * the store, and fsyncing the directory (so a crash cannot leave an empty
+ * store in place of acknowledged rows). The store path is opened once and that
  * descriptor is kept for the process life so a later symlink cannot redirect
  * appends.
  */
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   closeSync,
   constants as fsConstants,
@@ -18,10 +20,12 @@ import {
   lstatSync,
   openSync,
   readFileSync,
+  renameSync,
+  unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { MerkleLog, type LogLeaf } from "./merkle.ts";
 
@@ -63,11 +67,27 @@ export type StoreFileOps = {
   fsyncSync: (fd: number) => void;
 };
 
+/** Steps of torn-tail recovery; tests may fail one via `failAt`. */
+export type TornTailRecoveryStep = "write-tmp" | "fsync-tmp" | "rename" | "fsync-dir";
+
+export type StoreRecoveryOps = {
+  /** Test-only: throw at this recovery step. Not exposed through the CLI. */
+  failAt?: TornTailRecoveryStep;
+  writeFileSync?: typeof writeFileSync;
+  openSync?: typeof openSync;
+  fsyncSync?: typeof fsyncSync;
+  closeSync?: typeof closeSync;
+  renameSync?: typeof renameSync;
+  unlinkSync?: typeof unlinkSync;
+};
+
 export type OpenStoreOpts = {
   /** Test-only: substitute for lstatSync. Not exposed through the CLI. */
   lstat?: (path: string) => StoreStat;
   /** Test-only: substitute write/fsync used by append. Not exposed through the CLI. */
   fileOps?: StoreFileOps;
+  /** Test-only: substitute torn-tail recovery I/O. Not exposed through the CLI. */
+  recoveryOps?: StoreRecoveryOps;
 };
 
 function lineDigest(lineWithNewline: string): string {
@@ -161,12 +181,52 @@ function flushParentDir(filePath: string): void {
 }
 
 /**
+ * Replace the store with `kept` without truncating the original in place.
+ * Write → fsync → rename → directory fsync. A failure before rename leaves
+ * the original bytes (including any complete rows) untouched.
+ */
+function recoverTornTail(path: string, kept: string, ops?: StoreRecoveryOps): void {
+  const writeFile = ops?.writeFileSync ?? writeFileSync;
+  const open = ops?.openSync ?? openSync;
+  const fsync = ops?.fsyncSync ?? fsyncSync;
+  const close = ops?.closeSync ?? closeSync;
+  const rename = ops?.renameSync ?? renameSync;
+  const unlink = ops?.unlinkSync ?? unlinkSync;
+  const failAt = ops?.failAt;
+  const tmp = join(dirname(path), `.${randomBytes(8).toString("hex")}.store-recovering`);
+  try {
+    if (failAt === "write-tmp") throw new Error("injected torn-tail recovery failure at write-tmp");
+    writeFile(tmp, kept, "utf8");
+    if (failAt === "fsync-tmp") throw new Error("injected torn-tail recovery failure at fsync-tmp");
+    const tmpFd = open(tmp, "r+");
+    try {
+      fsync(tmpFd);
+    } finally {
+      close(tmpFd);
+    }
+    if (failAt === "rename") throw new Error("injected torn-tail recovery failure at rename");
+    rename(tmp, path);
+    if (failAt === "fsync-dir") throw new Error("injected torn-tail recovery failure at fsync-dir");
+    flushParentDir(path);
+  } catch (err) {
+    try {
+      unlink(tmp);
+    } catch {
+      /* tmp may be gone after a successful rename */
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`torn-tail recovery failed: ${msg}`);
+  }
+}
+
+/**
  * Open the store for the life of the process. Creates an empty regular file
  * when missing, fsyncs it and (where the platform allows) its parent directory.
  */
 export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
   const lstat = opts?.lstat ?? lstatSync;
   const io: StoreFileOps = opts?.fileOps ?? { writeSync, fsyncSync };
+  const recoveryOps = opts?.recoveryOps;
   assertStorePath(path, lstat);
 
   let created = false;
@@ -226,17 +286,21 @@ export function openStore(path: string, opts?: OpenStoreOpts): OpenStore {
     const cut = text.lastIndexOf("\n");
     const kept = cut < 0 ? "" : text.slice(0, cut + 1);
     try {
-      // Re-write through the path then reopen: Windows refuses ftruncate on an
-      // append-mode descriptor.
+      // Never truncate the store in place: a crash between truncate and write
+      // would leave an empty file. Write the kept prefix beside the store,
+      // fsync, rename over it, fsync the directory, then reopen.
       closeSync(fd);
-      writeFileSync(path, kept, "utf8");
+      fd = -1;
+      recoverTornTail(path, kept, recoveryOps);
       fd = openSync(path, "a+");
       fsyncSync(fd);
     } catch (err) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* */
+      if (fd >= 0) {
+        try {
+          closeSync(fd);
+        } catch {
+          /* */
+        }
       }
       throw err;
     }
