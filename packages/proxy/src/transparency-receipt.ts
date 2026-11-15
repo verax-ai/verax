@@ -208,7 +208,7 @@ const UNDERSTOOD = new Set<unknown>([1, 395]);
 export type ReceiptStage = "receipt-decode" | "vds-gate" | "inclusion" | "receipt-sig";
 
 export type ReceiptCheck =
-  | { ok: true; root: string; treeSize: number; leafIndex: number }
+  | { ok: true; root: string; treeSize: number; leafIndex: number; issuedAtSec?: number }
   | { ok: false; stage: ReceiptStage; reason: string };
 
 /**
@@ -261,7 +261,16 @@ export function verifyReceipt(receipt: Uint8Array, leafEntry: Uint8Array, public
     verified = false;
   }
   if (!verified) return { ok: false, stage: "receipt-sig", reason: "signature does not verify over the rebuilt root" };
-  return { ok: true, root: root.toString("hex"), treeSize, leafIndex };
+  // Optional CWT Claims (COSE header 15 / RFC 9597) with iat (CWT claim 6).
+  let issuedAtSec: number | undefined;
+  const cwt = sign1.protectedHeader.get(15);
+  if (cwt instanceof Map) {
+    const iat = cwt.get(6);
+    if (typeof iat === "number" && Number.isSafeInteger(iat)) issuedAtSec = iat;
+  }
+  return issuedAtSec === undefined
+    ? { ok: true, root: root.toString("hex"), treeSize, leafIndex }
+    : { ok: true, root: root.toString("hex"), treeSize, leafIndex, issuedAtSec };
 }
 
 export type CcfReceiptCheck =

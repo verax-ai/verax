@@ -26,6 +26,7 @@ import {
 } from "@verax-ai/proxy";
 import {
   pendingAnchors,
+  readAnchorTokenFile,
   registerCheckpoint,
   registerStatement,
   serviceNameOf,
@@ -52,17 +53,25 @@ export type WitnessListen = {
 /**
  * Where `verax witness` sends each checkpoint it signs, read once at start.
  * With `chainPem` the witness registers each checkpoint over SCRAPI as a
- * Signed Statement it signs as the Issuer that chain names.
+ * Signed Statement it signs as the Issuer that chain names. With `token` every
+ * request to the service carries that bearer token; the token is not written
+ * to listen or status files.
  */
-export type WitnessAnchor = { serviceName: string; serviceKey: string | null; chainPem: string | null };
+export type WitnessAnchor = {
+  serviceName: string;
+  serviceKey: string | null;
+  chainPem: string | null;
+  token: string | null;
+};
 
 /**
  * `VERAX_ANCHOR_SERVICE` names the service (https; http only on loopback),
- * `VERAX_ANCHOR_SERVICE_KEY` a file holding its public key and
+ * `VERAX_ANCHOR_SERVICE_KEY` a file holding its public key,
  * `VERAX_ANCHOR_X5CHAIN` a PEM file holding the witness certificate chain,
- * leaf first, which selects SCRAPI. None set is no anchoring. A value that is
- * set but unusable is an error, so a witness the operator meant to anchor
- * does not start without anchoring.
+ * leaf first, which selects SCRAPI, and `VERAX_ANCHOR_TOKEN_FILE` a file
+ * holding the bearer token the service requires. None set is no anchoring. A
+ * value that is set but unusable is an error, so a witness the operator meant
+ * to anchor does not start without anchoring.
  */
 export function witnessAnchorFromEnv(
   env: NodeJS.ProcessEnv = process.env,
@@ -70,9 +79,11 @@ export function witnessAnchorFromEnv(
   const raw = env.VERAX_ANCHOR_SERVICE?.trim() ?? "";
   const keyPath = env.VERAX_ANCHOR_SERVICE_KEY?.trim() ?? "";
   const chainPath = env.VERAX_ANCHOR_X5CHAIN?.trim() ?? "";
+  const tokenPath = env.VERAX_ANCHOR_TOKEN_FILE?.trim() ?? "";
   if (raw === "") {
     if (keyPath !== "") return { ok: false, reason: "VERAX_ANCHOR_SERVICE_KEY is set without VERAX_ANCHOR_SERVICE" };
     if (chainPath !== "") return { ok: false, reason: "VERAX_ANCHOR_X5CHAIN is set without VERAX_ANCHOR_SERVICE" };
+    if (tokenPath !== "") return { ok: false, reason: "VERAX_ANCHOR_TOKEN_FILE is set without VERAX_ANCHOR_SERVICE" };
     return { ok: true, anchor: null };
   }
   let chainPem: string | null = null;
@@ -114,7 +125,13 @@ export function witnessAnchorFromEnv(
       return { ok: false, reason: `VERAX_ANCHOR_SERVICE_KEY file ${keyPath} is not a public key` };
     }
   }
-  return { ok: true, anchor: { serviceName: serviceNameOf(url), serviceKey, chainPem } };
+  let token: string | null = null;
+  if (tokenPath !== "") {
+    const got = readAnchorTokenFile(tokenPath);
+    if (!got.ok) return { ok: false, reason: `VERAX_ANCHOR_TOKEN_FILE: ${got.reason}` };
+    token = got.token;
+  }
+  return { ok: true, anchor: { serviceName: serviceNameOf(url), serviceKey, chainPem, token } };
 }
 
 /**
@@ -154,8 +171,17 @@ export async function anchorPendingCheckpoints(
   }
   for (const hash of pending) {
     const got = issuer
-      ? await registerStatement(anchor.serviceName, hash, checkpointStatement(hash, issuer.chain, issuer.keys), anchor.serviceKey, fetchImpl)
-      : await registerCheckpoint(anchor.serviceName, hash, anchor.serviceKey, fetchImpl);
+      ? await registerStatement(
+          anchor.serviceName,
+          hash,
+          checkpointStatement(hash, issuer.chain, issuer.keys),
+          anchor.serviceKey,
+          fetchImpl,
+          Date.now,
+          undefined,
+          anchor.token,
+        )
+      : await registerCheckpoint(anchor.serviceName, hash, anchor.serviceKey, fetchImpl, Date.now, anchor.token);
     if (!got.ok) {
       appendStatus(stateDir, {
         atMs: Date.now(),

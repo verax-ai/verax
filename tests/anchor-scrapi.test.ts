@@ -309,7 +309,7 @@ describe("the witness registers over SCRAPI when it holds a chain", () => {
       return new Response(new Uint8Array(ccfReceiptFor(sha256(posted.at(-1)!), service.privateKey)), { status: 200 });
     }) as typeof fetch;
     try {
-      await anchorPendingCheckpoints(dir, { serviceName: "https://ts.example", serviceKey: serviceKeyPem, chainPem }, fetchImpl);
+      await anchorPendingCheckpoints(dir, { serviceName: "https://ts.example", serviceKey: serviceKeyPem, chainPem, token: null }, fetchImpl);
       assert.equal(posted.length, 1);
       const anchors = readAnchors(dir);
       assert.equal(anchors.rows.length, 1);
@@ -350,7 +350,7 @@ describe("the witness registers over SCRAPI when it holds a chain", () => {
       return new Response(null, { status: 500 });
     }) as typeof fetch;
     try {
-      await anchorPendingCheckpoints(dir, { serviceName: "https://ts.example", serviceKey: null, chainPem }, fetchImpl);
+      await anchorPendingCheckpoints(dir, { serviceName: "https://ts.example", serviceKey: null, chainPem, token: null }, fetchImpl);
       assert.equal(calls, 0);
       const last = statusRows(dir).at(-1)!;
       assert.equal(last.result, "anchor-failed");

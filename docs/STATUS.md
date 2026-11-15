@@ -269,6 +269,39 @@ wherever the operator starts it; `verax install` does not start a witness.
 
 Guard: `auto-anchor`. Published in 0.5.0.
 
+## Hosted anchoring with a token — unreleased
+
+`@verax-ai/anchor-service` (`verax-anchor-service`) is a small Transparency
+Service that speaks the same `POST /register` route the client already uses.
+It answers only callers that present a bearer token listed (by SHA-256 digest)
+in `VERAX_ANCHOR_SVC_TOKENS`. The service signs COSE receipts with the Ed25519
+key in `VERAX_ANCHOR_SVC_SIGNING_KEY` and appends leaf rows to
+`VERAX_ANCHOR_SVC_STORE`. A receipt names the time the service signed it
+(CWT `iat` in the protected header), so the hash was registered no later
+than that time by the service's clock; it does not show that the ledger is
+complete, and the operator still chooses what to send. `verax verify` does
+not print this time yet.
+
+Only one running service may hold a given store: start takes an exclusive
+lock beside the store file for the process lifetime, and a second start on
+the same path is refused. A lock left by a process that is no longer running
+is taken over (judged by the same beat / pid / start-time / boot rule as the
+body's `ledger.lock`). After any failed store append the service stops
+registering and answers `503` `store-unavailable` until restart, so a receipt
+is never issued from memory the store may not match. On start, a final store
+line with no terminating newline is treated as a torn write: it is dropped,
+the file is truncated to the last full line, and one line is written to
+stderr.
+
+`verax anchor … --token-file <file>` and `verax witness` with
+`VERAX_ANCHOR_TOKEN_FILE` send that file's content as `Authorization: Bearer …`
+on every request to the service. The token is never accepted on the command
+line and is not written to `checkpoint-anchors.jsonl`, `witness-status.jsonl`,
+`witness.listen.json`, doctor output, or error messages. A 401 from the
+service is reported as `unauthorized`, not `unreachable`.
+
+Guard: `hosted-anchor-token`. Unreleased.
+
 ## Signed start rows — since 0.5.0
 
 A body started by `verax serve` writes v2 start rows: the v1 fields plus

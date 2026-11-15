@@ -1,0 +1,40 @@
+{
+  "name": "@verax-ai/anchor-service",
+  "version": "0.8.2",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "verax-anchor-service": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@verax-ai/proxy": "^0.8.2"
+  },
+  "description": "A small Transparency Service that registers checkpoint hashes for callers that present a token.",
+  "homepage": "https://verax-ai.com",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/verax-ai/verax.git",
+    "directory": "packages/anchor-service"
+  }
+}
