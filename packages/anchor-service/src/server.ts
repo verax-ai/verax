@@ -128,6 +128,18 @@ export async function startService(
     afterAuthBeforeBody?: () => void | Promise<void>;
     /** Test-only: called after sendAndClose finishes its end callback. */
     afterSendAndClose?: (socketDestroyed: boolean) => void;
+    /**
+     * Test-only: body read timer in milliseconds. Defaults to
+     * `config.requestTimeoutMs`. Use a value far from `requestTimeout` /
+     * `headersTimeout` so each bound can be held alone.
+     */
+    bodyTimeoutMs?: number;
+    /**
+     * Test-only: connection idle timer in milliseconds. Defaults to
+     * `config.headersTimeoutMs`. Keep Node's `headersTimeout` larger in tests
+     * so only `socket.setTimeout` holds the slow-header cut.
+     */
+    connectionIdleTimeoutMs?: number;
   },
 ): Promise<RunningService> {
   let lock: StoreLock;
@@ -152,6 +164,8 @@ export async function startService(
   let storeUnavailable = false;
   const afterAuthBeforeBody = options?.afterAuthBeforeBody;
   const afterSendAndClose = options?.afterSendAndClose;
+  const bodyTimeoutMs = options?.bodyTimeoutMs ?? config.requestTimeoutMs;
+  const connectionIdleTimeoutMs = options?.connectionIdleTimeoutMs ?? config.headersTimeoutMs;
 
   const server = createServer((req, res) => {
     void handle(req, res);
@@ -171,8 +185,12 @@ export async function startService(
     Math.min(1_000, Math.floor(config.headersTimeoutMs / 2)),
   );
   // Connection-level timer: cuts sockets that never finish headers.
+  // Node's headersTimeout can emit "Request timeout" on the same bound and on
+  // this platform sometimes closes the server socket without the client seeing
+  // a cut inside the test window — keep headersTimeout larger in the slow-header
+  // test and arm this idle timer alone via connectionIdleTimeoutMs.
   server.on("connection", (socket) => {
-    socket.setTimeout(config.headersTimeoutMs);
+    socket.setTimeout(connectionIdleTimeoutMs);
     socket.once("timeout", () => {
       socket.destroy();
     });
@@ -207,7 +225,7 @@ export async function startService(
       if (afterAuthBeforeBody) await afterAuthBeforeBody();
       let body: Buffer;
       try {
-        body = await readBody(req, MAX_BODY, config.requestTimeoutMs);
+        body = await readBody(req, MAX_BODY, bodyTimeoutMs);
       } catch (err) {
         const msg = err instanceof Error ? err.message : "";
         if (msg === "body-too-large") {

@@ -101,7 +101,14 @@ type Harness = {
   token: string;
 };
 
-async function startHarness(env: NodeJS.ProcessEnv = {}): Promise<Harness> {
+async function startHarness(
+  env: NodeJS.ProcessEnv = {},
+  serviceOpts?: {
+    bodyTimeoutMs?: number;
+    connectionIdleTimeoutMs?: number;
+    afterAuthBeforeBody?: () => void | Promise<void>;
+  },
+): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "verax-asvc-"));
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -124,7 +131,7 @@ async function startHarness(env: NodeJS.ProcessEnv = {}): Promise<Harness> {
     VERAX_ANCHOR_SVC_PORT: "0",
     ...env,
   });
-  const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS });
+  const service = await startService(config, { lockBeatMs: TEST_LOCK_BEAT_MS, ...serviceOpts });
   return { dir, service, tokenFile, keyFile: pubFile, storePath, publicKeyPem, token: TOKEN };
 }
 
@@ -536,26 +543,46 @@ describe("hosted anchor service", () => {
   });
 
   it("a slow header is cut by the connection socket timer", { timeout: 10_000 }, async () => {
-    const h = await startHarness({
-      VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "200",
-      VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "2000",
-    });
+    // Node headersTimeout stays far above CUT_MS so a "Request timeout" race
+    // cannot satisfy this test. Only connectionIdleTimeoutMs → socket.setTimeout
+    // can cut within CUT_MS.
+    const CUT_MS = 1_000;
+    const h = await startHarness(
+      {
+        VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "5000",
+        VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "5000",
+      },
+      { connectionIdleTimeoutMs: 200 },
+    );
     try {
       const url = new URL(h.service.url);
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("slow header was not cut")), 3_000);
-        const socket = netConnect({ host: url.hostname, port: Number(url.port) }, () => {
+        const t0 = Date.now();
+        let settled = false;
+        let socket: Socket;
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          socket?.destroy();
+          reject(new Error("slow header was not cut"));
+        }, CUT_MS + 500);
+        socket = netConnect({ host: url.hostname, port: Number(url.port) }, () => {
           socket.write("POST /register HTTP/1.1\r\nHost: 127.0.0.1\r\n");
           // Deliberately never finish the headers.
         });
-        socket.on("close", () => {
+        const done = (): void => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
+          const elapsed = Date.now() - t0;
+          if (elapsed > CUT_MS) {
+            reject(new Error(`slow header cut too late (${elapsed}ms > ${CUT_MS}ms)`));
+            return;
+          }
           resolve();
-        });
-        socket.on("error", () => {
-          clearTimeout(timer);
-          resolve();
-        });
+        };
+        socket.on("close", done);
+        socket.on("error", done);
       });
     } finally {
       await stopHarness(h);
@@ -563,12 +590,15 @@ describe("hosted anchor service", () => {
   });
 
   it("a slow body is answered 408 by the body read timer", { timeout: 10_000 }, async () => {
-    // Equal short bounds so the connection idle timer does not win first with a
-    // hang-up; only the body-timeout reject yields this JSON 408.
-    const h = await startHarness({
-      VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "400",
-      VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "400",
-    });
+    // Idle timer and Node requestTimeout stay far above the body timer so a
+    // hang-up cannot race the JSON 408. Only the body-timeout reject yields it.
+    const h = await startHarness(
+      {
+        VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "2000",
+        VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "2000",
+      },
+      { bodyTimeoutMs: 300 },
+    );
     try {
       const url = new URL(h.service.url);
       const before = storeBytes(h.storePath);
@@ -617,10 +647,22 @@ describe("hosted anchor service", () => {
     }
   });
 
-  it("a request that stalls before the body is cut by requestTimeout", { timeout: 10_000 }, async () => {
-    // Delay after auth so readBody's timer starts later than requestTimeout.
-    // Trickle body bytes so the connection idle timer does not win first.
-    // Expect a bare hang-up (or Node's empty 408), not our JSON request-timeout.
+  it("a request that stalls before the body is cut by requestTimeout", { timeout: 20_000 }, async () => {
+    // On mutated runs without requestTimeout, the body timer's sendAndClose could
+    // race the JSON 408 and look like a hang-up inside a loose 3s window. Keep the
+    // connection idle timer (trickle) and the body timer (bodyTimeoutMs) several
+    // times above CUT_MS. Assert a cut within CUT_MS — only requestTimeout can meet
+    // that — and the opposite with a large requestTimeout: still connected after
+    // CUT_MS. headersTimeout must stay set for requestTimeout to take effect under
+    // Node's connections checker (pair: headersTimeout + requestTimeout).
+    const CUT_MS = 1_200;
+    const HEADERS_MS = 400;
+    const SHORT_REQUEST_MS = 400;
+    const LARGE_REQUEST_MS = 5_000;
+    const BODY_TIMEOUT_MS = 5_000;
+    const TRICKLE_EVERY_MS = 40;
+    const TRICKLE_COUNT = 80;
+
     const dir = mkdtempSync(join(tmpdir(), "verax-asvc-"));
     const { privateKey } = generateKeyPairSync("ed25519");
     const privatePem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -630,69 +672,143 @@ describe("hosted anchor service", () => {
     writeFileSync(keyFile, privatePem, { encoding: "utf8", mode: 0o600 });
     const digest = createHash("sha256").update(TOKEN, "utf8").digest("hex");
     writeFileSync(tokensFile, JSON.stringify({ [digest]: "owner-a" }), { encoding: "utf8", mode: 0o600 });
-    const config = loadConfig({
-      VERAX_ANCHOR_SVC_TOKENS: tokensFile,
-      VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
-      VERAX_ANCHOR_SVC_STORE: storePath,
-      VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
-      VERAX_ANCHOR_SVC_PORT: "0",
-      VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: "200",
-      VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: "300",
-    });
-    const service = await startService(config, {
-      lockBeatMs: TEST_LOCK_BEAT_MS,
-      afterAuthBeforeBody: () => new Promise((r) => setTimeout(r, 200)),
-    });
+
+    const startStallService = async (requestTimeoutMs: number) => {
+      const config = loadConfig({
+        VERAX_ANCHOR_SVC_TOKENS: tokensFile,
+        VERAX_ANCHOR_SVC_SIGNING_KEY: keyFile,
+        VERAX_ANCHOR_SVC_STORE: storePath,
+        VERAX_ANCHOR_SVC_HOST: "127.0.0.1",
+        VERAX_ANCHOR_SVC_PORT: "0",
+        VERAX_ANCHOR_SVC_HEADERS_TIMEOUT_MS: String(HEADERS_MS),
+        VERAX_ANCHOR_SVC_REQUEST_TIMEOUT_MS: String(requestTimeoutMs),
+      });
+      return startService(config, {
+        lockBeatMs: TEST_LOCK_BEAT_MS,
+        bodyTimeoutMs: BODY_TIMEOUT_MS,
+      });
+    };
+
+    const openStallClient = (
+      serviceUrl: string,
+      onCut: (info: { kind: "hangup" | "status"; status?: number; body?: string; elapsedMs: number }) => void,
+    ): { req: ReturnType<typeof httpRequest>; stopTrickle: () => void } => {
+      const url = new URL(serviceUrl);
+      const t0 = Date.now();
+      let settled = false;
+      const finish = (info: { kind: "hangup" | "status"; status?: number; body?: string }): void => {
+        if (settled) return;
+        settled = true;
+        onCut({ ...info, elapsedMs: Date.now() - t0 });
+      };
+      const req = httpRequest(
+        {
+          hostname: url.hostname,
+          port: url.port,
+          path: "/register",
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${TOKEN}`,
+            "content-length": "50",
+          },
+        },
+        (res) => {
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            finish({
+              kind: "status",
+              status: res.statusCode,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
+          });
+        },
+      );
+      req.on("error", () => {
+        finish({ kind: "hangup" });
+      });
+      let n = 0;
+      let trickleTimer: ReturnType<typeof setTimeout> | undefined;
+      const tick = (): void => {
+        if (n >= TRICKLE_COUNT || settled) return;
+        req.write("x");
+        n += 1;
+        trickleTimer = setTimeout(tick, TRICKLE_EVERY_MS);
+      };
+      tick();
+      return {
+        req,
+        stopTrickle: () => {
+          if (trickleTimer !== undefined) clearTimeout(trickleTimer);
+        },
+      };
+    };
+
+    let service = await startStallService(SHORT_REQUEST_MS);
     try {
-      const url = new URL(service.url);
       const before = storeBytes(storePath);
       await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("stalled request was not cut")), 3_000);
-        const req = httpRequest(
-          {
-            hostname: url.hostname,
-            port: url.port,
-            path: "/register",
-            method: "POST",
-            headers: {
-              "content-type": "application/json",
-              authorization: `Bearer ${TOKEN}`,
-              "content-length": "50",
-            },
-          },
-          (res) => {
-            const chunks: Buffer[] = [];
-            res.on("data", (c) => chunks.push(c));
-            res.on("end", () => {
-              clearTimeout(timer);
-              const text = Buffer.concat(chunks).toString("utf8");
-              // Our body-timer path answers JSON; requestTimeout must not.
-              if (res.statusCode === 408 && text.includes("request-timeout")) {
-                reject(new Error("stalled request was cut by the body read timer, not requestTimeout"));
-                return;
-              }
-              if (res.statusCode === 408) {
-                resolve();
-                return;
-              }
-              reject(new Error(`stalled request got status ${res.statusCode}`));
-            });
-          },
-        );
-        req.on("error", () => {
-          clearTimeout(timer);
-          resolve();
+        let client: { req: ReturnType<typeof httpRequest>; stopTrickle: () => void };
+        const watchdog = setTimeout(() => {
+          client.stopTrickle();
+          client.req.destroy();
+          reject(new Error("stalled request was not cut"));
+        }, CUT_MS + 500);
+        client = openStallClient(service.url, (info) => {
+          clearTimeout(watchdog);
+          client.stopTrickle();
+          try {
+            if (info.kind === "status" && info.status === 408 && (info.body ?? "").includes("request-timeout")) {
+              throw new Error("stalled request was cut by the body read timer, not requestTimeout");
+            }
+            if (info.elapsedMs > CUT_MS) {
+              throw new Error(`stalled request cut too late (${info.elapsedMs}ms > ${CUT_MS}ms)`);
+            }
+            if (info.kind === "hangup" || info.status === 408) {
+              resolve();
+              return;
+            }
+            throw new Error(`stalled request got status ${info.status}`);
+          } catch (err) {
+            reject(err);
+          }
         });
-        let n = 0;
-        const tick = (): void => {
-          if (n >= 40) return;
-          req.write("x");
-          n += 1;
-          setTimeout(tick, 40);
-        };
-        tick();
       });
       assert.ok(storeBytes(storePath).equals(before));
+    } finally {
+      await service.close();
+    }
+
+    // Opposite: same idle / body-delay setup, large requestTimeout — still up after CUT_MS.
+    writeFileSync(storePath, "", "utf8");
+    service = await startStallService(LARGE_REQUEST_MS);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        let cutEarly: { elapsedMs: number; kind: string } | undefined;
+        const client = openStallClient(service.url, (info) => {
+          cutEarly = { elapsedMs: info.elapsedMs, kind: info.kind };
+        });
+        setTimeout(() => {
+          client.stopTrickle();
+          try {
+            if (cutEarly !== undefined && cutEarly.elapsedMs <= CUT_MS) {
+              throw new Error(
+                `request was cut at ${cutEarly.elapsedMs}ms with large requestTimeout (${cutEarly.kind})`,
+              );
+            }
+            assert.equal(client.req.destroyed, false);
+            const sock = client.req.socket;
+            assert.ok(sock);
+            assert.equal(sock.destroyed, false);
+            client.req.destroy();
+            resolve();
+          } catch (err) {
+            client.req.destroy();
+            reject(err);
+          }
+        }, CUT_MS);
+      });
     } finally {
       await service.close();
       rmSync(dir, { recursive: true, force: true });
