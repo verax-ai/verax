@@ -13,7 +13,7 @@ import { runDownstreamPin } from "./downstream-pin.ts";
 import { clearVeraxEnv, envFileJwksMissing, loadEnvFile, runInitLocal } from "./init-local.ts";
 import { clearCliCodeCheckPassed, defaultElevated, directoryAccess, doctorStateTarget, elevatedCommandCodeRefusal, linuxNodeLabelCheck, linuxSelinuxCheck, liveInstalledChecks, markCliCodeCheckPassed, runInstall, runUninstall, SystemToolError, unreadableSentence } from "./install.ts";
 import { runHalt, runResume } from "./halt.ts";
-import { endProcess, main } from "./main.ts";
+import { main } from "./main.ts";
 import { runOperator } from "./operator-cli.ts";
 import { runAnchor } from "./anchor-cli.ts";
 import { runReconcile } from "./reconcile-cli.ts";
@@ -509,12 +509,39 @@ export function uncaughtText(err: unknown): string {
   return `${lines.join("\n")}\n`;
 }
 
+/**
+ * process.exit cuts a pipe after ~146 KB on Linux and macOS when stdout still
+ * holds buffered writes. Wait for stdout and stderr to flush, then end with
+ * the same code. Long-running commands (serve, watch) never return here.
+ */
+function drainStdioStream(stream: NodeJS.WriteStream): Promise<void> {
+  return new Promise((resolve) => {
+    if (!stream.writable) {
+      resolve();
+      return;
+    }
+    try {
+      stream.write("", (err) => {
+        void err;
+        resolve();
+      });
+    } catch {
+      resolve();
+    }
+  });
+}
+
+async function exitAfterStdioDrain(code: number): Promise<void> {
+  await Promise.all([drainStdioStream(process.stdout), drainStdioStream(process.stderr)]);
+  process.exit(code);
+}
+
 if (isCliEntry()) {
   try {
-    process.exit(await runCli(process.argv.slice(2)));
+    await exitAfterStdioDrain(await runCli(process.argv.slice(2)));
   } catch (err) {
     // Replaces Node's printer, which would write the path raw and a source excerpt.
     process.stderr.write(terminalLines(uncaughtText(err)));
-    endProcess(1);
+    await exitAfterStdioDrain(1);
   }
 }
