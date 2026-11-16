@@ -2261,6 +2261,25 @@ describe("verax report", () => {
     assert.equal(existsSync(join(dir, "report.html")), false);
   });
 
+  it("n3. --out under a missing subdir reached through a state-dir symlink exits 64", async (t) => {
+    const real = await buildLedger();
+    const parent = mkdtempSync(join(tmpdir(), "verax-report-state-link-"));
+    const link = join(parent, "state-link");
+    try {
+      symlinkSync(real, link, process.platform === "win32" ? "junction" : "dir");
+    } catch (err) {
+      t.skip(`symlink not permitted on this platform: ${(err as NodeJS.ErrnoException).code}`);
+      return;
+    }
+    const target = join(link, "sub", "nested.html");
+    const c = capture();
+    const code = await runReport([link, "--from", FROM, "--to", TO, "--out", target], c.out);
+    assert.equal(code, EX_USAGE, c.text());
+    assert.match(c.text(), /state directory/);
+    assert.doesNotMatch(c.text(), /could not write/);
+    assert.equal(existsSync(join(real, "sub")), false, "must refuse before creating sub under the state dir");
+  });
+
   // -------------------------------------------------------------------------
   // Findings 10, 11, 13: exclusive write
   // -------------------------------------------------------------------------

@@ -691,17 +691,27 @@ export function writeOutExclusive(outPath: string, content: string, tempPath?: s
   }
 }
 
+/**
+ * Real path when the file exists. When it does not, walk up to the nearest
+ * existing ancestor, realpath that, and append the missing segments. One
+ * parent is not enough: a state directory reached through a symlink (macOS
+ * /var, or a junction) resolves, while `--out dir/sub/nested` may not, and
+ * comparing the unresolved path then misses "inside the state directory".
+ */
 function realOrResolved(path: string): string {
   const abs = resolve(path);
-  try {
-    return realpathSync(abs);
-  } catch {
-    // The file may not exist yet: resolve its parent.
-  }
-  try {
-    return join(realpathSync(dirname(abs)), basename(abs));
-  } catch {
-    return abs;
+  const missing: string[] = [];
+  let cur = abs;
+  for (;;) {
+    try {
+      const real = realpathSync(cur);
+      return missing.length === 0 ? real : join(real, ...missing);
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return abs;
+      missing.unshift(basename(cur));
+      cur = parent;
+    }
   }
 }
 
