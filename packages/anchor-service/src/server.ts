@@ -56,9 +56,10 @@ function sendAndClose(
     "content-type": "application/json",
     connection: "close",
   });
+  const socket = res.socket;
   res.end(text, () => {
-    res.socket?.destroy();
-    after?.(res.socket?.destroyed === true);
+    socket?.destroy();
+    after?.(socket?.destroyed === true);
   });
 }
 
