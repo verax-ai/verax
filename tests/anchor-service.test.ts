@@ -44,6 +44,7 @@ import {
   acquireStoreLock,
   storeLockPath,
   storeTakeoverGatePath,
+  WIN32_MKDIR_EPERM_TRIES,
 } from "../packages/anchor-service/src/store-lock.ts";
 import { pendingAnchors, registerCheckpoint, runAnchor } from "../packages/body/src/anchor-cli.ts";
 import { runVerify } from "../packages/body/src/verify-cli.ts";
@@ -3067,6 +3068,169 @@ describe("hosted anchor service", () => {
       const onDisk = JSON.parse(readFileSync(holder, "utf8")) as { token?: string };
       assert.equal(onDisk.token, "other-holder");
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("win32, mkdir throws EPERM twice and then succeeds: the lock is acquired", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-eperm-ok-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    let calls = 0;
+    const lock = acquireStoreLock(storePath, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      platform: "win32",
+      mkdirSync: (path, opts) => {
+        calls += 1;
+        if (calls <= 2) {
+          const err = new Error("EPERM: operation not permitted, mkdir") as NodeJS.ErrnoException;
+          err.code = "EPERM";
+          throw err;
+        }
+        return mkdirSync(path, opts);
+      },
+    });
+    try {
+      assert.equal(lock.stillHeld(), true);
+      assert.ok(calls >= 3);
+    } finally {
+      lock.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("win32, mkdir throws EPERM and then EEXIST: the result is contention, not a throw of EPERM", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-eperm-exist-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    const held = acquireStoreLock(storePath, { lockBeatMs: TEST_LOCK_BEAT_MS });
+    let calls = 0;
+    try {
+      assert.throws(
+        () =>
+          acquireStoreLock(storePath, {
+            lockBeatMs: TEST_LOCK_BEAT_MS,
+            platform: "win32",
+            mkdirSync: () => {
+              calls += 1;
+              if (calls === 1) {
+                const err = new Error("EPERM: operation not permitted, mkdir") as NodeJS.ErrnoException;
+                err.code = "EPERM";
+                throw err;
+              }
+              const err = new Error("EEXIST: file already exists, mkdir") as NodeJS.ErrnoException;
+              err.code = "EEXIST";
+              throw err;
+            },
+          }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal(err.message, `store already locked: ${storePath}`);
+          assert.ok(!/EPERM/.test(err.message));
+          return true;
+        },
+      );
+      assert.ok(calls >= 2);
+    } finally {
+      held.release();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("win32, mkdir always throws EPERM: EPERM is rethrown, and the number of tries is the bound", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-eperm-persist-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    let calls = 0;
+    try {
+      assert.throws(
+        () =>
+          acquireStoreLock(storePath, {
+            lockBeatMs: TEST_LOCK_BEAT_MS,
+            platform: "win32",
+            mkdirSync: () => {
+              calls += 1;
+              const err = new Error("EPERM: operation not permitted, mkdir") as NodeJS.ErrnoException;
+              err.code = "EPERM";
+              throw err;
+            },
+          }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal((err as NodeJS.ErrnoException).code, "EPERM");
+          return true;
+        },
+      );
+      assert.equal(calls, WIN32_MKDIR_EPERM_TRIES);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("linux, mkdir throws EPERM once: rethrown after exactly one try", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-eperm-linux-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    let calls = 0;
+    try {
+      assert.throws(
+        () =>
+          acquireStoreLock(storePath, {
+            lockBeatMs: TEST_LOCK_BEAT_MS,
+            platform: "linux",
+            mkdirSync: () => {
+              calls += 1;
+              const err = new Error("EPERM: operation not permitted, mkdir") as NodeJS.ErrnoException;
+              err.code = "EPERM";
+              throw err;
+            },
+          }),
+        (err: unknown) => {
+          assert.ok(err instanceof Error);
+          assert.equal((err as NodeJS.ErrnoException).code, "EPERM");
+          return true;
+        },
+      );
+      assert.equal(calls, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("win32, gate mkdir throws EPERM twice and then succeeds: the stale lock is taken over", () => {
+    const dir = mkdtempSync(join(tmpdir(), "verax-asvc-gate-eperm-"));
+    const storePath = join(dir, "store.jsonl");
+    writeFileSync(storePath, "", "utf8");
+    writeStaleStoreLock(storePath, {
+      pid: 2_147_483_646,
+      startedAt: Date.now() - 60_000,
+      token: "stale-gate-eperm",
+    });
+    const lockPath = storeLockPath(storePath);
+    const gatePath = storeTakeoverGatePath(storePath);
+    let gateCalls = 0;
+    const lock = acquireStoreLock(storePath, {
+      lockBeatMs: TEST_LOCK_BEAT_MS,
+      platform: "win32",
+      mkdirSync: (path, opts) => {
+        if (path === gatePath) {
+          gateCalls += 1;
+          if (gateCalls <= 2) {
+            const err = new Error("EPERM: operation not permitted, mkdir") as NodeJS.ErrnoException;
+            err.code = "EPERM";
+            throw err;
+          }
+        }
+        return mkdirSync(path, opts);
+      },
+    });
+    try {
+      assert.equal(lock.stillHeld(), true);
+      assert.ok(gateCalls >= 3);
+      assert.equal(existsSync(lockPath), true);
+      assert.equal(existsSync(gatePath), false);
+    } finally {
+      lock.release();
       rmSync(dir, { recursive: true, force: true });
     }
   });

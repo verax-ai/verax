@@ -21,8 +21,48 @@ import { lockBeatOf, lockState, type LockHolder } from "@verax-ai/proxy";
 /** Same default beat as the body's ledger.lock. */
 export const STORE_LOCK_BEAT_MS = 2000;
 
+/**
+ * On win32, mkdir of a path another process is removing can fail with EPERM
+ * until the removal finishes. Retry this many times (with a short wait) so a
+ * contender either creates the directory or sees EEXIST. Total wait stays
+ * well under one second. Other platforms never retry EPERM.
+ */
+export const WIN32_MKDIR_EPERM_TRIES = 20;
+const WIN32_MKDIR_EPERM_WAIT_MS = 25;
+
 /** Tokens of locks this process wrote for stores. */
 const ownTokens = new Set<string>();
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+type LockMkdirIo = {
+  platform: NodeJS.Platform;
+  mkdirSync: typeof mkdirSync;
+};
+
+/**
+ * Exclusive mkdir. Returns true when created, false on EEXIST. On win32 only,
+ * EPERM is retried up to WIN32_MKDIR_EPERM_TRIES; a lasting EPERM is rethrown.
+ */
+function mkdirExclusive(path: string, io: LockMkdirIo): boolean {
+  const maxTries = io.platform === "win32" ? WIN32_MKDIR_EPERM_TRIES : 1;
+  for (let tryNo = 1; ; tryNo += 1) {
+    try {
+      io.mkdirSync(path);
+      return true;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return false;
+      if (code === "EPERM" && io.platform === "win32" && tryNo < maxTries) {
+        sleepSync(WIN32_MKDIR_EPERM_WAIT_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
+}
 
 export function storeLockPath(storePath: string): string {
   return `${storePath}.lock`;
@@ -120,6 +160,16 @@ export type AcquireStoreLockOpts = {
    * callers omit this; it is never read from the environment.
    */
   pauseAt?: (point: TakeoverPausePoint) => void;
+  /**
+   * Test-only: platform string for win32 EPERM mkdir retry. Defaults to
+   * `process.platform`. Not a global patch.
+   */
+  platform?: NodeJS.Platform;
+  /**
+   * Test-only: substitute for mkdirSync used by lock and takeover-gate create.
+   * Defaults to `fs.mkdirSync`. Not exposed through the CLI.
+   */
+  mkdirSync?: typeof mkdirSync;
 };
 
 function lockedError(storePath: string): Error {
@@ -142,13 +192,8 @@ function lockExists(lockPath: string): boolean {
   }
 }
 
-function tryCreate(lockPath: string, body: string): boolean {
-  try {
-    mkdirSync(lockPath);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-    return false;
-  }
+function tryCreate(lockPath: string, body: string, io: LockMkdirIo): boolean {
+  if (!mkdirExclusive(lockPath, io)) return false;
   try {
     writeFileSync(holderPath(lockPath), body, { encoding: "utf8", flag: "wx", mode: 0o600 });
     return true;
@@ -196,14 +241,12 @@ function takeOverStale(
   storePath: string,
   judgedBytes: string,
   body: string,
+  io: LockMkdirIo,
   pauseAt?: (point: TakeoverPausePoint) => void,
 ): boolean {
   const gate = takeoverGatePath(lockPath);
   pauseAt?.("after-stale-before-gate");
-  try {
-    mkdirSync(gate);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+  if (!mkdirExclusive(gate, io)) {
     throw takeoverGatePresentError(storePath);
   }
   try {
@@ -215,7 +258,7 @@ function takeOverStale(
     // After the recheck and before removal: a second waiter must not be here.
     pauseAt?.("inside-gate-before-removal");
     rmSync(lockPath, { recursive: true, force: true });
-    return tryCreate(lockPath, body);
+    return tryCreate(lockPath, body, io);
   } finally {
     try {
       rmSync(gate, { recursive: true, force: true });
@@ -237,8 +280,12 @@ export function acquireStoreLock(storePath: string, opts?: AcquireStoreLockOpts)
     ...(bootId ? { bootId } : {}),
     beatMs,
   })}\n`;
+  const io: LockMkdirIo = {
+    platform: opts?.platform ?? process.platform,
+    mkdirSync: opts?.mkdirSync ?? mkdirSync,
+  };
 
-  if (!tryCreate(lockPath, body)) {
+  if (!tryCreate(lockPath, body, io)) {
     try {
       const st = lstatSync(lockPath);
       if (st.isFile() || st.isSymbolicLink()) {
@@ -251,17 +298,17 @@ export function acquireStoreLock(storePath: string, opts?: AcquireStoreLockOpts)
 
     const judgedBytes = readHolderBytes(lockPath);
     if (judgedBytes === null) {
-      if (!tryCreate(lockPath, body)) throw lockedError(storePath);
+      if (!tryCreate(lockPath, body, io)) throw lockedError(storePath);
     } else {
       const lock = parseHolder(judgedBytes);
       const state = lock ? judge(lockPath, lock) : null;
       if (state === "stale") {
         if (typeof lock?.token !== "string") throw lockedError(storePath);
-        if (!takeOverStale(lockPath, storePath, judgedBytes, body, opts?.pauseAt)) {
+        if (!takeOverStale(lockPath, storePath, judgedBytes, body, io, opts?.pauseAt)) {
           throw lockedError(storePath);
         }
       } else if (state === "gone" && !lockExists(lockPath)) {
-        if (!tryCreate(lockPath, body)) throw lockedError(storePath);
+        if (!tryCreate(lockPath, body, io)) throw lockedError(storePath);
       } else {
         throw lockedError(storePath);
       }
