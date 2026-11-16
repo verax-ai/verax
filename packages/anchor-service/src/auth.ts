@@ -5,16 +5,19 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+import { assertSecretFile, type AssertSecretFileOpts } from "./secret-file.ts";
+
 const HASH = /^[0-9a-f]{64}$/;
 
 export type TokenMap = Map<string, string>;
 
-export function loadTokenMap(path: string): TokenMap {
+export function loadTokenMap(path: string, secretOpts?: AssertSecretFileOpts): TokenMap {
+  assertSecretFile(path, "token map", secretOpts);
   let raw: unknown;
   try {
     raw = JSON.parse(readFileSync(path, "utf8"));
   } catch {
-    throw new Error(`cannot read token map ${path}`);
+    throw new Error(`cannot read token map`);
   }
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error(`token map ${path} must be a JSON object`);

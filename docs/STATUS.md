@@ -276,22 +276,46 @@ Service that speaks the same `POST /register` route the client already uses.
 It answers only callers that present a bearer token listed (by SHA-256 digest)
 in `VERAX_ANCHOR_SVC_TOKENS`. The service signs COSE receipts with the Ed25519
 key in `VERAX_ANCHOR_SVC_SIGNING_KEY` and appends leaf rows to
-`VERAX_ANCHOR_SVC_STORE`. A receipt names the time the service signed it
-(CWT `iat` in the protected header), so the hash was registered no later
-than that time by the service's clock; it does not show that the ledger is
-complete, and the operator still chooses what to send. `verax verify` does
-not print this time yet.
+`VERAX_ANCHOR_SVC_STORE`. A receipt's CWT `iat` (floored to the second) is
+when that receipt was signed. A repeated registration of the same checkpoint
+gets the time of the repeat, not of the first registration, and even a first
+registration can cross a second boundary between append and signing. The
+receipt shows the entry was in the log when it was signed, during that second;
+it does not show that the ledger is complete, and the operator still chooses
+what to send. `verax verify` does not print this time yet.
 
-Only one running service may hold a given store: start takes an exclusive
-lock beside the store file for the process lifetime, and a second start on
-the same path is refused. A lock left by a process that is no longer running
-is taken over (judged by the same beat / pid / start-time / boot rule as the
-body's `ledger.lock`). After any failed store append the service stops
-registering and answers `503` `store-unavailable` until restart, so a receipt
-is never issued from memory the store may not match. On start, a final store
-line with no terminating newline is treated as a torn write: it is dropped,
-the file is truncated to the last full line, and one line is written to
-stderr.
+Deployment condition: run exactly one instance per store on one host with one
+pid namespace and a local file system. Under that shape, start takes an
+exclusive lock directory beside the store for the process lifetime; a second
+start on the same path is refused; a quiet lock whose named process cannot
+still be the writer is taken over by at most one waiter (same beat / pid /
+start-time / boot rule as the body's `ledger.lock`). The lock is not a
+guarantee across shared volumes or foreign pid namespaces. The prev-hash chain
+on the store catches edits that leave indexes or later hashes inconsistent,
+and nothing else: someone who can write the store file and does not hold the
+signing key can remove a suffix, change the last row, or rewrite rows and
+recompute every index and prev hash; the loader accepts that and the service
+then signs a different tree at the same size. The same condition covers the
+path-identity check before append and before signing: on a volume that reports
+inode 0 for every file the comparison proves nothing, and a process that can
+rename in the store's directory can swap the path between the comparison and
+the write. Whoever can write the store's directory can defeat both. Treat the
+store file with the same protection as the signing key; receipts already handed
+out are the outside record of what was signed. After any failed store append, or after
+the process loses its lock, every later authenticated register answers `503`
+`store-unavailable` until restart (unknown tokens still `401`, unknown routes
+`404`), so that process will not sign from memory after a write it could not
+finish. On start, a final store line with no terminating newline is treated as
+a torn write: it is dropped, the kept prefix replaces the file, and one line
+is written to stderr. An interrupted recovery can leave a `.store-recovering`
+copy beside the store; the service never reads it, and the operator may delete
+it while the service is stopped. The service account must be able to open the
+store's directory for reading (the directory flush opens it), so a
+write-and-search-only parent directory is not supported. Configured HTTP bounds
+(`headersTimeout`, `requestTimeout`, `keepAliveTimeout`, and the connection
+idle timer) are lower bounds on when a connection is cut, not exact limits:
+Node adds a keep-alive buffer of about one second to `keepAliveTimeout`, and
+header and request expiry are checked on an interval.
 
 `verax anchor … --token-file <file>` and `verax witness` with
 `VERAX_ANCHOR_TOKEN_FILE` send that file's content as `Authorization: Bearer …`

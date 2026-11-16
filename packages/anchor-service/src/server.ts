@@ -11,7 +11,13 @@ import { bearerToken, ownerForToken } from "./auth.ts";
 import type { ServiceConfig } from "./config.ts";
 import { RateLimiter } from "./rate.ts";
 import { issueReceipt } from "./receipt.ts";
-import { appendStore, loadStore, type StoreRow } from "./store.ts";
+import {
+  openStore,
+  StoreUnavailableError,
+  type OpenStore,
+  type OpenStoreOpts,
+  type StoreRow,
+} from "./store.ts";
 import { acquireStoreLock, type StoreLock } from "./store-lock.ts";
 import type { MerkleLog } from "./merkle.ts";
 
@@ -39,43 +45,76 @@ function send(res: ServerResponse, status: number, body?: unknown): void {
 }
 
 /** Answer and close the connection so the client cannot keep streaming. */
-function sendAndClose(res: ServerResponse, status: number, body: unknown): void {
+function sendAndClose(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  after?: (socketDestroyed: boolean) => void,
+): void {
   const text = JSON.stringify(body);
   res.writeHead(status, {
     "content-type": "application/json",
     connection: "close",
   });
+  const socket = res.socket;
   res.end(text, () => {
-    res.socket?.destroy();
+    socket?.destroy();
+    after?.(socket?.destroyed === true);
   });
 }
 
-function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
+/** Early refusal before a body is consumed: always ends the TCP connection. */
+function refuseEarly(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  after?: (socketDestroyed: boolean) => void,
+): void {
+  sendAndClose(res, status, body, after);
+}
+
+// Body bound: this timer. On expiry the handler answers 408
+// {"error":"request-timeout"} through sendAndClose and closes the socket.
+// Node's requestTimeout and the connection idle timer only tear the socket
+// down (the client sees a hang-up), so they are not a substitute for a stalled
+// body after auth. Destroying the request here would duplicate that close and
+// is not held by any test.
+function readBody(req: IncomingMessage, max: number, timeoutMs: number): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("body-timeout"));
+    }, timeoutMs);
+    const ok = (buf: Buffer): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(buf);
+    };
+    const fail = (err: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    };
     req.on("data", (chunk: Buffer) => {
       if (settled) return;
       size += chunk.length;
       if (size > max) {
-        settled = true;
-        reject(new Error("body-too-large"));
+        fail(new Error("body-too-large"));
         return;
       }
       chunks.push(chunk);
     });
     req.on("end", () => {
-      if (!settled) {
-        settled = true;
-        resolve(Buffer.concat(chunks));
-      }
+      ok(Buffer.concat(chunks));
     });
     req.on("error", (err) => {
-      if (!settled) {
-        settled = true;
-        reject(err);
-      }
+      fail(err);
     });
   });
 }
@@ -88,7 +127,27 @@ function contentTypeOk(header: string | undefined): boolean {
 
 export async function startService(
   config: ServiceConfig,
-  options?: { appendRow?: AppendRow; lockBeatMs?: number },
+  options?: {
+    appendRow?: AppendRow;
+    lockBeatMs?: number;
+    openStore?: OpenStoreOpts;
+    /** Test-only: after auth and the first lock check, before the body is read. */
+    afterAuthBeforeBody?: () => void | Promise<void>;
+    /** Test-only: called after sendAndClose finishes its end callback. */
+    afterSendAndClose?: (socketDestroyed: boolean) => void;
+    /**
+     * Test-only: body read timer in milliseconds. Defaults to
+     * `config.requestTimeoutMs`. Use a value far from `requestTimeout` /
+     * `headersTimeout` so each bound can be held alone.
+     */
+    bodyTimeoutMs?: number;
+    /**
+     * Test-only: connection idle timer in milliseconds. Defaults to
+     * `config.headersTimeoutMs`. Keep Node's `headersTimeout` larger in tests
+     * so only `socket.setTimeout` holds the slow-header cut.
+     */
+    connectionIdleTimeoutMs?: number;
+  },
 ): Promise<RunningService> {
   let lock: StoreLock;
   try {
@@ -96,50 +155,93 @@ export async function startService(
   } catch (err) {
     throw new Error(err instanceof Error ? err.message : String(err));
   }
-  let log: MerkleLog;
+  let store: OpenStore;
   try {
-    log = loadStore(config.storePath);
+    store = openStore(config.storePath, options?.openStore);
   } catch (err) {
     lock.release();
     throw new Error(err instanceof Error ? err.message : String(err));
   }
+  const log: MerkleLog = store.log;
   const rate = new RateLimiter(config.ratePerMinute);
-  const writeRow = options?.appendRow ?? appendStore;
+  const writeRow = options?.appendRow ?? ((_path: string, row: StoreRow) => store.append(row));
+  // stillHeld() already latches lost on the lock; every authenticated path
+  // checks it (and sets storeUnavailable). A separate onLost → storeUnavailable
+  // latch cannot fail alone, so it is not registered.
   let storeUnavailable = false;
+  const afterAuthBeforeBody = options?.afterAuthBeforeBody;
+  const afterSendAndClose = options?.afterSendAndClose;
+  const bodyTimeoutMs = options?.bodyTimeoutMs ?? config.requestTimeoutMs;
+  const connectionIdleTimeoutMs = options?.connectionIdleTimeoutMs ?? config.headersTimeoutMs;
 
   const server = createServer((req, res) => {
     void handle(req, res);
+  });
+  // headersTimeout must be set for requestTimeout to take effect under Node's
+  // connections checker (default headersTimeout is 60s and then a short
+  // requestTimeout does not cut). Partial-header clients are still cut by the
+  // connection socket timer below — headersTimeout alone does not hold that
+  // path under these intervals. Slow bodies after auth are held by readBody.
+  server.headersTimeout = config.headersTimeoutMs;
+  server.requestTimeout = config.requestTimeoutMs;
+  server.keepAliveTimeout = config.keepAliveTimeoutMs;
+  server.maxConnections = config.maxConnections;
+  // Present on Node's HTTP server; not yet in the published type definitions.
+  (server as Server & { connectionsCheckingInterval: number }).connectionsCheckingInterval = Math.max(
+    50,
+    Math.min(1_000, Math.floor(config.headersTimeoutMs / 2)),
+  );
+  // Connection-level timer: cuts sockets that never finish headers.
+  // Node's headersTimeout can emit "Request timeout" on the same bound and on
+  // this platform sometimes closes the server socket without the client seeing
+  // a cut inside the test window — keep headersTimeout larger in the slow-header
+  // test and arm this idle timer alone via connectionIdleTimeoutMs.
+  server.on("connection", (socket) => {
+    socket.setTimeout(connectionIdleTimeoutMs);
+    socket.once("timeout", () => {
+      socket.destroy();
+    });
   });
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     try {
       if (req.method !== "POST" || req.url !== "/register") {
-        send(res, 404, { error: "not-found" });
+        refuseEarly(res, 404, { error: "not-found" });
         return;
       }
       const token = bearerToken(req.headers.authorization);
       if (token === null) {
-        send(res, 401, { error: "unauthorized" });
+        refuseEarly(res, 401, { error: "unauthorized" });
         return;
       }
       const ownerId = ownerForToken(token, config.tokens);
       if (ownerId === null) {
-        send(res, 401, { error: "unauthorized" });
+        refuseEarly(res, 401, { error: "unauthorized" });
         return;
       }
-      if (storeUnavailable) {
-        send(res, 503, { error: "store-unavailable" });
+      if (storeUnavailable || !lock.stillHeld()) {
+        storeUnavailable = true;
+        refuseEarly(res, 503, { error: "store-unavailable" });
         return;
       }
       if (!contentTypeOk(req.headers["content-type"])) {
-        send(res, 400, { error: "bad-content-type" });
+        // 415 would be more precise; keep 400 for the existing client contract.
+        refuseEarly(res, 400, { error: "bad-content-type" });
         return;
       }
+      if (afterAuthBeforeBody) await afterAuthBeforeBody();
       let body: Buffer;
       try {
-        body = await readBody(req, MAX_BODY);
-      } catch {
-        sendAndClose(res, 400, { error: "body-too-large" });
+        body = await readBody(req, MAX_BODY, bodyTimeoutMs);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
+        if (msg === "body-too-large") {
+          sendAndClose(res, 413, { error: "body-too-large" }, afterSendAndClose);
+        } else if (msg === "body-timeout") {
+          sendAndClose(res, 408, { error: "request-timeout" }, afterSendAndClose);
+        } else {
+          sendAndClose(res, 400, { error: "bad-body" }, afterSendAndClose);
+        }
         return;
       }
       let parsed: unknown;
@@ -163,15 +265,27 @@ export async function startService(
         return;
       }
 
+      // Re-check after the body: another request may have latched the store, or
+      // the lock may have been lost while this request was reading.
+      if (storeUnavailable || !lock.stillHeld()) {
+        storeUnavailable = true;
+        send(res, 503, { error: "store-unavailable" });
+        return;
+      }
+
       const entryHash = anchorEntryHash(capsuleId, "register");
       let leafIndex = log.findLeaf(ownerId, entryHash);
       if (leafIndex < 0) {
         const atMs = Date.now();
         try {
           writeRow(config.storePath, { leaf_hash: entryHash, owner_id: ownerId, at_ms: atMs });
-        } catch {
+        } catch (err) {
           storeUnavailable = true;
-          send(res, 500, { error: "internal" });
+          if (err instanceof StoreUnavailableError) {
+            send(res, 503, { error: "store-unavailable" });
+          } else {
+            send(res, 500, { error: "internal" });
+          }
           return;
         }
         leafIndex = log.append({
@@ -179,6 +293,24 @@ export async function startService(
           ownerId,
           atMs,
         });
+      }
+      // Before any signature: path must still name the open store, for new and
+      // existing leaves (existing leaves never call append, so its check alone
+      // would miss a removed or replaced path). Identity may latch; the check
+      // below is the second moment after the body.
+      try {
+        store.assertPathIdentity();
+      } catch (err) {
+        storeUnavailable = true;
+        if (!(err instanceof StoreUnavailableError)) {
+          send(res, 500, { error: "internal" });
+          return;
+        }
+      }
+      if (storeUnavailable || !lock.stillHeld()) {
+        storeUnavailable = true;
+        send(res, 503, { error: "store-unavailable" });
+        return;
       }
       rate.record(ownerId);
       const issued = issueReceipt(log, leafIndex, config.privateKeyPem);
@@ -218,6 +350,11 @@ export async function startService(
     close: () =>
       new Promise((resolve, reject) => {
         server.close((err) => {
+          try {
+            store.close();
+          } catch {
+            // Still release the lock.
+          }
           lock.release();
           if (err) reject(err);
           else resolve();
