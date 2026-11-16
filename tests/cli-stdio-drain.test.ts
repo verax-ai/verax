@@ -15,6 +15,7 @@ import { createProxy, FileLedger, loadPolicy } from "@verax-ai/proxy";
 
 import { loadOrCreateSigners } from "../packages/body/src/keys.ts";
 import { persistPolicySnapshot } from "../packages/body/src/policy-store.ts";
+import { skipIfElevated } from "./elevated-refusal.ts";
 
 const cli = join(dirname(fileURLToPath(import.meta.url)), "..", "packages", "body", "src", "cli.ts");
 
@@ -71,7 +72,8 @@ function spawnCli(args: string[]): Promise<{ status: number | null; stdout: Buff
 }
 
 describe("CLI stdio drain before exit", () => {
-  it("n2. report --json over 200 KB through a pipe is complete parseable JSON", async () => {
+  it("n2. report --json over 200 KB through a pipe is complete parseable JSON", async (t) => {
+    if (skipIfElevated(t)) return;
     const dir = await largeReportLedger();
     try {
       const ran = await spawnCli(["report", dir, "--from", FROM, "--to", TO, "--json"]);
