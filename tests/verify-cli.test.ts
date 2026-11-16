@@ -102,8 +102,19 @@ describe("verax verify", () => {
     const y = yakala();
     const kod = await runVerify([mkdtempSync(join(tmpdir(), "verax-verify-n1-fail-")), "--json"], y.out);
     assert.equal(kod, 1, y.metin());
-    const j = JSON.parse(y.metin()) as Record<string, unknown>;
+    const j = JSON.parse(y.metin()) as {
+      ok: boolean;
+      trust: { source: string };
+      problems: string[];
+      effectCompleteness: string;
+    };
     assert.equal(j.ok, false);
+    assert.equal(j.trust.source, "none");
+    assert.ok(
+      j.problems.some((p) => /no decisions found/i.test(p)),
+      y.metin(),
+    );
+    assert.equal(j.effectCompleteness, "effect completeness was not checked");
     assert.equal("attestedDecisions" in j, false, "attestedDecisions must not be a top-level --json key");
     assert.equal("attestedCheckpoints" in j, false, "attestedCheckpoints must not be a top-level --json key");
   });
