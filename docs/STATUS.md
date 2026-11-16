@@ -734,51 +734,78 @@ Guards: `anchor-scrapi`, `signed-statement`, `ccf-receipt`.
 `verax report <stateDir> --from <YYYY-MM-DD> --to <YYYY-MM-DD>`
 reads a ledger directory the same way `verax verify` does: offline, with no
 body running and nothing on the network. The window is
-`[from 00:00:00Z, to+1 day 00:00:00Z)`. It counts decisions in that window
-(allow, deny, defer, in total and per tool name), held calls from signed
-defer records whose hold time falls in the window (approved when a signed
-allow answers the defer, with or without an operator signature as the
-signed inputs show; closed without an allow when a signed record refuses
-it, expired or otherwise; and still held when no signed answer exists), and
+`[from 00:00:00Z, to+1 day 00:00:00Z)`; the `to` day is included in full.
+Counts come only from the decision records and checkpoints that
+`verax verify` attested, and only when the ledger verifies. When it does
+not, every count is `null` (JSON, HTML and text say so with the
+verification problem classes); unverified material is never counted. It
+counts attested decisions in the window (allow, deny, defer, in total and
+per tool name, with records that have no usable subject counted beside
+the per-tool table so those numbers plus that field equal the totals),
+held calls from attested defer records whose hold time
+falls in the window (approved when the first terminal signed bound answer
+after the defer in chain order names it and agrees on request hash and
+tool and is an allow; closed without an allow when that first answer is a
+deny, expired or otherwise; still held when no signed bound answer exists
+and no later unbound record could have answered it; when a held defer
+could have been answered by an unbound record anywhere after it in chain
+order, `stillHeld` is not established and the report says how many held
+records an unbound inputs row could have answered; unmatched when the
+defer has no usable reference, shares its reference with another defer,
+or its only bound answers disagree on request hash or tool), and attested
 checkpoints whose coverage overlaps the window under the same
-`[startMs, endMs)` rule the ledger uses, including how many of those have
-an anchor row. `approvals.jsonl` may be read for candidates but is never
-the source of a count. It also carries the verification verdict
-`verax verify` would give for the whole ledger, naming each problem by its
-stable class only (a short fixed phrase of lower-case letters, digits,
-spaces and hyphens, at most 60 characters, or else `unclassified`; run
+`[startMs, endMs)` rule with `start < end`.
+The report verifies with default options only: it does not accept key
+pins, `--operator-credentials`, `--require-anchored`, `--anchor-key` or
+`--require-signed-starts`, so anchor rows are only counted as present and
+not checked. A signature field present on an approving record is reported
+as a field present, not as a verified operator signature.
+`approvals.jsonl` may be noted when malformed but never changes the
+verdict or any count. The verdict is only what `verax verify` would give
+for the whole ledger under those default options, naming each problem by
+its stable class only (a known class prefix from the verifier's problem
+strings, matched before a space, a colon or the end, or else
+`unclassified`; ledger refs and other detail are not the class; run
 `verax verify` on the machine for the detail), the first and last record
-time in the window, the record count, and the ledger head hash at read
-time. The ledger directory path does not appear in the JSON, HTML or text
-form; the same ledger reached by a relative path, an absolute path or a
-copy in another directory yields the same JSON and digest. `--json`
-prints one object with a fixed key order and no generation timestamp;
-`--out <file.html>` writes one self-contained HTML file through an
-exclusive create (refusing to overwrite) via a temporary file in the same
-directory, and ends with the SHA-256 of that JSON form. Without either
-flag it prints a short plain-text summary and the digest. Exit code is 0
-when the ledger verifies and the same non-zero code `verax verify` uses
-when it does not; the report is still written and names the verdict at
-the top. A corrupt ledger manifest, a malformed `approvals.jsonl` line, or
-an unreadable anchors file still produces the report, marks the ledger as
-not verifying, names the failure class, and exits with that verify-failed
-code (no stack trace on stderr). Usage errors (unknown option, malformed
-dates, `--from` after `--to`, overwrite) exit 64.
+time in the window, the record count, and the ledger head hash when the
+ledger verifies. The ledger directory path does not appear in the JSON,
+HTML or text form; the same ledger reached by a relative path, an absolute
+path or a copy in another directory yields the same JSON and digest.
+`--json` prints one object with a fixed key order and no generation
+timestamp; the digest is SHA-256 of those same display-safe JSON bytes
+(bidi, combining and control characters escaped). `--out <file.html>`
+writes one self-contained HTML file through an exclusive create (random
+temporary name, hard link into place, refusing to overwrite) and refuses
+any path inside the state directory; success and refusal messages print
+the base name only. Without either flag it prints a short plain-text
+summary and the digest. Exit code is 0 when the ledger verifies and the
+same non-zero code `verax verify` uses when it does not (including an
+unreadable state directory, which still yields a report that says NOT
+VERIFIED with a fixed problem class and no path). A corrupt ledger
+manifest or an unreadable anchors file still produces the report with
+null counts, marks the ledger as not verifying, and exits with that
+verify-failed code (no stack trace on stderr). Usage errors (unknown
+option, malformed dates, `--from` after `--to`, overwrite, `--out` inside
+the state directory) exit 64.
 
 What it does not show. It counts what is in the ledger. A call that never
 passed through the gate is not in it. A count is not a judgement that a
-decision was right. A held call is a signed defer counted by the time it
-was held; it is approved when a signed allow answers it, closed without an
-allow when a signed record refuses it (expired or otherwise), and still
-held when no signed answer exists. `approvals.jsonl` is not the source of
-a count. A checkpoint is counted when its coverage overlaps the window
-under the same `[startMs, endMs)` rule the ledger uses. The report does
-not name the ledger directory. Verification problems are named by class
-only; run `verax verify` on the machine for the detail. A ledger that
-cannot be read still yields a report that says it does not verify.
-Argument values, payee names, amounts, prompts and operator names do not
-appear; tool names and counts only. Operator identity appears only as the
-hash the ledger already holds.
+decision was right. Counts are taken only from records and checkpoints
+that verification attested, and only when the ledger verifies; when it
+does not, every count is null. A held call is a signed defer counted by
+the time it was held, matched only by a later terminal bound answer that
+agrees on request hash and tool; when a held defer could have been
+answered by an unbound record anywhere after it, still held is not
+established. `approvals.jsonl` is not the source of a count and does not
+change the verdict. A checkpoint is
+counted when its coverage overlaps the window under the same
+`[startMs, endMs)` rule with `start < end`. The report does not name the
+ledger directory. Verification problems are named by class only; run
+`verax verify` on the machine for the detail. A ledger that cannot be
+read still yields a report that says it does not verify. Argument values,
+payee names, amounts, prompts and operator names do not appear; tool
+names and counts only. Operator identity appears only as the hash the
+ledger already holds.
 
 Guards: `report`.
 

@@ -146,6 +146,140 @@ export function verdictLine(
   return "VERIFIED";
 }
 
+export type CompletedVerify = {
+  result: VerifyResult;
+  approval: ApprovalSignatureReport;
+  control: ControlSignatureReport;
+  starts: StartSummary;
+  verdict: string;
+};
+
+export type CompleteVerifyOptions = {
+  credentialsFile?: string;
+  requireSignedStarts?: boolean;
+  /** When set, start rows are checked under this pinned record key. */
+  pinnedPublicKeyPem?: string;
+  /**
+   * How to name a thrown error as a problem line. `verax verify` keeps the
+   * raw message; `verax report` maps to a short class.
+   */
+  problemFromThrown?: (err: unknown, fallback: string) => string;
+  /**
+   * When true, a throw from reading starts becomes a problem on the result
+   * instead of escaping. The report uses this; verify lets it throw.
+   */
+  catchStartErrors?: boolean;
+};
+
+function defaultProblemFromThrown(err: unknown, fallback: string): string {
+  return err instanceof Error ? err.message : fallback;
+}
+
+/**
+ * Approval signatures, control signatures and the start summary, folded into
+ * `result.ok` / `problems`, then the verdict line. Both `verax verify` and
+ * `verax report` call this so a change to one path cannot leave the other
+ * behind with every test still green.
+ */
+export async function completeVerify(
+  dir: string,
+  result: VerifyResult,
+  opts: CompleteVerifyOptions = {},
+): Promise<CompletedVerify> {
+  const problemFromThrown = opts.problemFromThrown ?? defaultProblemFromThrown;
+  let next = result;
+
+  let approval: ApprovalSignatureReport;
+  try {
+    approval = await verifyApprovalSignatures(dir, opts.credentialsFile ? { credentialsFile: opts.credentialsFile } : {});
+  } catch (err) {
+    const problem = problemFromThrown(err, "approval signatures could not be read");
+    approval = { ...APPROVAL_NOT_CHECKED, ok: false, trustNote: problem };
+    next = { ...next, ok: false, problems: [...next.problems, problem] };
+  }
+  if (approval.signedFailed > 0) {
+    next = {
+      ...next,
+      ok: false,
+      problems: [...next.problems, `approval signatures: ${approval.signedFailed} did not verify`],
+    };
+  }
+  if (approval.signedAfterRemoval > 0) {
+    next = {
+      ...next,
+      ok: false,
+      problems: [...next.problems, `approval signatures: ${approval.signedAfterRemoval} signed after removal`],
+    };
+  }
+
+  let control: ControlSignatureReport;
+  try {
+    control = await verifyControlSignatures(dir, opts.credentialsFile ? { credentialsFile: opts.credentialsFile } : {});
+  } catch (err) {
+    const problem = problemFromThrown(err, "control signatures could not be read");
+    control = { ...CONTROL_NOT_CHECKED, ok: false, trustNote: problem };
+    next = { ...next, ok: false, problems: [...next.problems, problem] };
+  }
+  if (control.signedFailed > 0) {
+    next = {
+      ...next,
+      ok: false,
+      problems: [...next.problems, `control signatures: ${control.signedFailed} did not verify`],
+    };
+  }
+  if (control.signedAfterRemoval > 0) {
+    next = {
+      ...next,
+      ok: false,
+      problems: [...next.problems, `control signatures: ${control.signedAfterRemoval} signed after removal`],
+    };
+  }
+
+  const startKeyPem = opts.pinnedPublicKeyPem ?? next.trust.publicKeyPem ?? null;
+  const startTrust = opts.pinnedPublicKeyPem ? "pinned" : "in-ledger";
+  let starts: StartSummary;
+  if (opts.catchStartErrors) {
+    try {
+      starts = readStartSummary(dir, startKeyPem, startTrust, {
+        requireSigned: opts.requireSignedStarts === true,
+      });
+      if (starts.problems.length > 0) {
+        next = { ...next, ok: false, problems: [...next.problems, ...starts.problems] };
+      }
+    } catch (err) {
+      const problem = problemFromThrown(err, "start-summary-unreadable");
+      next = { ...next, ok: false, problems: [...next.problems, problem] };
+      starts = {
+        count: 0,
+        largestGapMs: null,
+        missingPreviousBeat: [],
+        unsigned: false,
+        signed: 0,
+        signedVerified: 0,
+        startKey: startKeyPem ? startTrust : "none",
+        problems: [problem],
+        warnings: [],
+        downstream: [],
+      };
+    }
+  } else {
+    starts = readStartSummary(dir, startKeyPem, startTrust, {
+      requireSigned: opts.requireSignedStarts === true,
+    });
+    if (starts.problems.length > 0) {
+      next = { ...next, ok: false, problems: [...next.problems, ...starts.problems] };
+    }
+  }
+
+  return {
+    result: next,
+    approval,
+    control,
+    starts,
+    verdict: verdictLine(next, approval, control),
+  };
+}
+
 export function renderVerify(
   r: VerifyResult,
   approval: ApprovalSignatureReport = APPROVAL_NOT_CHECKED,
@@ -411,69 +545,42 @@ export async function runVerify(
       inputs: { line: "inputs: not checked", matched: 0, missing: 0, mismatched: 0 },
       anchors: { line: "anchors: not checked", receipts: 0, verified: 0, checked: false },
       problems: [problem],
+      attestedDecisions: [],
+      attestedCheckpoints: [],
     };
     const starts = readStartSummary(dir, publicKeyPem ?? null, publicKeyPem ? "pinned" : "none", {
       requireSigned: requireSignedStarts,
     });
-    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
+    // attested* stay on the in-process result for report; --json matches main.
+    const { attestedDecisions: _ad, attestedCheckpoints: _ac, ...failedPublic } = failed;
+    const failedReport = {
+      ...failedPublic,
+      approvalSignatures: APPROVAL_NOT_CHECKED,
+      controlSignatures: CONTROL_NOT_CHECKED,
+      starts,
+    };
     // Human lines are escaped in renderVerify. JSON keeps the breaks it wrote.
     out(json ? terminalLines(JSON.stringify(failedReport, null, 2)) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
     return EX_VERIFY_FAILED;
   }
-  let approval: ApprovalSignatureReport;
-  try {
-    approval = await verifyApprovalSignatures(dir, credentialsFile ? { credentialsFile } : {});
-  } catch (err) {
-    const problem = err instanceof Error ? err.message : "approval signatures could not be read";
-    approval = { ...APPROVAL_NOT_CHECKED, ok: false, trustNote: problem };
-    result = { ...result, ok: false, problems: [...result.problems, problem] };
-  }
-  if (approval.signedFailed > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `approval signatures: ${approval.signedFailed} did not verify`],
-    };
-  }
-  if (approval.signedAfterRemoval > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `approval signatures: ${approval.signedAfterRemoval} signed after removal`],
-    };
-  }
-  let control: ControlSignatureReport;
-  try {
-    control = await verifyControlSignatures(dir, credentialsFile ? { credentialsFile } : {});
-  } catch (err) {
-    const problem = err instanceof Error ? err.message : "control signatures could not be read";
-    control = { ...CONTROL_NOT_CHECKED, ok: false, trustNote: problem };
-    result = { ...result, ok: false, problems: [...result.problems, problem] };
-  }
-  if (control.signedFailed > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `control signatures: ${control.signedFailed} did not verify`],
-    };
-  }
-  if (control.signedAfterRemoval > 0) {
-    result = {
-      ...result,
-      ok: false,
-      problems: [...result.problems, `control signatures: ${control.signedAfterRemoval} signed after removal`],
-    };
-  }
-  // Start rows are signed by the record key: the pinned one, else the one the records carry.
-  const startKeyPem = publicKeyPem ?? result.trust.publicKeyPem ?? null;
-  const starts = readStartSummary(dir, startKeyPem, publicKeyPem ? "pinned" : "in-ledger", {
-    requireSigned: requireSignedStarts,
+  const completed = await completeVerify(dir, result, {
+    ...(credentialsFile ? { credentialsFile } : {}),
+    requireSignedStarts,
+    ...(publicKeyPem ? { pinnedPublicKeyPem: publicKeyPem } : {}),
   });
-  if (starts.problems.length > 0) {
-    result = { ...result, ok: false, problems: [...result.problems, ...starts.problems] };
-  }
-  const reported = { ...result, approvalSignatures: approval, controlSignatures: control, starts };
+  // attested* stay on completed.result for report; --json matches main.
+  const { attestedDecisions: _ad, attestedCheckpoints: _ac, ...publicResult } = completed.result;
+  const reported = {
+    ...publicResult,
+    approvalSignatures: completed.approval,
+    controlSignatures: completed.control,
+    starts: completed.starts,
+  };
   // Human lines are escaped in renderVerify. JSON keeps the breaks it wrote.
-  out(json ? terminalLines(JSON.stringify(reported, null, 2)) : renderVerify(reported, approval, control, reported.starts));
-  return reported.ok ? 0 : EX_VERIFY_FAILED;
+  out(
+    json
+      ? terminalLines(JSON.stringify(reported, null, 2))
+      : renderVerify(completed.result, completed.approval, completed.control, completed.starts),
+  );
+  return completed.result.ok ? 0 : EX_VERIFY_FAILED;
 }
