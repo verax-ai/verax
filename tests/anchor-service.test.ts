@@ -709,12 +709,12 @@ describe("hosted anchor service", () => {
       onCut: (info: { kind: "hangup" | "status"; status?: number; body?: string; elapsedMs: number }) => void,
     ): { req: ReturnType<typeof httpRequest>; stopTrickle: () => void } => {
       const url = new URL(serviceUrl);
-      const t0 = Date.now();
+      const t0 = performance.now();
       let settled = false;
       const finish = (info: { kind: "hangup" | "status"; status?: number; body?: string }): void => {
         if (settled) return;
         settled = true;
-        onCut({ ...info, elapsedMs: Date.now() - t0 });
+        onCut({ ...info, elapsedMs: Math.round(performance.now() - t0) });
       };
       const req = httpRequest(
         {
@@ -2792,7 +2792,7 @@ describe("hosted anchor service", () => {
       VERAX_ANCHOR_SVC_PORT: "0",
     });
     let failNext = false;
-    let stalled: (() => void) | null = null;
+    const stall: { release: (() => void) | null } = { release: null };
     let phase = 0;
     const service = await startService(config, {
       lockBeatMs: TEST_LOCK_BEAT_MS,
@@ -2803,7 +2803,7 @@ describe("hosted anchor service", () => {
       afterAuthBeforeBody: async () => {
         if (phase++ !== 0) return;
         await new Promise<void>((resolve) => {
-          stalled = resolve;
+          stall.release = resolve;
         });
       },
     });
@@ -2818,10 +2818,10 @@ describe("hosted anchor service", () => {
         body: JSON.stringify({ capsule_id: "a1".repeat(32) }),
       });
       const deadline = Date.now() + 5_000;
-      while (stalled === null && Date.now() < deadline) {
+      while (stall.release === null && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      assert.ok(stalled, "expected request A to stall after auth");
+      assert.ok(stall.release, "expected request A to stall after auth");
       failNext = true;
       const b = await fetch(`${service.url}/register`, {
         method: "POST",
@@ -2833,7 +2833,7 @@ describe("hosted anchor service", () => {
       });
       assert.equal(b.status, 500);
       failNext = false;
-      stalled();
+      stall.release();
       const a = await aPromise;
       assert.equal(a.status, 503);
       assert.deepEqual(await a.json(), { error: "store-unavailable" });
@@ -2869,7 +2869,7 @@ describe("hosted anchor service", () => {
       await seeded.close();
     }
     let failNext = false;
-    let stalled: (() => void) | null = null;
+    const stall: { release: (() => void) | null } = { release: null };
     let phase = 0;
     const service = await startService(config, {
       lockBeatMs: TEST_LOCK_BEAT_MS,
@@ -2880,7 +2880,7 @@ describe("hosted anchor service", () => {
       afterAuthBeforeBody: async () => {
         if (phase++ !== 0) return;
         await new Promise<void>((resolve) => {
-          stalled = resolve;
+          stall.release = resolve;
         });
       },
     });
@@ -2894,10 +2894,10 @@ describe("hosted anchor service", () => {
         body: JSON.stringify({ capsule_id: "aa".repeat(32) }),
       });
       const deadline = Date.now() + 5_000;
-      while (stalled === null && Date.now() < deadline) {
+      while (stall.release === null && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 10));
       }
-      assert.ok(stalled, "expected duplicate request to stall after auth");
+      assert.ok(stall.release, "expected duplicate request to stall after auth");
       failNext = true;
       const b = await fetch(`${service.url}/register`, {
         method: "POST",
@@ -2909,7 +2909,7 @@ describe("hosted anchor service", () => {
       });
       assert.equal(b.status, 500);
       failNext = false;
-      stalled();
+      stall.release();
       const a = await aPromise;
       assert.equal(a.status, 503);
       assert.deepEqual(await a.json(), { error: "store-unavailable" });
