@@ -551,7 +551,14 @@ export async function runVerify(
     const starts = readStartSummary(dir, publicKeyPem ?? null, publicKeyPem ? "pinned" : "none", {
       requireSigned: requireSignedStarts,
     });
-    const failedReport = { ...failed, approvalSignatures: APPROVAL_NOT_CHECKED, controlSignatures: CONTROL_NOT_CHECKED, starts };
+    // attested* stay on the in-process result for report; --json matches main.
+    const { attestedDecisions: _ad, attestedCheckpoints: _ac, ...failedPublic } = failed;
+    const failedReport = {
+      ...failedPublic,
+      approvalSignatures: APPROVAL_NOT_CHECKED,
+      controlSignatures: CONTROL_NOT_CHECKED,
+      starts,
+    };
     // Human lines are escaped in renderVerify. JSON keeps the breaks it wrote.
     out(json ? terminalLines(JSON.stringify(failedReport, null, 2)) : renderVerify(failed, APPROVAL_NOT_CHECKED, CONTROL_NOT_CHECKED, starts));
     return EX_VERIFY_FAILED;
@@ -561,8 +568,10 @@ export async function runVerify(
     requireSignedStarts,
     ...(publicKeyPem ? { pinnedPublicKeyPem: publicKeyPem } : {}),
   });
+  // attested* stay on completed.result for report; --json matches main.
+  const { attestedDecisions: _ad, attestedCheckpoints: _ac, ...publicResult } = completed.result;
   const reported = {
-    ...completed.result,
+    ...publicResult,
     approvalSignatures: completed.approval,
     controlSignatures: completed.control,
     starts: completed.starts,
@@ -571,7 +580,7 @@ export async function runVerify(
   out(
     json
       ? terminalLines(JSON.stringify(reported, null, 2))
-      : renderVerify(reported, completed.approval, completed.control, completed.starts),
+      : renderVerify(completed.result, completed.approval, completed.control, completed.starts),
   );
-  return reported.ok ? 0 : EX_VERIFY_FAILED;
+  return completed.result.ok ? 0 : EX_VERIFY_FAILED;
 }

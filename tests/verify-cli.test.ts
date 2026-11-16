@@ -88,6 +88,26 @@ describe("verax verify", () => {
     assert.equal(j.trust.source, "in-ledger");
   });
 
+  it("n1. verify --json omits attestedDecisions and attestedCheckpoints on a ledger with records", async () => {
+    const y = yakala();
+    const kod = await runVerify([kopyala(), "--json"], y.out);
+    assert.equal(kod, 0, y.metin());
+    const j = JSON.parse(y.metin()) as Record<string, unknown>;
+    assert.ok(typeof j.decisions === "number" && (j.decisions as number) > 0, "ledger has records");
+    assert.equal("attestedDecisions" in j, false, "attestedDecisions must not be a top-level --json key");
+    assert.equal("attestedCheckpoints" in j, false, "attestedCheckpoints must not be a top-level --json key");
+  });
+
+  it("n1. verify --json omits attestedDecisions and attestedCheckpoints on the failed-read path", async () => {
+    const y = yakala();
+    const kod = await runVerify([mkdtempSync(join(tmpdir(), "verax-verify-n1-fail-")), "--json"], y.out);
+    assert.equal(kod, 1, y.metin());
+    const j = JSON.parse(y.metin()) as Record<string, unknown>;
+    assert.equal(j.ok, false);
+    assert.equal("attestedDecisions" in j, false, "attestedDecisions must not be a top-level --json key");
+    assert.equal("attestedCheckpoints" in j, false, "attestedCheckpoints must not be a top-level --json key");
+  });
+
   it("--key okunamazsa sessizce kendi anahtarına düşmez", async () => {
     const y = yakala();
     const kod = await runVerify([kopyala(), "--key", join(tmpdir(), "boyle-bir-dosya-yok.pem")], y.out);
