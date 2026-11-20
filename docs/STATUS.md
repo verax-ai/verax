@@ -9,10 +9,10 @@ are stated separately before the historical record. Everything under
 commit that added it, not the tree today, and an early phase says things
 that later phases replaced. Read the matrix first.
 
-## Capability matrix — 0.8.2
+## Capability matrix — 0.9.0
 
 Released on npm as `@verax-ai/body`, `@verax-ai/proxy` and
-`@verax-ai/inventory` 0.8.2, and in the MCP registry as
+`@verax-ai/inventory` 0.9.0, and in the MCP registry as
 `io.github.verax-ai/verax`. `Since` is the earliest published version
 whose tree already carried that row's guard, read off the `v0.1.1` tag
 and the `0.1.0` release commit, so a customer can tell a capability that
@@ -46,6 +46,10 @@ what that test covers, not a wider claim.
 | Heartbeat and watch | 0.4.7; signed start rows 0.5.0 | The running body rewrites `heartbeat.json` every 10 seconds, idle included, and appends a `start` row naming the gap since the last beat, unsigned up to 0.4.8 and signed by the record key since 0.5.0. `verax watch <stateDir>` treats an absent, stale or future beat as silence and by default halts the body through the existing halt switch. | Attest uptime or a measured outage; tell silence from nothing happened when one host stops both the only copy and its watcher; tell a start row whose signature was taken off from one written before signing, unless the reader passes `--require-signed-starts`; halt from a remote watcher. | `heartbeat-watch`, `watch-exec`, `signed-starts` |
 | Ledger lock | 0.5.0 | A held lock is touched every 2 seconds and records that beat. The body, `verax unlock` and `verax doctor` watch a lock for five beats: one that moves is held, whatever pid it names; one that does not is judged by its pid and start time, so the lock a restarted container left under PID 1 is stale instead of held. A still lock under a live pid is `lock-not-beating` and only `verax unlock --force` removes it. | Decide in under about 10 seconds that a lock is stale. Keep a body frozen for longer than five beats from losing its lock to an operator in another container. Cover the witness's listen file or the unreleased desktop launcher. | `stale-lock-pid-reuse`, `attack-r26-lock-ownership` |
 | Key custody check | 0.5.0 | `verax doctor` opens the record key as the user who runs it. When that works and the session is not elevated, or when it is refused but that user owns the file, `key-custody` fails: an agent running as that user can sign records as the body. | Move the key out of a file. Judge an elevated session, which is outside the model. Tell apart an owner whose rights an OWNER RIGHTS entry narrowed. | `key-custody-doctor`, `attack-r26-key-custody-owner` |
+| Hosted anchoring client | 0.9.0 | `verax anchor … --token-file <file>` and `verax witness` with `VERAX_ANCHOR_TOKEN_FILE` send the file's content as a Bearer token to an anchoring service; the token is never taken on the command line. A receipt carries a signed time. | Publish the service itself: `@verax-ai/anchor-service` is private and not on npm. | `anchor-service`, `anchor` |
+| SCRAPI registration | 0.9.0 | With an x5chain, `verax anchor` and `verax witness` register each checkpoint over SCRAPI as a Signed Statement (RFC 9943) and keep the receipt. | Resolve the did:x509 in `verify`; the service does when it registers. Only one SCRAPI service has been tried, with a permissive registration policy. | `anchor-scrapi`, `signed-statement`, `ccf-receipt` |
+| Period report | 0.9.0 | `verax report <stateDir> --from --to` reads a ledger offline and counts only what `verax verify` attested, for a stated window. | Show argument values, payee names, amounts, prompts or operator names. | `report` |
+| RS256 agent tokens | 0.9.0 | An agent token may be RS256 as well as ES256 or EdDSA; an RSA key under 2048 bits, HS256, PS256, RS256 against an EC key and `alg: none` are refused. An audience that is not an http(s) URL gets a 401 with a plain Bearer challenge. | Change operator credentials, which stay a passkey or the CLI at the machine. | `auth-rs256-audience` |
 
 What stays unproven for every row above: none of it has run against a
 paying customer's production traffic. The pilot drills in
@@ -269,7 +273,7 @@ wherever the operator starts it; `verax install` does not start a witness.
 
 Guard: `auto-anchor`. Published in 0.5.0.
 
-## Hosted anchoring with a token — unreleased
+## Hosted anchoring with a token — since 0.9.0
 
 `@verax-ai/anchor-service` (`verax-anchor-service`) is a small Transparency
 Service that speaks the same `POST /register` route the client already uses.
@@ -324,7 +328,7 @@ line and is not written to `checkpoint-anchors.jsonl`, `witness-status.jsonl`,
 `witness.listen.json`, doctor output, or error messages. A 401 from the
 service is reported as `unauthorized`, not `unreachable`.
 
-Guard: `hosted-anchor-token`. Unreleased.
+Guards: `anchor-service`, `anchor`. The client flags are published in 0.9.0; `@verax-ai/anchor-service` is a private package and is not published to npm.
 
 ## Signed start rows — since 0.5.0
 
@@ -616,10 +620,10 @@ as before with one change: an image or audio block a downstream tool returns
 now reaches the agent as an image or audio block. In 0.7.0 the body turned
 it into JSON text, so the agent saw the base64 bytes as text.
 
-### Upgrading an installed service from 0.8.0 or 0.8.1 on Windows
+### Upgrading an installed service from 0.8.0, 0.8.1 or 0.8.2 on Windows
 
 Update the command first, in an elevated shell:
-`npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body@0.8.2`.
+`npm install -g --prefix "$env:ProgramFiles\verax-cli" @verax-ai/body@0.9.0`.
 `verax uninstall --keep-state` keeps the service account only from 0.8.1 on. Run
 the rest from that copy, because `--prefix` does not change `PATH`:
 `& "$env:ProgramFiles\verax-cli\verax.cmd" uninstall --keep-state`, which stops
@@ -667,7 +671,7 @@ macOS, where a new install carries the new service definition.
 Guards: `data-classes`, `result-classes`, `result-classes-error`,
 `result-record-verify`, `downstream-media`.
 
-## SCRAPI registration with a Signed Statement — unreleased
+## SCRAPI registration with a Signed Statement — since 0.9.0
 
 `verax anchor <stateDir> --service <url> --x5chain <chain.pem>`, and for
 `verax witness` `VERAX_ANCHOR_X5CHAIN=<chain.pem>` beside
@@ -729,7 +733,7 @@ with what the checkpoint counts. No other SCRAPI service has been tried.
 
 Guards: `anchor-scrapi`, `signed-statement`, `ccf-receipt`.
 
-## Period report — unreleased
+## Period report — since 0.9.0
 
 `verax report <stateDir> --from <YYYY-MM-DD> --to <YYYY-MM-DD>`
 reads a ledger directory the same way `verax verify` does: offline, with no
@@ -809,7 +813,7 @@ ledger already holds.
 
 Guards: `report`.
 
-## RS256 agent tokens and a non-URL audience — unreleased
+## RS256 agent tokens and a non-URL audience — since 0.9.0
 
 An agent token may be signed with RS256 as well as ES256 and EdDSA, the
 default of most hosted identity providers. `jose` refuses an RSA key under
