@@ -6,7 +6,7 @@ Verax is an MCP server that sits between an agent and its tools. Every tool call
 
 ## This image
 
-The image installs the published [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) package from npm on `node:24-slim`. It is for trying Verax or for running it on a server behind a TLS-terminating proxy.
+The image installs the published [`@verax-ai/body`](https://www.npmjs.com/package/@verax-ai/body) package from npm on `node:24-alpine` (Debian slim up to 0.8.2). It is for trying Verax or for running it on a server behind a TLS-terminating proxy.
 
 It is not the isolated install. Under `verax install` the boundary is a separate OS account the agent cannot read; here it is the container and whoever controls the Docker host.
 
