@@ -1,6 +1,6 @@
 {
   "name": "@verax-ai/body",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
@@ -26,8 +26,8 @@
     "@cedulon/cose": "0.16.0",
     "@cedulon/effect-extract": "0.16.0",
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@verax-ai/inventory": "^0.8.2",
-    "@verax-ai/proxy": "^0.8.2",
+    "@verax-ai/inventory": "^0.9.0",
+    "@verax-ai/proxy": "^0.9.0",
     "jose": "^6.2.13"
   },
   "description": "VERAX body: an MCP server that decides, records and proves what an agent did.",
