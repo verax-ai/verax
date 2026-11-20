@@ -2,7 +2,8 @@ import { strict as assert } from "node:assert";
 import { generateKeyPairSync, type KeyObject } from "node:crypto";
 import { describe, it } from "node:test";
 
-import { coseKeyToPublicKey } from "../packages/body/src/webauthn-verify.ts";
+import { coseKeyToPublicKey, verifyAssertion } from "../packages/body/src/webauthn-verify.ts";
+import { assertWithSoftwarePasskey, mintSoftwarePasskey } from "./software-passkey.ts";
 
 /**
  * @cedulon/cose 0.16 refuses a CBOR map whose keys are out of the
@@ -85,5 +86,18 @@ describe("a stored COSE key out of deterministic order", () => {
     for (const [name, b64] of Object.entries({ trailing, duplicate, text, longHead })) {
       assert.equal(coseKeyToPublicKey(b64, { storedKey: true }), null, name);
     }
+  });
+});
+
+describe("an assertion against a stored key out of order", () => {
+  it("verifies, so the stored-key path is the one verifyAssertion takes", () => {
+    const passkey = mintSoftwarePasskey("ES256");
+    const jwk = passkey.privateKey.export({ format: "jwk" }) as { x: string; y: string };
+    const stored = coseEc2(Buffer.from(jwk.x, "base64url"), Buffer.from(jwk.y, "base64url"), [3, 1, -2, -1, -3]);
+    assert.equal(coseKeyToPublicKey(stored), null, "the fixture must be out of deterministic order");
+    const challenge = Buffer.from("stored-key-challenge").toString("base64url");
+    const response = assertWithSoftwarePasskey(passkey, { challenge, rpID: "localhost", origin: "http://localhost" });
+    const verdict = verifyAssertion({ response, expectedChallenge: challenge, expectedOrigins: ["http://localhost"], rpId: "localhost", publicKeyCose: stored });
+    assert.equal(verdict.ok, true, JSON.stringify(verdict));
   });
 });

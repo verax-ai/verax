@@ -64,7 +64,7 @@ function decodeStoredCoseKey(bytes: Uint8Array): CborMap | null {
       }
       value = items;
     } else if (v.major === 2) {
-      if (v.value > 1024 || off + v.value > bytes.length) return null;
+      if (v.value > 16384 || off + v.value > bytes.length) return null;
       value = bytes.slice(off, off + v.value);
       off += v.value;
     } else return null;
