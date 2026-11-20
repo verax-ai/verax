@@ -49,6 +49,22 @@ describe("a stored COSE key out of deterministic order", () => {
     assert.equal(exportXY(coseKeyToPublicKey(outOfOrder, { storedKey: true })), `${jwk.x}.${jwk.y}`);
   });
 
+  it("reads a stored key that carries key_ops out of order", () => {
+    const withOps = (order: "canonical" | "shuffled") => {
+      const ops = Buffer.from([0x04, 0x81, 0x02]); // key_ops: [verify]
+      const kty = Buffer.from([0x01, 0x02]);
+      const alg = Buffer.from([0x03, 0x26]);
+      const crv = Buffer.from([0x20, 0x01]);
+      const xs = Buffer.concat([Buffer.from([0x21, 0x58, 0x20]), x]);
+      const ys = Buffer.concat([Buffer.from([0x22, 0x58, 0x20]), y]);
+      const parts = order === "canonical" ? [kty, alg, ops, crv, xs, ys] : [ops, alg, kty, xs, crv, ys];
+      return Buffer.concat([Buffer.from([0xa6]), ...parts]).toString("base64url");
+    };
+    assert.equal(exportXY(coseKeyToPublicKey(withOps("canonical"))), `${jwk.x}.${jwk.y}`);
+    assert.equal(coseKeyToPublicKey(withOps("shuffled")), null);
+    assert.equal(exportXY(coseKeyToPublicKey(withOps("shuffled"), { storedKey: true })), `${jwk.x}.${jwk.y}`);
+  });
+
   it("still refuses a stored key with trailing bytes, a duplicate label or a text value", () => {
     const trailing = coseEc2(x, y, [3, 1, -2, -1, -3], Buffer.from([0x00]));
     const duplicate = coseEc2(x, y, [3, 3, -2, -1, -3]);
@@ -59,7 +75,14 @@ describe("a stored COSE key out of deterministic order", () => {
       Buffer.from([0x22, 0x58, 0x20]),
       y,
     ]).toString("base64url");
-    for (const [name, b64] of Object.entries({ trailing, duplicate, text })) {
+    const longHead = Buffer.concat([
+      Buffer.from([0xb8, 0x05, 0x03, 0x26, 0x01, 0x02, 0x20, 0x01]),
+      Buffer.from([0x21, 0x58, 0x20]),
+      x,
+      Buffer.from([0x22, 0x58, 0x20]),
+      y,
+    ]).toString("base64url");
+    for (const [name, b64] of Object.entries({ trailing, duplicate, text, longHead })) {
       assert.equal(coseKeyToPublicKey(b64, { storedKey: true }), null, name);
     }
   });

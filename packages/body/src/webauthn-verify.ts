@@ -30,8 +30,13 @@ function decodeStoredCoseKey(bytes: Uint8Array): CborMap | null {
     if (width === 0 || off + width > bytes.length) return null;
     let value = 0;
     for (let i = 0; i < width; i += 1) value = value * 256 + bytes[off++];
+    // Only the key order may differ from the deterministic form; a head longer than it needs is refused.
+    const floor = width === 1 ? 24 : width === 2 ? 256 : 65536;
+    if (value < floor) return null;
     return { major, value };
   };
+  const intOf = (h: { major: number; value: number }): number | null =>
+    h.major === 0 ? h.value : h.major === 1 ? -1 - h.value : null;
   const top = head();
   if (!top || top.major !== 5 || top.value > 16) return null;
   const entries: [CborVal, CborVal][] = [];
@@ -47,7 +52,18 @@ function decodeStoredCoseKey(bytes: Uint8Array): CborMap | null {
     let value: CborVal;
     if (v.major === 0) value = v.value;
     else if (v.major === 1) value = -1 - v.value;
-    else if (v.major === 2) {
+    else if (v.major === 4) {
+      // key_ops (label 4) is an array of integers.
+      if (v.value > 8) return null;
+      const items: CborVal[] = [];
+      for (let j = 0; j < v.value; j += 1) {
+        const item = head();
+        const n = item ? intOf(item) : null;
+        if (n === null) return null;
+        items.push(n);
+      }
+      value = items;
+    } else if (v.major === 2) {
       if (v.value > 1024 || off + v.value > bytes.length) return null;
       value = bytes.slice(off, off + v.value);
       off += v.value;
