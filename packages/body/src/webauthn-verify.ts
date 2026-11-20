@@ -6,7 +6,73 @@
  */
 import { constants, createHash, createPublicKey, verify as cryptoVerify, type KeyObject } from "node:crypto";
 
-import { decodeCbor, isCborMap, mapGet, type CborMap, type CborVal } from "@cedulon/cose";
+import { cborMap, decodeCbor, isCborMap, mapGet, type CborMap, type CborVal } from "@cedulon/cose";
+
+/**
+ * A COSE_Key that was enrolled before @cedulon/cose 0.16 may be a valid map
+ * whose keys are not in the deterministic order 0.16 requires. Refusing it
+ * would lock out that operator and make every approval they already signed
+ * fail `verax verify`. This reads only the COSE_Key shape (a definite map of
+ * at most 16 integer labels to integers or byte strings, no duplicates, no
+ * trailing bytes) and is used for a key the store already holds, never for a
+ * new enrolment. The public key it yields is the same as the canonical one;
+ * the stored bytes are not rewritten.
+ */
+function decodeStoredCoseKey(bytes: Uint8Array): CborMap | null {
+  let off = 0;
+  const head = (): { major: number; value: number } | null => {
+    if (off >= bytes.length) return null;
+    const b = bytes[off++];
+    const major = b >> 5;
+    const info = b & 0x1f;
+    if (info < 24) return { major, value: info };
+    const width = info === 24 ? 1 : info === 25 ? 2 : info === 26 ? 4 : 0;
+    if (width === 0 || off + width > bytes.length) return null;
+    let value = 0;
+    for (let i = 0; i < width; i += 1) value = value * 256 + bytes[off++];
+    // Only the key order may differ from the deterministic form; a head longer than it needs is refused.
+    const floor = width === 1 ? 24 : width === 2 ? 256 : 65536;
+    if (value < floor) return null;
+    return { major, value };
+  };
+  const intOf = (h: { major: number; value: number }): number | null =>
+    h.major === 0 ? h.value : h.major === 1 ? -1 - h.value : null;
+  const top = head();
+  if (!top || top.major !== 5 || top.value > 16) return null;
+  const entries: [CborVal, CborVal][] = [];
+  const seen = new Set<number>();
+  for (let i = 0; i < top.value; i += 1) {
+    const k = head();
+    if (!k || (k.major !== 0 && k.major !== 1)) return null;
+    const label = k.major === 0 ? k.value : -1 - k.value;
+    if (seen.has(label)) return null;
+    seen.add(label);
+    const v = head();
+    if (!v) return null;
+    let value: CborVal;
+    if (v.major === 0) value = v.value;
+    else if (v.major === 1) value = -1 - v.value;
+    else if (v.major === 4) {
+      // key_ops (label 4) is an array of integers.
+      if (v.value > 8) return null;
+      const items: CborVal[] = [];
+      for (let j = 0; j < v.value; j += 1) {
+        const item = head();
+        const n = item ? intOf(item) : null;
+        if (n === null) return null;
+        items.push(n);
+      }
+      value = items;
+    } else if (v.major === 2) {
+      if (v.value > 16384 || off + v.value > bytes.length) return null;
+      value = bytes.slice(off, off + v.value);
+      off += v.value;
+    } else return null;
+    entries.push([label, value]);
+  }
+  if (off !== bytes.length) return null;
+  return cborMap(entries) as CborMap;
+}
 
 export type AssertionVerdict = { ok: true; counter: number; flags: number } | { ok: false; reason: string };
 
@@ -69,11 +135,19 @@ function mapBytes(map: CborMap, key: number, length?: number): Uint8Array | null
  * and the exponent 65537. Any other kty, alg, curve or RSA shape is refused.
  * A refusal returns null; this does not throw.
  */
-export function coseKeyToPublicKey(base64urlCose: string): KeyObject | null {
+export function coseKeyToPublicKey(base64urlCose: string, opts: { storedKey?: boolean } = {}): KeyObject | null {
   try {
     const bytes = fromBase64Url(base64urlCose);
     if (!bytes) return null;
-    const decoded = decodeCbor(new Uint8Array(bytes));
+    let decoded: CborVal;
+    try {
+      decoded = decodeCbor(new Uint8Array(bytes));
+    } catch (err) {
+      if (!opts.storedKey || !(err instanceof Error) || err.message !== "cbor-non-deterministic") throw err;
+      const stored = decodeStoredCoseKey(new Uint8Array(bytes));
+      if (!stored) return null;
+      decoded = stored;
+    }
     if (!isCborMap(decoded)) return null;
     const kty = mapNum(decoded, 1);
     const alg = mapNum(decoded, 3);
@@ -183,7 +257,7 @@ export function verifyAssertion(opts: {
     const flags = authenticatorData[32];
     if (flags === undefined || (flags & 0x05) !== 0x05) return { ok: false, reason: "user-verification" };
     const counter = authenticatorData.readUInt32BE(33);
-    const key = coseKeyToPublicKey(opts.publicKeyCose);
+    const key = coseKeyToPublicKey(opts.publicKeyCose, { storedKey: true });
     if (!key) return { ok: false, reason: "public-key" };
     const clientHash = createHash("sha256").update(clientBytes).digest();
     const data = Buffer.concat([authenticatorData, clientHash]);

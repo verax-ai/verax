@@ -1,6 +1,6 @@
 {
   "name": "@verax-ai/anchor-service",
-  "version": "0.8.2",
+  "version": "0.9.0",
   "private": true,
   "license": "Apache-2.0",
   "type": "module",
@@ -24,7 +24,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@verax-ai/proxy": "^0.8.2"
+    "@verax-ai/proxy": "^0.9.0"
   },
   "description": "A small Transparency Service that registers checkpoint hashes for callers that present a token.",
   "homepage": "https://verax-ai.com",

@@ -13,7 +13,7 @@
 # node:24-alpine with apk upgrade reported none. The packages are pure
 # JavaScript, so nothing is built against glibc.
 FROM node:24-alpine@sha256:116b800c3754b440ee0aa3ed2f20f5bf3d99a554bfd9adeea09ea8017f6e85f5
-ARG VERAX_VERSION=0.8.2
+ARG VERAX_VERSION=0.9.0
 RUN apk upgrade --no-cache \
  && npm install -g --no-audit --no-fund "@verax-ai/body@${VERAX_VERSION}" \
  && npm cache clean --force \
