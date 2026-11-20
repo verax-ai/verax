@@ -154,3 +154,67 @@ describe("an audience that is not a URL", () => {
     }
   });
 });
+
+describe("an RS256 agent token over HTTP", () => {
+  it("opens an MCP session but cannot approve, read the ledger, list agents or see health counts", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "verax-rs-http-"));
+    const rsa = await rsaJwk(2048, "rsa-http");
+    const jwksServer: Server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ keys: [rsa.jwk] }));
+    });
+    await new Promise<void>((r) => jwksServer.listen(0, "127.0.0.1", () => r()));
+    const jwksPort = (jwksServer.address() as { port: number }).port;
+    const server = await listen({
+      issuer: ISS,
+      jwksUrl: `http://127.0.0.1:${jwksPort}/jwks.json`,
+      audience: AUD,
+      stateDir,
+      bindHost: "127.0.0.1",
+      bindPort: 0,
+      policyFile,
+      tlsTerminated: false,
+    });
+    const base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+    const token = await new SignJWT({ scope: "verax:read verax:memory" })
+      .setProtectedHeader({ alg: "RS256", kid: "rsa-http" })
+      .setIssuer(ISS)
+      .setAudience(AUD)
+      .setSubject("agent-rs")
+      .setJti(randomUUID())
+      .setIssuedAt()
+      .setExpirationTime("10m")
+      .sign(rsa.privateKey);
+    const auth = { authorization: `Bearer ${token}` };
+    try {
+      const init = await fetch(`${base}/mcp`, {
+        method: "POST",
+        headers: { ...auth, "content-type": "application/json", accept: "application/json, text/event-stream" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "rs256-test", version: "1" } },
+        }),
+      });
+      assert.equal(init.status, 200, await init.text());
+
+      const approve = await fetch(`${base}/api/approve`, {
+        method: "POST",
+        headers: { ...auth, "content-type": "application/json" },
+        body: JSON.stringify({ ref: "r1", requestHash: "deadbeef" }),
+      });
+      assert.equal(approve.status, 403, await approve.text());
+      const ledger = await fetch(`${base}/api/ledger`, { headers: auth });
+      assert.equal(ledger.status, 403, await ledger.text());
+      const agents = await fetch(`${base}/api/agents`, { headers: auth });
+      assert.ok(agents.status === 403 || agents.status === 401, String(agents.status));
+      const health = await fetch(`${base}/healthz`, { headers: auth });
+      assert.equal(health.status, 200);
+      assert.deepEqual(await health.json(), { ok: true });
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())));
+      await new Promise<void>((r) => jwksServer.close(() => r()));
+    }
+  });
+});
