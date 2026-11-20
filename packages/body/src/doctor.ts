@@ -5,6 +5,7 @@ import { defaultElevated, readWindowsMachineRoots, SystemToolError, windowsAgent
 import { readLogTail } from "./body-log.ts";
 import { indexCoverage, listPieceFiles } from "@verax-ai/proxy";
 import { loadConfig, isLoopbackHost } from "./config.ts";
+import { resourceMetadataUrl } from "./auth.ts";
 import { parseDownstreamDocument } from "./downstream.ts";
 import { lockHolderAlive, lockState } from "@verax-ai/proxy";
 import { readLockFile } from "./unlock.ts";
@@ -53,6 +54,17 @@ export function runDoctor(env: NodeJS.ProcessEnv, argv: readonly string[], opts:
         : "VERAX_ISSUER, VERAX_JWKS_URL, and VERAX_AUDIENCE are set"
       : "one of VERAX_ISSUER, VERAX_JWKS_URL, VERAX_AUDIENCE is missing",
   });
+  const audienceValue = env.VERAX_AUDIENCE?.trim() ?? "";
+  if (audienceValue !== "") {
+    const audienceIsUrl = resourceMetadataUrl(audienceValue) !== null;
+    checks.push({
+      id: "audience-url",
+      level: audienceIsUrl ? "ok" : "warn",
+      detail: audienceIsUrl
+        ? "VERAX_AUDIENCE is an http(s) URL"
+        : "VERAX_AUDIENCE is not an http(s) URL: a 401 names no resource metadata, so an MCP client cannot discover the issuer",
+    });
+  }
 
   const loaded = loadConfig({
     ...env,

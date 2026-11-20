@@ -2,15 +2,32 @@ import { readFileSync } from "node:fs";
 import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 import type { Principal } from "@verax-ai/proxy";
 
-const ALGS = ["ES256", "EdDSA"] as const;
+/**
+ * Accepted signature algorithms for agent tokens. RS256 is the default of most
+ * hosted identity providers; jose refuses an RSA key under 2048 bits when it
+ * verifies, and checks that the key type matches the algorithm. HS* and `none`
+ * are not in the list, so a token signed with a shared secret is refused.
+ */
+export const AGENT_TOKEN_ALGS = ["ES256", "EdDSA", "RS256"] as const;
 
 export type VerifiedBearer = {
   principal: Principal;
   payload: JWTPayload;
 };
 
-export function resourceMetadataUrl(audience: string): string {
-  const u = new URL(audience);
+/**
+ * The protected-resource metadata URL for this audience (RFC 9728), or null
+ * when the audience is not an http(s) URL. A token audience may be any
+ * string, but only a URL names a resource whose metadata a client can fetch.
+ */
+export function resourceMetadataUrl(audience: string): string | null {
+  let u: URL;
+  try {
+    u = new URL(audience);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
   const path = u.pathname.replace(/\/+$/, "").replace(/^\/+/, "");
   if (path === "") {
     return `${u.origin}/.well-known/oauth-protected-resource`;
@@ -18,8 +35,10 @@ export function resourceMetadataUrl(audience: string): string {
   return `${u.origin}/.well-known/oauth-protected-resource/${path}`;
 }
 
+/** A 401's challenge. Without a URL audience there is no metadata to point at. */
 export function wwwAuthenticate(audience: string): string {
-  return `Bearer resource_metadata="${resourceMetadataUrl(audience)}"`;
+  const metadata = resourceMetadataUrl(audience);
+  return metadata === null ? "Bearer" : `Bearer resource_metadata="${metadata}"`;
 }
 
 function localJwks(path: string): ReturnType<typeof createLocalJWKSet> {
@@ -69,7 +88,7 @@ export function createVerifier(
     const { payload } = await jwtVerify(token, jwks, {
       issuer,
       audience,
-      algorithms: [...ALGS],
+      algorithms: [...AGENT_TOKEN_ALGS],
       requiredClaims: ["exp", "iat", "sub"],
       clockTolerance: 60,
     });

@@ -31,14 +31,14 @@ Bearer token the configured issuer did not sign.
 | `VERAX_ISSUER` | yes | Issuer the agent's token must carry. |
 | `VERAX_JWKS_URL` | one of | Where the body fetches the keys that verify that token. Set this or `VERAX_JWKS_FILE`, not both. |
 | `VERAX_JWKS_FILE` | one of | Path to a JWKS JSON file read once at start, instead of fetching `VERAX_JWKS_URL`. Accepted only with a loopback bind. |
-| `VERAX_AUDIENCE` | yes | Audience the token must name, so a token minted for something else is refused. |
+| `VERAX_AUDIENCE` | yes | Audience the token must name, so a token minted for something else is refused. Use the MCP URL, for example `https://verax.example/mcp`: a 401 then names the resource metadata a client reads to find the issuer. Any other string works for tokens, but the 401 carries a plain `Bearer` challenge and `verax doctor` warns. |
 | `VERAX_STATE_DIR` | yes | Directory the ledger, keys and approvals live in. It stays on this machine. |
 | `VERAX_POLICY_FILE` | yes | Policy the gate applies. `@verax-ai/proxy` ships `policy/default.json`, which denies what it does not name. |
 | `VERAX_BIND` | no | `host:port` to listen on. Default `127.0.0.1:8787`; anything but loopback needs `VERAX_TLS_TERMINATED=1`. |
 | `VERAX_INVENTORY_FILE` | no | Roster document the body serves. The format is `@verax-ai/inventory`. |
 | `VERAX_DOWNSTREAM` | no | Path to a JSON document naming MCP servers to put behind this gate: one `{ prefix, command?, args?, cwd?, env?, url?, headers?, timeoutMs?, trust? }` or an array of them. Each child names exactly one way in — `command` to spawn it over stdio, or `url` to reach one already running over Streamable HTTP, with `headers` for its own bearer. A stdio child requires `"trust": "same-user"` (it runs as the same user as the body and can read the signing keys); an HTTP child does not ask for that field and must not carry it. This is a breaking change: existing stdio documents do not open until the field is added. A path and not the JSON itself, because the document may name a key in `env` or `headers`. Their tools are served as `prefix.childName` and need an exact policy rule under that name; a named child that cannot be opened stops the body. |
 
-The agent's token is a JWT signed with ES256 or EdDSA by a key in that JWKS.
+The agent's token is a JWT signed with ES256, EdDSA or RS256 by a key in that JWKS. An RSA key must be at least 2048 bits; HS256 and other shared-secret algorithms are refused.
 It must carry `iss` (`VERAX_ISSUER`), `aud` (`VERAX_AUDIENCE`), `sub`, `iat`,
 `exp` and `jti`; `scope` is a space-separated list the policy reads. A token
 without `jti` is refused with 401, because a revocation names a token by its

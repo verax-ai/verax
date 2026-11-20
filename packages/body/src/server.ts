@@ -297,7 +297,10 @@ export function bearerStillLive(payload: { jti?: unknown; exp?: unknown }, state
 }
 
 function isProtectedResourcePath(pathname: string, audience: string): boolean {
-  const want = new URL(resourceMetadataUrl(audience)).pathname;
+  // RFC 9728 names the resource by URL; a non-URL audience has no metadata to serve.
+  const metadata = resourceMetadataUrl(audience);
+  if (metadata === null) return false;
+  const want = new URL(metadata).pathname;
   return pathname === want || pathname === "/.well-known/oauth-protected-resource";
 }
 

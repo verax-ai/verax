@@ -809,6 +809,25 @@ ledger already holds.
 
 Guards: `report`.
 
+## RS256 agent tokens and a non-URL audience — unreleased
+
+An agent token may be signed with RS256 as well as ES256 and EdDSA, the
+default of most hosted identity providers. `jose` refuses an RSA key under
+2048 bits when it verifies and checks that the key type matches the
+algorithm; HS256 keyed with the RSA public key, PS256, RS256 against an EC
+key and `alg: none` are refused. Operator credentials are not changed.
+
+An audience that is not an http(s) URL no longer turns an unauthenticated
+call into HTTP 400. `resourceMetadataUrl` threw on such an audience, so the
+401 branch failed and the outer handler answered `bad-request`; a call with
+a valid token was not affected. The 401 now carries a plain `Bearer`
+challenge, no metadata document is served, and `verax doctor` warns
+(`audience-url`). Seen on Amazon ECS with AWS Fargate on 20 November 2026.
+
+The container image is built on `node:24-alpine` with `apk upgrade`.
+
+Guards: `auth-rs256-audience`.
+
 ## Historical record
 
 The entries below are dated and kept as written. "this commit" in a
